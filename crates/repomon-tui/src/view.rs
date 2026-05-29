@@ -460,8 +460,8 @@ fn render_grid(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
         Constraint::Length(2), // header
-        Constraint::Length(1), // position indicator
         Constraint::Min(0),    // live tiles
+        Constraint::Length(1), // position indicator (just above the footer)
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -491,32 +491,13 @@ fn render_grid(f: &mut Frame, app: &App) {
                     "  (pin any with p). Spawn one with e, or press esc to go back.".to_string(),
                 ),
             ]),
-            rows[2],
+            rows[1],
         );
         f.render_widget(footer(GRID_KEYS, app), rows[3]);
         return;
     }
 
-    // Instagram-style position indicator: a dot per tile, filled for the active one, plus the
-    // active tile's name — so it's obvious what you're looking at and where you are.
     let active = app.grid_active.min(n - 1);
-    let dots: String = (0..n)
-        .map(|i| if i == active { "●" } else { "○" })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let label = app
-        .lanes
-        .iter()
-        .find(|l| l.id == ids[active])
-        .map(|l| format!("{}/{}", l.repo.name, lane_name(l)))
-        .unwrap_or_default();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("  {dots}    {}/{n}  {label}", active + 1),
-            app.theme.bold(),
-        ))),
-        rows[1],
-    );
 
     // Two columns; rows as needed for the visible tiles.
     let cols = if area.width >= 80 { 2 } else { 1 };
@@ -524,7 +505,7 @@ fn render_grid(f: &mut Frame, app: &App) {
     let row_constraints: Vec<Constraint> = (0..tile_rows)
         .map(|_| Constraint::Ratio(1, tile_rows as u32))
         .collect();
-    let grid_rows = Layout::vertical(row_constraints).split(rows[2]);
+    let grid_rows = Layout::vertical(row_constraints).split(rows[1]);
 
     for (r, row_area) in grid_rows.iter().enumerate() {
         let col_constraints: Vec<Constraint> = (0..cols)
@@ -549,6 +530,26 @@ fn render_grid(f: &mut Frame, app: &App) {
             );
         }
     }
+
+    // Instagram-style position indicator at the bottom (above the footer): a dot per tile,
+    // filled for the active one, plus its name — so what's selected is clear at a glance.
+    let dots: String = (0..n)
+        .map(|i| if i == active { "●" } else { "○" })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let label = app
+        .lanes
+        .iter()
+        .find(|l| l.id == ids[active])
+        .map(|l| format!("{}/{}", l.repo.name, lane_name(l)))
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {dots}    {}/{n}  {label}", active + 1),
+            app.theme.bold(),
+        ))),
+        rows[2],
+    );
     f.render_widget(footer(GRID_KEYS, app), rows[3]);
 }
 
