@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use repomon_core::model::{Commit, DirtyState, Lane, RepoId};
+use repomon_core::model::{Commit, DirtyState, Lane, LaneId, RepoId};
 
 use crate::app::App;
 use crate::keybinds::View;
@@ -16,16 +16,19 @@ use crate::theme;
 
 const FLEET_KEYS: &str =
     "↑↓ select  ↵/→ open  n new  d delete  / filter  g needs-you  c cd  q quit";
-const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  ←/esc back  n new-lane  / filter  c cd  q quit";
-const DETAIL_KEYS: &str = "←/esc back  c cd-to-path  x delete-lane  q quit";
-const NEWLANE_KEYS: &str = "↑↓ repo  type branch  ↵ create  esc cancel";
+const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a attach  spc grid  ←/esc back  q quit";
+const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
+const FOCUS_INSERT_KEYS: &str = "type to the agent   ↵ send   esc command-mode";
+const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
+const NEWLANE_KEYS: &str = "↑↓ repo  type branch  ↵ create + spawn claude  esc cancel";
 
 /// Render the current view.
 pub fn render(f: &mut Frame, app: &App) {
     match app.view {
         View::Fleet => render_fleet(f, app),
         View::Split => render_split(f, app),
-        View::LaneDetail => render_lane_detail(f, app),
+        View::Focus => render_focus(f, app),
+        View::Grid => render_grid(f, app),
         View::NewLane => render_new_lane(f, app),
     }
 }
@@ -54,25 +57,212 @@ fn render_split(f: &mut Frame, app: &App) {
     );
     let body = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(rows[1]);
     f.render_widget(Paragraph::new(sidebar_lines(app)), body[0]);
-    f.render_widget(Paragraph::new(detail_lines(app)), body[1]);
+    // Live agent output if there is any, otherwise the lane's git detail.
+    let id = app.selected_lane().map(|l| l.id);
+    let has_output = id
+        .and_then(|i| app.output.get(&i))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let right = if has_output {
+        output_tail(app, id, body[1].height as usize)
+    } else {
+        detail_lines(app)
+    };
+    f.render_widget(Paragraph::new(right), body[1]);
     f.render_widget(footer(SPLIT_KEYS, app), rows[2]);
 }
 
-fn render_lane_detail(f: &mut Frame, app: &App) {
+fn render_focus(f: &mut Frame, app: &App) {
     let area = f.area();
-    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
-    let title = match app.selected_lane() {
+    let rows = Layout::vertical([
+        Constraint::Length(2), // header
+        Constraint::Min(0),    // live output
+        Constraint::Length(1), // input line
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    let lane = app.selected_lane();
+    let title = match lane {
         Some(l) => format!("REPOMON · {}/{}", l.repo.name, lane_name(l)),
         None => "REPOMON".to_string(),
     };
-    let mut lines = vec![
-        header_line(area.width, &title, &fmt_clock(), app),
-        rule(area.width, true),
-        Line::raw(""),
-    ];
-    lines.extend(detail_lines(app));
-    f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(footer(DETAIL_KEYS, app), rows[1]);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, &title, &fmt_clock(), app),
+            rule(area.width, true),
+        ]),
+        rows[0],
+    );
+
+    let mut body: Vec<Line> = Vec::new();
+    if let Some(l) = lane {
+        body.push(Line::from(Span::styled(
+            focus_status_line(l),
+            app.theme.dim(),
+        )));
+    }
+    let avail = (rows[1].height as usize).saturating_sub(1);
+    body.extend(output_tail(app, lane.map(|l| l.id), avail));
+    f.render_widget(Paragraph::new(body), rows[1]);
+
+    let input = if app.focus_insert {
+        format!("› {}_", app.input)
+    } else {
+        "› press i to type to the agent".to_string()
+    };
+    f.render_widget(Paragraph::new(Line::raw(input)), rows[2]);
+
+    let keys = if app.focus_insert {
+        FOCUS_INSERT_KEYS
+    } else {
+        FOCUS_CMD_KEYS
+    };
+    f.render_widget(footer(keys, app), rows[3]);
+}
+
+fn render_grid(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let ids = app.grid_lane_ids();
+    let header = format!(
+        "REPOMON · BABYSIT {} of {}",
+        ids.len(),
+        app.visible_lanes().len()
+    );
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, &header, &fmt_clock(), app),
+            rule(area.width, true),
+        ]),
+        rows[0],
+    );
+
+    if ids.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::raw(
+                "  no lanes to babysit — pin some with p, or add a repo",
+            )),
+            rows[1],
+        );
+        f.render_widget(footer(GRID_KEYS, app), rows[2]);
+        return;
+    }
+
+    // Two columns; rows as needed for the visible tiles.
+    let cols = if area.width >= 80 { 2 } else { 1 };
+    let tile_rows = ids.len().div_ceil(cols);
+    let row_constraints: Vec<Constraint> = (0..tile_rows)
+        .map(|_| Constraint::Ratio(1, tile_rows as u32))
+        .collect();
+    let grid_rows = Layout::vertical(row_constraints).split(rows[1]);
+
+    for (r, row_area) in grid_rows.iter().enumerate() {
+        let col_constraints: Vec<Constraint> = (0..cols)
+            .map(|_| Constraint::Ratio(1, cols as u32))
+            .collect();
+        let cells = Layout::horizontal(col_constraints).split(*row_area);
+        for (c, cell) in cells.iter().enumerate() {
+            let idx = r * cols + c;
+            if idx >= ids.len() {
+                continue;
+            }
+            let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
+            let active = idx == app.grid_active;
+            f.render_widget(
+                Paragraph::new(tile_lines(
+                    app,
+                    lane,
+                    ids[idx],
+                    cell.height as usize,
+                    active,
+                )),
+                *cell,
+            );
+        }
+    }
+    f.render_widget(footer(GRID_KEYS, app), rows[2]);
+}
+
+fn tile_lines(
+    app: &App,
+    lane: Option<&Lane>,
+    id: LaneId,
+    height: usize,
+    active: bool,
+) -> Vec<Line<'static>> {
+    let marker = if active { "▎" } else { " " };
+    let head = match lane {
+        Some(l) => format!(
+            "{marker}{}/{}  {}",
+            l.repo.name,
+            lane_name(l),
+            agent_badge(l)
+        ),
+        None => format!("{marker}lane {id}"),
+    };
+    let style = if active {
+        app.theme.bold()
+    } else {
+        app.theme.dim()
+    };
+    let mut lines = vec![Line::from(Span::styled(head, style))];
+    lines.extend(output_tail(app, Some(id), height.saturating_sub(1)));
+    lines
+}
+
+fn agent_badge(lane: &Lane) -> String {
+    use repomon_core::model::AgentStatus;
+    match lane.agent_sessions.first() {
+        Some(s) if s.status == AgentStatus::Waiting => {
+            format!("⏸ needs you  {}↻", s.tool_call_count)
+        }
+        Some(s) if s.status == AgentStatus::Running => format!("▶ {}↻", s.tool_call_count),
+        Some(_) => "idle".to_string(),
+        None => String::new(),
+    }
+}
+
+/// The last `height` lines of a lane's captured output, or a placeholder.
+fn output_tail(app: &App, lane_id: Option<LaneId>, height: usize) -> Vec<Line<'static>> {
+    let content = lane_id.and_then(|id| app.output.get(&id));
+    match content {
+        Some(text) if !text.trim().is_empty() => {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(height.max(1));
+            lines[start..]
+                .iter()
+                .map(|l| Line::raw(l.to_string()))
+                .collect()
+        }
+        _ => vec![Line::from(Span::styled(
+            "(no live output — press e to start claude here)".to_string(),
+            app.theme.dim(),
+        ))],
+    }
+}
+
+fn focus_status_line(lane: &Lane) -> String {
+    let s = &lane.state;
+    let branch = lane_branch(lane);
+    let ab = ahead_behind_str(s.ahead, s.behind);
+    match lane.agent_sessions.first() {
+        Some(sess) => format!(
+            "{} · {} {} · {} · {} calls",
+            sess.agent.short(),
+            branch,
+            ab,
+            sess.status.as_str(),
+            sess.tool_call_count
+        ),
+        None => format!("{branch} {ab} · no agent"),
+    }
 }
 
 fn render_new_lane(f: &mut Frame, app: &App) {

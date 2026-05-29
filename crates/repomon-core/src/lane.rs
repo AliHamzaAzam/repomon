@@ -239,6 +239,40 @@ impl Lanes {
         Ok(())
     }
 
+    /// Quick-merge a lane's branch into the repo's main worktree (best-effort).
+    ///
+    /// Runs `git -C <main-worktree> merge --no-edit <lane-branch>`. The main worktree must be
+    /// on the target branch and clean; conflicts surface as an error. Returns a status message.
+    pub async fn merge(&self, id: LaneId, into: Option<String>) -> Result<String> {
+        let meta = self
+            .store
+            .list_lane_meta()
+            .await?
+            .into_iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| Error::NotFound(format!("lane {id}")))?;
+        let repo = self.store.get_repo(meta.repo_id).await?;
+        let wt_path = meta.worktree_path.clone();
+
+        if same_path(&wt_path, &repo.path) {
+            return Err(Error::Other("this lane is the main worktree".into()));
+        }
+        let branch = {
+            let rp = repo.path.clone();
+            let wp = wt_path.clone();
+            tokio::task::spawn_blocking(move || worktree_branch(&rp, &wp))
+                .await
+                .map_err(join_err)?
+        }
+        .ok_or_else(|| Error::Other("lane has no branch to merge (detached HEAD)".into()))?;
+
+        let rp = repo.path.clone();
+        let b = branch.clone();
+        tokio::task::spawn_blocking(move || merge_branch(&rp, &b, into.as_deref()))
+            .await
+            .map_err(join_err)?
+    }
+
     /// The filesystem path to cd into for a lane.
     pub async fn focus(&self, id: LaneId) -> Result<PathBuf> {
         self.store
@@ -305,6 +339,45 @@ fn worktree_branch(repo_path: &Path, wt_path: &Path) -> Option<String> {
         .into_iter()
         .find(|e| same_path(&e.path, wt_path))
         .and_then(|e| e.branch)
+}
+
+/// Merge `branch` into the main worktree (which must already be on the target branch).
+fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<String> {
+    if let Some(target) = into {
+        // Best-effort: ensure the main worktree is on the requested target branch.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .map_err(Error::Io)?;
+        let current = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if current != target {
+            return Err(Error::Other(format!(
+                "main worktree is on '{current}', not '{target}'; switch it first"
+            )));
+        }
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge", "--no-edit", branch])
+        .output()
+        .map_err(Error::Io)?;
+    if !out.status.success() {
+        return Err(Error::Git(format!(
+            "merge {branch}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(format!(
+        "merged {branch} ({})",
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("ok")
+            .trim()
+    ))
 }
 
 fn delete_branch(repo_path: &Path, branch: &str) -> Result<()> {

@@ -146,6 +146,8 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
         });
     }
 
+    tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
+
     let ctx_s = ctx.clone();
     let socket_s = socket.clone();
     let serve = tokio::spawn(async move {

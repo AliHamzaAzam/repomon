@@ -91,6 +91,12 @@ struct AgentPin {
 struct ViewportSet {
     lane_ids: Vec<repomon_core::model::LaneId>,
 }
+#[derive(Deserialize)]
+struct LaneMerge {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    into: Option<String>,
+}
 
 /// Dispatch a single request to its handler.
 pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
@@ -165,6 +171,11 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let p: LaneId = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             Ok(json!({ "path": path.to_string_lossy() }))
+        }
+        "lane.merge" => {
+            let p: LaneMerge = parse(params)?;
+            let message = ctx.lanes.merge(p.lane_id, p.into).await.map_err(internal)?;
+            Ok(json!({ "message": message }))
         }
 
         // ---- commits (computed live via gix) ----
@@ -253,6 +264,15 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?;
             Ok(Value::Null)
+        }
+        "agent.target" => {
+            let p: LaneId = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let lane = p.lane_id;
+            let available = tokio::task::spawn_blocking(move || tmux.has_window(lane))
+                .await
+                .map_err(internal)?;
+            Ok(json!({ "target": ctx.tmux.target(p.lane_id), "available": available }))
         }
 
         // ---- subscription is handled in the socket layer ----

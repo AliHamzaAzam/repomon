@@ -86,6 +86,9 @@ async fn main() {
         });
     }
 
+    // Stream visible agents' output to subscribed TUIs.
+    tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
+
     // Graceful shutdown on Ctrl-C / SIGTERM.
     {
         let ctx_s = ctx.clone();

@@ -210,3 +210,123 @@ async fn daemon_spawns_and_drives_an_agent() {
         .args(["kill-session", "-t", &session])
         .output();
 }
+
+#[tokio::test]
+async fn streams_agent_output_for_visible_lanes() {
+    if !TmuxRuntime::available() {
+        eprintln!("tmux not available; skipping streaming test");
+        return;
+    }
+    let session = format!("repomon-stream-it-{}", std::process::id());
+    let config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+    let sock = std::env::temp_dir().join(format!("repomon-stream-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    // The output streamer is what we're testing.
+    tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
+
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Do all request/response setup BEFORE subscribing, so responses aren't interleaved
+    // with pushed event notifications.
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
+    call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane_id = lanes[0]["id"].as_i64().unwrap();
+
+    call(
+        &mut stream,
+        3,
+        "agent.spawn",
+        Some(json!({ "lane_id": lane_id, "agent": "bash" })),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    call(
+        &mut stream,
+        4,
+        "agent.send_input",
+        Some(json!({ "lane_id": lane_id, "text": "echo STREAM_MARKER_XYZ" })),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Subscribe last, then mark the lane visible — the streamer should push its pane content.
+    call(
+        &mut stream,
+        5,
+        "subscribe",
+        Some(json!({ "topics": ["*"] })),
+    )
+    .await;
+    call(
+        &mut stream,
+        6,
+        "viewport.set",
+        Some(json!({ "lane_ids": [lane_id] })),
+    )
+    .await;
+
+    // Read pushed notifications looking for our marker.
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(frame))) = tokio::time::timeout(
+            Duration::from_millis(500),
+            protocol::read_frame(&mut stream),
+        )
+        .await
+        {
+            if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
+                if note.method == "event.agent.output"
+                    && note
+                        .params
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.contains("STREAM_MARKER_XYZ"))
+                        .unwrap_or(false)
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found,
+        "did not receive streamed agent output with the marker"
+    );
+
+    // (No further requests here — we're subscribed, so responses and events interleave.)
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &session])
+        .output();
+}

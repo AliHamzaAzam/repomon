@@ -69,3 +69,35 @@ impl Ctx {
         self.shutdown.notify_waiters();
     }
 }
+
+/// Viewport-aware output streaming: fast-poll the tmux panes the TUI currently has visible
+/// and push `event.agent.output` deltas. When nothing is visible, this is nearly free.
+pub async fn stream_output(ctx: Arc<Ctx>) {
+    use std::collections::HashMap;
+    let mut last: HashMap<LaneId, String> = HashMap::new();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    loop {
+        tick.tick().await;
+        let lanes: Vec<LaneId> = ctx.viewport.lock().await.clone();
+        if lanes.is_empty() {
+            last.clear();
+            continue;
+        }
+        last.retain(|k, _| lanes.contains(k));
+        for lane in lanes {
+            let tmux = ctx.tmux.clone();
+            let content = match tokio::task::spawn_blocking(move || tmux.capture(lane, None)).await
+            {
+                Ok(Ok(c)) => c,
+                _ => continue,
+            };
+            if last.get(&lane).map(|c| c != &content).unwrap_or(true) {
+                last.insert(lane, content.clone());
+                ctx.broadcast(
+                    pubsub::topic::AGENT_OUTPUT,
+                    serde_json::json!({ "lane_id": lane, "content": content }),
+                );
+            }
+        }
+    }
+}

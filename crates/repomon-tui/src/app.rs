@@ -1,11 +1,14 @@
 //! Application state and the interactive event loop.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
-use repomon_core::model::{Commit, Lane, Repo};
+use repomon_core::model::{Commit, Lane, LaneId, Repo};
+use repomon_core::protocol::Notification;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
@@ -30,6 +33,16 @@ pub struct App {
     pub nl_branch: String,
     pub should_quit: bool,
     pub cd_target: Option<PathBuf>,
+    /// Latest captured pane content per lane, pushed by `event.agent.output`.
+    pub output: HashMap<LaneId, String>,
+    /// Whether Focus is in insert mode (typing to the agent).
+    pub focus_insert: bool,
+    /// The agent input buffer (Focus insert mode).
+    pub input: String,
+    /// Active tile in the babysit grid.
+    pub grid_active: usize,
+    last_viewport: Vec<LaneId>,
+    attach_request: Option<LaneId>,
 }
 
 impl App {
@@ -49,6 +62,12 @@ impl App {
             nl_branch: String::new(),
             should_quit: false,
             cd_target: None,
+            output: HashMap::new(),
+            focus_insert: false,
+            input: String::new(),
+            grid_active: 0,
+            last_viewport: Vec::new(),
+            attach_request: None,
         }
     }
 
@@ -96,6 +115,22 @@ impl App {
         self.visible_lanes().into_iter().nth(self.selected)
     }
 
+    /// Lane ids to babysit in the grid: pinned first, then needs-you, then most-active.
+    pub fn grid_lane_ids(&self) -> Vec<LaneId> {
+        let mut lanes: Vec<&Lane> = self.visible_lanes();
+        lanes.sort_by(|a, b| {
+            let key = |l: &Lane| {
+                (
+                    !l.pinned,
+                    !l.agent_sessions.iter().any(|s| s.status.needs_you()),
+                    std::cmp::Reverse(l.last_activity_at),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        lanes.into_iter().take(8).map(|l| l.id).collect()
+    }
+
     fn clamp_selection(&mut self) {
         let n = self.visible_lanes().len();
         if n == 0 {
@@ -105,18 +140,57 @@ impl App {
         }
     }
 
+    /// Which lanes the daemon should fast-poll output for, given the current view.
+    fn live_lanes(&self) -> Vec<LaneId> {
+        match self.view {
+            View::Split | View::Focus => {
+                self.selected_lane().map(|l| vec![l.id]).unwrap_or_default()
+            }
+            View::Grid => self.grid_lane_ids(),
+            View::Fleet | View::NewLane => Vec::new(),
+        }
+    }
+
+    /// Tell the daemon which lanes are visible, if that set changed.
+    pub async fn sync_viewport(&mut self) {
+        let live = self.live_lanes();
+        if live != self.last_viewport {
+            let _ = self
+                .client
+                .call("viewport.set", Some(json!({ "lane_ids": live })))
+                .await;
+            self.last_viewport = live;
+        }
+    }
+
+    async fn on_notification(&mut self, note: Notification) {
+        if note.method == "event.agent.output" {
+            if let (Some(id), Some(content)) = (
+                note.params.get("lane_id").and_then(|v| v.as_i64()),
+                note.params.get("content").and_then(|v| v.as_str()),
+            ) {
+                self.output.insert(id, content.to_string());
+            }
+        } else {
+            self.refresh().await;
+        }
+    }
+
     async fn handle_event(&mut self, ev: Event) {
         let Event::Key(key) = ev else { return };
         if key.kind != KeyEventKind::Press {
             return;
         }
         self.status.clear();
-        if self.view == View::NewLane {
-            self.new_lane_key(key).await;
-        } else if self.filtering {
-            self.filter_key(key);
-        } else if let Some(action) = keybinds::nav(key) {
-            self.apply(action).await;
+        match self.view {
+            View::NewLane => self.new_lane_key(key).await,
+            View::Focus => self.focus_key(key).await,
+            _ if self.filtering => self.filter_key(key),
+            _ => {
+                if let Some(action) = keybinds::nav(key) {
+                    self.apply(action).await;
+                }
+            }
         }
     }
 
@@ -151,6 +225,38 @@ impl App {
         }
     }
 
+    /// Key handling in the Focus view: command mode + insert (talking to the agent).
+    async fn focus_key(&mut self, key: KeyEvent) {
+        if self.focus_insert {
+            match key.code {
+                KeyCode::Char(c) => self.input.push(c),
+                KeyCode::Backspace => {
+                    self.input.pop();
+                }
+                KeyCode::Enter => self.send_input().await,
+                KeyCode::Esc => self.focus_insert = false,
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Char('i') | KeyCode::Enter => self.focus_insert = true,
+            KeyCode::Char('e') => self.spawn_agent().await,
+            KeyCode::Char('s') => self.stop_agent().await,
+            KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
+            KeyCode::Char('m') => self.merge_lane().await,
+            KeyCode::Char('c') => {
+                if let Some(p) = self.selected_lane().map(|l| l.worktree.path.clone()) {
+                    self.cd_target = Some(p);
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Esc | KeyCode::Left => self.view = View::Split,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
     async fn submit_new_lane(&mut self) {
         let repo = self.repos.get(self.nl_repo_idx).cloned();
         match repo {
@@ -164,14 +270,107 @@ impl App {
                     "copy_files": [],
                 });
                 match self.client.call("lane.create", Some(params)).await {
-                    Ok(_) => {
-                        self.status = format!("created lane {}", self.nl_branch);
+                    Ok(lane) => {
+                        // Spin up claude in the new lane straight away.
+                        if let Some(id) = lane.get("id").and_then(|v| v.as_i64()) {
+                            let _ = self
+                                .client
+                                .call(
+                                    "agent.spawn",
+                                    Some(json!({ "lane_id": id, "agent": "claude-code" })),
+                                )
+                                .await;
+                        }
+                        self.status = format!("created lane {} + spawned claude", self.nl_branch);
                         self.view = View::Fleet;
                         self.refresh().await;
                     }
                     Err(e) => self.status = format!("create failed: {e}"),
                 }
             }
+        }
+    }
+
+    async fn send_input(&mut self) {
+        if self.input.is_empty() {
+            return;
+        }
+        if let Some(id) = self.selected_lane().map(|l| l.id) {
+            let text = std::mem::take(&mut self.input);
+            if let Err(e) = self
+                .client
+                .call(
+                    "agent.send_input",
+                    Some(json!({ "lane_id": id, "text": text })),
+                )
+                .await
+            {
+                self.status = format!("send failed: {e}");
+            }
+        }
+    }
+
+    async fn spawn_agent(&mut self) {
+        if let Some(id) = self.selected_lane().map(|l| l.id) {
+            match self
+                .client
+                .call(
+                    "agent.spawn",
+                    Some(json!({ "lane_id": id, "agent": "claude-code" })),
+                )
+                .await
+            {
+                Ok(_) => {
+                    self.status = "spawned claude".into();
+                    self.view = View::Focus;
+                    self.focus_insert = false;
+                }
+                Err(e) => self.status = format!("spawn failed: {e}"),
+            }
+        }
+    }
+
+    async fn stop_agent(&mut self) {
+        if let Some(id) = self.selected_lane().map(|l| l.id) {
+            let _ = self
+                .client
+                .call("agent.stop", Some(json!({ "lane_id": id })))
+                .await;
+            self.status = "stopped agent".into();
+            self.refresh().await;
+        }
+    }
+
+    async fn merge_lane(&mut self) {
+        if let Some(id) = self.selected_lane().map(|l| l.id) {
+            match self
+                .client
+                .call("lane.merge", Some(json!({ "lane_id": id })))
+                .await
+            {
+                Ok(v) => {
+                    self.status = v
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("merged")
+                        .to_string()
+                }
+                Err(e) => self.status = format!("merge failed: {e}"),
+            }
+            self.refresh().await;
+        }
+    }
+
+    async fn toggle_pin(&mut self) {
+        if let Some((id, pinned)) = self.selected_lane().map(|l| (l.id, l.pinned)) {
+            let _ = self
+                .client
+                .call(
+                    "agent.pin",
+                    Some(json!({ "lane_id": id, "pinned": !pinned })),
+                )
+                .await;
+            self.refresh().await;
         }
     }
 
@@ -187,13 +386,15 @@ impl App {
             Action::ZoomIn => {
                 self.view = match self.view {
                     View::Fleet => View::Split,
-                    View::Split => View::LaneDetail,
+                    View::Split => View::Focus,
+                    View::Grid => View::Focus,
                     other => other,
                 }
             }
             Action::ZoomOut => match self.view {
-                View::LaneDetail => self.view = View::Split,
+                View::Focus => self.view = View::Split,
                 View::Split => self.view = View::Fleet,
+                View::Grid => self.view = View::Fleet,
                 View::NewLane => self.view = View::Fleet,
                 View::Fleet => self.should_quit = true,
             },
@@ -236,7 +437,12 @@ impl App {
                 }
             }
             Action::ToggleBabysit => {
-                self.status = "babysit grid arrives in Phase 2".into();
+                self.view = if self.view == View::Grid {
+                    View::Fleet
+                } else {
+                    self.grid_active = 0;
+                    View::Grid
+                };
             }
             Action::JumpNeedsYou => {
                 let target = self
@@ -248,13 +454,26 @@ impl App {
                     None => self.status = "no agents need you".into(),
                 }
             }
+            Action::Attach => self.attach_request = self.selected_lane().map(|l| l.id),
+            Action::StopAgent => self.stop_agent().await,
+            Action::Pin => self.toggle_pin().await,
+            Action::Merge => self.merge_lane().await,
+            Action::SpawnAgent => self.spawn_agent().await,
+        }
+        // Grid uses its own cursor; keep it in range.
+        if self.view == View::Grid {
+            let n = self.grid_lane_ids().len();
+            if n == 0 {
+                self.grid_active = 0;
+            } else if self.grid_active >= n {
+                self.grid_active = n - 1;
+            }
         }
     }
 }
 
 /// Run the interactive TUI. Returns a path to cd into on exit, if requested.
 pub async fn run(client: DaemonClient) -> Result<Option<PathBuf>> {
-    // Ask the daemon to stream events, then subscribe locally.
     let _ = client
         .call("subscribe", Some(json!({ "topics": ["*"] })))
         .await;
@@ -283,34 +502,73 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     in_rx: &mut mpsc::Receiver<Event>,
-    events: &mut broadcast::Receiver<repomon_core::protocol::Notification>,
+    events: &mut broadcast::Receiver<Notification>,
 ) -> Result<()> {
     let mut events_alive = true;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
+        app.sync_viewport().await;
         terminal.draw(|f| view::render(f, app))?;
         if app.should_quit {
             return Ok(());
+        }
+        if let Some(lane) = app.attach_request.take() {
+            do_attach(terminal, app, lane).await;
+            continue;
         }
         tokio::select! {
             maybe = in_rx.recv() => match maybe {
                 Some(ev) => app.handle_event(ev).await,
                 None => return Ok(()),
             },
-            note = next_event(events), if events_alive => match note {
-                Some(()) => app.refresh().await,
-                None => events_alive = false, // daemon event stream closed
+            note = next_note(events), if events_alive => match note {
+                Some(n) => app.on_notification(n).await,
+                None => events_alive = false,
             },
+            _ = tick.tick() => {}
         }
     }
 }
 
+/// Suspend the TUI, attach to the lane's tmux window, then re-enter.
+async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) {
+    let resp = app
+        .client
+        .call("agent.target", Some(json!({ "lane_id": lane })))
+        .await;
+    let (target, available) = match resp {
+        Ok(v) => (
+            v.get("target")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
+            v.get("available")
+                .and_then(|a| a.as_bool())
+                .unwrap_or(false),
+        ),
+        Err(e) => {
+            app.status = format!("attach failed: {e}");
+            return;
+        }
+    };
+    if !available || target.is_empty() {
+        app.status = "no agent running in this lane".into();
+        return;
+    }
+    ratatui::restore();
+    let _ = std::process::Command::new("tmux")
+        .args(["attach", "-t", &target])
+        .status();
+    *terminal = ratatui::init();
+    let _ = terminal.clear();
+    app.last_viewport.clear(); // force a viewport resync after returning
+}
+
 /// Await the next forwardable event, collapsing lag. `None` means the stream closed.
-async fn next_event(
-    rx: &mut broadcast::Receiver<repomon_core::protocol::Notification>,
-) -> Option<()> {
+async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notification> {
     loop {
         match rx.recv().await {
-            Ok(_) => return Some(()),
+            Ok(n) => return Some(n),
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => return None,
         }

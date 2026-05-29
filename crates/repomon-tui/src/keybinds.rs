@@ -10,7 +10,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 pub enum View {
     Fleet,
     Split,
-    LaneDetail,
+    /// One agent, full-screen: live output + input + controls.
+    Focus,
+    /// Babysit grid of live tiles (M9b).
+    Grid,
     NewLane,
 }
 
@@ -29,6 +32,11 @@ pub enum Action {
     CdToLane,
     ToggleBabysit,
     JumpNeedsYou,
+    Attach,
+    StopAgent,
+    Pin,
+    Merge,
+    SpawnAgent,
 }
 
 /// Map a key to a navigation action (used when not in a text-input mode).
@@ -45,6 +53,11 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('c') => Some(Action::CdToLane),
         KeyCode::Char('g') => Some(Action::JumpNeedsYou),
+        KeyCode::Char('a') => Some(Action::Attach),
+        KeyCode::Char('s') => Some(Action::StopAgent),
+        KeyCode::Char('p') => Some(Action::Pin),
+        KeyCode::Char('m') => Some(Action::Merge),
+        KeyCode::Char('e') => Some(Action::SpawnAgent),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         _ => None,
     }
