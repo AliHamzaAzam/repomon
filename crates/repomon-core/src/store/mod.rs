@@ -595,6 +595,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reopen_file_db_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repomon.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.add_repo(PathBuf::from("/code/x"), "x".into(), None)
+                .await
+                .unwrap();
+            // Dropping the store ends the worker thread and closes the connection.
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Reopening must not re-run migrations or error; data persists.
+        let s2 = Store::open(&path).unwrap();
+        assert_eq!(s2.list_repos().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn repo_crud() {
         let s = store().await;
         let r = s

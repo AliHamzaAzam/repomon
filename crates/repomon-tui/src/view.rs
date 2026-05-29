@@ -1,0 +1,440 @@
+//! Rendering for the four views. Brutalist mono: light/heavy rules, single-char glyphs,
+//! two-space indents, reverse-video selection, no color.
+
+use chrono::{DateTime, Local, Utc};
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+use repomon_core::model::{Commit, DirtyState, Lane, RepoId};
+
+use crate::app::App;
+use crate::keybinds::View;
+use crate::theme;
+
+const FLEET_KEYS: &str =
+    "↑↓ select  ↵/→ open  n new-lane  d delete  / filter  r refresh  c cd  q quit";
+const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  ←/esc back  n new-lane  / filter  c cd  q quit";
+const DETAIL_KEYS: &str = "←/esc back  c cd-to-path  x delete-lane  q quit";
+const NEWLANE_KEYS: &str = "↑↓ repo  type branch  ↵ create  esc cancel";
+
+/// Render the current view.
+pub fn render(f: &mut Frame, app: &App) {
+    match app.view {
+        View::Fleet => render_fleet(f, app),
+        View::Split => render_split(f, app),
+        View::LaneDetail => render_lane_detail(f, app),
+        View::NewLane => render_new_lane(f, app),
+    }
+}
+
+fn render_fleet(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    f.render_widget(Paragraph::new(fleet_lines(app, area.width)), rows[0]);
+    f.render_widget(footer(FLEET_KEYS, app), rows[1]);
+}
+
+fn render_split(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON", &fmt_clock(), app),
+            rule(area.width, true),
+        ]),
+        rows[0],
+    );
+    let body = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(rows[1]);
+    f.render_widget(Paragraph::new(sidebar_lines(app)), body[0]);
+    f.render_widget(Paragraph::new(detail_lines(app)), body[1]);
+    f.render_widget(footer(SPLIT_KEYS, app), rows[2]);
+}
+
+fn render_lane_detail(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let title = match app.selected_lane() {
+        Some(l) => format!("REPOMON · {}/{}", l.repo.name, lane_name(l)),
+        None => "REPOMON".to_string(),
+    };
+    let mut lines = vec![
+        header_line(area.width, &title, &fmt_clock(), app),
+        rule(area.width, true),
+        Line::raw(""),
+    ];
+    lines.extend(detail_lines(app));
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(footer(DETAIL_KEYS, app), rows[1]);
+}
+
+fn render_new_lane(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let mut lines = vec![
+        header_line(area.width, "REPOMON · NEW LANE", &fmt_clock(), app),
+        rule(area.width, true),
+        Line::raw(""),
+    ];
+    let repo_name = app
+        .repos
+        .get(app.nl_repo_idx)
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "(no repos — add one first)".into());
+    let safe_branch = app.nl_branch.replace('/', "-");
+    let preview_path = if app.nl_branch.is_empty() {
+        "(enter a branch name)".to_string()
+    } else {
+        format!("~/code/{repo_name}-wt/{safe_branch}")
+    };
+    lines.push(Line::raw(format!("  repo      {repo_name}")));
+    lines.push(Line::raw(format!("  branch    {}_", app.nl_branch)));
+    lines.push(Line::raw("  source    HEAD".to_string()));
+    lines.push(Line::raw(format!("  path      {preview_path}   [auto]")));
+    lines.push(Line::raw(""));
+    lines.push(rule(area.width, false));
+    lines.push(Line::raw(""));
+    if !app.status.is_empty() {
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(footer(NEWLANE_KEYS, app), rows[1]);
+}
+
+// ---- shared line builders ----------------------------------------------------
+
+fn fleet_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let now = Utc::now();
+    let mut lines = Vec::new();
+    lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
+    lines.push(rule(width, true));
+    lines.push(Line::raw(""));
+
+    let visible = app.visible_lanes();
+    let repos = distinct_repos(&visible);
+    let needs = visible
+        .iter()
+        .filter(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()))
+        .count();
+    let left = format!(
+        "FLEET  {} lanes · {repos} repos · {needs} need you",
+        visible.len()
+    );
+    let right = format!("today · {} commits", app.commits.len());
+    lines.push(padded_line(width, &left, &right, app.theme.bold()));
+    lines.push(rule(width, false));
+    lines.push(Line::raw(""));
+
+    if app.filtering || !app.filter.is_empty() {
+        let cursor = if app.filtering { "_" } else { "" };
+        lines.push(Line::raw(format!("  filter: {}{cursor}", app.filter)));
+        lines.push(Line::raw(""));
+    }
+
+    if visible.is_empty() {
+        lines.push(Line::raw(
+            "  no lanes — press n to create one, or add a repo".to_string(),
+        ));
+    }
+
+    let mut current: Option<RepoId> = None;
+    for (i, lane) in visible.iter().enumerate() {
+        if current != Some(lane.repo.id) {
+            current = Some(lane.repo.id);
+            lines.push(repo_header(width, &lane.repo.name));
+        }
+        let mut line = lane_row(lane, now);
+        if i == app.selected {
+            line = line.style(app.theme.selected());
+        }
+        lines.push(line);
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(padded_line(width, "TODAY", &tz_offset(), app.theme.bold()));
+    lines.push(rule(width, false));
+    lines.push(Line::raw(""));
+    for c in app.commits.iter().take(12) {
+        lines.push(commit_line(c, app));
+    }
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    lines
+}
+
+fn sidebar_lines(app: &App) -> Vec<Line<'static>> {
+    let now = Utc::now();
+    let visible = app.visible_lanes();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("FLEET {}", visible.len()),
+            app.theme.bold(),
+        )),
+        Line::raw(""),
+    ];
+    let mut current: Option<RepoId> = None;
+    for (i, lane) in visible.iter().enumerate() {
+        if current != Some(lane.repo.id) {
+            current = Some(lane.repo.id);
+            lines.push(Line::from(Span::styled(
+                lane.repo.name.clone(),
+                app.theme.dim(),
+            )));
+        }
+        let glyph = status_glyph(lane);
+        let counts = dirty_str(&lane.state.dirty);
+        let text = format!(" {glyph} {:<10} {}", trunc(&lane_name(lane), 10), counts);
+        let mut line = Line::raw(text);
+        let _ = now;
+        if i == app.selected {
+            line = line.style(app.theme.selected());
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+fn detail_lines(app: &App) -> Vec<Line<'static>> {
+    let Some(lane) = app.selected_lane() else {
+        return vec![Line::raw("  (no lane selected)".to_string())];
+    };
+    let s = &lane.state;
+    let branch = lane_branch(lane);
+    let upstream = s.upstream.clone().unwrap_or_else(|| "—".into());
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{} · {}", lane.repo.name, lane_name(lane)),
+            app.theme.bold(),
+        )),
+        Line::raw(""),
+        Line::raw(format!("  path     {}", lane.worktree.path.display())),
+        Line::raw(format!(
+            "  branch   {branch} → {upstream}   {}",
+            ahead_behind_str(s.ahead, s.behind)
+        )),
+        Line::raw(format!(
+            "  status   +{} staged, ~{} unstaged, ?{} untracked",
+            s.dirty.staged, s.dirty.unstaged, s.dirty.untracked
+        )),
+    ];
+    if s.locked {
+        lines.push(Line::raw("  lock     this worktree is locked".to_string()));
+    }
+    if s.prunable {
+        lines.push(Line::raw(
+            "  prune    this worktree is prunable (g to prune)".to_string(),
+        ));
+    }
+    lines.push(Line::raw(
+        "  agent    none running  (spawn arrives in Phase 2)".to_string(),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("RECENT COMMITS", app.theme.bold())));
+    lines.push(Line::raw(""));
+    let mut shown = 0;
+    for c in app
+        .commits
+        .iter()
+        .filter(|c| c.repo_id == lane.repo.id)
+        .take(8)
+    {
+        lines.push(commit_line(c, app));
+        shown += 1;
+    }
+    if shown == 0 {
+        lines.push(Line::raw("  (no commits today)".to_string()));
+    }
+    lines
+}
+
+// ---- atoms -------------------------------------------------------------------
+
+fn footer(keys: &str, app: &App) -> Paragraph<'static> {
+    Paragraph::new(Line::from(Span::styled(keys.to_string(), app.theme.dim())))
+}
+
+fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
+    padded_line(width, left, right, app.theme.bold())
+}
+
+fn padded_line(width: u16, left: &str, right: &str, left_style: Style) -> Line<'static> {
+    let used = left.chars().count() + right.chars().count();
+    let pad = (width as usize).saturating_sub(used);
+    Line::from(vec![
+        Span::styled(left.to_string(), left_style),
+        Span::raw(" ".repeat(pad)),
+        Span::raw(right.to_string()),
+    ])
+}
+
+fn rule(width: u16, heavy: bool) -> Line<'static> {
+    let c = if heavy { theme::HEAVY } else { theme::LIGHT };
+    Line::raw(c.to_string().repeat(width as usize))
+}
+
+fn repo_header(width: u16, name: &str) -> Line<'static> {
+    let prefix = format!("  {name} ");
+    let dashes = (width as usize).saturating_sub(prefix.chars().count());
+    Line::raw(format!(
+        "{prefix}{}",
+        theme::LIGHT.to_string().repeat(dashes)
+    ))
+}
+
+fn lane_row(lane: &Lane, now: DateTime<Utc>) -> Line<'static> {
+    let glyph = status_glyph(lane);
+    let active = if lane.agent_sessions.iter().any(|s| {
+        !matches!(
+            s.status,
+            repomon_core::model::AgentStatus::Idle | repomon_core::model::AgentStatus::Ended
+        )
+    }) {
+        theme::AGENT_ACTIVE
+    } else {
+        " "
+    };
+    let agent = lane
+        .agent_sessions
+        .first()
+        .map(|s| s.agent.short().to_string())
+        .unwrap_or_default();
+    let text = format!(
+        "  {glyph} {active} {:<12} {:<26} {:<11} {:<7} {:<7} {}",
+        trunc(&lane_name(lane), 12),
+        lane_branch(lane),
+        dirty_str(&lane.state.dirty),
+        ahead_behind_str(lane.state.ahead, lane.state.behind),
+        agent,
+        rel_time(lane.last_activity_at, now),
+    );
+    Line::raw(text)
+}
+
+fn commit_line(c: &Commit, app: &App) -> Line<'static> {
+    let time = c.time.with_timezone(&Local).format("%H:%M").to_string();
+    let repo = app
+        .lanes
+        .iter()
+        .find(|l| l.repo.id == c.repo_id)
+        .map(|l| l.repo.name.clone())
+        .unwrap_or_else(|| format!("repo{}", c.repo_id));
+    Line::raw(format!("  {time}  {:<18} {}", trunc(&repo, 18), c.summary))
+}
+
+fn status_glyph(lane: &Lane) -> &'static str {
+    if lane.state.dirty.is_clean() {
+        theme::CLEAN
+    } else {
+        theme::DIRTY
+    }
+}
+
+fn lane_name(lane: &Lane) -> String {
+    if lane.worktree.is_main {
+        "main".to_string()
+    } else {
+        lane.worktree.name.clone()
+    }
+}
+
+fn lane_branch(lane: &Lane) -> String {
+    match &lane.state.branch {
+        Some(b) => b.clone(),
+        None => {
+            let hex = lane.state.head.to_hex().to_string();
+            format!("({})", &hex[..hex.len().min(8)])
+        }
+    }
+}
+
+fn dirty_str(d: &DirtyState) -> String {
+    let mut parts = Vec::new();
+    if d.staged > 0 {
+        parts.push(format!("+{}", d.staged));
+    }
+    if d.unstaged > 0 {
+        parts.push(format!("~{}", d.unstaged));
+    }
+    if d.untracked > 0 {
+        parts.push(format!("?{}", d.untracked));
+    }
+    parts.join(" ")
+}
+
+fn ahead_behind_str(ahead: u32, behind: u32) -> String {
+    let mut parts = Vec::new();
+    if ahead > 0 {
+        parts.push(format!("{}{ahead}", theme::UP));
+    }
+    if behind > 0 {
+        parts.push(format!("{}{behind}", theme::DOWN));
+    }
+    parts.join(" ")
+}
+
+fn trunc(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn rel_time(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - then).num_seconds();
+    if secs < 60 {
+        "now".to_string()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+fn fmt_clock() -> String {
+    Local::now()
+        .format("%H:%M %a %d %b %Y")
+        .to_string()
+        .to_lowercase()
+}
+
+fn tz_offset() -> String {
+    format!("UTC{}", Local::now().format("%:z"))
+}
+
+fn distinct_repos(lanes: &[&Lane]) -> usize {
+    let mut ids: Vec<RepoId> = lanes.iter().map(|l| l.repo.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.len()
+}
+
+/// Render a buffer to plain text (for `--print-once` and tests).
+pub fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+    let area = buf.area;
+    let mut out = String::new();
+    for y in area.top()..area.bottom() {
+        let mut line = String::new();
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell((x, y)) {
+                line.push_str(cell.symbol());
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}

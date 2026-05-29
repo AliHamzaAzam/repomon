@@ -1,0 +1,49 @@
+//! View modes and arrow-first key mapping.
+//!
+//! Arrow keys drive navigation at every level; `hjkl` are aliases. `↵`/`→` zoom in,
+//! `esc`/`←` zoom out, `space` toggles the babysit grid (Phase 2).
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+/// The current zoom level / modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Fleet,
+    Split,
+    LaneDetail,
+    NewLane,
+}
+
+/// A user intent derived from a key press in navigation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    MoveUp,
+    MoveDown,
+    ZoomIn,
+    ZoomOut,
+    Quit,
+    NewLane,
+    DeleteLane,
+    StartFilter,
+    Refresh,
+    CdToLane,
+    ToggleBabysit,
+}
+
+/// Map a key to a navigation action (used when not in a text-input mode).
+pub fn nav(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+        KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => Some(Action::ZoomIn),
+        KeyCode::Left | KeyCode::Esc | KeyCode::Char('h') => Some(Action::ZoomOut),
+        KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('n') => Some(Action::NewLane),
+        KeyCode::Char('d') | KeyCode::Char('x') => Some(Action::DeleteLane),
+        KeyCode::Char('/') => Some(Action::StartFilter),
+        KeyCode::Char('r') => Some(Action::Refresh),
+        KeyCode::Char('c') => Some(Action::CdToLane),
+        KeyCode::Char(' ') => Some(Action::ToggleBabysit),
+        _ => None,
+    }
+}

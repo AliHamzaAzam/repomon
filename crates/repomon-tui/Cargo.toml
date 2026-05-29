@@ -8,9 +8,24 @@ rust-version.workspace = true
 repository.workspace = true
 description = "repomon — the terminal UI client for the repomon daemon."
 
+[lib]
+name = "repomon_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "repomon"
 path = "src/main.rs"
 
 [dependencies]
 repomon-core = { workspace = true }
+repomon-daemon = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+ratatui = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

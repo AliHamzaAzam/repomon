@@ -176,7 +176,9 @@ fn parse_iso(s: &str) -> Result<chrono::DateTime<chrono::Utc>, RpcError> {
         .map_err(|e| RpcError::invalid_params(format!("bad timestamp {s:?}: {e}")))
 }
 
-/// Local-midnight to now, in UTC.
+/// The current local day, in UTC: [local midnight, next local midnight). Using the next
+/// midnight as the exclusive end (rather than `now`) avoids dropping a commit made in the
+/// same whole second as the query.
 fn today_range() -> TimeRange {
     use chrono::{Local, TimeZone, Utc};
     let now_local = Local::now();
@@ -188,7 +190,7 @@ fn today_range() -> TimeRange {
         .unwrap_or_else(Utc::now);
     TimeRange {
         from,
-        to: Utc::now(),
+        to: from + chrono::Duration::days(1),
     }
 }
 

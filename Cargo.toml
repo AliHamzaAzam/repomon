@@ -49,13 +49,15 @@ futures = "0.3"
 plist = "1"
 clap = { version = "4.5", features = ["derive"] }
 # --- tui ---
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui = "0.29"
+# --- cli / app ergonomics ---
+anyhow = "1"
 # --- dev ---
 tempfile = "3"
 insta = "1"
 # --- internal ---
 repomon-core = { path = "crates/repomon-core" }
+repomon-daemon = { path = "crates/repomon-daemon" }
 
 [profile.release]
 lto = "thin"
