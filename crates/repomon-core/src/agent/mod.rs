@@ -114,6 +114,7 @@ fn activity_summary(kind: AgentKind, manifest: &Path) -> Option<TranscriptSummar
         tool_call_count: 0,
         status,
         title: None,
+        config_dir: None,
     })
 }
 

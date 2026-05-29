@@ -48,7 +48,8 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `commit.recent` | `{ lane_id? \| repo_id?, limit=8 }` | `[Commit]` (latest on the worktree/repo HEAD, any date) |
 | `timeline` | `{ from_iso, to_iso, bucket_secs=3600 }` | `TimelineData` |
 | `sessions` | `{ from_iso, to_iso }` | `[WorkSession]` |
-| `agent.detect` | — | `[AgentChoice]` (built-ins on PATH + config customs; `default` flags the configured default) |
+| `agent.detect` | — | `[AgentChoice]` (one Claude entry per config dir + codex/aider + config customs; `default` flags the configured default) |
+| `agent.adopt` | `{ lane_id }` | `{ lane_id, window }` (take over an external session: resume it in a managed lane, account-aware) |
 | `agent.add` | `{ name, command }` | `null` (upsert a custom agent; rejects built-in names; persists to config.toml) |
 | `agent.remove` | `{ name }` | `null` (drop a custom agent; clears it as default; rejects built-ins) |
 | `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |

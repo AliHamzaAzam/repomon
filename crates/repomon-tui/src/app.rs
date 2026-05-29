@@ -983,28 +983,20 @@ impl App {
         }
     }
 
-    /// Adopt an external agent (one running in another terminal): resume its conversation in a
-    /// repomon-managed tmux lane so it can be driven from here.
+    /// Adopt an external agent (one running in another terminal): the daemon resumes its
+    /// conversation — against the right Claude account — in a managed tmux lane.
     async fn adopt_agent(&mut self) {
-        let target = self.selected_lane().and_then(|l| {
-            l.agent_sessions
-                .iter()
-                .find(|s| s.external)
-                .map(|s| (l.id, s.agent.as_str().into_owned()))
-        });
-        let (id, kind) = match target {
-            Some(t) => t,
-            None => {
+        let id = match self.selected_lane() {
+            Some(l) if l.agent_sessions.iter().any(|s| s.external) => l.id,
+            Some(_) => {
                 self.status = "no external agent here to adopt".into();
                 return;
             }
+            None => return,
         };
         match self
             .client
-            .call(
-                "agent.spawn",
-                Some(json!({ "lane_id": id, "agent": kind, "resume": true })),
-            )
+            .call("agent.adopt", Some(json!({ "lane_id": id })))
             .await
         {
             Ok(_) => {

@@ -70,9 +70,6 @@ struct AgentSpawn {
     agent: String,
     #[serde(default)]
     task: Option<String>,
-    /// Adopt an existing conversation by resuming it (`claude --continue`).
-    #[serde(default)]
-    resume: bool,
 }
 #[derive(Deserialize)]
 struct AgentInput {
@@ -345,7 +342,17 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let default = cfg.default_agent.clone();
             let is_default = |name: &str| default.as_deref() == Some(name);
             let mut choices: Vec<AgentChoice> = Vec::new();
-            for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Aider] {
+            // One Claude entry per detected config dir (default + ~/.claude-* + $CLAUDE_CONFIG_DIR).
+            for (name, command) in agent::claude::agent_variants() {
+                choices.push(AgentChoice {
+                    detected: on_path(&command),
+                    default: is_default(&name),
+                    name,
+                    command,
+                    custom: false,
+                });
+            }
+            for kind in [AgentKind::Codex, AgentKind::Aider] {
                 let command = kind.command().to_string();
                 let name = kind.as_str().into_owned();
                 choices.push(AgentChoice {
@@ -456,16 +463,21 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
-            // A config-defined custom agent's command wins; otherwise the built-in binary.
+            // Resolve the chosen name to a command: a config custom wins, then an autodetected
+            // Claude variant (e.g. claude-work → `CLAUDE_CONFIG_DIR=… claude`), else the kind.
             let mut command = {
                 let cfg = ctx.config.read().await;
-                cfg.agents
-                    .get(&p.agent)
-                    .cloned()
-                    .unwrap_or_else(|| AgentKind::from_kind_str(&p.agent).command().to_string())
+                if let Some(c) = cfg.agents.get(&p.agent) {
+                    c.clone()
+                } else if let Some((_, cmd)) = agent::claude::agent_variants()
+                    .into_iter()
+                    .find(|(n, _)| n == &p.agent)
+                {
+                    cmd
+                } else {
+                    AgentKind::from_kind_str(&p.agent).command().to_string()
+                }
             };
-            // Adopt: resume the existing conversation in this worktree (claude-only flag).
-            command = with_resume(command, p.resume);
             if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
                 command = format!("{command} {}", shell_quote(task));
             }
@@ -488,6 +500,42 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
             Ok(json!({ "lane_id": p.lane_id, "window": window, "agent": p.agent }))
+        }
+        "agent.adopt" => {
+            // Take over an agent running in another terminal: resume its conversation in a
+            // managed tmux lane. We re-detect the session to learn which Claude account
+            // (config dir) it used, so a work-account session resumes against ~/.claude-work.
+            let p: LaneId = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let detect = path.clone();
+            let config_dir = tokio::task::spawn_blocking(move || {
+                agent::claude::summary_for(&detect).and_then(|s| s.config_dir)
+            })
+            .await
+            .map_err(internal)?;
+            let command = match config_dir {
+                Some(dir) => format!("CLAUDE_CONFIG_DIR={} claude --continue", dir.display()),
+                None => "claude --continue".to_string(),
+            };
+            let tmux = ctx.tmux.clone();
+            let lane = p.lane_id;
+            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &path, &command))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            let _ = ctx
+                .store
+                .set_lane_tmux_window(p.lane_id, Some(window.clone()))
+                .await;
+            let _ = ctx
+                .store
+                .set_lane_agent_kind(p.lane_id, Some("claude-code".to_string()))
+                .await;
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_STATUS,
+                json!({ "lane_id": p.lane_id, "status": "running" }),
+            );
+            Ok(json!({ "lane_id": p.lane_id, "window": window }))
         }
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
@@ -722,27 +770,39 @@ fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>
     }
 }
 
-/// The built-in agent kind names. These are detected on PATH rather than user-defined, so
-/// they can't be added, removed, or have their command edited via the agent-manager RPCs.
-const BUILTIN_AGENTS: [&str; 3] = ["claude-code", "codex", "aider"];
+/// Built-in agent kinds with a fixed binary name. Claude is handled separately (one variant
+/// per detected config dir). These names can't be used for a custom agent.
+const BUILTIN_AGENTS: [&str; 2] = ["codex", "aider"];
 
+/// A name is reserved (can't be added/removed as a custom) if it's a fixed built-in or one of
+/// the autodetected Claude variants (claude-code, claude-work, …).
 fn is_builtin(name: &str) -> bool {
     BUILTIN_AGENTS.contains(&name)
+        || agent::claude::agent_variants()
+            .iter()
+            .any(|(n, _)| n == name)
 }
 
-/// Append claude's resume flag when adopting an existing conversation. Only `claude` supports
-/// `--continue`, so other agents are launched unchanged.
-fn with_resume(command: String, resume: bool) -> String {
-    if resume && command.split_whitespace().next() == Some("claude") {
-        format!("{command} --continue")
-    } else {
-        command
+/// Does a token look like a leading `VAR=value` env assignment (e.g. `CLAUDE_CONFIG_DIR=…`)?
+fn is_env_assignment(tok: &str) -> bool {
+    match tok.split_once('=') {
+        Some((k, _)) => !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        None => false,
     }
+}
+
+/// The program a command runs, skipping leading env assignments so commands like
+/// `CLAUDE_CONFIG_DIR=~/.claude-work claude` resolve to `claude`.
+fn program_of(command: &str) -> Option<&str> {
+    command.split_whitespace().find(|t| !is_env_assignment(t))
 }
 
 /// Is the command's program on PATH (or an absolute/relative path that exists)?
 fn on_path(command: &str) -> bool {
-    let prog = command.split_whitespace().next().unwrap_or(command);
+    let prog = match program_of(command) {
+        Some(p) => p,
+        None => return false,
+    };
     if prog.contains('/') {
         return Path::new(prog).exists();
     }
@@ -817,22 +877,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resume_appends_continue_only_for_claude() {
-        // Adopting a claude session resumes the existing conversation.
-        assert_eq!(with_resume("claude".into(), true), "claude --continue");
-        // A custom claude command also gets it (program is still `claude`).
+    fn program_of_skips_env_assignments() {
+        assert_eq!(program_of("claude"), Some("claude"));
+        // A work-account command resolves to the claude binary, not the env var.
         assert_eq!(
-            with_resume("claude --model opus".into(), true),
-            "claude --model opus --continue"
+            program_of("CLAUDE_CONFIG_DIR=/Users/x/.claude-work claude"),
+            Some("claude")
         );
-        // Non-claude agents are launched unchanged (no --continue).
-        assert_eq!(with_resume("aider".into(), true), "aider");
-        // Without resume, nothing is appended.
-        assert_eq!(with_resume("claude".into(), false), "claude");
+        assert_eq!(program_of("FOO=1 BAR=2 aider --model x"), Some("aider"));
+        assert_eq!(program_of(""), None);
+        assert!(is_env_assignment("CLAUDE_CONFIG_DIR=/x/.claude-work"));
+        assert!(!is_env_assignment("claude"));
+        assert!(!is_env_assignment("--model=opus")); // a flag, not an env assignment
     }
 
     #[test]
     fn builtins_are_recognized() {
+        // claude-code is always present (the default config dir is always listed).
         assert!(is_builtin("claude-code"));
         assert!(is_builtin("codex"));
         assert!(!is_builtin("claude-yolo"));

@@ -22,6 +22,17 @@ New Lane lists the **auto-detected** built-ins (claude-code / codex / aider, mar
 PATH) plus any **custom agents** you define — cycle them with Tab (Shift+Tab to go back). The
 **default** agent (marked ★) is preselected.
 
+### Multiple Claude accounts
+
+Claude keeps each account's data in a config dir (`~/.claude` by default; a second account is
+typically run with `CLAUDE_CONFIG_DIR=~/.claude-work`). repomon scans for these — the default
+`~/.claude` plus any `~/.claude-*` holding a `projects/` dir, and `$CLAUDE_CONFIG_DIR` — and
+offers **one agent per account**: `claude-code` (default) and e.g. `claude-work`
+(→ `CLAUDE_CONFIG_DIR=~/.claude-work claude`). No custom config needed. Detection and adopt
+are account-aware: a work-account session is read from `~/.claude-work/projects` and adopting
+it resumes against that account. (A shell *alias* like `claude-work` isn't a real binary, so a
+custom agent pointing at `claude-work` won't launch — use the autodetected entry instead.)
+
 ## Managing agents in-app
 
 Press **`A`** from Fleet (or **`Ctrl+A`** from New Lane) to open the agent manager:
