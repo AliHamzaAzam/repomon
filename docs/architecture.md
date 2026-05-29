@@ -5,20 +5,22 @@ The daemon owns all state and all git/tmux work; the TUI only renders cached sta
 forwards input. That split is what keeps the UI instant and lets agents outlive the UI.
 
 ```
-            ┌───────────────────────── repomon-core ─────────────────────────┐
-            │ model · store(SQLite) · git(gix + worktree shellout) · watch    │
-            │ registry · lane · agent(tmux runtime + Claude/Aider monitors)   │
-            │ analytics · session · indexer · service(launchd) · protocol     │
-            └───────────────▲───────────────────────────▲────────────────────┘
-                            │ (lib)                      │ (lib)
-                ┌───────────┴───────────┐    ┌───────────┴────────────┐
-                │     repomon-daemon     │    │      repomon-tui        │
-                │  repomond:             │    │  repomon:               │
-                │   UnixListener + RPC   │◄───┤   DaemonClient (socket) │
-                │   pubsub broadcast     │ socket   app loop + views    │
-                │   watchers / streamer  │ JSON-RPC keybinds (arrows)   │
-                │   indexer              │    │   cd-on-exit             │
-                └────────────────────────┘    └─────────────────────────┘
+      ┌───────────────────────── repomon-core ────────────────────────┐
+      │ model · store(SQLite) · git(gix + worktree shellout) · watch  │
+      │ registry · lane · agent(tmux runtime + Claude/Aider monitors) │
+      │ analytics · session · indexer · service(launchd) · protocol   │
+      └──────────────▲──────────────────────────────▲─────────────────┘
+                     │                              │
+                     │ (lib)                        │ (lib)
+        ┌─────────────────────────┐    ┌─────────────────────────┐
+        │ repomon-daemon          │    │ repomon-tui             │
+        │ repomond:               │    │ repomon:                │
+        │   UnixListener + RPC    │ ◄─ │   DaemonClient (socket) │
+        │   pubsub broadcast      │    │   app loop + views      │
+        │   watchers / streamer   │    │   keybinds (arrows)     │
+        │   indexer               │    │   cd-on-exit            │
+        └─────────────────────────┘    └─────────────────────────┘
+                                 socket · framed JSON-RPC
 ```
 
 ## Crates
