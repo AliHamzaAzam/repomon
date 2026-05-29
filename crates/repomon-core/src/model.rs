@@ -137,6 +137,17 @@ impl AgentKind {
         }
     }
 
+    /// The CLI binary to launch for this agent kind.
+    pub fn command(&self) -> &str {
+        match self {
+            AgentKind::ClaudeCode => "claude",
+            AgentKind::Codex => "codex",
+            AgentKind::Aider => "aider",
+            AgentKind::Cursor => "cursor-agent",
+            AgentKind::Other(s) => s,
+        }
+    }
+
     /// Parse from the wire/storage string (infallible — unknown kinds become `Other`).
     pub fn from_kind_str(s: &str) -> Self {
         match s {

@@ -2,8 +2,9 @@
 
 use std::path::PathBuf;
 
+use repomon_core::agent::shell_quote;
 use repomon_core::git::reader;
-use repomon_core::model::{Commit, CreateLaneParams, RepoId, TimeRange};
+use repomon_core::model::{AgentKind, Commit, CreateLaneParams, RepoId, TimeRange};
 use repomon_core::protocol::RpcError;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -57,6 +58,38 @@ struct CommitRange {
     to_iso: String,
     #[serde(default)]
     repo_ids: Option<Vec<RepoId>>,
+}
+#[derive(Deserialize)]
+struct AgentSpawn {
+    lane_id: repomon_core::model::LaneId,
+    agent: String,
+    #[serde(default)]
+    task: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentInput {
+    lane_id: repomon_core::model::LaneId,
+    text: String,
+}
+#[derive(Deserialize)]
+struct AgentSignal {
+    lane_id: repomon_core::model::LaneId,
+    key: String,
+}
+#[derive(Deserialize)]
+struct AgentCapture {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    lines: Option<u32>,
+}
+#[derive(Deserialize)]
+struct AgentPin {
+    lane_id: repomon_core::model::LaneId,
+    pinned: bool,
+}
+#[derive(Deserialize)]
+struct ViewportSet {
+    lane_ids: Vec<repomon_core::model::LaneId>,
 }
 
 /// Dispatch a single request to its handler.
@@ -139,9 +172,89 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             to_value(commits_in_range(ctx, TimeRange { from, to }, p.repo_ids).await?)
         }
 
+        // ---- agents (tmux-backed runtime) ----
+        "agent.spawn" => {
+            let p: AgentSpawn = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let kind = AgentKind::from_kind_str(&p.agent);
+            let mut command = kind.command().to_string();
+            if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
+                command = format!("{command} {}", shell_quote(task));
+            }
+            let tmux = ctx.tmux.clone();
+            let lane = p.lane_id;
+            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &path, &command))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            let _ = ctx
+                .store
+                .set_lane_tmux_window(p.lane_id, Some(window.clone()))
+                .await;
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_STATUS,
+                json!({ "lane_id": p.lane_id, "status": "running" }),
+            );
+            Ok(json!({ "lane_id": p.lane_id, "window": window, "agent": p.agent }))
+        }
+        "agent.capture" => {
+            let p: AgentCapture = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let (lane, lines) = (p.lane_id, p.lines);
+            let content = tokio::task::spawn_blocking(move || tmux.capture(lane, lines))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            Ok(json!({ "content": content }))
+        }
+        "agent.send_input" => {
+            let p: AgentInput = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let (lane, text) = (p.lane_id, p.text);
+            tokio::task::spawn_blocking(move || tmux.send_text(lane, &text))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
+        "agent.signal" => {
+            let p: AgentSignal = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let (lane, key) = (p.lane_id, p.key);
+            tokio::task::spawn_blocking(move || tmux.send_key(lane, &key))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
+        "agent.stop" => {
+            let p: LaneId = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let lane = p.lane_id;
+            let _ = tokio::task::spawn_blocking(move || tmux.kill(lane)).await;
+            let _ = ctx.store.set_lane_tmux_window(p.lane_id, None).await;
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_STATUS,
+                json!({ "lane_id": p.lane_id, "status": "ended" }),
+            );
+            Ok(Value::Null)
+        }
+        "agent.pin" => {
+            let p: AgentPin = parse(params)?;
+            ctx.store
+                .set_lane_pinned(p.lane_id, p.pinned)
+                .await
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
+
         // ---- subscription is handled in the socket layer ----
         "subscribe" => Ok(Value::Null),
-        "viewport.set" => Ok(Value::Null), // wired up in M9
+        "viewport.set" => {
+            let p: ViewportSet = parse(params)?;
+            *ctx.viewport.lock().await = p.lane_ids;
+            Ok(Value::Null)
+        }
 
         // ---- daemon ----
         "daemon.status" => {

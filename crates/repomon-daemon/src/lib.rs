@@ -12,10 +12,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use repomon_core::model::LaneId;
 use repomon_core::protocol::Notification;
-use repomon_core::{Config, Lanes, Registry, Store};
+use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime};
 use serde_json::Value;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, Mutex, Notify};
 
 pub use socket::serve;
 
@@ -25,9 +26,12 @@ pub struct Ctx {
     pub registry: Registry,
     pub lanes: Lanes,
     pub config: Config,
+    pub tmux: TmuxRuntime,
     pub started: Instant,
     pub db_path: Option<PathBuf>,
     pub events: pubsub::EventTx,
+    /// Lanes the TUI currently has visible — fast-polled for output (M9).
+    pub viewport: Mutex<Vec<LaneId>>,
     pub shutdown: Notify,
 }
 
@@ -35,15 +39,18 @@ impl Ctx {
     pub fn new(store: Store, config: Config, db_path: Option<PathBuf>) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
+        let tmux = TmuxRuntime::new(config.tmux_session.clone());
         let (events, _rx) = broadcast::channel(512);
         Arc::new(Ctx {
             store,
             registry,
             lanes,
             config,
+            tmux,
             started: Instant::now(),
             db_path,
             events,
+            viewport: Mutex::new(Vec::new()),
             shutdown: Notify::new(),
         })
     }

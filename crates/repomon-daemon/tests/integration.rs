@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
-use repomon_core::{Config, Store};
+use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::{serve, Ctx};
 use serde_json::json;
 use tokio::net::UnixStream;
@@ -106,4 +106,107 @@ async fn daemon_serves_repo_and_lane_methods() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn daemon_spawns_and_drives_an_agent() {
+    if !TmuxRuntime::available() {
+        eprintln!("tmux not available; skipping agent spawn test");
+        return;
+    }
+    // A unique tmux session so we never touch the user's real `repomon` session.
+    let session = format!("repomon-agent-it-{}", std::process::id());
+    let config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+    let sock = std::env::temp_dir().join(format!("repomon-agent-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Register a repo and grab its lane.
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
+    call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane_id = lanes[0]["id"].as_i64().unwrap();
+
+    // Spawn a plain shell as the "agent", drive it, and read its output back.
+    let spawned = call(
+        &mut stream,
+        3,
+        "agent.spawn",
+        Some(json!({ "lane_id": lane_id, "agent": "bash" })),
+    )
+    .await;
+    assert!(
+        spawned.error.is_none(),
+        "agent.spawn errored: {:?}",
+        spawned.error
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    call(
+        &mut stream,
+        4,
+        "agent.send_input",
+        Some(json!({ "lane_id": lane_id, "text": "echo HELLO_FROM_AGENT_XYZ" })),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let captured = call(
+        &mut stream,
+        5,
+        "agent.capture",
+        Some(json!({ "lane_id": lane_id })),
+    )
+    .await;
+    let content = captured.result.unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        content.contains("HELLO_FROM_AGENT_XYZ"),
+        "captured pane was: {content:?}"
+    );
+
+    // Stop the agent.
+    call(
+        &mut stream,
+        6,
+        "agent.stop",
+        Some(json!({ "lane_id": lane_id })),
+    )
+    .await;
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &session])
+        .output();
 }

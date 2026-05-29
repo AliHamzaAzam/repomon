@@ -5,6 +5,7 @@
 //! daemon wiring — those live in `repomon-daemon` and `repomon-tui`, which both build on
 //! the traits and types defined here.
 
+pub mod agent;
 pub mod config;
 pub mod error;
 pub mod git;
@@ -17,6 +18,7 @@ pub mod store;
 pub mod traits;
 pub mod watch;
 
+pub use agent::TmuxRuntime;
 pub use config::Config;
 pub use error::{Error, Result};
 pub use lane::Lanes;
