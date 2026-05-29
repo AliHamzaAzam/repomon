@@ -15,7 +15,7 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ select  ↵/→ open  n new  d delete  / filter  g needs-you  c cd  q quit";
+    "↑↓ ↵ open  n new  d del  / filter  g needs-you  c cd  2 timeline  3 sessions  4 search  q quit";
 const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a attach  spc grid  ←/esc back  q quit";
 const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "type to the agent   ↵ send   esc command-mode";
@@ -30,7 +30,167 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Focus => render_focus(f, app),
         View::Grid => render_grid(f, app),
         View::NewLane => render_new_lane(f, app),
+        View::Timeline => render_timeline(f, app),
+        View::Sessions => render_sessions(f, app),
+        View::Search => render_search(f, app),
     }
+}
+
+const DASH_KEYS: &str = "1 fleet  2 timeline  3 sessions  4 search  ←/esc fleet  q quit";
+
+fn render_timeline(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let mut lines = vec![
+        header_line(area.width, "REPOMON · TIMELINE", &fmt_clock(), app),
+        rule(area.width, true),
+        Line::raw(""),
+    ];
+    match &app.timeline {
+        Some(t) if !t.rows.is_empty() => {
+            let zoom = match app.timeline_zoom {
+                crate::app::Zoom::Day => "day",
+                crate::app::Zoom::Week => "week",
+                crate::app::Zoom::Month => "month",
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} · {} buckets   [d]ay [w]eek [m]onth",
+                    zoom,
+                    t.rows.first().map(|r| r.density.len()).unwrap_or(0)
+                ),
+                app.theme.dim(),
+            )));
+            lines.push(Line::raw(""));
+            let label_w = t
+                .rows
+                .iter()
+                .map(|r| r.repo_name.len())
+                .max()
+                .unwrap_or(8)
+                .min(20);
+            for row in &t.rows {
+                let bars: String = row.density.iter().map(|&l| analytics_char(l)).collect();
+                lines.push(Line::raw(format!(
+                    "  {:<label_w$}  {}",
+                    trunc(&row.repo_name, label_w),
+                    bars
+                )));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("CORRELATIONS", app.theme.bold())));
+            lines.push(rule(area.width, false));
+            lines.push(Line::raw(""));
+            if t.correlations.is_empty() {
+                lines.push(Line::raw("  (none above threshold)".to_string()));
+            }
+            for c in t.correlations.iter().take(8) {
+                lines.push(Line::raw(format!(
+                    "  {} ↔ {}     {} windows     {:.2} overlap",
+                    c.a, c.b, c.windows, c.overlap
+                )));
+            }
+        }
+        _ => lines.push(Line::raw(
+            "  no commit history yet (the indexer runs in the background)".to_string(),
+        )),
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(footer(DASH_KEYS, app), rows[1]);
+}
+
+fn render_sessions(f: &mut Frame, app: &App) {
+    use repomon_core::model::SessionKind;
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let total: i64 = app.sessions.iter().map(|s| s.duration_minutes()).sum();
+    let mut lines = vec![
+        header_line(area.width, "REPOMON · SESSIONS", &fmt_clock(), app),
+        rule(area.width, true),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!(
+                "last 7 days · {} sessions · {}h {}m active",
+                app.sessions.len(),
+                total / 60,
+                total % 60
+            ),
+            app.theme.dim(),
+        )),
+        Line::raw(""),
+    ];
+    if app.sessions.is_empty() {
+        lines.push(Line::raw("  no sessions detected yet".to_string()));
+    }
+    for s in &app.sessions {
+        let from = s.from.with_timezone(&Local).format("%a %H:%M");
+        let to = s.to.with_timezone(&Local).format("%H:%M");
+        let kind = match s.kind {
+            SessionKind::Parallel => "parallel",
+            SessionKind::Focused => "focused",
+        };
+        lines.push(Line::raw(format!(
+            "  {from} – {to}   {:>3}m   {:<9}  {}  ({} commits)",
+            s.duration_minutes(),
+            kind,
+            s.repo_names.join(", "),
+            s.commit_count
+        )));
+    }
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(
+        footer(
+            "e export-md  1 fleet  2 timeline  3 sessions  4 search  q quit",
+            app,
+        ),
+        rows[1],
+    );
+}
+
+fn render_search(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let mut lines = vec![
+        header_line(area.width, "REPOMON · SEARCH", &fmt_clock(), app),
+        rule(area.width, true),
+        Line::raw(""),
+        Line::raw(format!("  search commits: {}_", app.search_query)),
+        Line::raw(""),
+    ];
+    if app.search_query.trim().is_empty() {
+        lines.push(Line::raw(
+            "  type to search every indexed commit summary".to_string(),
+        ));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("{} result(s)", app.search_results.len()),
+            app.theme.dim(),
+        )));
+        lines.push(Line::raw(""));
+        for c in app
+            .search_results
+            .iter()
+            .take((rows[0].height as usize).saturating_sub(7))
+        {
+            let when = c.time.with_timezone(&Local).format("%Y-%m-%d %H:%M");
+            let oid = c.oid.to_hex().to_string();
+            lines.push(Line::raw(format!(
+                "  {when}  {}  {}",
+                &oid[..oid.len().min(8)],
+                c.summary
+            )));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(footer("type query  ←/esc fleet", app), rows[1]);
+}
+
+fn analytics_char(level: u8) -> &'static str {
+    repomon_core::analytics::density_char(level)
 }
 
 fn render_fleet(f: &mut Frame, app: &App) {

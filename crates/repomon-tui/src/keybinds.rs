@@ -12,9 +12,15 @@ pub enum View {
     Split,
     /// One agent, full-screen: live output + input + controls.
     Focus,
-    /// Babysit grid of live tiles (M9b).
+    /// Babysit grid of live tiles.
     Grid,
     NewLane,
+    /// Per-repo commit-density timeline (Phase 3).
+    Timeline,
+    /// Detected work sessions (Phase 3).
+    Sessions,
+    /// Global commit search (Phase 3).
+    Search,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -37,6 +43,7 @@ pub enum Action {
     Pin,
     Merge,
     SpawnAgent,
+    Goto(View),
 }
 
 /// Map a key to a navigation action (used when not in a text-input mode).
@@ -59,6 +66,10 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('m') => Some(Action::Merge),
         KeyCode::Char('e') => Some(Action::SpawnAgent),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
+        KeyCode::Char('1') => Some(Action::Goto(View::Fleet)),
+        KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),
+        KeyCode::Char('3') => Some(Action::Goto(View::Sessions)),
+        KeyCode::Char('4') => Some(Action::Goto(View::Search)),
         _ => None,
     }
 }

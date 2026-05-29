@@ -387,6 +387,20 @@ impl Store {
         .await
     }
 
+    /// Search indexed commit summaries (case-insensitive substring), newest first.
+    pub async fn search_commits(&self, query: String, limit: usize) -> Result<Vec<Commit>> {
+        self.call(move |c| {
+            let pattern = format!("%{query}%");
+            let mut stmt = c.prepare(
+                "SELECT oid, repo_id, author_name, author_email, summary, time, parent_count
+                 FROM commits WHERE summary LIKE ?1 ORDER BY time DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![pattern, limit as i64], commit_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
     // ---- agent sessions ------------------------------------------------------
 
     /// Insert or update a session keyed by its manifest path. Returns its id.

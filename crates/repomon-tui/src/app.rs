@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
-use repomon_core::model::{Commit, Lane, LaneId, Repo};
+use repomon_core::model::{Commit, Lane, LaneId, Repo, TimelineData, WorkSession};
 use repomon_core::protocol::Notification;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
@@ -19,6 +19,25 @@ use crate::view;
 
 /// Agent kinds offered when creating a lane (cycled with Tab).
 pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "aider"];
+
+/// Timeline zoom levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zoom {
+    Day,
+    Week,
+    Month,
+}
+
+impl Zoom {
+    /// (lookback seconds, bucket seconds, label).
+    fn params(self) -> (i64, i64, &'static str) {
+        match self {
+            Zoom::Day => (24 * 3600, 3600, "day"),
+            Zoom::Week => (7 * 24 * 3600, 6 * 3600, "week"),
+            Zoom::Month => (30 * 24 * 3600, 24 * 3600, "month"),
+        }
+    }
+}
 
 /// All UI state. `view` reads these fields directly.
 pub struct App {
@@ -45,6 +64,11 @@ pub struct App {
     pub input: String,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
+    pub timeline: Option<TimelineData>,
+    pub timeline_zoom: Zoom,
+    pub sessions: Vec<WorkSession>,
+    pub search_query: String,
+    pub search_results: Vec<Commit>,
     last_viewport: Vec<LaneId>,
     attach_request: Option<LaneId>,
 }
@@ -71,6 +95,11 @@ impl App {
             focus_insert: false,
             input: String::new(),
             grid_active: 0,
+            timeline: None,
+            timeline_zoom: Zoom::Day,
+            sessions: Vec::new(),
+            search_query: String::new(),
+            search_results: Vec::new(),
             last_viewport: Vec::new(),
             attach_request: None,
         }
@@ -152,7 +181,9 @@ impl App {
                 self.selected_lane().map(|l| vec![l.id]).unwrap_or_default()
             }
             View::Grid => self.grid_lane_ids(),
-            View::Fleet | View::NewLane => Vec::new(),
+            View::Fleet | View::NewLane | View::Timeline | View::Sessions | View::Search => {
+                Vec::new()
+            }
         }
     }
 
@@ -190,12 +221,140 @@ impl App {
         match self.view {
             View::NewLane => self.new_lane_key(key).await,
             View::Focus => self.focus_key(key).await,
+            View::Search => self.search_key(key).await,
+            View::Timeline => self.timeline_key(key).await,
+            View::Sessions => self.sessions_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
                     self.apply(action).await;
                 }
             }
+        }
+    }
+
+    async fn search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) => {
+                self.search_query.push(c);
+                self.run_search().await;
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.run_search().await;
+            }
+            KeyCode::Enter => self.run_search().await,
+            KeyCode::Esc | KeyCode::Left => self.view = View::Fleet,
+            _ => {}
+        }
+    }
+
+    async fn timeline_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('d') => self.set_zoom(Zoom::Day).await,
+            KeyCode::Char('w') => self.set_zoom(Zoom::Week).await,
+            KeyCode::Char('m') => self.set_zoom(Zoom::Month).await,
+            _ => {
+                if let Some(a) = keybinds::nav(key) {
+                    self.apply(a).await;
+                }
+            }
+        }
+    }
+
+    async fn sessions_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('e') => self.export_sessions(),
+            _ => {
+                if let Some(a) = keybinds::nav(key) {
+                    self.apply(a).await;
+                }
+            }
+        }
+    }
+
+    async fn set_zoom(&mut self, zoom: Zoom) {
+        self.timeline_zoom = zoom;
+        self.load_timeline().await;
+    }
+
+    async fn load_timeline(&mut self) {
+        let (lookback, bucket, _) = self.timeline_zoom.params();
+        let to = chrono::Utc::now();
+        let from = to - chrono::Duration::seconds(lookback);
+        let params = json!({
+            "from_iso": from.to_rfc3339(),
+            "to_iso": to.to_rfc3339(),
+            "bucket_secs": bucket,
+        });
+        match self
+            .client
+            .call_typed::<TimelineData>("timeline", Some(params))
+            .await
+        {
+            Ok(t) => self.timeline = Some(t),
+            Err(e) => self.status = format!("timeline failed: {e}"),
+        }
+    }
+
+    async fn load_sessions(&mut self) {
+        let to = chrono::Utc::now();
+        let from = to - chrono::Duration::days(7);
+        let params = json!({ "from_iso": from.to_rfc3339(), "to_iso": to.to_rfc3339() });
+        match self
+            .client
+            .call_typed::<Vec<WorkSession>>("sessions", Some(params))
+            .await
+        {
+            Ok(s) => self.sessions = s,
+            Err(e) => self.status = format!("sessions failed: {e}"),
+        }
+    }
+
+    async fn run_search(&mut self) {
+        if self.search_query.trim().is_empty() {
+            self.search_results.clear();
+            return;
+        }
+        let params = json!({ "query": self.search_query, "limit": 100 });
+        match self
+            .client
+            .call_typed::<Vec<Commit>>("commit.search", Some(params))
+            .await
+        {
+            Ok(r) => self.search_results = r,
+            Err(e) => self.status = format!("search failed: {e}"),
+        }
+    }
+
+    fn export_sessions(&mut self) {
+        let mut md = String::from("# repomon work sessions\n\n");
+        for s in &self.sessions {
+            let from = s
+                .from
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M");
+            let to = s.to.with_timezone(&chrono::Local).format("%H:%M");
+            md.push_str(&format!(
+                "- **{from} – {to}** ({} min, {:?}) — {} · {} commits\n",
+                s.duration_minutes(),
+                s.kind,
+                s.repo_names.join(", "),
+                s.commit_count
+            ));
+        }
+        let path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("repomon-sessions.md");
+        match std::fs::write(&path, md) {
+            Ok(_) => {
+                self.status = format!(
+                    "exported {} sessions to {}",
+                    self.sessions.len(),
+                    path.display()
+                )
+            }
+            Err(e) => self.status = format!("export failed: {e}"),
         }
     }
 
@@ -403,8 +562,21 @@ impl App {
                 View::Split => self.view = View::Fleet,
                 View::Grid => self.view = View::Fleet,
                 View::NewLane => self.view = View::Fleet,
+                View::Timeline | View::Sessions | View::Search => self.view = View::Fleet,
                 View::Fleet => self.should_quit = true,
             },
+            Action::Goto(target) => {
+                self.view = target;
+                match target {
+                    View::Timeline => self.load_timeline().await,
+                    View::Sessions => self.load_sessions().await,
+                    View::Search => {
+                        self.search_query.clear();
+                        self.search_results.clear();
+                    }
+                    _ => {}
+                }
+            }
             Action::Quit => self.should_quit = true,
             Action::NewLane => {
                 self.view = View::NewLane;

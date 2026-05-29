@@ -89,6 +89,14 @@ async fn main() {
     // Stream visible agents' output to subscribed TUIs.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
+    // Index commit history in the background (timeline / sessions / search).
+    {
+        let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());
+        tokio::spawn(async move {
+            let _ = indexer.sync_all().await;
+        });
+    }
+
     // Graceful shutdown on Ctrl-C / SIGTERM.
     {
         let ctx_s = ctx.clone();

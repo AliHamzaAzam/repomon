@@ -1,5 +1,6 @@
 //! JSON-RPC method dispatch.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use repomon_core::agent::{self, shell_quote};
@@ -8,7 +9,7 @@ use repomon_core::model::{
     AgentKind, AgentSession, AgentStatus, Commit, CreateLaneParams, Lane, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
-use repomon_core::TmuxRuntime;
+use repomon_core::{analytics, session, Indexer, TmuxRuntime};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -100,6 +101,30 @@ struct LaneMerge {
     #[serde(default)]
     into: Option<String>,
 }
+#[derive(Deserialize)]
+struct Search {
+    query: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+fn default_limit() -> usize {
+    50
+}
+#[derive(Deserialize)]
+struct TimelineParams {
+    from_iso: String,
+    to_iso: String,
+    #[serde(default = "default_bucket")]
+    bucket_secs: i64,
+}
+fn default_bucket() -> i64 {
+    3600
+}
+#[derive(Deserialize)]
+struct SessionsParams {
+    from_iso: String,
+    to_iso: String,
+}
 
 /// Dispatch a single request to its handler.
 pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
@@ -114,6 +139,12 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?;
             ctx.broadcast(crate::pubsub::topic::REPO_ADDED, json!({ "repo": repo }));
+            // Index the new repo's history in the background.
+            let indexer = Indexer::new(ctx.store.clone(), ctx.registry.clone());
+            let repo_for_index = repo.clone();
+            tokio::spawn(async move {
+                let _ = indexer.sync(&repo_for_index).await;
+            });
             to_value(repo)
         }
         "repo.remove" => {
@@ -191,6 +222,51 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let from = parse_iso(&p.from_iso)?;
             let to = parse_iso(&p.to_iso)?;
             to_value(commits_in_range(ctx, TimeRange { from, to }, p.repo_ids).await?)
+        }
+        "commit.search" => {
+            let p: Search = parse(params)?;
+            to_value(
+                ctx.store
+                    .search_commits(p.query, p.limit)
+                    .await
+                    .map_err(internal)?,
+            )
+        }
+
+        // ---- dashboard (Phase 3, from the indexed store) ----
+        "timeline" => {
+            let p: TimelineParams = parse(params)?;
+            let range = TimeRange {
+                from: parse_iso(&p.from_iso)?,
+                to: parse_iso(&p.to_iso)?,
+            };
+            let commits = ctx
+                .store
+                .commits_in_range(range, None)
+                .await
+                .map_err(internal)?;
+            let names = repo_names(ctx).await;
+            to_value(analytics::build_timeline(
+                &commits,
+                &names,
+                range.from,
+                range.to,
+                p.bucket_secs,
+            ))
+        }
+        "sessions" => {
+            let p: SessionsParams = parse(params)?;
+            let range = TimeRange {
+                from: parse_iso(&p.from_iso)?,
+                to: parse_iso(&p.to_iso)?,
+            };
+            let commits = ctx
+                .store
+                .commits_in_range(range, None)
+                .await
+                .map_err(internal)?;
+            let names = repo_names(ctx).await;
+            to_value(session::detect(&commits, &names))
         }
 
         // ---- agents (tmux-backed runtime) ----
@@ -369,6 +445,16 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             });
         }
     }
+}
+
+async fn repo_names(ctx: &Ctx) -> HashMap<RepoId, String> {
+    ctx.registry
+        .list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| (r.id, r.name))
+        .collect()
 }
 
 fn parse_iso(s: &str) -> Result<chrono::DateTime<chrono::Utc>, RpcError> {

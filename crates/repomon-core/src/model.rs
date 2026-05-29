@@ -279,6 +279,59 @@ pub struct SyncReport {
     pub errors: Vec<String>,
 }
 
+/// Whether a work session was focused on one repo or spanned several in parallel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionKind {
+    Focused,
+    Parallel,
+}
+
+/// A detected window of activity (Phase 3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkSession {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub kind: SessionKind,
+    pub repo_ids: Vec<RepoId>,
+    pub repo_names: Vec<String>,
+    pub commit_count: u32,
+}
+
+impl WorkSession {
+    pub fn duration_minutes(&self) -> i64 {
+        (self.to - self.from).num_minutes()
+    }
+}
+
+/// One repo's density row in the timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineRow {
+    pub repo_id: RepoId,
+    pub repo_name: String,
+    /// Density level (0–5) per time bucket.
+    pub density: Vec<u8>,
+}
+
+/// A correlation between two repos' active-bucket sets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Correlation {
+    pub a: String,
+    pub b: String,
+    pub windows: u32,
+    pub overlap: f64,
+}
+
+/// The full timeline payload: density rows + correlations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineData {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub bucket_secs: i64,
+    pub rows: Vec<TimelineRow>,
+    pub correlations: Vec<Correlation>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

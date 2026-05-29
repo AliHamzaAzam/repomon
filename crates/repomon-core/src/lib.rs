@@ -6,14 +6,17 @@
 //! the traits and types defined here.
 
 pub mod agent;
+pub mod analytics;
 pub mod config;
 pub mod error;
 pub mod git;
+pub mod indexer;
 pub mod lane;
 pub mod model;
 pub mod protocol;
 pub mod registry;
 pub mod service;
+pub mod session;
 pub mod store;
 pub mod traits;
 pub mod watch;
@@ -21,6 +24,7 @@ pub mod watch;
 pub use agent::{AgentMonitor, ClaudeMonitor, TmuxRuntime};
 pub use config::Config;
 pub use error::{Error, Result};
+pub use indexer::Indexer;
 pub use lane::Lanes;
 pub use model::*;
 pub use registry::Registry;

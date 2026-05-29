@@ -330,3 +330,99 @@ async fn streams_agent_output_for_visible_lanes() {
         .args(["kill-session", "-t", &session])
         .output();
 }
+
+#[tokio::test]
+async fn dashboard_timeline_sessions_search() {
+    use repomon_core::{Indexer, Registry};
+
+    // Build a repo with two commits 15 minutes apart so a session is detected.
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    let now = chrono::Utc::now().timestamp();
+    git_commit_at(repo_dir.path(), now - 1200, "feat: alpha change");
+    git_commit_at(repo_dir.path(), now - 300, "feat: beta change");
+
+    // Index history deterministically (don't rely on the background spawn).
+    let store = Store::open_in_memory().unwrap();
+    let reg = Registry::new(store.clone());
+    let repo = reg.add(repo_dir.path()).await.unwrap();
+    let report = Indexer::new(store.clone(), reg.clone())
+        .sync(&repo)
+        .await
+        .unwrap();
+    assert_eq!(report.commits_added, 2);
+
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-dash-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    let from = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+    let to = chrono::Utc::now().to_rfc3339();
+
+    // search
+    let r = call(
+        &mut stream,
+        1,
+        "commit.search",
+        Some(json!({ "query": "feat" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap().as_array().unwrap().len(), 2);
+
+    // timeline: one repo row with some density
+    let r = call(
+        &mut stream,
+        2,
+        "timeline",
+        Some(json!({ "from_iso": from, "to_iso": to, "bucket_secs": 3600 })),
+    )
+    .await;
+    let t = r.result.unwrap();
+    assert_eq!(t["rows"].as_array().unwrap().len(), 1);
+
+    // sessions: the two commits (15 min span) form one session
+    let r = call(
+        &mut stream,
+        3,
+        "sessions",
+        Some(json!({ "from_iso": from, "to_iso": to })),
+    )
+    .await;
+    let sessions = r.result.unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["commit_count"], json!(2));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+fn git_commit_at(dir: &Path, epoch: i64, msg: &str) {
+    let date = format!("@{epoch} +0000");
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["commit", "--allow-empty", "-m", msg])
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@e.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@e.com")
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git commit at {epoch}");
+}
