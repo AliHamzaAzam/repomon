@@ -17,10 +17,10 @@ use crate::theme;
 const FLEET_KEYS: &str =
     "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
 const SPLIT_KEYS: &str =
-    "↑↓ switch  i interact  ↵/→ focus  e spawn  o adopt  spc grid  ←/esc back  q";
+    "↑↓ lane  tab session  i interact  ↵/→ focus  o adopt  e spawn  spc grid  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
-    "i/↵/→ type  e spawn  o adopt  s stop  a attach  m merge  c cd  ←/esc back";
+    "i/↵/→ type  tab session  o adopt  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
 const NEWLANE_KEYS: &str =
@@ -554,18 +554,48 @@ fn tile_lines(
 
 fn agent_badge(lane: &Lane) -> String {
     use repomon_core::model::AgentStatus;
-    // `ext` flags an agent running in another terminal (adopt it to drive it from repomon).
-    let tag = match lane.agent_sessions.first() {
-        Some(s) if s.external => " ·ext",
-        _ => "",
+    let sessions = &lane.agent_sessions;
+    if sessions.is_empty() {
+        return String::new();
+    }
+    let n = sessions.len();
+    let waiting = sessions
+        .iter()
+        .filter(|s| s.status == AgentStatus::Waiting)
+        .count();
+    let running = sessions
+        .iter()
+        .filter(|s| s.status == AgentStatus::Running)
+        .count();
+    // `ext` flags agents running in another terminal; `×N` when several share the worktree.
+    let tag = if sessions.iter().any(|s| s.external) {
+        " ·ext"
+    } else {
+        ""
     };
-    match lane.agent_sessions.first() {
-        Some(s) if s.status == AgentStatus::Waiting => {
-            format!("⏸ needs you  {}↻{tag}", s.tool_call_count)
-        }
-        Some(s) if s.status == AgentStatus::Running => format!("▶ {}↻{tag}", s.tool_call_count),
-        Some(_) => format!("idle{tag}"),
-        None => String::new(),
+    let count = if n > 1 {
+        format!(" ×{n}")
+    } else {
+        String::new()
+    };
+    if waiting > 0 {
+        format!("⏸ needs you{count}{tag}")
+    } else if running > 0 {
+        format!("▶ running{count}{tag}")
+    } else {
+        format!("idle{count}{tag}")
+    }
+}
+
+/// A compact "time since" label for a session's last activity.
+fn ago(t: DateTime<Utc>) -> String {
+    let mins = (Utc::now() - t).num_minutes().max(0);
+    if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 60 * 24 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{}d", mins / (60 * 24))
     }
 }
 
@@ -797,22 +827,51 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             "  prune    this worktree is prunable (g to prune)".to_string(),
         ));
     }
-    let agent_line = match lane.agent_sessions.first() {
-        Some(sess) if sess.external => format!(
-            "  agent    {} · {} · {} calls · external — o to adopt",
-            sess.agent.short(),
-            sess.status.as_str(),
-            sess.tool_call_count
-        ),
-        Some(sess) => format!(
-            "  agent    {} · {} · {} calls",
-            sess.agent.short(),
-            sess.status.as_str(),
-            sess.tool_call_count
-        ),
-        None => "  agent    none running  (e to spawn)".to_string(),
-    };
-    lines.push(Line::raw(agent_line));
+    // Agent sessions: every recently-active agent in this worktree (several can run at once),
+    // with a cursor (‣) on the one `o` will adopt. External = running in another terminal.
+    if lane.agent_sessions.is_empty() {
+        lines.push(Line::raw(
+            "  agents   none running  (e to spawn)".to_string(),
+        ));
+    } else {
+        let n = lane.agent_sessions.len();
+        let waiting = lane
+            .agent_sessions
+            .iter()
+            .filter(|s| s.status.needs_you())
+            .count();
+        let adoptable = lane.agent_sessions.iter().any(|s| s.external);
+        let hint = if adoptable && n > 1 {
+            "  · tab to switch · o adopt"
+        } else if adoptable {
+            "  · o adopt"
+        } else {
+            ""
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  agents   {n} active · {waiting} waiting{hint}"),
+            app.theme.bold(),
+        )));
+        for (i, sess) in lane.agent_sessions.iter().enumerate() {
+            let cursor = if i == app.session_idx { "‣" } else { " " };
+            let glyph = match sess.status.as_str() {
+                "waiting" => "⏸",
+                "running" => "▶",
+                _ => "●",
+            };
+            let kind = if sess.external { "ext " } else { "mine" };
+            let label = sess
+                .title
+                .clone()
+                .or_else(|| sess.session_id.clone().map(|s| s.chars().take(8).collect()))
+                .unwrap_or_else(|| sess.agent.short().to_string());
+            lines.push(Line::raw(format!(
+                "  {cursor} {glyph} {kind}  {:<40}  {}",
+                trunc(&label, 40),
+                ago(sess.last_activity_at)
+            )));
+        }
+    }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled("RECENT COMMITS", app.theme.bold())));
     lines.push(Line::raw(""));

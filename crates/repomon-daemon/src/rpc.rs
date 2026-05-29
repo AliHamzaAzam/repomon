@@ -109,6 +109,13 @@ struct AgentSetDefault {
     name: Option<String>,
 }
 #[derive(Deserialize)]
+struct AgentAdopt {
+    lane_id: repomon_core::model::LaneId,
+    /// Resume this exact session (`claude --resume <id>`); `None` resumes the most recent.
+    #[serde(default)]
+    session_id: Option<String>,
+}
+#[derive(Deserialize)]
 struct AgentPin {
     lane_id: repomon_core::model::LaneId,
     pinned: bool,
@@ -503,20 +510,32 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
         "agent.adopt" => {
             // Take over an agent running in another terminal: resume its conversation in a
-            // managed tmux lane. We re-detect the session to learn which Claude account
-            // (config dir) it used, so a work-account session resumes against ~/.claude-work.
-            let p: LaneId = parse(params)?;
+            // managed tmux lane. With a session id we resume that exact session
+            // (`claude --resume <id>`); otherwise the most recent one (`--continue`). Either
+            // way we resolve which Claude account (config dir) it belongs to so a work-account
+            // session resumes against ~/.claude-work.
+            let p: AgentAdopt = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             let detect = path.clone();
-            let config_dir = tokio::task::spawn_blocking(move || {
-                agent::claude::summary_for(&detect).and_then(|s| s.config_dir)
+            let session_id = p.session_id.clone();
+            let command = tokio::task::spawn_blocking(move || {
+                let (config_dir, tail) = match session_id {
+                    Some(sid) => {
+                        let cfg = agent::claude::config_base_for_session(&detect, &sid).flatten();
+                        (cfg, format!("claude --resume {sid}"))
+                    }
+                    None => {
+                        let cfg = agent::claude::summary_for(&detect).and_then(|s| s.config_dir);
+                        (cfg, "claude --continue".to_string())
+                    }
+                };
+                match config_dir {
+                    Some(dir) => format!("CLAUDE_CONFIG_DIR={} {tail}", dir.display()),
+                    None => tail,
+                }
             })
             .await
             .map_err(internal)?;
-            let command = match config_dir {
-                Some(dir) => format!("CLAUDE_CONFIG_DIR={} claude --continue", dir.display()),
-                None => "claude --continue".to_string(),
-            };
             let tmux = ctx.tmux.clone();
             let lane = p.lane_id;
             let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &path, &command))
@@ -669,13 +688,29 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
 /// Overlay live agent sessions onto lanes: rich status from the monitors (Claude transcript,
 /// Aider history, …), falling back to "is the repomon-spawned tmux window alive?" for any
 /// other kind. Reads run off the runtime thread.
+/// How far back a transcript can have last changed and still count as a live session, and the
+/// cap on how many concurrent sessions to surface per worktree.
+const SESSION_WINDOW_HOURS: i64 = 6;
+const MAX_SESSIONS_PER_LANE: usize = 8;
+
 async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();
-    let summaries = tokio::task::spawn_blocking(move || {
+    // All recently-active Claude sessions per worktree (one per transcript), so several
+    // concurrent agents in one worktree each show up. Falls back to the generic monitor
+    // (which also covers aider) when there's nothing recent from Claude.
+    let per_lane = tokio::task::spawn_blocking(move || {
+        let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
         paths
             .iter()
-            .map(|p| agent::summary_for(p))
-            .collect::<Vec<_>>()
+            .map(|p| {
+                let recent = agent::claude::summaries_for(p, within, MAX_SESSIONS_PER_LANE);
+                if recent.is_empty() {
+                    agent::summary_for(p).into_iter().collect()
+                } else {
+                    recent
+                }
+            })
+            .collect::<Vec<Vec<_>>>()
     })
     .await
     .unwrap_or_default();
@@ -686,21 +721,23 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         .await
         .unwrap_or_default();
 
-    for (lane, summary) in lanes.iter_mut().zip(summaries) {
-        if let Some(s) = summary {
-            if s.last_activity > lane.last_activity_at {
-                lane.last_activity_at = s.last_activity;
+    for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
+        let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
+        if !summaries.is_empty() {
+            for s in summaries {
+                if s.last_activity > lane.last_activity_at {
+                    lane.last_activity_at = s.last_activity;
+                }
+                // No live repomon window means the agent is running in another terminal —
+                // mark it external so the UI can offer to adopt it.
+                let mut session = s.into_session(lane.repo.id, lane.worktree.id);
+                session.external = !managed;
+                lane.agent_sessions.push(session);
             }
-            // A transcript with no live repomon window means the agent is running in another
-            // terminal — mark it external so the UI can offer to adopt it.
-            let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
-            let mut session = s.into_session(lane.repo.id, lane.worktree.id);
-            session.external = !managed;
-            lane.agent_sessions.push(session);
             continue;
         }
         // No parseable transcript: surface a repomon-spawned agent if its window is alive.
-        if windows.contains(&TmuxRuntime::window_name(lane.id)) {
+        if managed {
             let kind = metas
                 .iter()
                 .find(|m| m.id == lane.id)
@@ -720,6 +757,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 title: None,
                 status: AgentStatus::Running,
                 external: false,
+                session_id: None,
             });
         }
     }

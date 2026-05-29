@@ -81,6 +81,10 @@ pub struct App {
     /// Split detail, with a fallback when there's nothing today.
     pub recent_commits: Vec<Commit>,
     recent_commits_lane: Option<LaneId>,
+    /// Which of the selected lane's agent sessions is highlighted (for adopt). Several
+    /// concurrent agents can run in one worktree; this cursor picks among them.
+    pub session_idx: usize,
+    session_lane: Option<LaneId>,
     pub browse_path: String,
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
@@ -130,6 +134,8 @@ impl App {
             search_results: Vec::new(),
             recent_commits: Vec::new(),
             recent_commits_lane: None,
+            session_idx: 0,
+            session_lane: None,
             browse_path: String::new(),
             browse_parent: None,
             browse_entries: Vec::new(),
@@ -267,6 +273,39 @@ impl App {
                 self.recent_commits = c;
             }
         }
+    }
+
+    /// Keep the session cursor in range: reset to 0 when the selected lane changes, and clamp
+    /// to the number of sessions on that lane.
+    fn sync_session_cursor(&mut self) {
+        let sel = self.selected_lane().map(|l| l.id);
+        if sel != self.session_lane {
+            self.session_lane = sel;
+            self.session_idx = 0;
+        }
+        let n = self
+            .selected_lane()
+            .map(|l| l.agent_sessions.len())
+            .unwrap_or(0);
+        if self.session_idx >= n {
+            self.session_idx = n.saturating_sub(1);
+        }
+    }
+
+    /// Move the session cursor among the selected lane's agents.
+    fn cycle_session(&mut self, forward: bool) {
+        let n = self
+            .selected_lane()
+            .map(|l| l.agent_sessions.len())
+            .unwrap_or(0);
+        if n <= 1 {
+            return;
+        }
+        self.session_idx = if forward {
+            (self.session_idx + 1) % n
+        } else {
+            (self.session_idx + n - 1) % n
+        };
     }
 
     async fn on_notification(&mut self, note: Notification) {
@@ -888,6 +927,11 @@ impl App {
             self.focus_insert = true;
             return;
         }
+        match key.code {
+            KeyCode::Tab => return self.cycle_session(true),
+            KeyCode::BackTab => return self.cycle_session(false),
+            _ => {}
+        }
         if let Some(action) = keybinds::nav(key) {
             self.apply(action).await;
         }
@@ -907,6 +951,8 @@ impl App {
             // i / ↵ / → all drop into insert: → is "zoom in" and Focus is the deepest level,
             // so the next step in is typing to the agent.
             KeyCode::Char('i') | KeyCode::Enter | KeyCode::Right => self.focus_insert = true,
+            KeyCode::Tab => self.cycle_session(true),
+            KeyCode::BackTab => self.cycle_session(false),
             KeyCode::Char('e') => self.spawn_agent().await,
             KeyCode::Char('o') => self.adopt_agent().await,
             KeyCode::Char('s') => self.stop_agent().await,
@@ -995,22 +1041,28 @@ impl App {
             .unwrap_or_else(|| "claude-code".to_string())
     }
 
-    /// Adopt an external agent (one running in another terminal): the daemon resumes its
-    /// conversation — against the right Claude account — in a managed tmux lane.
+    /// Adopt the highlighted external agent (one running in another terminal): the daemon
+    /// resumes that exact session — against the right Claude account — in a managed tmux lane.
     async fn adopt_agent(&mut self) {
-        let id = match self.selected_lane() {
-            Some(l) if l.agent_sessions.iter().any(|s| s.external) => l.id,
-            Some(_) => {
-                self.status = "no external agent here to adopt".into();
+        let idx = self.session_idx;
+        let target = self.selected_lane().and_then(|l| {
+            l.agent_sessions
+                .get(idx)
+                .filter(|s| s.external)
+                .map(|s| (l.id, s.session_id.clone()))
+        });
+        let (id, session_id) = match target {
+            Some(t) => t,
+            None => {
+                self.status = "select an external agent to adopt (tab to switch)".into();
                 return;
             }
-            None => return,
         };
-        match self
-            .client
-            .call("agent.adopt", Some(json!({ "lane_id": id })))
-            .await
-        {
+        let mut params = json!({ "lane_id": id });
+        if let Some(sid) = session_id {
+            params["session_id"] = json!(sid);
+        }
+        match self.client.call("agent.adopt", Some(params)).await {
             Ok(_) => {
                 self.status = "adopted — resuming in repomon (close the original terminal)".into();
                 self.view = View::Focus;
@@ -1237,6 +1289,7 @@ async fn event_loop(
     loop {
         app.sync_viewport().await;
         app.sync_recent_commits().await;
+        app.sync_session_cursor();
         terminal.draw(|f| view::render(f, app))?;
         if app.should_quit {
             return Ok(());

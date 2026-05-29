@@ -226,6 +226,10 @@ pub struct AgentSession {
     /// another terminal. Overlaid at list time; adopt it to interact from within repomon.
     #[serde(default)]
     pub external: bool,
+    /// The agent's session id (Claude transcript id), when known — lets adopt resume this
+    /// exact session even when several run in the same worktree.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

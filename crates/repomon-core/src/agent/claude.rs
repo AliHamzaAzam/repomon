@@ -33,6 +33,9 @@ pub struct TranscriptSummary {
     /// The Claude config dir this session belongs to, when it isn't the default `~/.claude`
     /// (e.g. a work account run with `CLAUDE_CONFIG_DIR=~/.claude-work`). Drives adopt.
     pub config_dir: Option<PathBuf>,
+    /// The session id (transcript filename stem) — lets adopt resume *this* exact session
+    /// (`claude --resume <id>`) when several run in one worktree.
+    pub session_id: Option<String>,
 }
 
 impl TranscriptSummary {
@@ -51,6 +54,7 @@ impl TranscriptSummary {
             title: self.title,
             status: self.status,
             external: false, // overlay flips this based on tmux ownership
+            session_id: self.session_id,
         }
     }
 }
@@ -227,6 +231,10 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
         status,
         title,
         config_dir: None, // set by the caller based on which config dir it came from
+        session_id: path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string()),
     })
 }
 
@@ -304,6 +312,73 @@ pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
     best
 }
 
+/// Summarize *every* recently-active Claude session for `cwd` — one per transcript — across
+/// all config dirs, newest first, capped at `max`. This is what lets repomon show several
+/// concurrent agents in one worktree (each is a distinct `<session-id>.jsonl`) rather than
+/// only the newest. "Recently active" means the transcript changed within `within`.
+pub fn summaries_for(cwd: &Path, within: Duration, max: usize) -> Vec<TranscriptSummary> {
+    let encoded = encode_project_dir(cwd);
+    let cutoff = Utc::now() - within;
+
+    // (config_dir for that base, the encoded project dir under it)
+    let dirs: Vec<(Option<PathBuf>, PathBuf)> =
+        if let Ok(p) = std::env::var("REPOMON_CLAUDE_PROJECTS") {
+            vec![(None, PathBuf::from(p).join(&encoded))]
+        } else {
+            let default = default_config_base();
+            config_bases()
+                .into_iter()
+                .map(|base| {
+                    let cfg = (base != default).then(|| base.clone());
+                    (cfg, base.join("projects").join(&encoded))
+                })
+                .collect()
+        };
+
+    let mut out: Vec<TranscriptSummary> = Vec::new();
+    for (config_dir, dir) in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            // Cheap mtime gate before parsing the whole transcript.
+            let recent = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| DateTime::<Utc>::from(t) >= cutoff)
+                .unwrap_or(false);
+            if !recent {
+                continue;
+            }
+            if let Some(mut s) = parse_transcript(&path) {
+                s.config_dir = config_dir.clone();
+                out.push(s);
+            }
+        }
+    }
+    out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+    out.truncate(max);
+    out
+}
+
+/// Which config dir holds `session_id`'s transcript for `cwd` (so adopt can resume it against
+/// the right account). `Some(None)` = the default `~/.claude`; `Some(Some(dir))` = a variant.
+pub fn config_base_for_session(cwd: &Path, session_id: &str) -> Option<Option<PathBuf>> {
+    let encoded = encode_project_dir(cwd);
+    let file = format!("{session_id}.jsonl");
+    let default = default_config_base();
+    for base in config_bases() {
+        if base.join("projects").join(&encoded).join(&file).is_file() {
+            return Some((base != default).then_some(base));
+        }
+    }
+    None
+}
+
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
@@ -356,6 +431,34 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, lines.join("\n")).unwrap();
         path
+    }
+
+    #[test]
+    fn summaries_for_lists_every_recent_session() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/code/multi");
+        let dir = root.path().join(encode_project_dir(cwd));
+        let line = r#"{"type":"user","cwd":"/code/multi","message":{"content":"hi"}}"#;
+        for id in ["aaaa1111", "bbbb2222", "cccc3333"] {
+            write_transcript(&dir, &format!("{id}.jsonl"), &[line]);
+        }
+
+        std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path());
+        let all = summaries_for(cwd, Duration::hours(6), 8);
+        let capped = summaries_for(cwd, Duration::hours(6), 2);
+        let single = summary_for(cwd);
+        std::env::remove_var("REPOMON_CLAUDE_PROJECTS");
+
+        // Each concurrent session surfaces as its own entry, keyed by session id.
+        assert_eq!(all.len(), 3, "all three sessions surface");
+        let ids: std::collections::HashSet<String> =
+            all.iter().filter_map(|s| s.session_id.clone()).collect();
+        assert!(ids.contains("aaaa1111"));
+        assert!(ids.contains("bbbb2222"));
+        assert!(ids.contains("cccc3333"));
+        // The cap is honored, and the single-session helper still works.
+        assert_eq!(capped.len(), 2);
+        assert!(single.is_some());
     }
 
     #[test]
