@@ -1,12 +1,13 @@
 //! JSON-RPC method dispatch.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::reader;
 use repomon_core::model::{
-    AgentKind, AgentSession, AgentStatus, Commit, CreateLaneParams, Lane, RepoId, TimeRange,
+    AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, CreateLaneParams,
+    Lane, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
 use repomon_core::{analytics, session, Indexer, TmuxRuntime};
@@ -124,6 +125,11 @@ fn default_bucket() -> i64 {
 struct SessionsParams {
     from_iso: String,
     to_iso: String,
+}
+#[derive(Deserialize)]
+struct Browse {
+    #[serde(default)]
+    path: Option<String>,
 }
 
 /// Dispatch a single request to its handler.
@@ -358,6 +364,24 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(json!({ "target": ctx.tmux.target(p.lane_id), "available": available }))
         }
 
+        // ---- interactive repo browser ----
+        "fs.browse" => {
+            let p: Browse = parse(params)?;
+            let added: std::collections::HashSet<PathBuf> = ctx
+                .registry
+                .list()
+                .await
+                .map_err(internal)?
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            let start = p.path.map(PathBuf::from);
+            tokio::task::spawn_blocking(move || browse_dir(start, &added))
+                .await
+                .map_err(internal)
+                .and_then(to_value)
+        }
+
         // ---- subscription is handled in the socket layer ----
         "subscribe" => Ok(Value::Null),
         "viewport.set" => {
@@ -444,6 +468,51 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 status: AgentStatus::Running,
             });
         }
+    }
+}
+
+/// List the subdirectories of `start` (default: $HOME) for the repo browser, marking which
+/// are git repos and which are already registered.
+fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>) -> BrowseResult {
+    let path = start
+        .filter(|p| p.is_dir())
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let path = path.canonicalize().unwrap_or(path);
+    let parent = path.parent().map(Path::to_path_buf);
+
+    let mut entries = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&path) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) if !n.starts_with('.') => n.to_string(),
+                _ => continue, // skip hidden / non-utf8
+            };
+            let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+            let is_repo = p.join(".git").exists();
+            let is_added = added.contains(&canon) || added.contains(&p);
+            entries.push(BrowseEntry {
+                name,
+                path: p,
+                is_repo,
+                added: is_added,
+            });
+        }
+    }
+    // Repos first, then plain dirs; alphabetical within each.
+    entries.sort_by(|a, b| {
+        b.is_repo
+            .cmp(&a.is_repo)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    BrowseResult {
+        path,
+        parent,
+        entries,
     }
 }
 

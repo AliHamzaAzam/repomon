@@ -21,6 +21,8 @@ pub enum View {
     Sessions,
     /// Global commit search (Phase 3).
     Search,
+    /// Interactive repo browser (add repos by exploring the filesystem).
+    AddRepo,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -70,6 +72,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),
         KeyCode::Char('3') => Some(Action::Goto(View::Sessions)),
         KeyCode::Char('4') => Some(Action::Goto(View::Search)),
+        KeyCode::Char('A') => Some(Action::Goto(View::AddRepo)),
         _ => None,
     }
 }

@@ -426,3 +426,80 @@ fn git_commit_at(dir: &Path, epoch: i64, msg: &str) {
         .success();
     assert!(ok, "git commit at {epoch}");
 }
+
+#[tokio::test]
+async fn fs_browse_marks_repos_and_added() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-browse-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // root/{myrepo(.git), plain, .hidden}
+    let root = tempfile::tempdir().unwrap();
+    let myrepo = root.path().join("myrepo");
+    std::fs::create_dir(&myrepo).unwrap();
+    git(&myrepo, &["init", "-b", "main"]);
+    std::fs::create_dir(root.path().join("plain")).unwrap();
+    std::fs::create_dir(root.path().join(".hidden")).unwrap();
+
+    let r = call(
+        &mut stream,
+        1,
+        "fs.browse",
+        Some(json!({ "path": root.path().to_string_lossy() })),
+    )
+    .await;
+    let res = r.result.unwrap();
+    let entries = res["entries"].as_array().unwrap();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"myrepo"));
+    assert!(names.contains(&"plain"));
+    assert!(!names.contains(&".hidden"), "hidden dirs are skipped");
+    let mr = entries.iter().find(|e| e["name"] == "myrepo").unwrap();
+    assert_eq!(mr["is_repo"], json!(true));
+    assert_eq!(mr["added"], json!(false));
+    assert!(res["parent"].is_string());
+
+    // After registering it, the browser marks it added.
+    call(
+        &mut stream,
+        2,
+        "repo.add",
+        Some(json!({ "path": myrepo.to_string_lossy() })),
+    )
+    .await;
+    let r = call(
+        &mut stream,
+        3,
+        "fs.browse",
+        Some(json!({ "path": root.path().to_string_lossy() })),
+    )
+    .await;
+    let entries = r.result.unwrap();
+    let mr = entries["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "myrepo")
+        .unwrap()
+        .clone();
+    assert_eq!(mr["added"], json!(true));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

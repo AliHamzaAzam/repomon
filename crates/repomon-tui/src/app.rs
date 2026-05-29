@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
-use repomon_core::model::{Commit, Lane, LaneId, Repo, TimelineData, WorkSession};
+use repomon_core::model::{
+    BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
+};
 use repomon_core::protocol::Notification;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
@@ -69,6 +71,10 @@ pub struct App {
     pub sessions: Vec<WorkSession>,
     pub search_query: String,
     pub search_results: Vec<Commit>,
+    pub browse_path: String,
+    pub browse_parent: Option<String>,
+    pub browse_entries: Vec<BrowseEntry>,
+    pub browse_selected: usize,
     last_viewport: Vec<LaneId>,
     attach_request: Option<LaneId>,
 }
@@ -100,6 +106,10 @@ impl App {
             sessions: Vec::new(),
             search_query: String::new(),
             search_results: Vec::new(),
+            browse_path: String::new(),
+            browse_parent: None,
+            browse_entries: Vec::new(),
+            browse_selected: 0,
             last_viewport: Vec::new(),
             attach_request: None,
         }
@@ -181,9 +191,12 @@ impl App {
                 self.selected_lane().map(|l| vec![l.id]).unwrap_or_default()
             }
             View::Grid => self.grid_lane_ids(),
-            View::Fleet | View::NewLane | View::Timeline | View::Sessions | View::Search => {
-                Vec::new()
-            }
+            View::Fleet
+            | View::NewLane
+            | View::Timeline
+            | View::Sessions
+            | View::Search
+            | View::AddRepo => Vec::new(),
         }
     }
 
@@ -231,6 +244,7 @@ impl App {
             View::Search => self.search_key(key).await,
             View::Timeline => self.timeline_key(key).await,
             View::Sessions => self.sessions_key(key).await,
+            View::AddRepo => self.addrepo_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -278,6 +292,108 @@ impl App {
                 }
             }
         }
+    }
+
+    async fn addrepo_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.browse_selected = self.browse_selected.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.browse_selected + 1 < self.browse_entries.len() =>
+            {
+                self.browse_selected += 1
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                if let Some(e) = self.browse_entries.get(self.browse_selected) {
+                    let p = e.path.to_string_lossy().into_owned();
+                    self.load_browse(Some(p)).await;
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+                if let Some(parent) = self.browse_parent.clone() {
+                    self.load_browse(Some(parent)).await;
+                }
+            }
+            KeyCode::Char('a') => self.add_browsed().await,
+            KeyCode::Char('d') => self.discover_here().await,
+            KeyCode::Esc => self.view = View::Fleet,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    async fn load_browse(&mut self, path: Option<String>) {
+        match self
+            .client
+            .call_typed::<BrowseResult>("fs.browse", Some(json!({ "path": path })))
+            .await
+        {
+            Ok(r) => {
+                self.browse_path = r.path.to_string_lossy().into_owned();
+                self.browse_parent = r.parent.map(|p| p.to_string_lossy().into_owned());
+                self.browse_entries = r.entries;
+                self.browse_selected = 0;
+            }
+            Err(e) => self.status = format!("browse failed: {e}"),
+        }
+    }
+
+    async fn add_browsed(&mut self) {
+        let entry = self.browse_entries.get(self.browse_selected).cloned();
+        match entry {
+            None => {}
+            Some(e) if e.added => self.status = format!("{} is already registered", e.name),
+            Some(e) if !e.is_repo => {
+                self.status = format!(
+                    "{} is not a git repo — ↵ to enter, d to discover inside",
+                    e.name
+                )
+            }
+            Some(e) => {
+                let path = e.path.to_string_lossy().into_owned();
+                match self
+                    .client
+                    .call("repo.add", Some(json!({ "path": path })))
+                    .await
+                {
+                    Ok(_) => {
+                        self.status = format!("added {}", e.name);
+                        self.refresh().await;
+                        let here = self.browse_path.clone();
+                        self.load_browse(Some(here)).await; // refresh "added" markers
+                    }
+                    Err(err) => self.status = format!("add failed: {err}"),
+                }
+            }
+        }
+    }
+
+    async fn discover_here(&mut self) {
+        let root = self.browse_path.clone();
+        let found: Vec<String> = self
+            .client
+            .call_typed(
+                "repo.discover",
+                Some(json!({ "root": root, "max_depth": 4 })),
+            )
+            .await
+            .unwrap_or_default();
+        let mut added = 0;
+        for path in &found {
+            if self
+                .client
+                .call("repo.add", Some(json!({ "path": path })))
+                .await
+                .is_ok()
+            {
+                added += 1;
+            }
+        }
+        self.status = format!("discovered {} repo(s), added {added}", found.len());
+        self.refresh().await;
+        let here = self.browse_path.clone();
+        self.load_browse(Some(here)).await;
     }
 
     async fn set_zoom(&mut self, zoom: Zoom) {
@@ -594,7 +710,9 @@ impl App {
                 View::Split => self.view = View::Fleet,
                 View::Grid => self.view = View::Fleet,
                 View::NewLane => self.view = View::Fleet,
-                View::Timeline | View::Sessions | View::Search => self.view = View::Fleet,
+                View::Timeline | View::Sessions | View::Search | View::AddRepo => {
+                    self.view = View::Fleet
+                }
                 View::Fleet => self.should_quit = true,
             },
             Action::Goto(target) => {
@@ -605,6 +723,12 @@ impl App {
                     View::Search => {
                         self.search_query.clear();
                         self.search_results.clear();
+                    }
+                    View::AddRepo => {
+                        let cwd = std::env::current_dir()
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned());
+                        self.load_browse(cwd).await;
                     }
                     _ => {}
                 }

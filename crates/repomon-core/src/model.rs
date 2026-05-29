@@ -332,6 +332,23 @@ pub struct TimelineData {
     pub correlations: Vec<Correlation>,
 }
 
+/// One entry in the interactive repo browser (directories only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowseEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_repo: bool,
+    pub added: bool,
+}
+
+/// A directory listing for the repo browser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowseResult {
+    pub path: PathBuf,
+    pub parent: Option<PathBuf>,
+    pub entries: Vec<BrowseEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

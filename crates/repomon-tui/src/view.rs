@@ -15,7 +15,7 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open  n new  d del  / filter  g needs-you  c cd  2 timeline  3 sessions  4 search  q quit";
+    "↑↓ ↵ open  A add-repo  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
 const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a attach  spc grid  ←/esc back  q quit";
 const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "type to the agent   ↵ send   esc command-mode";
@@ -33,7 +33,58 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Timeline => render_timeline(f, app),
         View::Sessions => render_sessions(f, app),
         View::Search => render_search(f, app),
+        View::AddRepo => render_addrepo(f, app),
     }
+}
+
+const ADDREPO_KEYS: &str =
+    "↑↓ select  ↵/→ enter dir  ←/h up  a add repo  d discover + add here  esc back";
+
+fn render_addrepo(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let path_line = if app.status.is_empty() {
+        format!("  {}", app.browse_path)
+    } else {
+        format!("  {}    [{}]", app.browse_path, app.status)
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · ADD REPO", &fmt_clock(), app),
+            rule(area.width, true),
+            Line::from(Span::styled(path_line, app.theme.dim())),
+        ]),
+        rows[0],
+    );
+
+    let h = (rows[1].height as usize).max(1);
+    let start = app.browse_selected.saturating_sub(h.saturating_sub(1));
+    let mut lines = Vec::new();
+    if app.browse_entries.is_empty() {
+        lines.push(Line::raw("  (no subdirectories here)".to_string()));
+    }
+    for (i, e) in app.browse_entries.iter().enumerate().skip(start).take(h) {
+        let (marker, suffix) = if e.added {
+            ("+", " (added)")
+        } else if e.is_repo {
+            (theme::DIRTY, " (repo)")
+        } else {
+            (" ", "/")
+        };
+        let mut line = Line::raw(format!("  {marker} {}{suffix}", e.name));
+        if i == app.browse_selected {
+            line = line.style(app.theme.selected());
+        }
+        lines.push(line);
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    f.render_widget(footer(ADDREPO_KEYS, app), rows[2]);
 }
 
 const DASH_KEYS: &str = "1 fleet  2 timeline  3 sessions  4 search  ←/esc fleet  q quit";
@@ -492,8 +543,10 @@ fn fleet_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if visible.is_empty() {
         lines.push(Line::raw(
-            "  no lanes — press n to create one, or add a repo".to_string(),
+            "  no lanes yet — press A to browse for repos to add (or `repomon add <path>`),"
+                .to_string(),
         ));
+        lines.push(Line::raw("  then n to create a lane.".to_string()));
     }
 
     let mut current: Option<RepoId> = None;
