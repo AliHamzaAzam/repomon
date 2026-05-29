@@ -48,9 +48,17 @@ impl TmuxRuntime {
         format!("{}:{}", self.session, Self::window_name(lane))
     }
 
+    /// repomon runs its tmux on a dedicated socket (named after the session) so its windows
+    /// never collide with — or share a server with — the user's own tmux.
+    fn full_args<'a>(&'a self, args: &'a [&'a str]) -> Vec<&'a str> {
+        let mut full = vec!["-L", self.session.as_str()];
+        full.extend_from_slice(args);
+        full
+    }
+
     fn run(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("tmux")
-            .args(args)
+            .args(self.full_args(args))
             .output()
             .map_err(Error::Io)?;
         if !out.status.success() {
@@ -65,10 +73,15 @@ impl TmuxRuntime {
 
     fn ok(&self, args: &[&str]) -> bool {
         Command::new("tmux")
-            .args(args)
+            .args(self.full_args(args))
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// The tmux socket label repomon uses (pass as `tmux -L <label>`). Equals the session name.
+    pub fn socket(&self) -> &str {
+        &self.session
     }
 
     pub fn session_exists(&self) -> bool {
@@ -214,9 +227,16 @@ impl TmuxRuntime {
         Ok(())
     }
 
-    /// Args for `tmux attach` to this lane (the TUI execs this for a raw session).
+    /// Args for `tmux attach` to this lane (the TUI execs this for a raw session), including
+    /// the dedicated socket.
     pub fn attach_args(&self, lane: LaneId) -> Vec<String> {
-        vec!["attach".into(), "-t".into(), self.target(lane)]
+        vec![
+            "-L".into(),
+            self.session.clone(),
+            "attach".into(),
+            "-t".into(),
+            self.target(lane),
+        ]
     }
 }
 

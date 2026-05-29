@@ -226,7 +226,7 @@ async fn daemon_spawns_and_drives_an_agent() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new("tmux")
-        .args(["kill-session", "-t", &session])
+        .args(["-L", &session, "kill-server"])
         .output();
 }
 
@@ -346,7 +346,7 @@ async fn streams_agent_output_for_visible_lanes() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new("tmux")
-        .args(["kill-session", "-t", &session])
+        .args(["-L", &session, "kill-server"])
         .output();
 }
 
@@ -641,7 +641,7 @@ async fn agent_spawn_uses_custom_command() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new("tmux")
-        .args(["kill-session", "-t", &session])
+        .args(["-L", &session, "kill-server"])
         .output();
 }
 

@@ -1460,9 +1460,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     }
     disable_mouse();
     ratatui::restore();
-    let _ = std::process::Command::new("tmux")
-        .args(["attach", "-t", &target])
-        .status();
+    tmux_attach(&target);
     *terminal = ratatui::init();
     enable_mouse();
     let _ = terminal.clear();
@@ -1476,14 +1474,23 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     }
     disable_mouse();
     ratatui::restore();
-    let _ = std::process::Command::new("tmux")
-        .args(["attach", "-t", target])
-        .status();
+    tmux_attach(target);
     *terminal = ratatui::init();
     enable_mouse();
     let _ = terminal.clear();
     app.last_viewport.clear();
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
+}
+
+/// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
+/// the session name). `$TMUX` is dropped so this works even when repomon runs inside tmux —
+/// otherwise tmux refuses to attach ("sessions should be nested with care").
+fn tmux_attach(target: &str) {
+    let socket = target.split(':').next().unwrap_or("repomon");
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", socket, "attach", "-t", target])
+        .env_remove("TMUX")
+        .status();
 }
 
 /// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
