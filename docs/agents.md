@@ -87,11 +87,16 @@ Because status comes from the transcript, a `claude` you start in any other term
 registered repo's worktree is **detected automatically** — its status and "needs you" show up
 on that lane, tagged `·ext` (external: repomon didn't spawn it, so it has no tmux window).
 
+If you run **several** Claude sessions in one worktree, each (a distinct `<session-id>.jsonl`,
+active within the last few hours) shows as its own entry in the lane detail — `Tab`/`⇧Tab`
+move the cursor (`‣`) between them.
+
 repomon can't type into a plain terminal process, so to drive an external session press
-**`o` to adopt** it (Fleet/Split/Focus): repomon resumes that conversation with
-`claude --continue` in a managed tmux lane, after which it's fully interactive here. The
-original terminal window is left as-is — close it once you've adopted. (Adopt is claude-only;
-`agent.spawn { resume: true }` performs it.)
+**`o` to adopt** the highlighted one (Fleet/Split/Focus): repomon resumes *that exact* session
+with `claude --resume <id>` (or `--continue` for the most recent) in a managed tmux lane,
+after which it's fully interactive here. The original terminal window is left as-is — close it
+once you've adopted. repomon manages one session per worktree at a time (a single tmux
+window), but you can observe them all and choose which to adopt.
 
 ## How status is detected
 
