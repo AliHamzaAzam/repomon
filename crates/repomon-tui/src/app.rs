@@ -873,7 +873,7 @@ impl App {
     /// still zooms into full-screen Focus.
     async fn split_key(&mut self, key: KeyEvent) {
         if self.focus_insert {
-            if key.code == KeyCode::Esc {
+            if leaves_insert(&key) {
                 self.focus_insert = false;
                 return;
             }
@@ -896,7 +896,7 @@ impl App {
     /// Key handling in the Focus view: command mode + insert (live passthrough to the agent).
     async fn focus_key(&mut self, key: KeyEvent) {
         if self.focus_insert {
-            if key.code == KeyCode::Esc {
+            if leaves_insert(&key) {
                 self.focus_insert = false;
                 return;
             }
@@ -1255,6 +1255,12 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
 
 /// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
 /// is sent with `send-keys -l`; named keys (Enter, Tab, BTab, arrows, C-c, …) without it.
+/// The keystroke that leaves insert mode. It's `Ctrl-O` (not `Esc`) because the agent itself
+/// needs `Esc` for interrupt/clear, so `Esc` is forwarded rather than captured.
+fn leaves_insert(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 fn translate_key(key: &KeyEvent) -> Option<(String, bool)> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let spec = match key.code {
@@ -1264,6 +1270,7 @@ fn translate_key(key: &KeyEvent) -> Option<(String, bool)> {
             }
             return Some((c.to_string(), true)); // literal printable
         }
+        KeyCode::Esc => "Escape", // the agent needs Esc (interrupt / clear); ^O leaves insert
         KeyCode::Enter => "Enter",
         KeyCode::Backspace => "BSpace",
         KeyCode::Tab => "Tab",
@@ -1290,5 +1297,31 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn esc_is_forwarded_not_captured() {
+        // Esc must reach the agent (interrupt / clear), so it maps to the tmux key name...
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(translate_key(&esc), Some(("Escape".to_string(), false)));
+        // ...and it does NOT leave insert mode.
+        assert!(!leaves_insert(&esc));
+    }
+
+    #[test]
+    fn ctrl_o_leaves_insert_plain_o_does_not() {
+        let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert!(leaves_insert(&ctrl_o));
+
+        let plain_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert!(!leaves_insert(&plain_o));
+        // A plain 'o' is a literal char for the agent; Ctrl-O would be C-o if forwarded.
+        assert_eq!(translate_key(&plain_o), Some(("o".to_string(), true)));
+        assert_eq!(translate_key(&ctrl_o), Some(("C-o".to_string(), false)));
     }
 }

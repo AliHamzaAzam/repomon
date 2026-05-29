@@ -53,11 +53,12 @@ to its custom command (if any) or the built-in binary, appends an optional task,
 
 ## Interacting
 
-In the Focus view, `i` enters **insert** mode and every keystroke is forwarded live to the
-agent via tmux `send-keys` — printable chars, Enter, Backspace, arrows, **Shift+Tab** (so
-Claude's mode cycling works), and `Ctrl-<key>` (e.g. `Ctrl-C`). `esc` returns to command mode.
-Output is captured with `capture-pane -e`, so the agent's colors render. For an unmediated
-session, `a` attaches the raw tmux window.
+In the Split and Focus views, `i` enters **insert** mode and every keystroke is forwarded
+live to the agent via tmux `send-keys` — printable chars, Enter, Backspace, arrows,
+**Shift+Tab** (so Claude's mode cycling works), `Ctrl-<key>` (e.g. `Ctrl-C`), and **`Esc`**
+(the agent needs it to interrupt/clear). Because `Esc` is forwarded, you leave insert mode
+with **`Ctrl-O`** instead. Output is captured with `capture-pane -e`, so the agent's colors
+render. For an unmediated session, `a` (in Focus) attaches the raw tmux window.
 
 `AgentKind::command()` maps kinds to binaries:
 

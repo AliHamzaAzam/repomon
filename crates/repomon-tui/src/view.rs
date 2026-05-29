@@ -17,9 +17,9 @@ use crate::theme;
 const FLEET_KEYS: &str =
     "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
 const SPLIT_KEYS: &str = "↑↓ switch  i interact  ↵/→ focus  e spawn  spc grid  ←/esc back  q quit";
-const SPLIT_INSERT_KEYS: &str = "keys → agent  ⇧⇥ modes  ↑↓ menus  ^C interrupt  esc command-mode";
+const SPLIT_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
-const FOCUS_INSERT_KEYS: &str = "keys → agent  ⇧⇥ modes  ↑↓ menus  ^C interrupt  esc command-mode";
+const FOCUS_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
 const NEWLANE_KEYS: &str =
     "↑↓ repo  tab agent  ^a manage agents  type branch  ↵ create + spawn  esc cancel";
@@ -377,7 +377,7 @@ fn render_split(f: &mut Frame, app: &App) {
     // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
     let mode = if app.focus_insert {
         Line::from(Span::styled(
-            " ● INSERT — keys go to the agent (⇧⇥ modes · ↑↓ menus · ^C) · esc to command ",
+            " ● INSERT — keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
             app.theme.selected(),
         ))
     } else {
@@ -433,7 +433,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     // A clear mode toggle indicator: reverse-video INSERT vs dim COMMAND.
     let mode = if app.focus_insert {
         Line::from(Span::styled(
-            " ● INSERT — keys go to the agent (⇧⇥ modes · ↑↓ menus · ^C) · esc to command ",
+            " ● INSERT — keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
             app.theme.selected(),
         ))
     } else {
