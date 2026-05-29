@@ -61,6 +61,10 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.stop` | `{ lane_id }` | `null` |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
 | `agent.target` | `{ lane_id }` | `{ target, available }` |
+| `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
+| `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
+| `terminal.close` | `{ id }` | `null` |
+| `terminal.target` | `{ id }` | `{ target, available }` |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
 | `viewport.set` | `{ lane_ids }` | `null` |
 | `subscribe` | `{ topics? }` | `null` |

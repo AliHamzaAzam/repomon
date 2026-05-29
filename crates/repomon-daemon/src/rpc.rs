@@ -121,6 +121,10 @@ struct AgentPin {
     pinned: bool,
 }
 #[derive(Deserialize)]
+struct TerminalId {
+    id: String,
+}
+#[derive(Deserialize)]
 struct ViewportSet {
     lane_ids: Vec<repomon_core::model::LaneId>,
 }
@@ -630,6 +634,67 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?;
             Ok(json!({ "target": ctx.tmux.target(p.lane_id), "available": available }))
+        }
+
+        // ---- plain terminals (a shell per worktree, several allowed) ----
+        "terminal.open" => {
+            let p: LaneId = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let prefix = format!("term-{}-", p.lane_id);
+            let tmux = ctx.tmux.clone();
+            // Next free sequence for this lane's terminals.
+            let existing = {
+                let t = tmux.clone();
+                tokio::task::spawn_blocking(move || t.list_windows().unwrap_or_default())
+                    .await
+                    .map_err(internal)?
+            };
+            let next = existing
+                .iter()
+                .filter_map(|w| w.strip_prefix(&prefix))
+                .filter_map(|s| s.parse::<u32>().ok())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let name = format!("term-{}-{next}", p.lane_id);
+            let target = {
+                let name = name.clone();
+                tokio::task::spawn_blocking(move || tmux.open_named(&name, &path))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?
+            };
+            Ok(json!({ "id": name, "target": target }))
+        }
+        "terminal.list" => {
+            let p: LaneId = parse(params)?;
+            let prefix = format!("term-{}-", p.lane_id);
+            let tmux = ctx.tmux.clone();
+            let wins = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
+                .await
+                .map_err(internal)?;
+            let mut terms: Vec<String> = wins
+                .into_iter()
+                .filter(|w| w.starts_with(&prefix))
+                .collect();
+            terms.sort();
+            to_value(terms)
+        }
+        "terminal.close" => {
+            let p: TerminalId = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let id = p.id;
+            let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&id)).await;
+            Ok(Value::Null)
+        }
+        "terminal.target" => {
+            let p: TerminalId = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let id = p.id.clone();
+            let available = tokio::task::spawn_blocking(move || tmux.has_named(&id))
+                .await
+                .map_err(internal)?;
+            Ok(json!({ "target": ctx.tmux.target_named(&p.id), "available": available }))
         }
 
         // ---- interactive repo browser ----

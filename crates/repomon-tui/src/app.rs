@@ -88,6 +88,9 @@ pub struct App {
     /// concurrent agents can run in one worktree; this cursor picks among them.
     pub session_idx: usize,
     session_lane: Option<LaneId>,
+    /// Plain shell terminals open for the selected lane (tmux window names).
+    pub terminals: Vec<String>,
+    terminals_lane: Option<LaneId>,
     pub browse_path: String,
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
@@ -106,6 +109,8 @@ pub struct App {
     agents_return: Option<View>,
     last_viewport: Vec<LaneId>,
     attach_request: Option<LaneId>,
+    /// A tmux target (e.g. a terminal window) the loop should attach to next.
+    attach_target: Option<String>,
 }
 
 impl App {
@@ -140,6 +145,8 @@ impl App {
             recent_commits_lane: None,
             session_idx: 0,
             session_lane: None,
+            terminals: Vec::new(),
+            terminals_lane: None,
             browse_path: String::new(),
             browse_parent: None,
             browse_entries: Vec::new(),
@@ -155,6 +162,7 @@ impl App {
             agents_return: None,
             last_viewport: Vec::new(),
             attach_request: None,
+            attach_target: None,
         }
     }
 
@@ -980,6 +988,8 @@ impl App {
             KeyCode::BackTab => self.cycle_session(false),
             KeyCode::Char('e') => self.spawn_agent().await,
             KeyCode::Char('o') => self.adopt_agent().await,
+            KeyCode::Char('t') => self.open_terminal().await,
+            KeyCode::Char('T') => self.attach_latest_terminal().await,
             KeyCode::Char('s') => self.stop_agent().await,
             KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
             KeyCode::Char('m') => self.merge_lane().await,
@@ -1095,6 +1105,72 @@ impl App {
                 self.refresh().await;
             }
             Err(e) => self.status = format!("adopt failed: {e}"),
+        }
+    }
+
+    /// Open a fresh shell terminal in the selected lane's worktree and attach to it. The loop
+    /// performs the actual attach (it owns the terminal handle).
+    async fn open_terminal(&mut self) {
+        let Some(id) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        match self
+            .client
+            .call("terminal.open", Some(json!({ "lane_id": id })))
+            .await
+        {
+            Ok(v) => {
+                if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
+                    self.attach_target = Some(t.to_string());
+                }
+                self.terminals_lane = None; // refetch the list after we return
+            }
+            Err(e) => self.status = format!("terminal failed: {e}"),
+        }
+    }
+
+    /// Re-attach to the most recent open terminal for the selected lane, or open one if none.
+    async fn attach_latest_terminal(&mut self) {
+        let Some(id) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        let terms = self
+            .client
+            .call_typed::<Vec<String>>("terminal.list", Some(json!({ "lane_id": id })))
+            .await
+            .unwrap_or_default();
+        match terms.last() {
+            Some(name) => {
+                let resp = self
+                    .client
+                    .call("terminal.target", Some(json!({ "id": name })))
+                    .await;
+                if let Ok(v) = resp {
+                    if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
+                        self.attach_target = Some(t.to_string());
+                    }
+                }
+            }
+            None => self.open_terminal().await,
+        }
+    }
+
+    /// Refresh the selected lane's open terminals when the selection changes.
+    async fn sync_terminals(&mut self) {
+        let sel = self.selected_lane().map(|l| l.id);
+        if sel == self.terminals_lane {
+            return;
+        }
+        self.terminals_lane = sel;
+        self.terminals.clear();
+        if let Some(id) = sel {
+            if let Ok(t) = self
+                .client
+                .call_typed::<Vec<String>>("terminal.list", Some(json!({ "lane_id": id })))
+                .await
+            {
+                self.terminals = t;
+            }
         }
     }
 
@@ -1257,6 +1333,8 @@ impl App {
             Action::Merge => self.merge_lane().await,
             Action::SpawnAgent => self.spawn_agent().await,
             Action::AdoptAgent => self.adopt_agent().await,
+            Action::OpenTerminal => self.open_terminal().await,
+            Action::AttachTerminal => self.attach_latest_terminal().await,
         }
         // Grid uses its own cursor; keep it in range.
         if self.view == View::Grid {
@@ -1320,6 +1398,7 @@ async fn event_loop(
     loop {
         app.sync_viewport().await;
         app.sync_recent_commits().await;
+        app.sync_terminals().await;
         app.sync_session_cursor();
         app.check_focus_alive();
         terminal.draw(|f| view::render(f, app))?;
@@ -1328,6 +1407,10 @@ async fn event_loop(
         }
         if let Some(lane) = app.attach_request.take() {
             do_attach(terminal, app, lane).await;
+            continue;
+        }
+        if let Some(target) = app.attach_target.take() {
+            do_attach_target(terminal, app, &target).await;
             continue;
         }
         tokio::select! {
@@ -1384,6 +1467,23 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     enable_mouse();
     let _ = terminal.clear();
     app.last_viewport.clear(); // force a viewport resync after returning
+}
+
+/// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.
+async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target: &str) {
+    if target.is_empty() {
+        return;
+    }
+    disable_mouse();
+    ratatui::restore();
+    let _ = std::process::Command::new("tmux")
+        .args(["attach", "-t", target])
+        .status();
+    *terminal = ratatui::init();
+    enable_mouse();
+    let _ = terminal.clear();
+    app.last_viewport.clear();
+    app.terminals_lane = None; // the shell may have exited; refresh the terminal list
 }
 
 /// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text

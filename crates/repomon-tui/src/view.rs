@@ -17,10 +17,10 @@ use crate::theme;
 const FLEET_KEYS: &str =
     "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane  tab session  i interact  ↵/→ focus  o adopt  e spawn  spc grid  ←/esc back";
+    "↑↓ lane  tab session  i interact  ↵/→ focus  o adopt  e spawn  t term  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
-    "i/↵/→ type  tab session  o adopt  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
+    "i/↵/→ type  tab session  o adopt  e spawn  t term  s stop  a attach  m merge  c cd  ←/esc";
 const FOCUS_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
 const NEWLANE_KEYS: &str =
@@ -872,6 +872,16 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             )));
         }
     }
+    // Plain shell terminals (no agent) — open as many as you like with `t`.
+    let term_line = if app.terminals.is_empty() {
+        "  terminals  none  ·  t open a shell here".to_string()
+    } else {
+        format!(
+            "  terminals  {} open  ·  t new · T re-attach last",
+            app.terminals.len()
+        )
+    };
+    lines.push(Line::raw(term_line));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled("RECENT COMMITS", app.theme.bold())));
     lines.push(Line::raw(""));

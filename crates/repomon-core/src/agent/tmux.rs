@@ -171,6 +171,49 @@ impl TmuxRuntime {
         Ok(())
     }
 
+    /// The `session:window` target for an arbitrary named window (e.g. a terminal).
+    pub fn target_named(&self, name: &str) -> String {
+        format!("{}:{}", self.session, name)
+    }
+
+    /// Is there a window with this exact name?
+    pub fn has_named(&self, name: &str) -> bool {
+        self.list_windows()
+            .map(|w| w.iter().any(|x| x == name))
+            .unwrap_or(false)
+    }
+
+    /// Open a plain interactive shell in `cwd` as a named window (no agent); returns its
+    /// target. tmux runs the user's default shell when no command is given.
+    pub fn open_named(&self, name: &str, cwd: &Path) -> Result<String> {
+        let cwd = cwd.to_string_lossy();
+        if self.session_exists() {
+            self.run(&["new-window", "-t", &self.session, "-n", name, "-c", &cwd])?;
+        } else {
+            self.run(&[
+                "new-session",
+                "-d",
+                "-x",
+                "220",
+                "-y",
+                "50",
+                "-s",
+                &self.session,
+                "-n",
+                name,
+                "-c",
+                &cwd,
+            ])?;
+        }
+        Ok(self.target_named(name))
+    }
+
+    /// Terminate a named window (e.g. a terminal).
+    pub fn kill_named(&self, name: &str) -> Result<()> {
+        self.run(&["kill-window", "-t", &self.target_named(name)])?;
+        Ok(())
+    }
+
     /// Args for `tmux attach` to this lane (the TUI execs this for a raw session).
     pub fn attach_args(&self, lane: LaneId) -> Vec<String> {
         vec!["attach".into(), "-t".into(), self.target(lane)]

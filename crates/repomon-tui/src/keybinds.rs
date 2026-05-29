@@ -47,6 +47,8 @@ pub enum Action {
     Merge,
     SpawnAgent,
     AdoptAgent,
+    OpenTerminal,
+    AttachTerminal,
     Goto(View),
 }
 
@@ -71,6 +73,8 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('m') => Some(Action::Merge),
         KeyCode::Char('e') => Some(Action::SpawnAgent),
         KeyCode::Char('o') => Some(Action::AdoptAgent),
+        KeyCode::Char('t') => Some(Action::OpenTerminal),
+        KeyCode::Char('T') => Some(Action::AttachTerminal),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         KeyCode::Char('1') => Some(Action::Goto(View::Fleet)),
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),
