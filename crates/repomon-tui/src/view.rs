@@ -15,16 +15,16 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
+    "↑↓ ↵ open  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane  tab session  i interact  ↵/→ focus  o adopt  e spawn  t term  ←/esc back";
-const SPLIT_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
+    "↑↓ lane · tab session  ·  i interact · ↵/→ focus  ·  e spawn · o adopt · t term  ·  ←/esc back";
+const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
-    "i/↵/→ type  tab session  o adopt  e spawn  t term  s stop  a attach  m merge  c cd  ←/esc";
-const FOCUS_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
-const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
+    "i/↵/→ type · tab session  ·  e spawn · o adopt · t term · s stop  ·  a attach · m merge · c cd  ·  ←/esc back";
+const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
+const GRID_KEYS: &str = "↑↓←→ move · ↵ focus  ·  e spawn · s stop · p pin  ·  spc/f fleet · q quit";
 const NEWLANE_KEYS: &str =
-    "↑↓ repo  tab agent  ^a manage agents  type branch  ↵ create + spawn  esc cancel";
+    "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
 
 /// Render the current view.
 pub fn render(f: &mut Frame, app: &App) {
@@ -42,8 +42,8 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 }
 
-const AGENTS_KEYS: &str = "↑↓ select  n new  e edit  d delete  * default  esc back";
-const AGENTS_EDIT_KEYS: &str = "tab switch field  type  ↵ save  esc cancel";
+const AGENTS_KEYS: &str = "↑↓ select  ·  n new · e edit · d delete · * default  ·  esc back";
+const AGENTS_EDIT_KEYS: &str = "tab switch field · type  ·  ↵ save · esc cancel";
 
 /// The agent manager: a list of agents (built-ins read-only, customs editable) with an
 /// inline add/edit form. `★` marks the default; `✓`/`✗` is PATH detection.
@@ -134,7 +134,7 @@ fn render_agents(f: &mut Frame, app: &App) {
 }
 
 const ADDREPO_KEYS: &str =
-    "↑↓ select  ↵/→ enter dir  ←/h up  a add repo  d discover + add here  esc back";
+    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -183,7 +183,7 @@ fn render_addrepo(f: &mut Frame, app: &App) {
     f.render_widget(footer(ADDREPO_KEYS, app), rows[2]);
 }
 
-const DASH_KEYS: &str = "1 fleet  2 timeline  3 sessions  4 search  ←/esc fleet  q quit";
+const DASH_KEYS: &str = "1 fleet · 2 timeline · 3 sessions · 4 search  ·  ←/esc fleet · q quit";
 
 fn render_timeline(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -291,7 +291,7 @@ fn render_sessions(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines), rows[0]);
     f.render_widget(
         footer(
-            "e export-md  1 fleet  2 timeline  3 sessions  4 search  q quit",
+            "e export-md  ·  1 fleet · 2 timeline · 3 sessions · 4 search  ·  q quit",
             app,
         ),
         rows[1],
@@ -333,7 +333,7 @@ fn render_search(f: &mut Frame, app: &App) {
         }
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(footer("type query  ←/esc fleet", app), rows[1]);
+    f.render_widget(footer("type to search  ·  ←/esc fleet", app), rows[1]);
 }
 
 fn analytics_char(level: u8) -> &'static str {
