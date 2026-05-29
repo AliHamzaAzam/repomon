@@ -517,7 +517,18 @@ impl App {
                 let back = self.agents_return.take().unwrap_or(View::Fleet);
                 self.view = back;
                 if back == View::NewLane {
-                    self.load_agents().await; // reflect changes in the picker
+                    // Reflect manager changes in the picker but keep the user's current pick
+                    // (load_agents would otherwise snap back to the default).
+                    let prev = self
+                        .nl_agents
+                        .get(self.nl_agent_idx)
+                        .map(|a| a.name.clone());
+                    self.load_agents().await;
+                    if let Some(name) = prev {
+                        if let Some(i) = self.nl_agents.iter().position(|a| a.name == name) {
+                            self.nl_agent_idx = i;
+                        }
+                    }
                 }
             }
             KeyCode::Char('q') => self.should_quit = true,
@@ -552,7 +563,9 @@ impl App {
         }
     }
 
-    /// Save the add/edit form: persist via `agent.add` (handling a rename), then reload.
+    /// Save the add/edit form: persist via `agent.add`, then drop the old entry on a rename.
+    /// Adding *first* means a rejected save (e.g. an invalid name) leaves the original intact.
+    /// A rename that was the default carries the default over to the new name.
     async fn submit_agent_form(&mut self) {
         let name = self.ag_name.trim().to_string();
         let command = self.ag_command.trim().to_string();
@@ -560,15 +573,14 @@ impl App {
             self.status = "name and command are required".into();
             return;
         }
-        // A rename drops the old entry first.
-        if let Some(orig) = self.ag_orig.clone() {
-            if orig != name {
-                let _ = self
-                    .client
-                    .call("agent.remove", Some(json!({ "name": orig })))
-                    .await;
-            }
-        }
+        // Was the agent being edited the default? (Checked before we mutate anything.)
+        let orig_was_default = self
+            .ag_orig
+            .as_ref()
+            .and_then(|o| self.agents.iter().find(|a| &a.name == o))
+            .map(|a| a.default)
+            .unwrap_or(false);
+
         match self
             .client
             .call(
@@ -578,8 +590,31 @@ impl App {
             .await
         {
             Ok(_) => {
-                self.status = format!("saved agent {name}");
                 self.ag_editing = false;
+                self.status = format!("saved agent {name}");
+                // On a rename the new entry now exists, so the old one is safe to remove.
+                if let Some(orig) = self.ag_orig.clone() {
+                    if orig != name {
+                        match self
+                            .client
+                            .call("agent.remove", Some(json!({ "name": orig })))
+                            .await
+                        {
+                            // Carry the default over to the renamed agent.
+                            Ok(_) if orig_was_default => {
+                                let _ = self
+                                    .client
+                                    .call("agent.set_default", Some(json!({ "name": name })))
+                                    .await;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                self.status =
+                                    format!("saved {name}, but removing old '{orig}' failed: {e}")
+                            }
+                        }
+                    }
+                }
                 self.refresh_agents().await;
                 if let Some(i) = self.agents.iter().position(|a| a.name == name) {
                     self.agents_selected = i;

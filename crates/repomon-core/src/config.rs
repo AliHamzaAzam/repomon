@@ -85,18 +85,42 @@ impl Config {
         self.save_to(&config_path())
     }
 
-    /// Persist the config to a specific file, atomically (write temp + rename). NOTE: this
-    /// rewrites the whole file via serde, so any hand-added comments are not preserved —
-    /// repomon owns the file once you manage agents in-app. `None` options and empty maps are
-    /// omitted, and scalars serialize before tables so the output is always valid TOML.
+    /// Persist the config to a specific file, atomically and durably (write a unique temp
+    /// file, fsync it, rename over the target, then fsync the directory). NOTE: this rewrites
+    /// the whole file via serde, so any hand-added comments are not preserved — repomon owns
+    /// the file once you manage agents in-app. `None` options and empty maps are omitted, and
+    /// scalars serialize before tables so the output is always valid TOML.
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        use std::io::Write;
+        let parent = path.parent();
+        if let Some(p) = parent {
+            std::fs::create_dir_all(p)?;
         }
         let body = toml::to_string(self).map_err(|e| Error::Config(e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, body)?;
+
+        // Unique temp name (pid + nanos) so two writers never collide on a shared temp path;
+        // the file is hidden and lives beside the target so the rename stays on one filesystem.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("config.toml");
+        let tmp = path.with_file_name(format!(".{base}.{}.{nanos}.tmp", std::process::id()));
+
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?; // flush data to disk before it becomes the live file
+        drop(f);
         std::fs::rename(&tmp, path)?;
+        // Best-effort: fsync the directory so the rename itself survives a crash.
+        if let Some(p) = parent {
+            if let Ok(dir) = std::fs::File::open(p) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(())
     }
 
@@ -239,6 +263,13 @@ mod tests {
         let reloaded = Config::load_from(&path).unwrap();
         assert!(reloaded.default_agent.is_none());
         assert!(reloaded.agents.is_empty());
+
+        // The atomic write leaves no temp files behind.
+        let leftover_tmp = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!leftover_tmp, "a .tmp file was left behind after save");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
