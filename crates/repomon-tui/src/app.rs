@@ -70,6 +70,9 @@ pub struct App {
     pub output: HashMap<LaneId, String>,
     /// Whether Focus is in insert mode (keystrokes forwarded live to the agent).
     pub focus_insert: bool,
+    /// True while Focus is driving a repomon-managed agent — so when it exits (`/exit` or
+    /// stop) we can drop back out of Focus instead of staring at a dead pane.
+    focus_managed: bool,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
     pub timeline: Option<TimelineData>,
@@ -126,6 +129,7 @@ impl App {
             cd_target: None,
             output: HashMap::new(),
             focus_insert: false,
+            focus_managed: false,
             grid_active: 0,
             timeline: None,
             timeline_zoom: Zoom::Day,
@@ -289,6 +293,27 @@ impl App {
             .unwrap_or(0);
         if self.session_idx >= n {
             self.session_idx = n.saturating_sub(1);
+        }
+    }
+
+    /// Drop out of Focus once the agent we were driving exits (its managed session is gone —
+    /// e.g. the user typed `/exit`, or it crashed). Avoids sitting on a dead pane.
+    fn check_focus_alive(&mut self) {
+        if self.view != View::Focus {
+            self.focus_managed = false;
+            return;
+        }
+        let has_managed = self
+            .selected_lane()
+            .map(|l| l.agent_sessions.iter().any(|s| !s.external))
+            .unwrap_or(false);
+        if has_managed {
+            self.focus_managed = true;
+        } else if self.focus_managed {
+            self.focus_managed = false;
+            self.focus_insert = false;
+            self.view = View::Split;
+            self.status = "agent exited".into();
         }
     }
 
@@ -1080,6 +1105,12 @@ impl App {
                 .call("agent.stop", Some(json!({ "lane_id": id })))
                 .await;
             self.status = "stopped agent".into();
+            // Don't keep staring at the stopped agent's pane.
+            if self.view == View::Focus {
+                self.view = View::Split;
+            }
+            self.focus_insert = false;
+            self.focus_managed = false;
             self.refresh().await;
         }
     }
@@ -1290,6 +1321,7 @@ async fn event_loop(
         app.sync_viewport().await;
         app.sync_recent_commits().await;
         app.sync_session_cursor();
+        app.check_focus_alive();
         terminal.draw(|f| view::render(f, app))?;
         if app.should_quit {
             return Ok(());
@@ -1307,7 +1339,13 @@ async fn event_loop(
                 Some(n) => app.on_notification(n).await,
                 None => events_alive = false,
             },
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                // Keep agent state fresh in views that show it, so an agent that exits on its
+                // own (e.g. `/exit`) is noticed promptly and Focus drops back to Split.
+                if matches!(app.view, View::Focus | View::Split | View::Grid) {
+                    app.refresh().await;
+                }
+            }
         }
     }
 }

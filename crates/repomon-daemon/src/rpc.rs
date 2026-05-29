@@ -720,8 +720,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let windows = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
         .await
         .unwrap_or_default();
+    // Only count Claude sessions whose process is still alive — a `/exit`ed session leaves a
+    // recently-modified transcript behind but is no longer running.
+    let live = live_sessions_cached(ctx).await;
 
-    for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
+    for (lane, mut summaries) in lanes.iter_mut().zip(per_lane) {
+        if let Some(live) = &live {
+            summaries.retain(|s| s.session_id.as_ref().is_none_or(|id| live.contains(id)));
+        }
         let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
         if !summaries.is_empty() {
             for (idx, s) in summaries.into_iter().enumerate() {
@@ -834,6 +840,60 @@ fn is_env_assignment(tok: &str) -> bool {
 /// `CLAUDE_CONFIG_DIR=~/.claude-work claude` resolve to `claude`.
 fn program_of(command: &str) -> Option<&str> {
     command.split_whitespace().find(|t| !is_env_assignment(t))
+}
+
+/// Session ids of currently-running `claude` CLI processes — each keeps its transcript file
+/// open, so `lsof` reveals which `<session-id>.jsonl` it's writing. `None` means the probe
+/// couldn't run (then we don't filter); `Some({})` means no claude is running.
+fn live_claude_sessions() -> Option<std::collections::HashSet<String>> {
+    use std::process::Command;
+    let pgrep = Command::new("pgrep").args(["-x", "claude"]).output().ok()?;
+    // pgrep exits 1 when there are no matches — that's a clean "none", not a failure.
+    let pids: Vec<&str> = std::str::from_utf8(&pgrep.stdout)
+        .ok()?
+        .split_whitespace()
+        .collect();
+    if pids.is_empty() {
+        return Some(std::collections::HashSet::new());
+    }
+    let lsof = Command::new("lsof")
+        .arg("-p")
+        .arg(pids.join(","))
+        .arg("-Fn")
+        .output()
+        .ok()?;
+    let mut ids = std::collections::HashSet::new();
+    for line in std::str::from_utf8(&lsof.stdout).unwrap_or("").lines() {
+        if let Some(name) = line.strip_prefix('n') {
+            if name.ends_with(".jsonl") && name.contains("/projects/") {
+                if let Some(stem) = Path::new(name).file_stem().and_then(|s| s.to_str()) {
+                    ids.insert(stem.to_string());
+                }
+            }
+        }
+    }
+    Some(ids)
+}
+
+/// Cached [`live_claude_sessions`] with a ~2s TTL, so frequent `lane.list` calls don't hammer
+/// `lsof`.
+async fn live_sessions_cached(ctx: &Ctx) -> Option<std::collections::HashSet<String>> {
+    {
+        let cache = ctx.live_sessions.lock().await;
+        if let Some((t, set)) = &*cache {
+            if t.elapsed() < std::time::Duration::from_secs(2) {
+                return Some(set.clone());
+            }
+        }
+    }
+    let fresh = tokio::task::spawn_blocking(live_claude_sessions)
+        .await
+        .ok()
+        .flatten();
+    if let Some(set) = &fresh {
+        *ctx.live_sessions.lock().await = Some((std::time::Instant::now(), set.clone()));
+    }
+    fresh
 }
 
 /// Is the command's program on PATH (or an absolute/relative path that exists)?
