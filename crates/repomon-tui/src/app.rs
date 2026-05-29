@@ -998,12 +998,7 @@ impl App {
             KeyCode::Char('s') => self.stop_agent().await,
             KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
             KeyCode::Char('m') => self.merge_lane().await,
-            KeyCode::Char('c') => {
-                if let Some(p) = self.selected_lane().map(|l| l.worktree.path.clone()) {
-                    self.cd_target = Some(p);
-                    self.should_quit = true;
-                }
-            }
+            KeyCode::Char('c') => self.cd_to_lane(),
             KeyCode::Esc | KeyCode::Left => self.view = View::Split,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
@@ -1179,6 +1174,22 @@ impl App {
         }
     }
 
+    /// `c`: cd the parent shell into the selected worktree on exit. This only works through the
+    /// `repomon` shell function (which sets `REPOMON_CD_FD`); without it, quitting just to print
+    /// a path is surprising, so we no-op with a hint instead of exiting.
+    fn cd_to_lane(&mut self) {
+        let Some(path) = self.selected_lane().map(|l| l.worktree.path.clone()) else {
+            return;
+        };
+        if std::env::var_os("REPOMON_CD_FD").is_some() {
+            self.cd_target = Some(path);
+            self.should_quit = true;
+        } else {
+            self.status =
+                "cd-on-exit needs the `repomon` shell function (see README) — not active".into();
+        }
+    }
+
     async fn stop_agent(&mut self) {
         if let Some(id) = self.selected_lane().map(|l| l.id) {
             let _ = self
@@ -1309,12 +1320,7 @@ impl App {
                 self.refresh().await;
                 self.status = "refreshed".into();
             }
-            Action::CdToLane => {
-                if let Some(path) = self.selected_lane().map(|l| l.worktree.path.clone()) {
-                    self.cd_target = Some(path);
-                    self.should_quit = true;
-                }
-            }
+            Action::CdToLane => self.cd_to_lane(),
             Action::ToggleBabysit => {
                 self.view = if self.view == View::Grid {
                     View::Fleet
