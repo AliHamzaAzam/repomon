@@ -5,6 +5,16 @@
 //! daemon wiring — those live in `repomon-daemon` and `repomon-tui`, which both build on
 //! the traits and types defined here.
 
+pub mod config;
+pub mod error;
+pub mod model;
+pub mod store;
+
+pub use config::Config;
+pub use error::{Error, Result};
+pub use model::*;
+pub use store::Store;
+
 /// The crate (and product) version, surfaced via `daemon.status`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
