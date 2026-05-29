@@ -46,30 +46,40 @@ async fn main() {
 
     let ctx = Ctx::new(store, config, Some(db));
 
-    // Watch registered repos; rebroadcast changes so clients can refresh.
-    let mut watcher = Watcher::new().ok();
-    if let Some(w) = watcher.as_mut() {
-        if let Ok(repos) = ctx.registry.list().await {
-            for repo in repos {
-                if let Err(e) = w.watch_path(&repo.path) {
-                    tracing::warn!("watch {}: {e}", repo.path.display());
-                }
-            }
-        }
-        // Watch Claude Code transcripts so agent status (and "needs you") refreshes live.
-        let projects = repomon_core::agent::claude::projects_root();
-        if projects.exists() {
-            let _ = w.watch_path(&projects);
-        }
-        let mut rx = w.subscribe();
+    // Watch registered repos; rebroadcast changes so clients can refresh. Done in a background
+    // task (and the watcher is owned by it) so the socket binds immediately — registering a
+    // recursive watch on a large tree like ~/.claude/projects can take a few seconds, and we
+    // don't want clients to see a "not running" gap while it sets up.
+    {
         let ctx_w = ctx.clone();
         tokio::spawn(async move {
+            let mut watcher = match Watcher::new() {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("watcher init failed: {e}");
+                    return;
+                }
+            };
+            if let Ok(repos) = ctx_w.registry.list().await {
+                for repo in repos {
+                    if let Err(e) = watcher.watch_path(&repo.path) {
+                        tracing::warn!("watch {}: {e}", repo.path.display());
+                    }
+                }
+            }
+            // Watch Claude Code transcripts so agent status (and "needs you") refreshes live.
+            let projects = repomon_core::agent::claude::projects_root();
+            if projects.exists() {
+                let _ = watcher.watch_path(&projects);
+            }
+            let mut rx = watcher.subscribe();
             while let Ok(change) = rx.recv().await {
                 ctx_w.broadcast(
                     "event.repo.changed",
                     json!({ "path": change.path.to_string_lossy(), "kind": format!("{:?}", change.kind) }),
                 );
             }
+            drop(watcher); // hold the watcher for the daemon's lifetime
         });
     }
 
@@ -111,6 +121,4 @@ async fn main() {
         eprintln!("serve error: {e}");
         std::process::exit(1);
     }
-
-    drop(watcher); // keep the watcher alive for the daemon's lifetime
 }

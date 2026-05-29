@@ -93,7 +93,8 @@ pub async fn ensure_daemon(
         return Ok(client);
     }
     spawn_daemon(&socket)?;
-    connect_with_retry(&socket, 75).await
+    // Generous window: a first-ever start runs SQLite migrations before binding the socket.
+    connect_with_retry(&socket, 150).await
 }
 
 /// Launch `repomond` as a detached background process (logs to the daemon log file).
