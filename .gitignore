@@ -1,0 +1,15 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Visual-companion brainstorm scratch (not part of the project)
+.superpowers/
+
+# Local databases / runtime artifacts
+*.db
+*.db-journal
+*.db-wal
+*.sock
+
+# macOS
+.DS_Store

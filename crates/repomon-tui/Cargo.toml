@@ -1,0 +1,16 @@
+[package]
+name = "repomon-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "repomon — the terminal UI client for the repomon daemon."
+
+[[bin]]
+name = "repomon"
+path = "src/main.rs"
+
+[dependencies]
+repomon-core = { workspace = true }

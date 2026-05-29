@@ -1,0 +1,16 @@
+[package]
+name = "repomon-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "repomond — the repomon background daemon (SQLite, watchers, agent runtime, JSON-RPC socket)."
+
+[[bin]]
+name = "repomond"
+path = "src/main.rs"
+
+[dependencies]
+repomon-core = { workspace = true }

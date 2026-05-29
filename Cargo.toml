@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/repomon-core",
+    "crates/repomon-daemon",
+    "crates/repomon-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Ali Hamza Azam"]
+rust-version = "1.86"
+repository = "https://github.com/AliHamzaAzam/repomon"
+
+# Centralized, pinned versions. Crates opt in with `<dep> = { workspace = true }`.
+# (Declared here but only resolved/downloaded once a crate actually depends on them.)
+[workspace.dependencies]
+# --- core: git, persistence, model ---
+gix = "0.82"
+rusqlite = { version = "0.40", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+notify = "8"
+notify-debouncer-full = "0.7"
+globset = "0.4"
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# --- daemon: async, ipc, cli ---
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
+    "macros",
+    "io-util",
+    "signal",
+    "process",
+    "fs",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+plist = "1"
+clap = { version = "4.5", features = ["derive"] }
+# --- tui ---
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+# --- dev ---
+tempfile = "3"
+insta = "1"
+# --- internal ---
+repomon-core = { path = "crates/repomon-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
