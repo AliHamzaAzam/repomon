@@ -22,7 +22,7 @@ const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  
 const FOCUS_CMD_KEYS: &str =
     "i/↵/→ type · tab session  ·  e spawn · o adopt · t term · s stop  ·  a attach · m merge · c cd  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
-const GRID_KEYS: &str = "↑↓←→ move · ↵ focus  ·  e spawn · s stop · p pin  ·  spc/f fleet · q quit";
+const GRID_KEYS: &str = "←→ move · ↵ focus  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
 
@@ -459,17 +459,18 @@ fn render_focus(f: &mut Frame, app: &App) {
 fn render_grid(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(2), // header
+        Constraint::Length(1), // position indicator
+        Constraint::Min(0),    // live tiles
+        Constraint::Length(1), // footer
     ])
     .split(area);
 
     let ids = app.grid_lane_ids();
+    let n = ids.len();
     let header = format!(
-        "REPOMON · BABYSIT {} of {}",
-        ids.len(),
-        app.visible_lanes().len()
+        "REPOMON · GRID — {n} live pane{}",
+        if n == 1 { "" } else { "s" }
     );
     f.render_widget(
         Paragraph::new(vec![
@@ -481,22 +482,49 @@ fn render_grid(f: &mut Frame, app: &App) {
 
     if ids.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::raw(
-                "  no lanes to babysit — pin some with p, or add a repo",
-            )),
-            rows[1],
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::raw(
+                    "  Nothing to babysit yet — the grid tiles your most active agents".to_string(),
+                ),
+                Line::raw(
+                    "  (pin any with p). Spawn one with e, or press esc to go back.".to_string(),
+                ),
+            ]),
+            rows[2],
         );
-        f.render_widget(footer(GRID_KEYS, app), rows[2]);
+        f.render_widget(footer(GRID_KEYS, app), rows[3]);
         return;
     }
 
+    // Instagram-style position indicator: a dot per tile, filled for the active one, plus the
+    // active tile's name — so it's obvious what you're looking at and where you are.
+    let active = app.grid_active.min(n - 1);
+    let dots: String = (0..n)
+        .map(|i| if i == active { "●" } else { "○" })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let label = app
+        .lanes
+        .iter()
+        .find(|l| l.id == ids[active])
+        .map(|l| format!("{}/{}", l.repo.name, lane_name(l)))
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {dots}    {}/{n}  {label}", active + 1),
+            app.theme.bold(),
+        ))),
+        rows[1],
+    );
+
     // Two columns; rows as needed for the visible tiles.
     let cols = if area.width >= 80 { 2 } else { 1 };
-    let tile_rows = ids.len().div_ceil(cols);
+    let tile_rows = n.div_ceil(cols);
     let row_constraints: Vec<Constraint> = (0..tile_rows)
         .map(|_| Constraint::Ratio(1, tile_rows as u32))
         .collect();
-    let grid_rows = Layout::vertical(row_constraints).split(rows[1]);
+    let grid_rows = Layout::vertical(row_constraints).split(rows[2]);
 
     for (r, row_area) in grid_rows.iter().enumerate() {
         let col_constraints: Vec<Constraint> = (0..cols)
@@ -505,24 +533,23 @@ fn render_grid(f: &mut Frame, app: &App) {
         let cells = Layout::horizontal(col_constraints).split(*row_area);
         for (c, cell) in cells.iter().enumerate() {
             let idx = r * cols + c;
-            if idx >= ids.len() {
+            if idx >= n {
                 continue;
             }
             let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
-            let active = idx == app.grid_active;
             f.render_widget(
                 Paragraph::new(tile_lines(
                     app,
                     lane,
                     ids[idx],
                     cell.height as usize,
-                    active,
+                    idx == active,
                 )),
                 *cell,
             );
         }
     }
-    f.render_widget(footer(GRID_KEYS, app), rows[2]);
+    f.render_widget(footer(GRID_KEYS, app), rows[3]);
 }
 
 fn tile_lines(

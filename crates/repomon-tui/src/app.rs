@@ -330,6 +330,57 @@ impl App {
         }
     }
 
+    /// Point the fleet selection at the grid's active tile (so per-lane actions act on it).
+    fn select_grid_active(&mut self) {
+        let ids = self.grid_lane_ids();
+        if let Some(&id) = ids.get(self.grid_active) {
+            if let Some(pos) = self.visible_lanes().iter().position(|l| l.id == id) {
+                self.selected = pos;
+            }
+        }
+    }
+
+    /// Key handling in the babysit Grid: a linear cursor over the live tiles (arrows move it,
+    /// dots show position), `↵` focuses the active tile, and esc/spc/q leave the view.
+    async fn grid_key(&mut self, key: KeyEvent) {
+        let n = self.grid_lane_ids().len();
+        if self.grid_active >= n {
+            self.grid_active = n.saturating_sub(1);
+        }
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+                self.grid_active = self.grid_active.saturating_sub(1);
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char('j')
+                if self.grid_active + 1 < n =>
+            {
+                self.grid_active += 1;
+            }
+            KeyCode::Enter if n > 0 => {
+                self.select_grid_active();
+                self.view = View::Focus;
+                self.focus_insert = false;
+            }
+            // Per-tile actions act on the active tile.
+            KeyCode::Char('e') => {
+                self.select_grid_active();
+                self.spawn_agent().await;
+            }
+            KeyCode::Char('s') => {
+                self.select_grid_active();
+                self.stop_agent().await;
+                self.view = View::Grid;
+            }
+            KeyCode::Char('p') => {
+                self.select_grid_active();
+                self.toggle_pin().await;
+            }
+            KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Esc => self.view = View::Fleet,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
     /// Move the session cursor among the selected lane's agents.
     fn cycle_session(&mut self, forward: bool) {
         let n = self
@@ -378,6 +429,7 @@ impl App {
             View::NewLane => self.new_lane_key(key).await,
             View::Split => self.split_key(key).await,
             View::Focus => self.focus_key(key).await,
+            View::Grid => self.grid_key(key).await,
             View::Search => self.search_key(key).await,
             View::Timeline => self.timeline_key(key).await,
             View::Sessions => self.sessions_key(key).await,
