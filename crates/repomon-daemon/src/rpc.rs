@@ -82,6 +82,13 @@ struct AgentSignal {
     key: String,
 }
 #[derive(Deserialize)]
+struct AgentKey {
+    lane_id: repomon_core::model::LaneId,
+    key: String,
+    #[serde(default)]
+    literal: bool,
+}
+#[derive(Deserialize)]
 struct AgentCapture {
     lane_id: repomon_core::model::LaneId,
     #[serde(default)]
@@ -332,6 +339,22 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
+            Ok(Value::Null)
+        }
+        "agent.key" => {
+            let p: AgentKey = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let (lane, key, literal) = (p.lane_id, p.key, p.literal);
+            tokio::task::spawn_blocking(move || {
+                if literal {
+                    tmux.send_literal(lane, &key)
+                } else {
+                    tmux.send_key(lane, &key)
+                }
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
             Ok(Value::Null)
         }
         "agent.stop" => {

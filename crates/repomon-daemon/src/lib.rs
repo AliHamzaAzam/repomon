@@ -75,7 +75,7 @@ impl Ctx {
 pub async fn stream_output(ctx: Arc<Ctx>) {
     use std::collections::HashMap;
     let mut last: HashMap<LaneId, String> = HashMap::new();
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         tick.tick().await;
         let lanes: Vec<LaneId> = ctx.viewport.lock().await.clone();

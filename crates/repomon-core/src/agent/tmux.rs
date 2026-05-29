@@ -109,9 +109,14 @@ impl TmuxRuntime {
                 command,
             ])?;
         } else {
+            // A roomy detached size so the agent renders wide (vs the 80×24 default).
             self.run(&[
                 "new-session",
                 "-d",
+                "-x",
+                "220",
+                "-y",
+                "50",
                 "-s",
                 &self.session,
                 "-n",
@@ -124,19 +129,25 @@ impl TmuxRuntime {
         Ok(self.target(lane))
     }
 
-    /// Capture the pane's text. With `lines`, include that many rows of scrollback.
+    /// Capture the pane's text, including ANSI color escapes (`-e`).
     pub fn capture(&self, lane: LaneId, lines: Option<u32>) -> Result<String> {
         if !self.has_window(lane) {
             return Ok(String::new());
         }
         let target = self.target(lane);
         let start = lines.map(|n| format!("-{n}")).unwrap_or_default();
-        let mut args = vec!["capture-pane", "-p", "-t", &target];
+        let mut args = vec!["capture-pane", "-e", "-p", "-t", &target];
         if lines.is_some() {
             args.push("-S");
             args.push(&start);
         }
         self.run(&args)
+    }
+
+    /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
+    pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
+        self.run(&["send-keys", "-t", &self.target(lane), "-l", text])?;
+        Ok(())
     }
 
     /// Type `text` into the agent and press Enter.

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
     BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
@@ -60,10 +60,8 @@ pub struct App {
     pub cd_target: Option<PathBuf>,
     /// Latest captured pane content per lane, pushed by `event.agent.output`.
     pub output: HashMap<LaneId, String>,
-    /// Whether Focus is in insert mode (typing to the agent).
+    /// Whether Focus is in insert mode (keystrokes forwarded live to the agent).
     pub focus_insert: bool,
-    /// The agent input buffer (Focus insert mode).
-    pub input: String,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
     pub timeline: Option<TimelineData>,
@@ -99,7 +97,6 @@ impl App {
             cd_target: None,
             output: HashMap::new(),
             focus_insert: false,
-            input: String::new(),
             grid_active: 0,
             timeline: None,
             timeline_zoom: Zoom::Day,
@@ -538,17 +535,25 @@ impl App {
         }
     }
 
-    /// Key handling in the Focus view: command mode + insert (talking to the agent).
+    /// Key handling in the Focus view: command mode + insert (live passthrough to the agent).
     async fn focus_key(&mut self, key: KeyEvent) {
         if self.focus_insert {
-            match key.code {
-                KeyCode::Char(c) => self.input.push(c),
-                KeyCode::Backspace => {
-                    self.input.pop();
-                }
-                KeyCode::Enter => self.send_input().await,
-                KeyCode::Esc => self.focus_insert = false,
-                _ => {}
+            // Esc leaves insert mode; everything else is forwarded live to the agent so its
+            // own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
+            if key.code == KeyCode::Esc {
+                self.focus_insert = false;
+                return;
+            }
+            if let (Some(id), Some((spec, literal))) =
+                (self.selected_lane().map(|l| l.id), translate_key(&key))
+            {
+                let _ = self
+                    .client
+                    .call(
+                        "agent.key",
+                        Some(json!({ "lane_id": id, "key": spec, "literal": literal })),
+                    )
+                    .await;
             }
             return;
         }
@@ -601,25 +606,6 @@ impl App {
                     }
                     Err(e) => self.status = format!("create failed: {e}"),
                 }
-            }
-        }
-    }
-
-    async fn send_input(&mut self) {
-        if self.input.is_empty() {
-            return;
-        }
-        if let Some(id) = self.selected_lane().map(|l| l.id) {
-            let text = std::mem::take(&mut self.input);
-            if let Err(e) = self
-                .client
-                .call(
-                    "agent.send_input",
-                    Some(json!({ "lane_id": id, "text": text })),
-                )
-                .await
-            {
-                self.status = format!("send failed: {e}");
             }
         }
     }
@@ -911,6 +897,35 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     enable_mouse();
     let _ = terminal.clear();
     app.last_viewport.clear(); // force a viewport resync after returning
+}
+
+/// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
+/// is sent with `send-keys -l`; named keys (Enter, Tab, BTab, arrows, C-c, …) without it.
+fn translate_key(key: &KeyEvent) -> Option<(String, bool)> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let spec = match key.code {
+        KeyCode::Char(c) => {
+            if ctrl {
+                return Some((format!("C-{}", c.to_ascii_lowercase()), false));
+            }
+            return Some((c.to_string(), true)); // literal printable
+        }
+        KeyCode::Enter => "Enter",
+        KeyCode::Backspace => "BSpace",
+        KeyCode::Tab => "Tab",
+        KeyCode::BackTab => "BTab", // Shift+Tab — cycles agent modes
+        KeyCode::Up => "Up",
+        KeyCode::Down => "Down",
+        KeyCode::Left => "Left",
+        KeyCode::Right => "Right",
+        KeyCode::Delete => "DC",
+        KeyCode::Home => "Home",
+        KeyCode::End => "End",
+        KeyCode::PageUp => "PageUp",
+        KeyCode::PageDown => "PageDown",
+        _ => return None,
+    };
+    Some((spec.to_string(), false))
 }
 
 /// Await the next forwardable event, collapsing lag. `None` means the stream closed.

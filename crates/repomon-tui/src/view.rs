@@ -317,12 +317,19 @@ fn render_focus(f: &mut Frame, app: &App) {
     body.extend(output_tail(app, lane.map(|l| l.id), avail));
     f.render_widget(Paragraph::new(body), rows[1]);
 
-    let input = if app.focus_insert {
-        format!("› {}_", app.input)
+    // A clear mode toggle indicator: reverse-video INSERT vs dim COMMAND.
+    let mode = if app.focus_insert {
+        Line::from(Span::styled(
+            " ● INSERT — keys go to the agent (⇧⇥ modes · ↑↓ menus · ^C) · esc to command ",
+            app.theme.selected(),
+        ))
     } else {
-        "› press i to type to the agent".to_string()
+        Line::from(Span::styled(
+            " ○ COMMAND — i type to agent · s stop · a attach · m merge · c cd · esc back ",
+            app.theme.dim(),
+        ))
     };
-    f.render_widget(Paragraph::new(Line::raw(input)), rows[2]);
+    f.render_widget(Paragraph::new(mode), rows[2]);
 
     let keys = if app.focus_insert {
         FOCUS_INSERT_KEYS
@@ -440,23 +447,33 @@ fn agent_badge(lane: &Lane) -> String {
     }
 }
 
-/// The last `height` lines of a lane's captured output, or a placeholder.
+/// The last `height` lines of a lane's captured output, ANSI-colored, or a placeholder.
 fn output_tail(app: &App, lane_id: Option<LaneId>, height: usize) -> Vec<Line<'static>> {
+    use ansi_to_tui::IntoText;
     let content = lane_id.and_then(|id| app.output.get(&id));
     match content {
         Some(text) if !text.trim().is_empty() => {
-            let lines: Vec<&str> = text.lines().collect();
+            // Parse the captured pane (with `-e` escapes) into styled lines.
+            let mut lines = text
+                .into_text()
+                .map(|t| t.lines)
+                .unwrap_or_else(|_| text.lines().map(|l| Line::raw(l.to_string())).collect());
+            // Drop trailing blank rows tmux pads the pane with.
+            while lines.last().map(line_is_blank).unwrap_or(false) {
+                lines.pop();
+            }
             let start = lines.len().saturating_sub(height.max(1));
-            lines[start..]
-                .iter()
-                .map(|l| Line::raw(l.to_string()))
-                .collect()
+            lines.split_off(start)
         }
         _ => vec![Line::from(Span::styled(
             "(no live output — press e to start claude here)".to_string(),
             app.theme.dim(),
         ))],
     }
+}
+
+fn line_is_blank(line: &Line) -> bool {
+    line.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
 fn focus_status_line(lane: &Lane) -> String {

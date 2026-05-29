@@ -26,6 +26,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
+ansi-to-tui = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
