@@ -877,7 +877,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
         "  terminals  none  ·  t open a shell here".to_string()
     } else {
         format!(
-            "  terminals  {} open  ·  t new · T re-attach last",
+            "  terminals  {} open  ·  t new · T re-attach  (in a terminal: exit to close · ^b d to detach)",
             app.terminals.len()
         )
     };
