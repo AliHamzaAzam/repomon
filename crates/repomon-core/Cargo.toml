@@ -19,6 +19,10 @@ gix = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+globset = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
