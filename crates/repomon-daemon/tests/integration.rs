@@ -503,3 +503,125 @@ async fn fs_browse_marks_repos_and_added() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn agent_detect_lists_builtins_and_customs() {
+    let mut config = Config::default();
+    config.agents.insert(
+        "yolo".into(),
+        "claude --dangerously-skip-permissions".into(),
+    );
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+    let sock = std::env::temp_dir().join(format!("repomon-detect-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    let r = call(&mut stream, 1, "agent.detect", None).await;
+    let choices = r.result.unwrap();
+    let arr = choices.as_array().unwrap();
+    let names: Vec<&str> = arr.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"claude-code"));
+    assert!(names.contains(&"codex"));
+    assert!(names.contains(&"aider"));
+    let yolo = arr
+        .iter()
+        .find(|c| c["name"] == "yolo")
+        .expect("custom agent listed");
+    assert_eq!(yolo["custom"], json!(true));
+    assert_eq!(
+        yolo["command"],
+        json!("claude --dangerously-skip-permissions")
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn agent_spawn_uses_custom_command() {
+    if !TmuxRuntime::available() {
+        eprintln!("tmux not available; skipping custom-command spawn test");
+        return;
+    }
+    let session = format!("repomon-custom-it-{}", std::process::id());
+    let mut config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
+    // A "custom agent" that's just a marker so we can prove the command launched.
+    config.agents.insert(
+        "marker".into(),
+        "bash -c 'echo CUSTOM_AGENT_OK; sleep 30'".into(),
+    );
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+    let sock = std::env::temp_dir().join(format!("repomon-custom-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
+    call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane_id = lanes[0]["id"].as_i64().unwrap();
+
+    call(
+        &mut stream,
+        3,
+        "agent.spawn",
+        Some(json!({ "lane_id": lane_id, "agent": "marker" })),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let cap = call(
+        &mut stream,
+        4,
+        "agent.capture",
+        Some(json!({ "lane_id": lane_id })),
+    )
+    .await;
+    let content = cap.result.unwrap()["content"].as_str().unwrap().to_string();
+    assert!(
+        content.contains("CUSTOM_AGENT_OK"),
+        "custom command output: {content:?}"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &session])
+        .output();
+}

@@ -32,6 +32,10 @@ pub struct Config {
     pub tmux_session: String,
     /// Optional accent color name (e.g. "cyan"); default monochrome.
     pub accent: Option<String>,
+    /// Custom agents, keyed by display name -> launch command line. These appear in the
+    /// New Lane picker alongside the auto-detected built-ins, e.g.:
+    /// `[agents]` then `claude-yolo = "claude --dangerously-skip-permissions"`.
+    pub agents: HashMap<String, String>,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
 }
@@ -44,6 +48,7 @@ impl Default for Config {
             time_format: DEFAULT_TIME_FORMAT.to_string(),
             tmux_session: DEFAULT_TMUX_SESSION.to_string(),
             accent: None,
+            agents: HashMap::new(),
             repos: HashMap::new(),
         }
     }

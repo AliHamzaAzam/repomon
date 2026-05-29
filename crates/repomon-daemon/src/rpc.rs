@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::reader;
 use repomon_core::model::{
-    AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, CreateLaneParams,
-    Lane, RepoId, TimeRange,
+    AgentChoice, AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit,
+    CreateLaneParams, Lane, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
 use repomon_core::{analytics, session, Indexer, TmuxRuntime};
@@ -283,11 +283,39 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
 
         // ---- agents (tmux-backed runtime) ----
+        "agent.detect" => {
+            let mut choices: Vec<AgentChoice> = Vec::new();
+            for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Aider] {
+                let command = kind.command().to_string();
+                choices.push(AgentChoice {
+                    detected: on_path(&command),
+                    name: kind.as_str().into_owned(),
+                    command,
+                    custom: false,
+                });
+            }
+            let mut customs: Vec<_> = ctx.config.agents.iter().collect();
+            customs.sort_by_key(|(name, _)| name.to_string());
+            for (name, command) in customs {
+                choices.push(AgentChoice {
+                    name: name.clone(),
+                    detected: on_path(command),
+                    command: command.clone(),
+                    custom: true,
+                });
+            }
+            to_value(choices)
+        }
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
-            let kind = AgentKind::from_kind_str(&p.agent);
-            let mut command = kind.command().to_string();
+            // A config-defined custom agent's command wins; otherwise the built-in binary.
+            let mut command = ctx
+                .config
+                .agents
+                .get(&p.agent)
+                .cloned()
+                .unwrap_or_else(|| AgentKind::from_kind_str(&p.agent).command().to_string());
             if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
                 command = format!("{command} {}", shell_quote(task));
             }
@@ -303,7 +331,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await;
             let _ = ctx
                 .store
-                .set_lane_agent_kind(p.lane_id, Some(kind.as_str().into_owned()))
+                .set_lane_agent_kind(p.lane_id, Some(p.agent.clone()))
                 .await;
             ctx.broadcast(
                 crate::pubsub::topic::AGENT_STATUS,
@@ -537,6 +565,17 @@ fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>
         parent,
         entries,
     }
+}
+
+/// Is the command's program on PATH (or an absolute/relative path that exists)?
+fn on_path(command: &str) -> bool {
+    let prog = command.split_whitespace().next().unwrap_or(command);
+    if prog.contains('/') {
+        return Path::new(prog).exists();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(prog).is_file()))
+        .unwrap_or(false)
 }
 
 async fn repo_names(ctx: &Ctx) -> HashMap<RepoId, String> {

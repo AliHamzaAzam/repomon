@@ -47,13 +47,16 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
 | `timeline` | `{ from_iso, to_iso, bucket_secs=3600 }` | `TimelineData` |
 | `sessions` | `{ from_iso, to_iso }` | `[WorkSession]` |
+| `agent.detect` | — | `[AgentChoice]` (built-ins on PATH + config customs) |
 | `agent.spawn` | `{ lane_id, agent, task? }` | `{ lane_id, window, agent }` |
-| `agent.capture` | `{ lane_id, lines? }` | `{ content }` |
-| `agent.send_input` | `{ lane_id, text }` | `null` |
+| `agent.capture` | `{ lane_id, lines? }` | `{ content }` (ANSI-colored) |
+| `agent.send_input` | `{ lane_id, text }` | `null` (types text + Enter) |
+| `agent.key` | `{ lane_id, key, literal=false }` | `null` (one keystroke: literal char or key name) |
 | `agent.signal` | `{ lane_id, key }` | `null` |
 | `agent.stop` | `{ lane_id }` | `null` |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
 | `agent.target` | `{ lane_id }` | `{ target, available }` |
+| `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
 | `viewport.set` | `{ lane_ids }` | `null` |
 | `subscribe` | `{ topics? }` | `null` |
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |

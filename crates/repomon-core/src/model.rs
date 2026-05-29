@@ -332,6 +332,19 @@ pub struct TimelineData {
     pub correlations: Vec<Correlation>,
 }
 
+/// A spawnable agent choice: a built-in kind (detected on PATH) or a configured custom one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentChoice {
+    /// The name to pass to `agent.spawn` (a kind like "claude-code", or a custom name).
+    pub name: String,
+    /// The launch command line.
+    pub command: String,
+    /// Whether the command's binary was found on PATH.
+    pub detected: bool,
+    /// True if user-defined in config (vs a built-in kind).
+    pub custom: bool,
+}
+
 /// One entry in the interactive repo browser (directories only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowseEntry {

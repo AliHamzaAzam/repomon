@@ -16,6 +16,30 @@ The daemon reads output with `capture-pane`, sends input with `send-keys`, and `
 gives you the raw session. Because tmux owns the process, the agent survives the daemon and
 the TUI. The spawned kind is recorded on the lane so repomon can identify it later.
 
+## Choosing an agent
+
+New Lane lists the **auto-detected** built-ins (claude-code / codex / aider, marked ✓ if on
+PATH) plus any **custom agents** you define in config — cycle them with Tab. Custom agents are
+launch commands you set yourself:
+
+```toml
+# ~/.config/repomon/config.toml
+[agents]
+claude-yolo = "claude --dangerously-skip-permissions"
+claude-resume = "claude --continue"
+```
+
+`agent.detect` returns the combined list; `agent.spawn` resolves a chosen name to a config
+command (if any) or the built-in binary, appends an optional task, and runs it.
+
+## Interacting
+
+In the Focus view, `i` enters **insert** mode and every keystroke is forwarded live to the
+agent via tmux `send-keys` — printable chars, Enter, Backspace, arrows, **Shift+Tab** (so
+Claude's mode cycling works), and `Ctrl-<key>` (e.g. `Ctrl-C`). `esc` returns to command mode.
+Output is captured with `capture-pane -e`, so the agent's colors render. For an unmediated
+session, `a` attaches the raw tmux window.
+
 `AgentKind::command()` maps kinds to binaries:
 
 | Kind          | Binary         |

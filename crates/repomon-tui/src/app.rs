@@ -8,7 +8,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
-    BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
+    AgentChoice, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -56,6 +56,7 @@ pub struct App {
     pub nl_repo_idx: usize,
     pub nl_branch: String,
     pub nl_agent_idx: usize,
+    pub nl_agents: Vec<AgentChoice>,
     pub should_quit: bool,
     pub cd_target: Option<PathBuf>,
     /// Latest captured pane content per lane, pushed by `event.agent.output`.
@@ -93,6 +94,7 @@ impl App {
             nl_repo_idx: 0,
             nl_branch: String::new(),
             nl_agent_idx: 0,
+            nl_agents: Vec::new(),
             should_quit: false,
             cd_target: None,
             output: HashMap::new(),
@@ -393,6 +395,28 @@ impl App {
         self.load_browse(Some(here)).await;
     }
 
+    /// Fetch the spawnable agents (built-ins + configured customs) for the New Lane picker.
+    async fn load_agents(&mut self) {
+        match self
+            .client
+            .call_typed::<Vec<AgentChoice>>("agent.detect", None)
+            .await
+        {
+            Ok(a) if !a.is_empty() => self.nl_agents = a,
+            _ => {
+                self.nl_agents = AGENT_KINDS
+                    .iter()
+                    .map(|k| AgentChoice {
+                        name: (*k).to_string(),
+                        command: (*k).to_string(),
+                        detected: true,
+                        custom: false,
+                    })
+                    .collect()
+            }
+        }
+    }
+
     async fn set_zoom(&mut self, zoom: Zoom) {
         self.timeline_zoom = zoom;
         self.load_timeline().await;
@@ -524,7 +548,9 @@ impl App {
         match key.code {
             KeyCode::Up if repos > 0 => self.nl_repo_idx = (self.nl_repo_idx + repos - 1) % repos,
             KeyCode::Down if repos > 0 => self.nl_repo_idx = (self.nl_repo_idx + 1) % repos,
-            KeyCode::Tab => self.nl_agent_idx = (self.nl_agent_idx + 1) % AGENT_KINDS.len(),
+            KeyCode::Tab if !self.nl_agents.is_empty() => {
+                self.nl_agent_idx = (self.nl_agent_idx + 1) % self.nl_agents.len()
+            }
             KeyCode::Char(c) => self.nl_branch.push(c),
             KeyCode::Backspace => {
                 self.nl_branch.pop();
@@ -587,7 +613,11 @@ impl App {
                     "source_branch": null,
                     "copy_files": [],
                 });
-                let agent = AGENT_KINDS[self.nl_agent_idx % AGENT_KINDS.len()];
+                let agent = self
+                    .nl_agents
+                    .get(self.nl_agent_idx)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "claude-code".to_string());
                 match self.client.call("lane.create", Some(params)).await {
                     Ok(lane) => {
                         // Spin up the chosen agent in the new lane straight away.
@@ -724,6 +754,8 @@ impl App {
                 self.view = View::NewLane;
                 self.nl_branch.clear();
                 self.nl_repo_idx = 0;
+                self.nl_agent_idx = 0;
+                self.load_agents().await;
             }
             Action::DeleteLane => {
                 if let Some(id) = self.selected_lane().map(|l| l.id) {
