@@ -18,7 +18,7 @@ const FLEET_KEYS: &str =
     "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
 const SPLIT_KEYS: &str = "↑↓ switch  i interact  ↵/→ focus  e spawn  spc grid  ←/esc back  q quit";
 const SPLIT_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
-const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
+const FOCUS_CMD_KEYS: &str = "i/↵/→ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
 const NEWLANE_KEYS: &str =
@@ -438,7 +438,7 @@ fn render_focus(f: &mut Frame, app: &App) {
         ))
     } else {
         Line::from(Span::styled(
-            " ○ COMMAND — i type to agent · s stop · a attach · m merge · c cd · esc back ",
+            " ○ COMMAND — i/→ type to agent · s stop · a attach · m merge · c cd · esc back ",
             app.theme.dim(),
         ))
     };

@@ -904,7 +904,9 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('i') | KeyCode::Enter => self.focus_insert = true,
+            // i / ↵ / → all drop into insert: → is "zoom in" and Focus is the deepest level,
+            // so the next step in is typing to the agent.
+            KeyCode::Char('i') | KeyCode::Enter | KeyCode::Right => self.focus_insert = true,
             KeyCode::Char('e') => self.spawn_agent().await,
             KeyCode::Char('s') => self.stop_agent().await,
             KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
