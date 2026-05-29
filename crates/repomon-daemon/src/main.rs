@@ -56,6 +56,11 @@ async fn main() {
                 }
             }
         }
+        // Watch Claude Code transcripts so agent status (and "needs you") refreshes live.
+        let projects = repomon_core::agent::claude::projects_root();
+        if projects.exists() {
+            let _ = w.watch_path(&projects);
+        }
         let mut rx = w.subscribe();
         let ctx_w = ctx.clone();
         tokio::spawn(async move {

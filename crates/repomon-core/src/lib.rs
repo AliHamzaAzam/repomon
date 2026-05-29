@@ -18,7 +18,7 @@ pub mod store;
 pub mod traits;
 pub mod watch;
 
-pub use agent::TmuxRuntime;
+pub use agent::{AgentMonitor, ClaudeMonitor, TmuxRuntime};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use lane::Lanes;

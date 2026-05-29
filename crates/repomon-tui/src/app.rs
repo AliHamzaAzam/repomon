@@ -238,6 +238,16 @@ impl App {
             Action::ToggleBabysit => {
                 self.status = "babysit grid arrives in Phase 2".into();
             }
+            Action::JumpNeedsYou => {
+                let target = self
+                    .visible_lanes()
+                    .iter()
+                    .position(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()));
+                match target {
+                    Some(i) => self.selected = i,
+                    None => self.status = "no agents need you".into(),
+                }
+            }
         }
     }
 }

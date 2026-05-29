@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use repomon_core::agent::shell_quote;
+use repomon_core::agent::{claude, shell_quote};
 use repomon_core::git::reader;
-use repomon_core::model::{AgentKind, Commit, CreateLaneParams, RepoId, TimeRange};
+use repomon_core::model::{AgentKind, Commit, CreateLaneParams, Lane, RepoId, TimeRange};
 use repomon_core::protocol::RpcError;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -131,10 +131,17 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
 
         // ---- lanes ----
-        "lane.list" => to_value(ctx.lanes.list().await.map_err(internal)?),
+        "lane.list" => {
+            let mut lanes = ctx.lanes.list().await.map_err(internal)?;
+            overlay_agents(&mut lanes).await;
+            to_value(lanes)
+        }
         "lane.get" => {
             let p: LaneId = parse(params)?;
-            to_value(ctx.lanes.get(p.lane_id).await.map_err(internal)?)
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let mut one = vec![lane];
+            overlay_agents(&mut one).await;
+            to_value(one.into_iter().next().unwrap())
         }
         "lane.create" => {
             let p: CreateLaneParams = parse(params)?;
@@ -280,6 +287,30 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
 
         other => Err(RpcError::method_not_found(other)),
+    }
+}
+
+/// Overlay live Claude Code sessions onto lanes (status, tool-call count, "needs you").
+/// Reads transcripts off the runtime thread.
+async fn overlay_agents(lanes: &mut [Lane]) {
+    let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();
+    let summaries = tokio::task::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|p| claude::summary_for(p))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+
+    for (lane, summary) in lanes.iter_mut().zip(summaries) {
+        if let Some(s) = summary {
+            if s.last_activity > lane.last_activity_at {
+                lane.last_activity_at = s.last_activity;
+            }
+            lane.agent_sessions
+                .push(s.into_session(lane.repo.id, lane.worktree.id));
+        }
     }
 }
 

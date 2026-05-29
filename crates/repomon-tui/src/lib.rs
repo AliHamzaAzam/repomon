@@ -130,6 +130,10 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
                 let _ = w.watch_path(&repo.path);
             }
         }
+        let projects = repomon_core::agent::claude::projects_root();
+        if projects.exists() {
+            let _ = w.watch_path(&projects);
+        }
         let mut rx = w.subscribe();
         let ctx_w = ctx.clone();
         tokio::spawn(async move {

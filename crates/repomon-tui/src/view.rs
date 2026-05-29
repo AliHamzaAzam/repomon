@@ -15,7 +15,7 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ select  ↵/→ open  n new-lane  d delete  / filter  r refresh  c cd  q quit";
+    "↑↓ select  ↵/→ open  n new  d delete  / filter  g needs-you  c cd  q quit";
 const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  ←/esc back  n new-lane  / filter  c cd  q quit";
 const DETAIL_KEYS: &str = "←/esc back  c cd-to-path  x delete-lane  q quit";
 const NEWLANE_KEYS: &str = "↑↓ repo  type branch  ↵ create  esc cancel";
@@ -291,14 +291,20 @@ fn repo_header(width: u16, name: &str) -> Line<'static> {
 }
 
 fn lane_row(lane: &Lane, now: DateTime<Utc>) -> Line<'static> {
+    use repomon_core::model::AgentStatus;
     let glyph = status_glyph(lane);
-    let active = if lane.agent_sessions.iter().any(|s| {
-        !matches!(
-            s.status,
-            repomon_core::model::AgentStatus::Idle | repomon_core::model::AgentStatus::Ended
-        )
-    }) {
-        theme::AGENT_ACTIVE
+    let active = if lane
+        .agent_sessions
+        .iter()
+        .any(|s| s.status == AgentStatus::Waiting)
+    {
+        theme::WAITING // ⏸ needs you
+    } else if lane
+        .agent_sessions
+        .iter()
+        .any(|s| s.status == AgentStatus::Running)
+    {
+        theme::AGENT_ACTIVE // ▶ working
     } else {
         " "
     };

@@ -28,6 +28,7 @@ pub enum Action {
     Refresh,
     CdToLane,
     ToggleBabysit,
+    JumpNeedsYou,
 }
 
 /// Map a key to a navigation action (used when not in a text-input mode).
@@ -43,6 +44,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('/') => Some(Action::StartFilter),
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('c') => Some(Action::CdToLane),
+        KeyCode::Char('g') => Some(Action::JumpNeedsYou),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         _ => None,
     }
