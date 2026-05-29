@@ -113,8 +113,10 @@ fn render_agents(f: &mut Frame, app: &App) {
         let star = if a.default { "★" } else { " " };
         let mark = if a.detected { "✓" } else { "✗" };
         let kind = if a.custom { "custom " } else { "builtin" };
+        // Spell out a failed PATH check so the bare ✗ isn't cryptic.
+        let note = if a.detected { "" } else { "   not on PATH" };
         let mut line = Line::raw(format!(
-            "  {star} {mark} {:<16} {kind}  $ {}",
+            "  {star} {mark} {:<16} {kind}  $ {}{note}",
             trunc(&a.name, 16),
             a.command
         ));
