@@ -720,13 +720,20 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let windows = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
         .await
         .unwrap_or_default();
-    // Only count Claude sessions whose process is still alive — a `/exit`ed session leaves a
-    // recently-modified transcript behind but is no longer running.
-    let live = live_sessions_cached(ctx).await;
+    // A `/exit`ed session leaves a recently-modified transcript behind but is no longer
+    // running. claude's cwd is the worktree, so the number of live claude processes there
+    // bounds how many sessions are actually running — keep that many of the most recent.
+    let live = live_cwds_cached(ctx).await;
 
     for (lane, mut summaries) in lanes.iter_mut().zip(per_lane) {
         if let Some(live) = &live {
-            summaries.retain(|s| s.session_id.as_ref().is_none_or(|id| live.contains(id)));
+            let key = lane
+                .worktree
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| lane.worktree.path.clone());
+            let alive = live.get(&key).copied().unwrap_or(0);
+            summaries.truncate(alive); // sorted newest-first; 0 → none
         }
         let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
         if !summaries.is_empty() {
@@ -842,10 +849,11 @@ fn program_of(command: &str) -> Option<&str> {
     command.split_whitespace().find(|t| !is_env_assignment(t))
 }
 
-/// Session ids of currently-running `claude` CLI processes — each keeps its transcript file
-/// open, so `lsof` reveals which `<session-id>.jsonl` it's writing. `None` means the probe
-/// couldn't run (then we don't filter); `Some({})` means no claude is running.
-fn live_claude_sessions() -> Option<std::collections::HashSet<String>> {
+/// How many live `claude` CLI processes have each working directory. claude doesn't hold its
+/// transcript open, but its cwd is the worktree it runs in — so the count per worktree bounds
+/// how many of that worktree's sessions are actually running. `None` if the probe couldn't
+/// run (then we don't filter); `Some({})` means no claude is running.
+fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     use std::process::Command;
     let pgrep = Command::new("pgrep").args(["-x", "claude"]).output().ok()?;
     // pgrep exits 1 when there are no matches — that's a clean "none", not a failure.
@@ -853,45 +861,43 @@ fn live_claude_sessions() -> Option<std::collections::HashSet<String>> {
         .ok()?
         .split_whitespace()
         .collect();
+    let mut counts: HashMap<PathBuf, usize> = HashMap::new();
     if pids.is_empty() {
-        return Some(std::collections::HashSet::new());
+        return Some(counts);
     }
+    // One lsof call listing just each process's cwd (one `n<path>` line per process).
     let lsof = Command::new("lsof")
-        .arg("-p")
+        .args(["-a", "-d", "cwd", "-Fn", "-p"])
         .arg(pids.join(","))
-        .arg("-Fn")
         .output()
         .ok()?;
-    let mut ids = std::collections::HashSet::new();
     for line in std::str::from_utf8(&lsof.stdout).unwrap_or("").lines() {
         if let Some(name) = line.strip_prefix('n') {
-            if name.ends_with(".jsonl") && name.contains("/projects/") {
-                if let Some(stem) = Path::new(name).file_stem().and_then(|s| s.to_str()) {
-                    ids.insert(stem.to_string());
-                }
-            }
+            let p = PathBuf::from(name);
+            let key = p.canonicalize().unwrap_or(p);
+            *counts.entry(key).or_insert(0) += 1;
         }
     }
-    Some(ids)
+    Some(counts)
 }
 
-/// Cached [`live_claude_sessions`] with a ~2s TTL, so frequent `lane.list` calls don't hammer
+/// Cached [`live_claude_cwds`] with a ~2s TTL, so frequent `lane.list` calls don't hammer
 /// `lsof`.
-async fn live_sessions_cached(ctx: &Ctx) -> Option<std::collections::HashSet<String>> {
+async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
     {
-        let cache = ctx.live_sessions.lock().await;
-        if let Some((t, set)) = &*cache {
+        let cache = ctx.live_cwds.lock().await;
+        if let Some((t, map)) = &*cache {
             if t.elapsed() < std::time::Duration::from_secs(2) {
-                return Some(set.clone());
+                return Some(map.clone());
             }
         }
     }
-    let fresh = tokio::task::spawn_blocking(live_claude_sessions)
+    let fresh = tokio::task::spawn_blocking(live_claude_cwds)
         .await
         .ok()
         .flatten();
-    if let Some(set) = &fresh {
-        *ctx.live_sessions.lock().await = Some((std::time::Instant::now(), set.clone()));
+    if let Some(map) = &fresh {
+        *ctx.live_cwds.lock().await = Some((std::time::Instant::now(), map.clone()));
     }
     fresh
 }

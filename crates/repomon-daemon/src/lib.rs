@@ -36,9 +36,9 @@ pub struct Ctx {
     pub events: pubsub::EventTx,
     /// Lanes the TUI currently has visible — fast-polled for output (M9).
     pub viewport: Mutex<Vec<LaneId>>,
-    /// Cache of session ids with a live `claude` process (refreshed via ps/lsof, ~2s TTL) so
-    /// `/exit`ed sessions whose transcripts linger aren't shown as running.
-    pub live_sessions: Mutex<Option<(Instant, std::collections::HashSet<String>)>>,
+    /// Cache of how many live `claude` processes have each working dir (ps/lsof, ~2s TTL), so
+    /// `/exit`ed sessions whose transcripts linger aren't counted as running.
+    pub live_cwds: Mutex<Option<(Instant, std::collections::HashMap<PathBuf, usize>)>>,
     pub shutdown: Notify,
 }
 
@@ -70,7 +70,7 @@ impl Ctx {
             db_path,
             events,
             viewport: Mutex::new(Vec::new()),
-            live_sessions: Mutex::new(None),
+            live_cwds: Mutex::new(None),
             shutdown: Notify::new(),
         })
     }
