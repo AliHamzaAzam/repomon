@@ -520,23 +520,26 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             // session resumes against ~/.claude-work.
             let p: AgentAdopt = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let (default_agent, customs) = {
+                let cfg = ctx.config.read().await;
+                (cfg.default_agent.clone(), cfg.agents.clone())
+            };
             let detect = path.clone();
             let session_id = p.session_id.clone();
             let command = tokio::task::spawn_blocking(move || {
-                let (config_dir, tail) = match session_id {
-                    Some(sid) => {
-                        let cfg = agent::claude::config_base_for_session(&detect, &sid).flatten();
-                        (cfg, format!("claude --resume {sid}"))
-                    }
-                    None => {
-                        let cfg = agent::claude::summary_for(&detect).and_then(|s| s.config_dir);
-                        (cfg, "claude --continue".to_string())
-                    }
+                // Which account (config dir) the session belongs to, and how to resume it.
+                let (config_dir, resume) = match &session_id {
+                    Some(sid) => (
+                        agent::claude::config_base_for_session(&detect, sid).flatten(),
+                        format!("--resume {sid}"),
+                    ),
+                    None => (
+                        agent::claude::summary_for(&detect).and_then(|s| s.config_dir),
+                        "--continue".to_string(),
+                    ),
                 };
-                match config_dir {
-                    Some(dir) => format!("CLAUDE_CONFIG_DIR={} {tail}", dir.display()),
-                    None => tail,
-                }
+                let base = adopt_base_command(&default_agent, &customs, &config_dir);
+                format!("{base} {resume}")
             })
             .await
             .map_err(internal)?;
@@ -900,6 +903,54 @@ fn is_builtin(name: &str) -> bool {
             .any(|(n, _)| n == name)
 }
 
+/// The base command to resume an adopted Claude session, matching the *account* (config dir)
+/// the session belongs to — and reusing the user's configured agent for that account so any
+/// flags they set (e.g. `--dangerously-skip-permissions`) carry over. Falls back to a bare
+/// `[CLAUDE_CONFIG_DIR=…] claude`.
+fn adopt_base_command(
+    default_agent: &Option<String>,
+    customs: &HashMap<String, String>,
+    config_dir: &Option<PathBuf>,
+) -> String {
+    let want = config_dir
+        .as_ref()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()));
+    // Prefer the configured default agent, then autodetected variants, then customs.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(name) = default_agent {
+        if let Some(c) = customs.get(name) {
+            candidates.push(c.clone());
+        } else if let Some((_, c)) = agent::claude::agent_variants()
+            .into_iter()
+            .find(|(n, _)| n == name)
+        {
+            candidates.push(c);
+        }
+    }
+    candidates.extend(agent::claude::agent_variants().into_iter().map(|(_, c)| c));
+    candidates.extend(customs.values().cloned());
+
+    pick_for_account(&candidates, &want).unwrap_or_else(|| match config_dir {
+        Some(d) => format!("CLAUDE_CONFIG_DIR={} claude", d.display()),
+        None => "claude".to_string(),
+    })
+}
+
+/// The account (CLAUDE_CONFIG_DIR, canonicalized) a command targets, or `None` for the default.
+fn command_account(cmd: &str) -> Option<PathBuf> {
+    cmd.split_whitespace()
+        .find_map(|t| t.strip_prefix("CLAUDE_CONFIG_DIR=").map(PathBuf::from))
+        .map(|p| p.canonicalize().unwrap_or(p))
+}
+
+/// The first claude command from `candidates` whose account matches `want`.
+fn pick_for_account(candidates: &[String], want: &Option<PathBuf>) -> Option<String> {
+    candidates
+        .iter()
+        .find(|c| program_of(c) == Some("claude") && &command_account(c) == want)
+        .cloned()
+}
+
 /// Does a token look like a leading `VAR=value` env assignment (e.g. `CLAUDE_CONFIG_DIR=…`)?
 fn is_env_assignment(tok: &str) -> bool {
     match tok.split_once('=') {
@@ -1059,6 +1110,34 @@ mod tests {
         assert!(is_env_assignment("CLAUDE_CONFIG_DIR=/x/.claude-work"));
         assert!(!is_env_assignment("claude"));
         assert!(!is_env_assignment("--model=opus")); // a flag, not an env assignment
+    }
+
+    #[test]
+    fn adopt_picks_command_matching_the_account() {
+        let candidates = vec![
+            "claude".to_string(),                                         // default account
+            "CLAUDE_CONFIG_DIR=/h/.claude-work claude --foo".to_string(), // work account + flag
+            "aider".to_string(),                                          // not claude
+        ];
+        let work = PathBuf::from("/h/.claude-work");
+        let want = Some(work.canonicalize().unwrap_or(work));
+        // The work-account session resumes with the work command — flag carried over.
+        assert_eq!(
+            pick_for_account(&candidates, &want),
+            Some("CLAUDE_CONFIG_DIR=/h/.claude-work claude --foo".to_string())
+        );
+        // A default-account session resumes with bare claude.
+        assert_eq!(
+            pick_for_account(&candidates, &None),
+            Some("claude".to_string())
+        );
+        // Non-claude commands are never chosen (can't --resume).
+        assert_eq!(pick_for_account(&["aider".to_string()], &None), None);
+        assert_eq!(
+            command_account("CLAUDE_CONFIG_DIR=/x claude"),
+            Some(PathBuf::from("/x"))
+        );
+        assert_eq!(command_account("claude"), None);
     }
 
     #[test]

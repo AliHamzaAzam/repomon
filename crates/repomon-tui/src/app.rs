@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -111,6 +113,8 @@ pub struct App {
     attach_request: Option<LaneId>,
     /// A tmux target (e.g. a terminal window) the loop should attach to next.
     attach_target: Option<String>,
+    /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
+    input_suspended: Arc<AtomicBool>,
 }
 
 impl App {
@@ -163,6 +167,7 @@ impl App {
             last_viewport: Vec::new(),
             attach_request: None,
             attach_target: None,
+            input_suspended: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1362,10 +1367,28 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     let mut terminal = ratatui::init();
     enable_mouse();
     let (in_tx, mut in_rx) = mpsc::channel::<Event>(128);
+    // Read stdin on a thread, but pause it (via `input_suspended`) during a tmux attach so we
+    // don't fight tmux for the terminal — otherwise keystrokes get split and the session
+    // misbehaves. Polling (rather than a blocking read) lets us check the flag.
+    let suspended = app.input_suspended.clone();
     std::thread::spawn(move || {
-        while let Ok(ev) = ratatui::crossterm::event::read() {
-            if in_tx.blocking_send(ev).is_err() {
-                break;
+        use ratatui::crossterm::event;
+        loop {
+            if suspended.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(40));
+                continue;
+            }
+            match event::poll(Duration::from_millis(100)) {
+                Ok(true) => match event::read() {
+                    Ok(ev) => {
+                        if in_tx.blocking_send(ev).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                },
+                Ok(false) => {}
+                Err(_) => break,
             }
         }
     });
@@ -1458,12 +1481,15 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         app.status = "no agent running in this lane".into();
         return;
     }
+    app.input_suspended.store(true, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
     disable_mouse();
     ratatui::restore();
     tmux_attach(&target);
     *terminal = ratatui::init();
     enable_mouse();
     let _ = terminal.clear();
+    app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
 }
 
@@ -1472,12 +1498,15 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     if target.is_empty() {
         return;
     }
+    app.input_suspended.store(true, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
     disable_mouse();
     ratatui::restore();
     tmux_attach(target);
     *terminal = ratatui::init();
     enable_mouse();
     let _ = terminal.clear();
+    app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
 }
