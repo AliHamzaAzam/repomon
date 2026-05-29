@@ -45,6 +45,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `commit.today` | — | `[Commit]` (live, all repos) |
 | `commit.range` | `{ from_iso, to_iso, repo_ids? }` | `[Commit]` |
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
+| `commit.recent` | `{ lane_id? \| repo_id?, limit=8 }` | `[Commit]` (latest on the worktree/repo HEAD, any date) |
 | `timeline` | `{ from_iso, to_iso, bucket_secs=3600 }` | `TimelineData` |
 | `sessions` | `{ from_iso, to_iso }` | `[WorkSession]` |
 | `agent.detect` | — | `[AgentChoice]` (built-ins on PATH + config customs; `default` flags the configured default) |

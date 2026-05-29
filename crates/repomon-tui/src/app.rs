@@ -77,6 +77,10 @@ pub struct App {
     pub sessions: Vec<WorkSession>,
     pub search_query: String,
     pub search_results: Vec<Commit>,
+    /// Latest commits for the selected lane's worktree (its branch history) — shown in the
+    /// Split detail, with a fallback when there's nothing today.
+    pub recent_commits: Vec<Commit>,
+    recent_commits_lane: Option<LaneId>,
     pub browse_path: String,
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
@@ -124,6 +128,8 @@ impl App {
             sessions: Vec::new(),
             search_query: String::new(),
             search_results: Vec::new(),
+            recent_commits: Vec::new(),
+            recent_commits_lane: None,
             browse_path: String::new(),
             browse_parent: None,
             browse_entries: Vec::new(),
@@ -240,6 +246,29 @@ impl App {
         }
     }
 
+    /// Load the selected lane's recent commits (its branch history) when the selection
+    /// changes. `recent_commits_lane == None` forces a refetch (e.g. after a repo event).
+    pub async fn sync_recent_commits(&mut self) {
+        let sel = self.selected_lane().map(|l| l.id);
+        if sel == self.recent_commits_lane && self.recent_commits_lane.is_some() {
+            return;
+        }
+        self.recent_commits_lane = sel;
+        self.recent_commits.clear();
+        if let Some(id) = sel {
+            if let Ok(c) = self
+                .client
+                .call_typed::<Vec<Commit>>(
+                    "commit.recent",
+                    Some(json!({ "lane_id": id, "limit": 8 })),
+                )
+                .await
+            {
+                self.recent_commits = c;
+            }
+        }
+    }
+
     async fn on_notification(&mut self, note: Notification) {
         if note.method == "event.agent.output" {
             if let (Some(id), Some(content)) = (
@@ -250,6 +279,8 @@ impl App {
             }
         } else {
             self.refresh().await;
+            // A repo may have new commits; refetch the selected lane's history next tick.
+            self.recent_commits_lane = None;
         }
     }
 
@@ -1133,6 +1164,7 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         app.sync_viewport().await;
+        app.sync_recent_commits().await;
         terminal.draw(|f| view::render(f, app))?;
         if app.should_quit {
             return Ok(());

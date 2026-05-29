@@ -133,6 +133,18 @@ fn default_limit() -> usize {
     50
 }
 #[derive(Deserialize)]
+struct CommitRecent {
+    #[serde(default)]
+    lane_id: Option<repomon_core::model::LaneId>,
+    #[serde(default)]
+    repo_id: Option<RepoId>,
+    #[serde(default = "default_recent_limit")]
+    limit: usize,
+}
+fn default_recent_limit() -> usize {
+    8
+}
+#[derive(Deserialize)]
 struct TimelineParams {
     from_iso: String,
     to_iso: String,
@@ -258,6 +270,34 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     .await
                     .map_err(internal)?,
             )
+        }
+        "commit.recent" => {
+            let p: CommitRecent = parse(params)?;
+            // A lane shows its worktree's branch history; otherwise the repo's main HEAD.
+            let (path, repo_id) = if let Some(lid) = p.lane_id {
+                let lane = ctx.lanes.get(lid).await.map_err(internal)?;
+                (lane.worktree.path.clone(), lane.repo.id)
+            } else if let Some(rid) = p.repo_id {
+                let repo = ctx
+                    .registry
+                    .list()
+                    .await
+                    .map_err(internal)?
+                    .into_iter()
+                    .find(|r| r.id == rid)
+                    .ok_or_else(|| RpcError::invalid_params(format!("no repo {rid}")))?;
+                (repo.path.clone(), repo.id)
+            } else {
+                return Err(RpcError::invalid_params("lane_id or repo_id is required"));
+            };
+            let limit = p.limit;
+            let commits = tokio::task::spawn_blocking(move || {
+                reader::read_recent_commits(&path, repo_id, limit)
+            })
+            .await
+            .map_err(internal)?
+            .unwrap_or_default();
+            to_value(commits)
         }
 
         // ---- dashboard (Phase 3, from the indexed store) ----

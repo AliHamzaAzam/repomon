@@ -761,24 +761,27 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             "  prune    this worktree is prunable (g to prune)".to_string(),
         ));
     }
-    lines.push(Line::raw(
-        "  agent    none running  (spawn arrives in Phase 2)".to_string(),
-    ));
+    let agent_line = match lane.agent_sessions.first() {
+        Some(sess) => format!(
+            "  agent    {} · {} · {} calls",
+            sess.agent.short(),
+            sess.status.as_str(),
+            sess.tool_call_count
+        ),
+        None => "  agent    none running  (e to spawn)".to_string(),
+    };
+    lines.push(Line::raw(agent_line));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled("RECENT COMMITS", app.theme.bold())));
     lines.push(Line::raw(""));
-    let mut shown = 0;
-    for c in app
-        .commits
-        .iter()
-        .filter(|c| c.repo_id == lane.repo.id)
-        .take(8)
-    {
-        lines.push(commit_line(c, app));
-        shown += 1;
-    }
-    if shown == 0 {
-        lines.push(Line::raw("  (no commits today)".to_string()));
+    // The latest commits on this worktree's branch (loaded per-selection), so a feature
+    // branch or a repo with nothing today still shows its history.
+    if app.recent_commits.is_empty() {
+        lines.push(Line::raw("  (no commits yet)".to_string()));
+    } else {
+        for c in app.recent_commits.iter().take(8) {
+            lines.push(commit_line(c, app));
+        }
     }
     lines
 }

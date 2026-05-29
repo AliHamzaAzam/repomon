@@ -210,3 +210,58 @@ pub fn read_commits_in_range(
     let repo = open(path)?;
     commits_in_range(&repo, repo_id, range)
 }
+
+/// Walk HEAD newest-first and return up to `limit` commits, ignoring dates. Used for the
+/// "recent commits" panel so a worktree on a feature branch (or a repo with nothing today)
+/// still shows its latest history.
+pub fn recent_commits(
+    repo: &gix::Repository,
+    repo_id: RepoId,
+    limit: usize,
+) -> Result<Vec<Commit>> {
+    use gix::revision::walk::Sorting;
+    use gix::traverse::commit::simple::CommitTimeOrder;
+
+    let head_id = match repo.head_id() {
+        Ok(id) => id.detach(),
+        Err(_) => return Ok(Vec::new()),
+    };
+    let walk = repo
+        .rev_walk([head_id])
+        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
+        .all()
+        .map_err(gix_err)?;
+
+    let mut out = Vec::new();
+    for info in walk {
+        if out.len() >= limit {
+            break;
+        }
+        let info = info.map_err(gix_err)?;
+        let t = info.commit_time.unwrap_or(0);
+        let commit = repo.find_commit(info.id).map_err(gix_err)?;
+        let author = commit.author().map_err(gix_err)?;
+        let raw = commit.message_raw().map_err(gix_err)?;
+        let summary = raw
+            .lines()
+            .next()
+            .map(|l| l.to_str_lossy().into_owned())
+            .unwrap_or_default();
+        out.push(Commit {
+            oid: info.id,
+            repo_id,
+            author_name: author.name.to_string(),
+            author_email: author.email.to_string(),
+            summary,
+            time: DateTime::from_timestamp(t, 0).unwrap_or_else(Utc::now),
+            parent_count: commit.parent_ids().count() as u32,
+        });
+    }
+    Ok(out)
+}
+
+/// Convenience: open `path` and return its latest `limit` commits.
+pub fn read_recent_commits(path: &Path, repo_id: RepoId, limit: usize) -> Result<Vec<Commit>> {
+    let repo = open(path)?;
+    recent_commits(&repo, repo_id, limit)
+}

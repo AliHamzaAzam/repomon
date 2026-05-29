@@ -26,6 +26,25 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+/// Like `git`, but pins the author+committer date so commits land outside "today".
+fn git_dated(dir: &Path, args: &[&str], date: &str) {
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@e.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@e.com")
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
 async fn call(
     stream: &mut UnixStream,
     id: u64,
@@ -752,6 +771,80 @@ async fn agent_manager_add_set_default_and_remove() {
     )
     .await;
     assert!(r.error.is_some(), "unknown default should be rejected");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn commit_recent_returns_latest_even_when_none_today() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-recent-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // A repo whose only commits are from last year — nothing "today".
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    git_dated(
+        repo_dir.path(),
+        &["commit", "--allow-empty", "-m", "old one"],
+        "2024-01-01T00:00:00",
+    );
+    git_dated(
+        repo_dir.path(),
+        &["commit", "--allow-empty", "-m", "old two"],
+        "2024-01-02T00:00:00",
+    );
+    call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane_id = lanes[0]["id"].as_i64().unwrap();
+
+    // Nothing today...
+    let today = call(&mut stream, 3, "commit.today", None)
+        .await
+        .result
+        .unwrap();
+    assert!(
+        today.as_array().unwrap().is_empty(),
+        "expected no commits today, got {today}"
+    );
+
+    // ...but commit.recent still returns the branch's latest, newest first.
+    let recent = call(
+        &mut stream,
+        4,
+        "commit.recent",
+        Some(json!({ "lane_id": lane_id, "limit": 5 })),
+    )
+    .await
+    .result
+    .unwrap();
+    let arr = recent.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "recent commits: {recent}");
+    assert_eq!(arr[0]["summary"], json!("old two")); // newest first
+    assert_eq!(arr[1]["summary"], json!("old one"));
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
