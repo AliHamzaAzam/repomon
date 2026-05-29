@@ -4,6 +4,7 @@
 //! integration tests drive the real client + app + view stack against an embedded daemon.
 
 pub mod app;
+pub mod cli;
 pub mod client;
 pub mod keybinds;
 pub mod theme;
@@ -23,6 +24,8 @@ use repomon_core::{config, Config};
     about = "Terminal mission control for parallel coding agents"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<cli::Command>,
     /// Override the daemon socket path.
     #[arg(long)]
     socket: Option<PathBuf>,
@@ -38,6 +41,11 @@ struct Cli {
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load().unwrap_or_default();
+
+    // A subcommand runs headless and exits; no subcommand launches the TUI.
+    if let Some(command) = cli.command {
+        return cli::handle(command, &config, cli.socket).await;
+    }
 
     let (socket, _embedded) = if cli.embedded {
         let (socket, guard) = start_embedded(&config).await?;

@@ -46,10 +46,46 @@ is a thin client. Three crates:
 - `repomon-daemon` — `repomond`: the socket server and background services.
 - `repomon-tui` — `repomon`: the terminal UI.
 
+## Usage
+
+```sh
+cargo build --release                  # builds repomond + repomon
+
+repomon daemon start                   # install + load the launchd daemon (macOS)
+repomon add ~/code/pos-saas            # register a repo
+repomon discover ~/code --add          # or find and register many at once
+repomon                                # launch the TUI
+
+# headless / scripting
+repomon lane list
+repomon lane new --repo pos-saas --branch feat/inventory --source main
+repomon lane delete feat/inventory --delete-branch
+repomon daemon status | logs | stop | uninstall
+```
+
+For development without launchd, run the daemon inline with `repomon --embedded`, or
+start `repomond` directly.
+
+## Shell integration (cd-on-exit)
+
+Pressing `c` on a lane exits repomon and changes your shell into that worktree. repomon
+writes the path to the file descriptor in `$REPOMON_CD_FD`; add this wrapper to your
+`~/.zshrc` / `~/.bashrc` so the shell acts on it:
+
+```sh
+repomon() {
+  local tmp; tmp=$(mktemp)
+  REPOMON_CD_FD=3 command repomon "$@" 3>"$tmp"
+  local dir; dir=$(cat "$tmp"); rm -f "$tmp"
+  [ -n "$dir" ] && [ -d "$dir" ] && cd "$dir"
+}
+```
+
 ## Status
 
-🚧 Early development. Building the foundation and fleet view first, then the agent
-multiplexer, then the history dashboard. See the build plan for milestones.
+🚧 Early development. The Observatory foundation and the agent multiplexer are landing
+milestone by milestone; see the build plan for what's next (timeline/sessions dashboard,
+more agent kinds).
 
 ## License
 
