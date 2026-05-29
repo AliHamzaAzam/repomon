@@ -8,9 +8,23 @@ rust-version.workspace = true
 repository.workspace = true
 description = "repomond — the repomon background daemon (SQLite, watchers, agent runtime, JSON-RPC socket)."
 
+[lib]
+name = "repomon_daemon"
+path = "src/lib.rs"
+
 [[bin]]
 name = "repomond"
 path = "src/main.rs"
 
 [dependencies]
 repomon-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

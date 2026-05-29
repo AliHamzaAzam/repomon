@@ -1,0 +1,109 @@
+//! End-to-end: start the daemon on a temp socket and exercise the JSON-RPC surface.
+
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+use repomon_core::protocol::{self, Request, Response};
+use repomon_core::{Config, Store};
+use repomon_daemon::{serve, Ctx};
+use serde_json::json;
+use tokio::net::UnixStream;
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@e.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@e.com")
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+async fn call(
+    stream: &mut UnixStream,
+    id: u64,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> Response {
+    let req = Request::new(id, method, params);
+    protocol::write_message(stream, &req).await.unwrap();
+    let frame = protocol::read_frame(stream)
+        .await
+        .unwrap()
+        .expect("response frame");
+    serde_json::from_slice(&frame).unwrap()
+}
+
+#[tokio::test]
+async fn daemon_serves_repo_and_lane_methods() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+
+    // Short socket path (macOS caps UDS paths at ~104 chars).
+    let sock = std::env::temp_dir().join(format!("repomon-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+
+    // Wait for the socket to come up.
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Empty fleet to start.
+    let r = call(&mut stream, 1, "repo.list", None).await;
+    assert_eq!(r.result.unwrap(), json!([]));
+
+    // Add a real git repo.
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "init"]);
+
+    let r = call(
+        &mut stream,
+        2,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    assert!(r.error.is_none(), "repo.add errored: {:?}", r.error);
+
+    // The main worktree appears as a lane.
+    let r = call(&mut stream, 3, "lane.list", None).await;
+    let lanes = r.result.unwrap();
+    let arr = lanes.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["worktree"]["is_main"], json!(true));
+    assert_eq!(arr[0]["state"]["branch"], json!("main"));
+
+    // daemon.status reports our version.
+    let r = call(&mut stream, 4, "daemon.status", None).await;
+    let status = r.result.unwrap();
+    assert_eq!(status["version"], json!(repomon_core::version()));
+    assert_eq!(status["repos"], json!(1));
+
+    // Unknown method is a proper JSON-RPC error.
+    let r = call(&mut stream, 5, "no.such.method", None).await;
+    assert!(r.result.is_none());
+    assert_eq!(r.error.unwrap().code, -32601);
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
