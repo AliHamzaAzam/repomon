@@ -33,8 +33,16 @@ repomon is one tool with four **zoom levels**, one selection that follows you th
 - **Babysit grid** — live tiles auto-sized to your window; watch and nudge several at once.
 - **Focus** — one agent full-screen with full live terminal, input, and controls.
 
-Arrow keys drive everything. Agents run in durable tmux sessions, so they survive closing
-the UI and reattach with full scrollback.
+Arrow keys drive everything (`↵`/`→` zoom in, `esc`/`←` zoom out, `space` the grid). Agents
+run in durable tmux sessions, so they survive closing the UI and reattach (`a`) with full
+scrollback. `⏸` flags an agent that needs you; `g` jumps to the next one.
+
+Beyond the live views, three Phase-3 dashboards (keys `2`/`3`/`4`): a per-repo **timeline**
+of commit density with cross-repo correlations, detected **work sessions** (focused vs
+parallel, exportable to Markdown), and global commit **search**.
+
+Agents: Claude Code is first-class (rich status from its transcript); Codex and Aider also
+run, with a tmux-alive fallback for any kind. See [docs/agents.md](docs/agents.md).
 
 ## Architecture
 
@@ -81,11 +89,18 @@ repomon() {
 }
 ```
 
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — how the daemon, TUI, and core fit together.
+- [docs/protocol.md](docs/protocol.md) — the JSON-RPC socket reference.
+- [docs/agents.md](docs/agents.md) — how agents run and how status is detected.
+
 ## Status
 
-🚧 Early development. The Observatory foundation and the agent multiplexer are landing
-milestone by milestone; see the build plan for what's next (timeline/sessions dashboard,
-more agent kinds).
+The Observatory (fleet/lanes/today), the agent multiplexer (spawn, live output, input,
+attach, babysit grid), and the history dashboard (timeline/sessions/search) are all in.
+Deferred follow-ups: a SwiftUI menu-bar companion, an embedded PTY renderer (vs the tmux
+pivot), a web dashboard, and Windows support.
 
 ## License
 

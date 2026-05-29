@@ -203,9 +203,17 @@ pub fn summary_for_root(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
     best
 }
 
-/// Summarize the Claude session for `cwd` under the default projects root.
+/// Summarize the Claude session for `cwd` — the hot path, used per-lane on every refresh.
+///
+/// Only the encoded project directory is consulted (an O(1) lookup), so a worktree with no
+/// Claude session doesn't trigger an expensive scan of every project dir. For the
+/// encoding-drift fallback, call [`summary_for_root`] explicitly.
 pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
-    summary_for_root(&projects_root(), cwd)
+    let encoded = projects_root().join(encode_project_dir(cwd));
+    if !encoded.is_dir() {
+        return None;
+    }
+    newest_transcript_in(&encoded).and_then(|t| parse_transcript(&t))
 }
 
 fn canonical(p: &Path) -> PathBuf {
