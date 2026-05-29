@@ -789,7 +789,6 @@ impl App {
                     None => self.status = "no agents need you".into(),
                 }
             }
-            Action::Attach => self.attach_request = self.selected_lane().map(|l| l.id),
             Action::StopAgent => self.stop_agent().await,
             Action::Pin => self.toggle_pin().await,
             Action::Merge => self.merge_lane().await,

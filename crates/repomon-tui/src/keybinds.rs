@@ -40,7 +40,6 @@ pub enum Action {
     CdToLane,
     ToggleBabysit,
     JumpNeedsYou,
-    Attach,
     StopAgent,
     Pin,
     Merge,
@@ -62,7 +61,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('c') => Some(Action::CdToLane),
         KeyCode::Char('g') => Some(Action::JumpNeedsYou),
-        KeyCode::Char('a') => Some(Action::Attach),
+        KeyCode::Char('a') => Some(Action::Goto(View::AddRepo)),
         KeyCode::Char('s') => Some(Action::StopAgent),
         KeyCode::Char('p') => Some(Action::Pin),
         KeyCode::Char('m') => Some(Action::Merge),
@@ -72,7 +71,6 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),
         KeyCode::Char('3') => Some(Action::Goto(View::Sessions)),
         KeyCode::Char('4') => Some(Action::Goto(View::Search)),
-        KeyCode::Char('A') => Some(Action::Goto(View::AddRepo)),
         _ => None,
     }
 }

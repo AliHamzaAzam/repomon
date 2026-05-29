@@ -15,8 +15,8 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open  A add-repo  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
-const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a attach  spc grid  ←/esc back  q quit";
+    "↑↓ ↵ open  a add-repo  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
+const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a add-repo  spc grid  ←/esc back  q quit";
 const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "type to the agent   ↵ send   esc command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
@@ -543,7 +543,7 @@ fn fleet_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if visible.is_empty() {
         lines.push(Line::raw(
-            "  no lanes yet — press A to browse for repos to add (or `repomon add <path>`),"
+            "  no lanes yet — press a to browse for repos to add (or `repomon add <path>`),"
                 .to_string(),
         ));
         lines.push(Line::raw("  then n to create a lane.".to_string()));

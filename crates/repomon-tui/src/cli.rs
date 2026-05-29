@@ -65,18 +65,20 @@ pub enum LaneCmd {
 
 #[derive(Subcommand)]
 pub enum DaemonCmd {
-    /// Write the launchd plist and load it.
-    Install,
-    /// Unload and remove the launchd plist.
-    Uninstall,
-    /// Install (if needed) and (re)start the daemon.
+    /// Start the daemon if it isn't already running.
     Start,
-    /// Stop the daemon.
+    /// Stop the running daemon.
     Stop,
+    /// Restart the daemon (useful after rebuilding).
+    Restart,
     /// Show daemon status.
     Status,
     /// Print the daemon log (tail).
     Logs,
+    /// Install + load a launchd-managed service (macOS).
+    Install,
+    /// Unload + remove the launchd service.
+    Uninstall,
 }
 
 /// Run a CLI subcommand.
@@ -128,7 +130,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             }
         }
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
-        Command::Daemon { cmd } => handle_daemon(cmd, config)?,
+        Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
     }
     Ok(())
 }
@@ -201,30 +203,35 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
     Ok(())
 }
 
-fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
+async fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
     let socket = config::socket_path(config);
     match cmd {
-        DaemonCmd::Install => {
-            service::install(&service::repomond_path(), &socket)?;
-            println!("installed and loaded {}", service::plist_path().display());
-        }
-        DaemonCmd::Uninstall => {
-            service::uninstall()?;
-            println!("uninstalled");
-        }
         DaemonCmd::Start => {
-            // Install is idempotent; ensure the plist exists, then (re)start.
-            service::install(&service::repomond_path(), &socket)?;
-            service::start()?;
-            println!("daemon started (socket: {})", socket.display());
+            crate::ensure_daemon(config, None).await?;
+            println!("daemon running (socket: {})", socket.display());
         }
         DaemonCmd::Stop => {
-            service::stop()?;
-            println!("daemon stopped");
+            if stop_running(&socket).await {
+                println!("daemon stopped");
+            } else {
+                println!("no running daemon at {}", socket.display());
+            }
+            // Also bootout a launchd-managed instance, if any.
+            let _ = service::stop();
         }
-        DaemonCmd::Status => {
-            print!("{}", service::status()?);
+        DaemonCmd::Restart => {
+            stop_running(&socket).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            crate::ensure_daemon(config, None).await?;
+            println!("daemon restarted (socket: {})", socket.display());
         }
+        DaemonCmd::Status => match DaemonClient::connect(&socket).await {
+            Ok(c) => {
+                let v = c.call("daemon.status", None).await?;
+                println!("running: {v}");
+            }
+            Err(_) => println!("not running (socket: {})", socket.display()),
+        },
         DaemonCmd::Logs => {
             let path = service::log_file();
             match std::fs::read_to_string(&path) {
@@ -238,8 +245,28 @@ fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
                 Err(_) => println!("no log file yet at {}", path.display()),
             }
         }
+        DaemonCmd::Install => {
+            service::install(&service::repomond_path(), &socket)?;
+            println!("installed and loaded {}", service::plist_path().display());
+        }
+        DaemonCmd::Uninstall => {
+            stop_running(&socket).await;
+            service::uninstall()?;
+            println!("uninstalled");
+        }
     }
     Ok(())
+}
+
+/// Tell a running daemon to shut down via the socket (works for an auto-spawned one).
+async fn stop_running(socket: &std::path::Path) -> bool {
+    match DaemonClient::connect(socket).await {
+        Ok(c) => {
+            let _ = c.call("daemon.shutdown", None).await;
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 async fn connect(socket: Option<PathBuf>, config: &Config) -> Result<DaemonClient> {

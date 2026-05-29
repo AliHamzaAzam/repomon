@@ -74,8 +74,11 @@ repomon lane delete feat/inventory --delete-branch
 **`repomon` is the single command.** With no daemon running it launches a detached
 `repomond` (which then survives across UI sessions), connects, and opens the TUI. If the
 `repomond` binary can't be found it falls back to an in-process daemon. Use `--embedded` to
-force in-process always, or manage a launchd service explicitly with
-`repomon daemon install | start | stop | status | logs | uninstall` (macOS).
+force in-process always, or manage the daemon with
+`repomon daemon start | stop | restart | status | logs | install | uninstall`.
+
+> **Dev note:** because the daemon outlives the UI, after you rebuild run
+> `repomon daemon restart` (or it auto-starts fresh once stopped) so the new code is served.
 
 Testing it: `cargo build` (so both binaries exist), then `./target/debug/repomon` — or after
 `cargo build --release`, `./target/release/repomon`.
