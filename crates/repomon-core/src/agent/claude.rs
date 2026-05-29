@@ -47,6 +47,7 @@ impl TranscriptSummary {
             tool_call_count: self.tool_call_count,
             title: self.title,
             status: self.status,
+            external: false, // overlay flips this based on tmux ownership
         }
     }
 }

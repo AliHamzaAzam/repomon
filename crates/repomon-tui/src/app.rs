@@ -908,6 +908,7 @@ impl App {
             // so the next step in is typing to the agent.
             KeyCode::Char('i') | KeyCode::Enter | KeyCode::Right => self.focus_insert = true,
             KeyCode::Char('e') => self.spawn_agent().await,
+            KeyCode::Char('o') => self.adopt_agent().await,
             KeyCode::Char('s') => self.stop_agent().await,
             KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
             KeyCode::Char('m') => self.merge_lane().await,
@@ -979,6 +980,40 @@ impl App {
                 }
                 Err(e) => self.status = format!("spawn failed: {e}"),
             }
+        }
+    }
+
+    /// Adopt an external agent (one running in another terminal): resume its conversation in a
+    /// repomon-managed tmux lane so it can be driven from here.
+    async fn adopt_agent(&mut self) {
+        let target = self.selected_lane().and_then(|l| {
+            l.agent_sessions
+                .iter()
+                .find(|s| s.external)
+                .map(|s| (l.id, s.agent.as_str().into_owned()))
+        });
+        let (id, kind) = match target {
+            Some(t) => t,
+            None => {
+                self.status = "no external agent here to adopt".into();
+                return;
+            }
+        };
+        match self
+            .client
+            .call(
+                "agent.spawn",
+                Some(json!({ "lane_id": id, "agent": kind, "resume": true })),
+            )
+            .await
+        {
+            Ok(_) => {
+                self.status = "adopted — resuming in repomon (close the original terminal)".into();
+                self.view = View::Focus;
+                self.focus_insert = false;
+                self.refresh().await;
+            }
+            Err(e) => self.status = format!("adopt failed: {e}"),
         }
     }
 
@@ -1134,6 +1169,7 @@ impl App {
             Action::Pin => self.toggle_pin().await,
             Action::Merge => self.merge_lane().await,
             Action::SpawnAgent => self.spawn_agent().await,
+            Action::AdoptAgent => self.adopt_agent().await,
         }
         // Grid uses its own cursor; keep it in range.
         if self.view == View::Grid {

@@ -16,9 +16,11 @@ use crate::theme;
 
 const FLEET_KEYS: &str =
     "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
-const SPLIT_KEYS: &str = "↑↓ switch  i interact  ↵/→ focus  e spawn  spc grid  ←/esc back  q quit";
+const SPLIT_KEYS: &str =
+    "↑↓ switch  i interact  ↵/→ focus  e spawn  o adopt  spc grid  ←/esc back  q";
 const SPLIT_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
-const FOCUS_CMD_KEYS: &str = "i/↵/→ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
+const FOCUS_CMD_KEYS: &str =
+    "i/↵/→ type  e spawn  o adopt  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent  esc/⇧⇥/^C all sent  ^O command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
 const NEWLANE_KEYS: &str =
@@ -550,12 +552,17 @@ fn tile_lines(
 
 fn agent_badge(lane: &Lane) -> String {
     use repomon_core::model::AgentStatus;
+    // `ext` flags an agent running in another terminal (adopt it to drive it from repomon).
+    let tag = match lane.agent_sessions.first() {
+        Some(s) if s.external => " ·ext",
+        _ => "",
+    };
     match lane.agent_sessions.first() {
         Some(s) if s.status == AgentStatus::Waiting => {
-            format!("⏸ needs you  {}↻", s.tool_call_count)
+            format!("⏸ needs you  {}↻{tag}", s.tool_call_count)
         }
-        Some(s) if s.status == AgentStatus::Running => format!("▶ {}↻", s.tool_call_count),
-        Some(_) => "idle".to_string(),
+        Some(s) if s.status == AgentStatus::Running => format!("▶ {}↻{tag}", s.tool_call_count),
+        Some(_) => format!("idle{tag}"),
         None => String::new(),
     }
 }
@@ -595,12 +602,17 @@ fn focus_status_line(lane: &Lane) -> String {
     let ab = ahead_behind_str(s.ahead, s.behind);
     match lane.agent_sessions.first() {
         Some(sess) => format!(
-            "{} · {} {} · {} · {} calls",
+            "{} · {} {} · {} · {} calls{}",
             sess.agent.short(),
             branch,
             ab,
             sess.status.as_str(),
-            sess.tool_call_count
+            sess.tool_call_count,
+            if sess.external {
+                " · external (o to adopt)"
+            } else {
+                ""
+            }
         ),
         None => format!("{branch} {ab} · no agent"),
     }
@@ -784,6 +796,12 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
         ));
     }
     let agent_line = match lane.agent_sessions.first() {
+        Some(sess) if sess.external => format!(
+            "  agent    {} · {} · {} calls · external — o to adopt",
+            sess.agent.short(),
+            sess.status.as_str(),
+            sess.tool_call_count
+        ),
         Some(sess) => format!(
             "  agent    {} · {} · {} calls",
             sess.agent.short(),

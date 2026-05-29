@@ -46,6 +46,7 @@ pub enum Action {
     Pin,
     Merge,
     SpawnAgent,
+    AdoptAgent,
     Goto(View),
 }
 
@@ -69,6 +70,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('p') => Some(Action::Pin),
         KeyCode::Char('m') => Some(Action::Merge),
         KeyCode::Char('e') => Some(Action::SpawnAgent),
+        KeyCode::Char('o') => Some(Action::AdoptAgent),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         KeyCode::Char('1') => Some(Action::Goto(View::Fleet)),
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),

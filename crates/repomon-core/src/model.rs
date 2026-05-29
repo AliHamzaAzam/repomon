@@ -222,6 +222,10 @@ pub struct AgentSession {
     /// Live status, overlaid by the daemon (not persisted).
     #[serde(default)]
     pub status: AgentStatus,
+    /// True when detected from a transcript but NOT managed by repomon — i.e. running in
+    /// another terminal. Overlaid at list time; adopt it to interact from within repomon.
+    #[serde(default)]
+    pub external: bool,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

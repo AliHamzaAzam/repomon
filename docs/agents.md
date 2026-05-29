@@ -70,6 +70,18 @@ render. For an unmediated session, `a` (in Focus) attaches the raw tmux window.
 | `cursor`      | `cursor-agent` |
 | other         | the kind string itself |
 
+## External sessions (running in another terminal)
+
+Because status comes from the transcript, a `claude` you start in any other terminal inside a
+registered repo's worktree is **detected automatically** — its status and "needs you" show up
+on that lane, tagged `·ext` (external: repomon didn't spawn it, so it has no tmux window).
+
+repomon can't type into a plain terminal process, so to drive an external session press
+**`o` to adopt** it (Fleet/Split/Focus): repomon resumes that conversation with
+`claude --continue` in a managed tmux lane, after which it's fully interactive here. The
+original terminal window is left as-is — close it once you've adopted. (Adopt is claude-only;
+`agent.spawn { resume: true }` performs it.)
+
 ## How status is detected
 
 Each agent kind has an `AgentMonitor` (`crates/repomon-core/src/agent/`). Monitors are tried

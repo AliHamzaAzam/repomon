@@ -70,6 +70,9 @@ struct AgentSpawn {
     agent: String,
     #[serde(default)]
     task: Option<String>,
+    /// Adopt an existing conversation by resuming it (`claude --continue`).
+    #[serde(default)]
+    resume: bool,
 }
 #[derive(Deserialize)]
 struct AgentInput {
@@ -461,6 +464,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     .cloned()
                     .unwrap_or_else(|| AgentKind::from_kind_str(&p.agent).command().to_string())
             };
+            // Adopt: resume the existing conversation in this worktree (claude-only flag).
+            command = with_resume(command, p.resume);
             if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
                 command = format!("{command} {}", shell_quote(task));
             }
@@ -638,8 +643,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             if s.last_activity > lane.last_activity_at {
                 lane.last_activity_at = s.last_activity;
             }
-            lane.agent_sessions
-                .push(s.into_session(lane.repo.id, lane.worktree.id));
+            // A transcript with no live repomon window means the agent is running in another
+            // terminal — mark it external so the UI can offer to adopt it.
+            let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
+            let mut session = s.into_session(lane.repo.id, lane.worktree.id);
+            session.external = !managed;
+            lane.agent_sessions.push(session);
             continue;
         }
         // No parseable transcript: surface a repomon-spawned agent if its window is alive.
@@ -662,6 +671,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 tool_call_count: 0,
                 title: None,
                 status: AgentStatus::Running,
+                external: false,
             });
         }
     }
@@ -718,6 +728,16 @@ const BUILTIN_AGENTS: [&str; 3] = ["claude-code", "codex", "aider"];
 
 fn is_builtin(name: &str) -> bool {
     BUILTIN_AGENTS.contains(&name)
+}
+
+/// Append claude's resume flag when adopting an existing conversation. Only `claude` supports
+/// `--continue`, so other agents are launched unchanged.
+fn with_resume(command: String, resume: bool) -> String {
+    if resume && command.split_whitespace().next() == Some("claude") {
+        format!("{command} --continue")
+    } else {
+        command
+    }
 }
 
 /// Is the command's program on PATH (or an absolute/relative path that exists)?
@@ -790,4 +810,31 @@ async fn commits_in_range(
     }
     out.sort_by_key(|c| std::cmp::Reverse(c.time));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_appends_continue_only_for_claude() {
+        // Adopting a claude session resumes the existing conversation.
+        assert_eq!(with_resume("claude".into(), true), "claude --continue");
+        // A custom claude command also gets it (program is still `claude`).
+        assert_eq!(
+            with_resume("claude --model opus".into(), true),
+            "claude --model opus --continue"
+        );
+        // Non-claude agents are launched unchanged (no --continue).
+        assert_eq!(with_resume("aider".into(), true), "aider");
+        // Without resume, nothing is appended.
+        assert_eq!(with_resume("claude".into(), false), "claude");
+    }
+
+    #[test]
+    fn builtins_are_recognized() {
+        assert!(is_builtin("claude-code"));
+        assert!(is_builtin("codex"));
+        assert!(!is_builtin("claude-yolo"));
+    }
 }
