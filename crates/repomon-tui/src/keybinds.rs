@@ -23,6 +23,8 @@ pub enum View {
     Search,
     /// Interactive repo browser (add repos by exploring the filesystem).
     AddRepo,
+    /// Manage agent launch commands (add/edit/delete customs, set the default).
+    Agents,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -62,6 +64,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('c') => Some(Action::CdToLane),
         KeyCode::Char('g') => Some(Action::JumpNeedsYou),
         KeyCode::Char('a') => Some(Action::Goto(View::AddRepo)),
+        KeyCode::Char('A') => Some(Action::Goto(View::Agents)),
         KeyCode::Char('s') => Some(Action::StopAgent),
         KeyCode::Char('p') => Some(Action::Pin),
         KeyCode::Char('m') => Some(Action::Merge),

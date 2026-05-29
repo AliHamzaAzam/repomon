@@ -343,6 +343,9 @@ pub struct AgentChoice {
     pub detected: bool,
     /// True if user-defined in config (vs a built-in kind).
     pub custom: bool,
+    /// True if this is the configured default agent (preselected in New Lane).
+    #[serde(default)]
+    pub default: bool,
 }
 
 /// One entry in the interactive repo browser (directories only).

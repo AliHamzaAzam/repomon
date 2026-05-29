@@ -18,4 +18,6 @@ pub mod topic {
     pub const LANE_DELETED: &str = "event.lane.deleted";
     pub const AGENT_OUTPUT: &str = "event.agent.output";
     pub const AGENT_STATUS: &str = "event.agent.status";
+    /// A custom agent was added/removed, or the default changed (config mutated).
+    pub const AGENT_CHANGED: &str = "event.agent.changed";
 }

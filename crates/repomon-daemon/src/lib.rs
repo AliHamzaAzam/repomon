@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use repomon_core::model::LaneId;
 use repomon_core::protocol::Notification;
-use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime};
+use repomon_core::{config, Config, Lanes, Registry, Store, TmuxRuntime};
 use serde_json::Value;
-use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 
 pub use socket::serve;
 
@@ -25,7 +25,11 @@ pub struct Ctx {
     pub store: Store,
     pub registry: Registry,
     pub lanes: Lanes,
-    pub config: Config,
+    /// User config. Behind a lock because the agent-manager RPCs mutate it (and persist to
+    /// disk) at runtime; most fields are static after startup.
+    pub config: RwLock<Config>,
+    /// Where [`Config::save`] writes — `config::config_path()` in prod, a tempdir in tests.
+    pub config_path: PathBuf,
     pub tmux: TmuxRuntime,
     pub started: Instant,
     pub db_path: Option<PathBuf>,
@@ -37,6 +41,17 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(store: Store, config: Config, db_path: Option<PathBuf>) -> Arc<Self> {
+        Self::new_with_config_path(store, config, db_path, config::config_path())
+    }
+
+    /// Like [`new`](Self::new) but with an explicit config-file path (tests use a tempdir so
+    /// agent-manager mutations never touch the real `~/.config/repomon/config.toml`).
+    pub fn new_with_config_path(
+        store: Store,
+        config: Config,
+        db_path: Option<PathBuf>,
+        config_path: PathBuf,
+    ) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
         let tmux = TmuxRuntime::new(config.tmux_session.clone());
@@ -45,7 +60,8 @@ impl Ctx {
             store,
             registry,
             lanes,
-            config,
+            config: RwLock::new(config),
+            config_path,
             tmux,
             started: Instant::now(),
             db_path,

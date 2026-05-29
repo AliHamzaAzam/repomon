@@ -32,6 +32,9 @@ pub struct Config {
     pub tmux_session: String,
     /// Optional accent color name (e.g. "cyan"); default monochrome.
     pub accent: Option<String>,
+    /// The agent preselected in New Lane (a built-in kind like "claude-code" or a custom
+    /// name). `None` falls back to the first listed agent.
+    pub default_agent: Option<String>,
     /// Custom agents, keyed by display name -> launch command line. These appear in the
     /// New Lane picker alongside the auto-detected built-ins, e.g.:
     /// `[agents]` then `claude-yolo = "claude --dangerously-skip-permissions"`.
@@ -48,6 +51,7 @@ impl Default for Config {
             time_format: DEFAULT_TIME_FORMAT.to_string(),
             tmux_session: DEFAULT_TMUX_SESSION.to_string(),
             accent: None,
+            default_agent: None,
             agents: HashMap::new(),
             repos: HashMap::new(),
         }
@@ -64,12 +68,36 @@ pub struct RepoConfig {
 impl Config {
     /// Load config from [`config_path`], returning defaults if the file is absent.
     pub fn load() -> Result<Config> {
-        let path = config_path();
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&config_path())
+    }
+
+    /// Load config from a specific file (used by tests; [`load`] wraps this).
+    pub fn load_from(path: &std::path::Path) -> Result<Config> {
+        match std::fs::read_to_string(path) {
             Ok(s) => toml::from_str(&s).map_err(|e| Error::Config(e.to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(Error::Io(e)),
         }
+    }
+
+    /// Persist the config to [`config_path`]. See [`save_to`](Self::save_to) for caveats.
+    pub fn save(&self) -> Result<()> {
+        self.save_to(&config_path())
+    }
+
+    /// Persist the config to a specific file, atomically (write temp + rename). NOTE: this
+    /// rewrites the whole file via serde, so any hand-added comments are not preserved —
+    /// repomon owns the file once you manage agents in-app. `None` options and empty maps are
+    /// omitted, and scalars serialize before tables so the output is always valid TOML.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = toml::to_string(self).map_err(|e| Error::Config(e.to_string()))?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 
     /// The worktree template for a given repo, honoring per-repo overrides.
@@ -174,6 +202,45 @@ mod tests {
         assert_eq!(c.tmux_session, "work");
         // Unspecified fields fall back to defaults.
         assert_eq!(c.worktree_template, DEFAULT_WORKTREE_TEMPLATE);
+    }
+
+    #[test]
+    fn save_round_trips_agents_and_default() {
+        let dir = std::env::temp_dir().join(format!("repomon-cfg-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+
+        let mut c = Config {
+            tmux_session: "work".into(),
+            default_agent: Some("claude-yolo".into()),
+            ..Default::default()
+        };
+        c.agents.insert(
+            "claude-yolo".into(),
+            "claude --dangerously-skip-permissions".into(),
+        );
+        c.save_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.default_agent.as_deref(), Some("claude-yolo"));
+        assert_eq!(
+            loaded.agents.get("claude-yolo").map(String::as_str),
+            Some("claude --dangerously-skip-permissions")
+        );
+        // Unrelated scalar fields survive the round-trip.
+        assert_eq!(loaded.tmux_session, "work");
+        assert_eq!(loaded.worktree_template, DEFAULT_WORKTREE_TEMPLATE);
+
+        // Clearing the default and removing the agent persists too.
+        let mut c2 = loaded;
+        c2.default_agent = None;
+        c2.agents.clear();
+        c2.save_to(&path).unwrap();
+        let reloaded = Config::load_from(&path).unwrap();
+        assert!(reloaded.default_agent.is_none());
+        assert!(reloaded.agents.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

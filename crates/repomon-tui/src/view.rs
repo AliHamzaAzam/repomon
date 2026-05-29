@@ -10,17 +10,18 @@ use ratatui::Frame;
 
 use repomon_core::model::{Commit, DirtyState, Lane, LaneId, RepoId};
 
-use crate::app::App;
+use crate::app::{AgField, App};
 use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open  a add-repo  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
+    "↑↓ ↵ open  a add-repo  A agents  n new  d del  / filter  g needs-you  2 timeline  3 sessions  4 search  q";
 const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a add-repo  spc grid  ←/esc back  q quit";
 const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent  ⇧⇥ modes  ↑↓ menus  ^C interrupt  esc command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
-const NEWLANE_KEYS: &str = "↑↓ repo  tab agent  type branch  ↵ create + spawn  esc cancel";
+const NEWLANE_KEYS: &str =
+    "↑↓ repo  tab agent  ^a manage agents  type branch  ↵ create + spawn  esc cancel";
 
 /// Render the current view.
 pub fn render(f: &mut Frame, app: &App) {
@@ -34,7 +35,97 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Sessions => render_sessions(f, app),
         View::Search => render_search(f, app),
         View::AddRepo => render_addrepo(f, app),
+        View::Agents => render_agents(f, app),
     }
+}
+
+const AGENTS_KEYS: &str = "↑↓ select  n new  e edit  d delete  * default  esc back";
+const AGENTS_EDIT_KEYS: &str = "tab switch field  type  ↵ save  esc cancel";
+
+/// The agent manager: a list of agents (built-ins read-only, customs editable) with an
+/// inline add/edit form. `★` marks the default; `✓`/`✗` is PATH detection.
+fn render_agents(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · AGENTS", &fmt_clock(), app),
+            rule(area.width, true),
+        ]),
+        rows[0],
+    );
+
+    if app.ag_editing {
+        let title = if app.ag_is_new {
+            "new agent"
+        } else {
+            "edit agent"
+        };
+        let name_cur = if app.ag_field == AgField::Name {
+            "_"
+        } else {
+            ""
+        };
+        let cmd_cur = if app.ag_field == AgField::Command {
+            "_"
+        } else {
+            ""
+        };
+        let mut lines = vec![
+            Line::raw(""),
+            Line::from(Span::styled(format!("  {title}"), app.theme.bold())),
+            Line::raw(""),
+            Line::raw(format!("  name      {}{name_cur}", app.ag_name)),
+            Line::raw(format!("  command   {}{cmd_cur}", app.ag_command)),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "  the command runs in the lane's worktree; the name is what you pick in New Lane"
+                    .to_string(),
+                app.theme.dim(),
+            )),
+        ];
+        if !app.status.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!("  {}", app.status)));
+        }
+        f.render_widget(Paragraph::new(lines), rows[1]);
+        f.render_widget(footer(AGENTS_EDIT_KEYS, app), rows[2]);
+        return;
+    }
+
+    let h = (rows[1].height as usize).max(1);
+    let start = app.agents_selected.saturating_sub(h.saturating_sub(1));
+    let mut lines = Vec::new();
+    if app.agents.is_empty() {
+        lines.push(Line::raw(
+            "  (no agents — press n to add a custom launch command)".to_string(),
+        ));
+    }
+    for (i, a) in app.agents.iter().enumerate().skip(start).take(h) {
+        let star = if a.default { "★" } else { " " };
+        let mark = if a.detected { "✓" } else { "✗" };
+        let kind = if a.custom { "custom " } else { "builtin" };
+        let mut line = Line::raw(format!(
+            "  {star} {mark} {:<16} {kind}  $ {}",
+            trunc(&a.name, 16),
+            a.command
+        ));
+        if i == app.agents_selected {
+            line = line.style(app.theme.selected());
+        }
+        lines.push(line);
+    }
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    f.render_widget(footer(AGENTS_KEYS, app), rows[2]);
 }
 
 const ADDREPO_KEYS: &str =
@@ -517,8 +608,9 @@ fn render_new_lane(f: &mut Frame, app: &App) {
         Some(a) => {
             let mark = if a.detected { "✓" } else { "✗ not on PATH" };
             let tag = if a.custom { " (custom)" } else { "" };
+            let star = if a.default { " ★ default" } else { "" };
             lines.push(Line::raw(format!(
-                "  agent     {}{tag}   [tab to change]",
+                "  agent     {}{tag}{star}   [tab to change]",
                 a.name
             )));
             lines.push(Line::from(Span::styled(

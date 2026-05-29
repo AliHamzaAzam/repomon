@@ -30,6 +30,13 @@ pub enum Zoom {
     Month,
 }
 
+/// Which field the agent add/edit form is typing into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgField {
+    Name,
+    Command,
+}
+
 impl Zoom {
     /// (lookback seconds, bucket seconds, label).
     fn params(self) -> (i64, i64, &'static str) {
@@ -74,6 +81,18 @@ pub struct App {
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
     pub browse_selected: usize,
+    /// Agent-manager state: the list, the cursor, and the add/edit form.
+    pub agents: Vec<AgentChoice>,
+    pub agents_selected: usize,
+    pub ag_editing: bool,
+    pub ag_is_new: bool,
+    pub ag_field: AgField,
+    pub ag_name: String,
+    pub ag_command: String,
+    /// Original name when editing an existing agent (for rename detection).
+    pub ag_orig: Option<String>,
+    /// Where `esc` returns from the Agents view (e.g. back to New Lane).
+    agents_return: Option<View>,
     last_viewport: Vec<LaneId>,
     attach_request: Option<LaneId>,
 }
@@ -109,6 +128,15 @@ impl App {
             browse_parent: None,
             browse_entries: Vec::new(),
             browse_selected: 0,
+            agents: Vec::new(),
+            agents_selected: 0,
+            ag_editing: false,
+            ag_is_new: false,
+            ag_field: AgField::Name,
+            ag_name: String::new(),
+            ag_command: String::new(),
+            ag_orig: None,
+            agents_return: None,
             last_viewport: Vec::new(),
             attach_request: None,
         }
@@ -195,7 +223,8 @@ impl App {
             | View::Timeline
             | View::Sessions
             | View::Search
-            | View::AddRepo => Vec::new(),
+            | View::AddRepo
+            | View::Agents => Vec::new(),
         }
     }
 
@@ -244,6 +273,7 @@ impl App {
             View::Timeline => self.timeline_key(key).await,
             View::Sessions => self.sessions_key(key).await,
             View::AddRepo => self.addrepo_key(key).await,
+            View::Agents => self.agents_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -395,7 +425,8 @@ impl App {
         self.load_browse(Some(here)).await;
     }
 
-    /// Fetch the spawnable agents (built-ins + configured customs) for the New Lane picker.
+    /// Fetch the spawnable agents (built-ins + configured customs) for the New Lane picker,
+    /// preselecting the configured default.
     async fn load_agents(&mut self) {
         match self
             .client
@@ -411,9 +442,193 @@ impl App {
                         command: (*k).to_string(),
                         detected: true,
                         custom: false,
+                        default: false,
                     })
                     .collect()
             }
+        }
+        self.nl_agent_idx = self.nl_agents.iter().position(|a| a.default).unwrap_or(0);
+    }
+
+    /// Open the agent manager, remembering where `esc` should return.
+    async fn enter_agents(&mut self, return_to: Option<View>) {
+        self.agents_return = return_to;
+        self.view = View::Agents;
+        self.ag_editing = false;
+        self.agents_selected = 0;
+        self.refresh_agents().await;
+    }
+
+    /// Reload the agent list (built-ins + customs) from the daemon, keeping the cursor in range.
+    async fn refresh_agents(&mut self) {
+        match self
+            .client
+            .call_typed::<Vec<AgentChoice>>("agent.detect", None)
+            .await
+        {
+            Ok(a) => self.agents = a,
+            Err(e) => self.status = format!("agent.detect failed: {e}"),
+        }
+        if self.agents_selected >= self.agents.len() {
+            self.agents_selected = self.agents.len().saturating_sub(1);
+        }
+    }
+
+    /// Key handling for the agent manager: a list of agents plus an add/edit form.
+    async fn agents_key(&mut self, key: KeyEvent) {
+        if self.ag_editing {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.ag_field = match self.ag_field {
+                        AgField::Name => AgField::Command,
+                        AgField::Command => AgField::Name,
+                    };
+                }
+                KeyCode::Char(c) => match self.ag_field {
+                    AgField::Name => self.ag_name.push(c),
+                    AgField::Command => self.ag_command.push(c),
+                },
+                KeyCode::Backspace => {
+                    match self.ag_field {
+                        AgField::Name => self.ag_name.pop(),
+                        AgField::Command => self.ag_command.pop(),
+                    };
+                }
+                KeyCode::Enter => self.submit_agent_form().await,
+                KeyCode::Esc => self.ag_editing = false,
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.agents_selected = self.agents_selected.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.agents_selected + 1 < self.agents.len() => {
+                self.agents_selected += 1
+            }
+            KeyCode::Char('n') => self.begin_agent_edit(true),
+            KeyCode::Char('e') | KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                self.begin_agent_edit(false)
+            }
+            KeyCode::Char('d') | KeyCode::Char('x') => self.delete_selected_agent().await,
+            KeyCode::Char('*') | KeyCode::Char(' ') => self.toggle_default_agent().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+                let back = self.agents_return.take().unwrap_or(View::Fleet);
+                self.view = back;
+                if back == View::NewLane {
+                    self.load_agents().await; // reflect changes in the picker
+                }
+            }
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Begin adding a new custom agent, or editing the selected one (built-ins are read-only).
+    fn begin_agent_edit(&mut self, is_new: bool) {
+        if is_new {
+            self.ag_editing = true;
+            self.ag_is_new = true;
+            self.ag_field = AgField::Name;
+            self.ag_name.clear();
+            self.ag_command.clear();
+            self.ag_orig = None;
+            return;
+        }
+        match self.agents.get(self.agents_selected) {
+            Some(a) if a.custom => {
+                self.ag_editing = true;
+                self.ag_is_new = false;
+                self.ag_field = AgField::Command;
+                self.ag_name = a.name.clone();
+                self.ag_command = a.command.clone();
+                self.ag_orig = Some(a.name.clone());
+            }
+            Some(_) => {
+                self.status = "built-in agents are read-only — press n to add a custom one".into()
+            }
+            None => {}
+        }
+    }
+
+    /// Save the add/edit form: persist via `agent.add` (handling a rename), then reload.
+    async fn submit_agent_form(&mut self) {
+        let name = self.ag_name.trim().to_string();
+        let command = self.ag_command.trim().to_string();
+        if name.is_empty() || command.is_empty() {
+            self.status = "name and command are required".into();
+            return;
+        }
+        // A rename drops the old entry first.
+        if let Some(orig) = self.ag_orig.clone() {
+            if orig != name {
+                let _ = self
+                    .client
+                    .call("agent.remove", Some(json!({ "name": orig })))
+                    .await;
+            }
+        }
+        match self
+            .client
+            .call(
+                "agent.add",
+                Some(json!({ "name": name, "command": command })),
+            )
+            .await
+        {
+            Ok(_) => {
+                self.status = format!("saved agent {name}");
+                self.ag_editing = false;
+                self.refresh_agents().await;
+                if let Some(i) = self.agents.iter().position(|a| a.name == name) {
+                    self.agents_selected = i;
+                }
+            }
+            Err(e) => self.status = format!("save failed: {e}"),
+        }
+    }
+
+    async fn delete_selected_agent(&mut self) {
+        match self.agents.get(self.agents_selected).cloned() {
+            Some(a) if a.custom => {
+                match self
+                    .client
+                    .call("agent.remove", Some(json!({ "name": a.name })))
+                    .await
+                {
+                    Ok(_) => {
+                        self.status = format!("removed {}", a.name);
+                        self.refresh_agents().await;
+                    }
+                    Err(e) => self.status = format!("remove failed: {e}"),
+                }
+            }
+            Some(_) => self.status = "built-in agents can't be removed".into(),
+            None => {}
+        }
+    }
+
+    /// Toggle the selected agent as the default (preselected in New Lane).
+    async fn toggle_default_agent(&mut self) {
+        let (name, is_default) = match self.agents.get(self.agents_selected) {
+            Some(a) => (a.name.clone(), a.default),
+            None => return,
+        };
+        let new_default = if is_default { None } else { Some(name.clone()) };
+        match self
+            .client
+            .call("agent.set_default", Some(json!({ "name": new_default })))
+            .await
+        {
+            Ok(_) => {
+                self.status = match &new_default {
+                    Some(n) => format!("default agent: {n}"),
+                    None => "cleared default agent".into(),
+                };
+                self.refresh_agents().await;
+            }
+            Err(e) => self.status = format!("set default failed: {e}"),
         }
     }
 
@@ -550,6 +765,15 @@ impl App {
             KeyCode::Down if repos > 0 => self.nl_repo_idx = (self.nl_repo_idx + 1) % repos,
             KeyCode::Tab if !self.nl_agents.is_empty() => {
                 self.nl_agent_idx = (self.nl_agent_idx + 1) % self.nl_agents.len()
+            }
+            KeyCode::BackTab if !self.nl_agents.is_empty() => {
+                let n = self.nl_agents.len();
+                self.nl_agent_idx = (self.nl_agent_idx + n - 1) % n;
+            }
+            // Ctrl+A jumps to the agent manager and returns here afterwards (a plain `a`
+            // types into the branch name).
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.enter_agents(Some(View::NewLane)).await;
             }
             KeyCode::Char(c) => self.nl_branch.push(c),
             KeyCode::Backspace => {
@@ -726,7 +950,7 @@ impl App {
                 View::Split => self.view = View::Fleet,
                 View::Grid => self.view = View::Fleet,
                 View::NewLane => self.view = View::Fleet,
-                View::Timeline | View::Sessions | View::Search | View::AddRepo => {
+                View::Timeline | View::Sessions | View::Search | View::AddRepo | View::Agents => {
                     self.view = View::Fleet
                 }
                 View::Fleet => self.should_quit = true,
@@ -746,6 +970,7 @@ impl App {
                             .map(|p| p.to_string_lossy().into_owned());
                         self.load_browse(cwd).await;
                     }
+                    View::Agents => self.enter_agents(None).await,
                     _ => {}
                 }
             }

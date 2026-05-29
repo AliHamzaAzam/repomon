@@ -47,7 +47,10 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
 | `timeline` | `{ from_iso, to_iso, bucket_secs=3600 }` | `TimelineData` |
 | `sessions` | `{ from_iso, to_iso }` | `[WorkSession]` |
-| `agent.detect` | — | `[AgentChoice]` (built-ins on PATH + config customs) |
+| `agent.detect` | — | `[AgentChoice]` (built-ins on PATH + config customs; `default` flags the configured default) |
+| `agent.add` | `{ name, command }` | `null` (upsert a custom agent; rejects built-in names; persists to config.toml) |
+| `agent.remove` | `{ name }` | `null` (drop a custom agent; clears it as default; rejects built-ins) |
+| `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |
 | `agent.spawn` | `{ lane_id, agent, task? }` | `{ lane_id, window, agent }` |
 | `agent.capture` | `{ lane_id, lines? }` | `{ content }` (ANSI-colored) |
 | `agent.send_input` | `{ lane_id, text }` | `null` (types text + Enter) |
@@ -75,5 +78,6 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `event.lane.deleted` | `{ lane_id }` |
 | `event.agent.status` | `{ lane_id, status }` |
 | `event.agent.output` | `{ lane_id, content }` |
+| `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.

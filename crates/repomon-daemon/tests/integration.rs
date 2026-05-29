@@ -625,3 +625,134 @@ async fn agent_spawn_uses_custom_command() {
         .args(["kill-session", "-t", &session])
         .output();
 }
+
+#[tokio::test]
+async fn agent_manager_add_set_default_and_remove() {
+    let store = Store::open_in_memory().unwrap();
+    // Isolate config writes to a tempdir so we never touch the real ~/.config/repomon.
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let cfg_path = cfg_dir.path().join("config.toml");
+    let ctx = Ctx::new_with_config_path(store, Config::default(), None, cfg_path.clone());
+    let sock = std::env::temp_dir().join(format!("repomon-agmgr-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Add a custom agent → it appears in detect, marked custom, and is persisted to disk.
+    let r = call(
+        &mut stream,
+        1,
+        "agent.add",
+        Some(json!({ "name": "yolo", "command": "claude --dangerously-skip-permissions" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "agent.add: {:?}", r.error);
+    let saved = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(saved.contains("yolo"), "config.toml: {saved}");
+
+    let arr = call(&mut stream, 2, "agent.detect", None)
+        .await
+        .result
+        .unwrap();
+    let yolo = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "yolo")
+        .expect("custom listed");
+    assert_eq!(yolo["custom"], json!(true));
+    assert_eq!(yolo["default"], json!(false));
+
+    // Adding under a built-in name is rejected.
+    let r = call(
+        &mut stream,
+        3,
+        "agent.add",
+        Some(json!({ "name": "claude-code", "command": "claude" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "built-in name should be rejected");
+
+    // Set the custom agent as default → detect reflects it, and so does the file.
+    let r = call(
+        &mut stream,
+        4,
+        "agent.set_default",
+        Some(json!({ "name": "yolo" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "set_default: {:?}", r.error);
+    let arr = call(&mut stream, 5, "agent.detect", None)
+        .await
+        .result
+        .unwrap();
+    let yolo = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "yolo")
+        .unwrap();
+    assert_eq!(yolo["default"], json!(true));
+    assert!(std::fs::read_to_string(&cfg_path)
+        .unwrap()
+        .contains("default_agent"));
+
+    // A built-in can also be the default.
+    let r = call(
+        &mut stream,
+        6,
+        "agent.set_default",
+        Some(json!({ "name": "claude-code" })),
+    )
+    .await;
+    assert!(r.error.is_none());
+
+    // Removing a built-in is rejected; removing the custom agent succeeds.
+    let r = call(
+        &mut stream,
+        7,
+        "agent.remove",
+        Some(json!({ "name": "codex" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "removing a built-in should be rejected");
+    let r = call(
+        &mut stream,
+        8,
+        "agent.remove",
+        Some(json!({ "name": "yolo" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "remove yolo: {:?}", r.error);
+    let arr = call(&mut stream, 9, "agent.detect", None)
+        .await
+        .result
+        .unwrap();
+    assert!(
+        !arr.as_array().unwrap().iter().any(|c| c["name"] == "yolo"),
+        "yolo should be gone"
+    );
+
+    // Set-default on an unknown agent is rejected.
+    let r = call(
+        &mut stream,
+        10,
+        "agent.set_default",
+        Some(json!({ "name": "ghost" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "unknown default should be rejected");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

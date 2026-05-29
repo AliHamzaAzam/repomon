@@ -95,6 +95,20 @@ struct AgentCapture {
     lines: Option<u32>,
 }
 #[derive(Deserialize)]
+struct AgentAdd {
+    name: String,
+    command: String,
+}
+#[derive(Deserialize)]
+struct AgentRemove {
+    name: String,
+}
+#[derive(Deserialize)]
+struct AgentSetDefault {
+    #[serde(default)]
+    name: Option<String>,
+}
+#[derive(Deserialize)]
 struct AgentPin {
     lane_id: repomon_core::model::LaneId,
     pinned: bool,
@@ -284,38 +298,129 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
 
         // ---- agents (tmux-backed runtime) ----
         "agent.detect" => {
+            let cfg = ctx.config.read().await;
+            let default = cfg.default_agent.clone();
+            let is_default = |name: &str| default.as_deref() == Some(name);
             let mut choices: Vec<AgentChoice> = Vec::new();
             for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Aider] {
                 let command = kind.command().to_string();
+                let name = kind.as_str().into_owned();
                 choices.push(AgentChoice {
                     detected: on_path(&command),
-                    name: kind.as_str().into_owned(),
+                    default: is_default(&name),
+                    name,
                     command,
                     custom: false,
                 });
             }
-            let mut customs: Vec<_> = ctx.config.agents.iter().collect();
+            let mut customs: Vec<_> = cfg.agents.iter().collect();
             customs.sort_by_key(|(name, _)| name.to_string());
             for (name, command) in customs {
                 choices.push(AgentChoice {
-                    name: name.clone(),
                     detected: on_path(command),
+                    default: is_default(name),
+                    name: name.clone(),
                     command: command.clone(),
                     custom: true,
                 });
             }
             to_value(choices)
         }
+        "agent.add" => {
+            let p: AgentAdd = parse(params)?;
+            let name = p.name.trim().to_string();
+            let command = p.command.trim().to_string();
+            if name.is_empty() || command.is_empty() {
+                return Err(RpcError::invalid_params("name and command are required"));
+            }
+            if is_builtin(&name) {
+                return Err(RpcError::invalid_params(format!(
+                    "'{name}' is a built-in agent name; pick a different name"
+                )));
+            }
+            {
+                let mut cfg = ctx.config.write().await;
+                let prev = cfg.agents.insert(name.clone(), command.clone());
+                if let Err(e) = cfg.save_to(&ctx.config_path) {
+                    match prev {
+                        Some(v) => {
+                            cfg.agents.insert(name.clone(), v);
+                        }
+                        None => {
+                            cfg.agents.remove(&name);
+                        }
+                    }
+                    return Err(internal(e));
+                }
+            }
+            ctx.broadcast(crate::pubsub::topic::AGENT_CHANGED, json!({ "name": name }));
+            Ok(Value::Null)
+        }
+        "agent.remove" => {
+            let p: AgentRemove = parse(params)?;
+            if is_builtin(&p.name) {
+                return Err(RpcError::invalid_params("cannot remove a built-in agent"));
+            }
+            {
+                let mut cfg = ctx.config.write().await;
+                let prev = match cfg.agents.remove(&p.name) {
+                    Some(v) => v,
+                    None => {
+                        return Err(RpcError::invalid_params(format!(
+                            "no custom agent named '{}'",
+                            p.name
+                        )))
+                    }
+                };
+                let prev_default = cfg.default_agent.clone();
+                if cfg.default_agent.as_deref() == Some(p.name.as_str()) {
+                    cfg.default_agent = None;
+                }
+                if let Err(e) = cfg.save_to(&ctx.config_path) {
+                    cfg.agents.insert(p.name.clone(), prev);
+                    cfg.default_agent = prev_default;
+                    return Err(internal(e));
+                }
+            }
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_CHANGED,
+                json!({ "name": p.name }),
+            );
+            Ok(Value::Null)
+        }
+        "agent.set_default" => {
+            let p: AgentSetDefault = parse(params)?;
+            {
+                let mut cfg = ctx.config.write().await;
+                if let Some(name) = &p.name {
+                    if !is_builtin(name) && !cfg.agents.contains_key(name) {
+                        return Err(RpcError::invalid_params(format!("unknown agent '{name}'")));
+                    }
+                }
+                let prev = cfg.default_agent.clone();
+                cfg.default_agent = p.name.clone();
+                if let Err(e) = cfg.save_to(&ctx.config_path) {
+                    cfg.default_agent = prev;
+                    return Err(internal(e));
+                }
+            }
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_CHANGED,
+                json!({ "default": p.name }),
+            );
+            Ok(Value::Null)
+        }
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             // A config-defined custom agent's command wins; otherwise the built-in binary.
-            let mut command = ctx
-                .config
-                .agents
-                .get(&p.agent)
-                .cloned()
-                .unwrap_or_else(|| AgentKind::from_kind_str(&p.agent).command().to_string());
+            let mut command = {
+                let cfg = ctx.config.read().await;
+                cfg.agents
+                    .get(&p.agent)
+                    .cloned()
+                    .unwrap_or_else(|| AgentKind::from_kind_str(&p.agent).command().to_string())
+            };
             if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
                 command = format!("{command} {}", shell_quote(task));
             }
@@ -565,6 +670,14 @@ fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>
         parent,
         entries,
     }
+}
+
+/// The built-in agent kind names. These are detected on PATH rather than user-defined, so
+/// they can't be added, removed, or have their command edited via the agent-manager RPCs.
+const BUILTIN_AGENTS: [&str; 3] = ["claude-code", "codex", "aider"];
+
+fn is_builtin(name: &str) -> bool {
+    BUILTIN_AGENTS.contains(&name)
 }
 
 /// Is the command's program on PATH (or an absolute/relative path that exists)?

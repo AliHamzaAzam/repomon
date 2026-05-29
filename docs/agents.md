@@ -19,18 +19,37 @@ the TUI. The spawned kind is recorded on the lane so repomon can identify it lat
 ## Choosing an agent
 
 New Lane lists the **auto-detected** built-ins (claude-code / codex / aider, marked ✓ if on
-PATH) plus any **custom agents** you define in config — cycle them with Tab. Custom agents are
-launch commands you set yourself:
+PATH) plus any **custom agents** you define — cycle them with Tab (Shift+Tab to go back). The
+**default** agent (marked ★) is preselected.
+
+## Managing agents in-app
+
+Press **`A`** from Fleet (or **`Ctrl+A`** from New Lane) to open the agent manager:
+
+- **`n`** — add a custom agent: a *name* (what you pick in New Lane) and a *command* (the
+  launch command line, run in the lane's worktree). Tab switches fields, `↵` saves.
+- **`e`** — edit the selected custom agent (built-ins are read-only). Renaming is handled
+  transparently.
+- **`d`** — delete the selected custom agent.
+- **`*`** — set (or clear) the selected agent as the default; built-ins can be the default too.
+
+Changes are written straight to `~/.config/repomon/config.toml`. You can still hand-edit it:
 
 ```toml
 # ~/.config/repomon/config.toml
+default_agent = "claude-yolo"
+
 [agents]
 claude-yolo = "claude --dangerously-skip-permissions"
 claude-resume = "claude --continue"
 ```
 
-`agent.detect` returns the combined list; `agent.spawn` resolves a chosen name to a config
-command (if any) or the built-in binary, appends an optional task, and runs it.
+> Note: editing agents in-app rewrites `config.toml` via the serializer, so hand-added
+> comments in that file are not preserved.
+
+`agent.detect` returns the combined list (with a `default` flag); `agent.add` / `agent.remove`
+/ `agent.set_default` mutate the config and persist it; `agent.spawn` resolves a chosen name
+to its custom command (if any) or the built-in binary, appends an optional task, and runs it.
 
 ## Interacting
 
