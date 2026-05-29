@@ -58,21 +58,27 @@ is a thin client. Three crates:
 
 ```sh
 cargo build --release                  # builds repomond + repomon
+# optional: install both on PATH
+cargo install --path crates/repomon-tui && cargo install --path crates/repomon-daemon
 
-repomon daemon start                   # install + load the launchd daemon (macOS)
+repomon                                # just run it — starts the daemon if needed, then the TUI
 repomon add ~/code/pos-saas            # register a repo
 repomon discover ~/code --add          # or find and register many at once
-repomon                                # launch the TUI
 
-# headless / scripting
+# headless / scripting (also auto-start the daemon)
 repomon lane list
 repomon lane new --repo pos-saas --branch feat/inventory --source main
 repomon lane delete feat/inventory --delete-branch
-repomon daemon status | logs | stop | uninstall
 ```
 
-For development without launchd, run the daemon inline with `repomon --embedded`, or
-start `repomond` directly.
+**`repomon` is the single command.** With no daemon running it launches a detached
+`repomond` (which then survives across UI sessions), connects, and opens the TUI. If the
+`repomond` binary can't be found it falls back to an in-process daemon. Use `--embedded` to
+force in-process always, or manage a launchd service explicitly with
+`repomon daemon install | start | stop | status | logs | uninstall` (macOS).
+
+Testing it: `cargo build` (so both binaries exist), then `./target/debug/repomon` — or after
+`cargo build --release`, `./target/release/repomon`.
 
 ## Shell integration (cd-on-exit)
 

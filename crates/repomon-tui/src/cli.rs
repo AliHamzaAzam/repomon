@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use repomon_core::model::{Lane, Repo};
 use repomon_core::{config, service, Config};
@@ -243,13 +243,8 @@ fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
 }
 
 async fn connect(socket: Option<PathBuf>, config: &Config) -> Result<DaemonClient> {
-    let path = socket.unwrap_or_else(|| config::socket_path(config));
-    DaemonClient::connect(&path).await.with_context(|| {
-        format!(
-            "no daemon at {} — start it with `repomon daemon start` (or run `repomond`)",
-            path.display()
-        )
-    })
+    // Auto-start a detached daemon if one isn't already running.
+    crate::ensure_daemon(config, socket).await
 }
 
 async fn resolve_repo(client: &DaemonClient, key: &str) -> Result<Repo> {

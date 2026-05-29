@@ -47,17 +47,25 @@ pub async fn run_cli() -> Result<()> {
         return cli::handle(command, &config, cli.socket).await;
     }
 
-    let (socket, _embedded) = if cli.embedded {
+    // Acquire a daemon: --embedded forces in-process; otherwise connect to a running
+    // daemon, auto-start a detached `repomond` if none, and fall back to in-process if the
+    // repomond binary can't be found. So plain `repomon` always just works.
+    let mut _embedded = None;
+    let client = if cli.embedded {
         let (socket, guard) = start_embedded(&config).await?;
-        (socket, Some(guard))
+        _embedded = Some(guard);
+        connect_with_retry(&socket, 100).await?
     } else {
-        (
-            cli.socket.unwrap_or_else(|| config::socket_path(&config)),
-            None,
-        )
+        match ensure_daemon(&config, cli.socket.clone()).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("repomon: starting in-process daemon ({e})");
+                let (socket, guard) = start_embedded(&config).await?;
+                _embedded = Some(guard);
+                connect_with_retry(&socket, 100).await?
+            }
+        }
     };
-
-    let client = connect_with_retry(&socket, if cli.embedded { 100 } else { 20 }).await?;
 
     if cli.print_once {
         print_once(&client).await?;
@@ -72,7 +80,59 @@ pub async fn run_cli() -> Result<()> {
     Ok(())
 }
 
-/// Connect to the daemon, retrying briefly (the embedded daemon needs a moment to bind).
+/// Connect to a running daemon, or start a detached `repomond` and connect to that.
+///
+/// Returns `Err` if no daemon is running and `repomond` can't be launched (e.g. the binary
+/// isn't built/on PATH) — callers may then fall back to an in-process daemon.
+pub async fn ensure_daemon(
+    config: &Config,
+    socket_override: Option<PathBuf>,
+) -> Result<DaemonClient> {
+    let socket = socket_override.unwrap_or_else(|| config::socket_path(config));
+    if let Ok(client) = DaemonClient::connect(&socket).await {
+        return Ok(client);
+    }
+    spawn_daemon(&socket)?;
+    connect_with_retry(&socket, 75).await
+}
+
+/// Launch `repomond` as a detached background process (logs to the daemon log file).
+fn spawn_daemon(socket: &Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let program = repomon_core::service::repomond_path();
+    let _ = std::fs::create_dir_all(repomon_core::service::log_dir());
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(repomon_core::service::log_file())
+        .ok();
+
+    let mut cmd = Command::new(&program);
+    cmd.arg("--socket").arg(socket).stdin(Stdio::null());
+    match log {
+        Some(out) => {
+            let err = out.try_clone().ok();
+            cmd.stdout(Stdio::from(out));
+            if let Some(err) = err {
+                cmd.stderr(Stdio::from(err));
+            }
+        }
+        None => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+    // Detach from the TUI's process group so it survives the terminal/UI closing.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+        .with_context(|| format!("starting daemon `{}`", program.display()))?;
+    Ok(())
+}
+
+/// Connect to the daemon, retrying briefly (a freshly-started daemon needs a moment to bind).
 pub async fn connect_with_retry(socket: &Path, tries: usize) -> Result<DaemonClient> {
     let mut last = None;
     for _ in 0..tries {
