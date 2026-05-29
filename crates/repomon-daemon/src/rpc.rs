@@ -724,14 +724,15 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
         let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
         if !summaries.is_empty() {
-            for s in summaries {
+            for (idx, s) in summaries.into_iter().enumerate() {
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
                 }
-                // No live repomon window means the agent is running in another terminal —
-                // mark it external so the UI can offer to adopt it.
+                // repomon manages at most one session per worktree (its single tmux window);
+                // assume that's the most-recent one. Every other session is running in another
+                // terminal, so it's external and adoptable.
                 let mut session = s.into_session(lane.repo.id, lane.worktree.id);
-                session.external = !managed;
+                session.external = !(managed && idx == 0);
                 lane.agent_sessions.push(session);
             }
             continue;
