@@ -2,10 +2,13 @@
 
 use std::path::PathBuf;
 
-use repomon_core::agent::{claude, shell_quote};
+use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::reader;
-use repomon_core::model::{AgentKind, Commit, CreateLaneParams, Lane, RepoId, TimeRange};
+use repomon_core::model::{
+    AgentKind, AgentSession, AgentStatus, Commit, CreateLaneParams, Lane, RepoId, TimeRange,
+};
 use repomon_core::protocol::RpcError;
+use repomon_core::TmuxRuntime;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -139,14 +142,14 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         // ---- lanes ----
         "lane.list" => {
             let mut lanes = ctx.lanes.list().await.map_err(internal)?;
-            overlay_agents(&mut lanes).await;
+            overlay_agents(ctx, &mut lanes).await;
             to_value(lanes)
         }
         "lane.get" => {
             let p: LaneId = parse(params)?;
             let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
             let mut one = vec![lane];
-            overlay_agents(&mut one).await;
+            overlay_agents(ctx, &mut one).await;
             to_value(one.into_iter().next().unwrap())
         }
         "lane.create" => {
@@ -208,6 +211,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
+                .await;
+            let _ = ctx
+                .store
+                .set_lane_agent_kind(p.lane_id, Some(kind.as_str().into_owned()))
                 .await;
             ctx.broadcast(
                 crate::pubsub::topic::AGENT_STATUS,
@@ -310,18 +317,25 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
     }
 }
 
-/// Overlay live Claude Code sessions onto lanes (status, tool-call count, "needs you").
-/// Reads transcripts off the runtime thread.
-async fn overlay_agents(lanes: &mut [Lane]) {
+/// Overlay live agent sessions onto lanes: rich status from the monitors (Claude transcript,
+/// Aider history, …), falling back to "is the repomon-spawned tmux window alive?" for any
+/// other kind. Reads run off the runtime thread.
+async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();
     let summaries = tokio::task::spawn_blocking(move || {
         paths
             .iter()
-            .map(|p| claude::summary_for(p))
+            .map(|p| agent::summary_for(p))
             .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
+
+    let metas = ctx.store.list_lane_meta().await.unwrap_or_default();
+    let tmux = ctx.tmux.clone();
+    let windows = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
+        .await
+        .unwrap_or_default();
 
     for (lane, summary) in lanes.iter_mut().zip(summaries) {
         if let Some(s) = summary {
@@ -330,6 +344,29 @@ async fn overlay_agents(lanes: &mut [Lane]) {
             }
             lane.agent_sessions
                 .push(s.into_session(lane.repo.id, lane.worktree.id));
+            continue;
+        }
+        // No parseable transcript: surface a repomon-spawned agent if its window is alive.
+        if windows.contains(&TmuxRuntime::window_name(lane.id)) {
+            let kind = metas
+                .iter()
+                .find(|m| m.id == lane.id)
+                .and_then(|m| m.agent_kind.clone())
+                .map(|k| AgentKind::from_kind_str(&k))
+                .unwrap_or(AgentKind::ClaudeCode);
+            lane.agent_sessions.push(AgentSession {
+                id: 0,
+                agent: kind,
+                repo_id: lane.repo.id,
+                worktree_id: Some(lane.worktree.id),
+                started_at: lane.last_activity_at,
+                last_activity_at: lane.last_activity_at,
+                ended_at: None,
+                manifest_path: std::path::PathBuf::new(),
+                tool_call_count: 0,
+                title: None,
+                status: AgentStatus::Running,
+            });
         }
     }
 }

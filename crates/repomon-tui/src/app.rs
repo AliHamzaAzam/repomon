@@ -17,6 +17,9 @@ use crate::keybinds::{self, Action, View};
 use crate::theme::Theme;
 use crate::view;
 
+/// Agent kinds offered when creating a lane (cycled with Tab).
+pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "aider"];
+
 /// All UI state. `view` reads these fields directly.
 pub struct App {
     pub client: DaemonClient,
@@ -31,6 +34,7 @@ pub struct App {
     pub status: String,
     pub nl_repo_idx: usize,
     pub nl_branch: String,
+    pub nl_agent_idx: usize,
     pub should_quit: bool,
     pub cd_target: Option<PathBuf>,
     /// Latest captured pane content per lane, pushed by `event.agent.output`.
@@ -60,6 +64,7 @@ impl App {
             status: String::new(),
             nl_repo_idx: 0,
             nl_branch: String::new(),
+            nl_agent_idx: 0,
             should_quit: false,
             cd_target: None,
             output: HashMap::new(),
@@ -215,6 +220,7 @@ impl App {
         match key.code {
             KeyCode::Up if repos > 0 => self.nl_repo_idx = (self.nl_repo_idx + repos - 1) % repos,
             KeyCode::Down if repos > 0 => self.nl_repo_idx = (self.nl_repo_idx + 1) % repos,
+            KeyCode::Tab => self.nl_agent_idx = (self.nl_agent_idx + 1) % AGENT_KINDS.len(),
             KeyCode::Char(c) => self.nl_branch.push(c),
             KeyCode::Backspace => {
                 self.nl_branch.pop();
@@ -269,19 +275,20 @@ impl App {
                     "source_branch": null,
                     "copy_files": [],
                 });
+                let agent = AGENT_KINDS[self.nl_agent_idx % AGENT_KINDS.len()];
                 match self.client.call("lane.create", Some(params)).await {
                     Ok(lane) => {
-                        // Spin up claude in the new lane straight away.
+                        // Spin up the chosen agent in the new lane straight away.
                         if let Some(id) = lane.get("id").and_then(|v| v.as_i64()) {
                             let _ = self
                                 .client
                                 .call(
                                     "agent.spawn",
-                                    Some(json!({ "lane_id": id, "agent": "claude-code" })),
+                                    Some(json!({ "lane_id": id, "agent": agent })),
                                 )
                                 .await;
                         }
-                        self.status = format!("created lane {} + spawned claude", self.nl_branch);
+                        self.status = format!("created lane {} + spawned {agent}", self.nl_branch);
                         self.view = View::Fleet;
                         self.refresh().await;
                     }

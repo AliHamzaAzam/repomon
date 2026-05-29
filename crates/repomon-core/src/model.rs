@@ -238,7 +238,7 @@ pub struct Lane {
     pub pinned: bool,
 }
 
-/// Persisted per-lane metadata not derivable from git (pin state, tmux window).
+/// Persisted per-lane metadata not derivable from git (pin state, tmux window, agent kind).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaneMeta {
     pub id: LaneId,
@@ -246,6 +246,8 @@ pub struct LaneMeta {
     pub worktree_path: PathBuf,
     pub pinned: bool,
     pub tmux_window: Option<String>,
+    /// The agent kind repomon last spawned in this lane, if any.
+    pub agent_kind: Option<String>,
 }
 
 /// Parameters for creating a new lane (and its worktree).

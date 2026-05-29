@@ -20,9 +20,10 @@ use crate::model::{AgentKind, AgentSession, AgentStatus, RepoId, WorktreeId};
 /// How long with no transcript activity before we consider a session idle.
 const IDLE_AFTER: Duration = Duration::minutes(10);
 
-/// A digest of a Claude Code transcript.
+/// A digest of an agent session (transcript- or activity-derived).
 #[derive(Debug, Clone)]
 pub struct TranscriptSummary {
+    pub kind: AgentKind,
     pub manifest_path: PathBuf,
     pub cwd: Option<PathBuf>,
     pub last_activity: DateTime<Utc>,
@@ -36,7 +37,7 @@ impl TranscriptSummary {
     pub fn into_session(self, repo_id: RepoId, worktree_id: WorktreeId) -> AgentSession {
         AgentSession {
             id: 0,
-            agent: AgentKind::ClaudeCode,
+            agent: self.kind,
             repo_id,
             worktree_id: Some(worktree_id),
             started_at: self.last_activity,
@@ -157,6 +158,7 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     };
 
     Some(TranscriptSummary {
+        kind: AgentKind::ClaudeCode,
         manifest_path: path.to_path_buf(),
         cwd,
         last_activity,

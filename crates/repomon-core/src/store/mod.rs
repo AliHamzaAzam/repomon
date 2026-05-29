@@ -17,7 +17,10 @@ use crate::error::{Error, Result};
 use crate::model::*;
 
 /// Embedded migrations, applied in order. The index + 1 is the target `user_version`.
-const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/0001_init.sql"),
+    include_str!("../../migrations/0002_agent_kind.sql"),
+];
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -304,10 +307,22 @@ impl Store {
 
     pub async fn list_lane_meta(&self) -> Result<Vec<LaneMeta>> {
         self.call(|c| {
-            let mut stmt =
-                c.prepare("SELECT id, repo_id, worktree_path, pinned, tmux_window FROM lanes")?;
+            let mut stmt = c.prepare(
+                "SELECT id, repo_id, worktree_path, pinned, tmux_window, agent_kind FROM lanes",
+            )?;
             let rows = stmt.query_map([], lane_meta_from_row)?;
             collect(rows)
+        })
+        .await
+    }
+
+    pub async fn set_lane_agent_kind(&self, lane_id: LaneId, kind: Option<String>) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE lanes SET agent_kind = ?2 WHERE id = ?1",
+                params![lane_id, kind],
+            )?;
+            Ok(())
         })
         .await
     }
@@ -545,6 +560,7 @@ fn lane_meta_from_row(r: &Row) -> rusqlite::Result<LaneMeta> {
         worktree_path: PathBuf::from(r.get::<_, String>(2)?),
         pinned: r.get::<_, i64>(3)? != 0,
         tmux_window: r.get(4)?,
+        agent_kind: r.get(5)?,
     })
 }
 

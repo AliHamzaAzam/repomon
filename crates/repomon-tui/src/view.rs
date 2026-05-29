@@ -20,7 +20,7 @@ const SPLIT_KEYS: &str = "↑↓ switch  ↵/→ focus  e spawn  a attach  spc g
 const FOCUS_CMD_KEYS: &str = "i/↵ type  e spawn  s stop  a attach  m merge  c cd  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "type to the agent   ↵ send   esc command-mode";
 const GRID_KEYS: &str = "↑↓←→ move  ↵ focus  e spawn  s stop  p pin  spc/f fleet  q quit";
-const NEWLANE_KEYS: &str = "↑↓ repo  type branch  ↵ create + spawn claude  esc cancel";
+const NEWLANE_KEYS: &str = "↑↓ repo  tab agent  type branch  ↵ create + spawn  esc cancel";
 
 /// Render the current view.
 pub fn render(f: &mut Frame, app: &App) {
@@ -284,7 +284,9 @@ fn render_new_lane(f: &mut Frame, app: &App) {
     } else {
         format!("~/code/{repo_name}-wt/{safe_branch}")
     };
+    let agent = crate::app::AGENT_KINDS[app.nl_agent_idx % crate::app::AGENT_KINDS.len()];
     lines.push(Line::raw(format!("  repo      {repo_name}")));
+    lines.push(Line::raw(format!("  agent     {agent}   [tab to change]")));
     lines.push(Line::raw(format!("  branch    {}_", app.nl_branch)));
     lines.push(Line::raw("  source    HEAD".to_string()));
     lines.push(Line::raw(format!("  path      {preview_path}   [auto]")));

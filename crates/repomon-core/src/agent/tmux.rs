@@ -38,7 +38,8 @@ impl TmuxRuntime {
         &self.session
     }
 
-    fn window_name(lane: LaneId) -> String {
+    /// The tmux window name for a lane.
+    pub fn window_name(lane: LaneId) -> String {
         format!("lane-{lane}")
     }
 
