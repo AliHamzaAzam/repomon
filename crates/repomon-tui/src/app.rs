@@ -299,6 +299,7 @@ impl App {
         self.status.clear();
         match self.view {
             View::NewLane => self.new_lane_key(key).await,
+            View::Split => self.split_key(key).await,
             View::Focus => self.focus_key(key).await,
             View::Search => self.search_key(key).await,
             View::Timeline => self.timeline_key(key).await,
@@ -851,26 +852,55 @@ impl App {
         }
     }
 
-    /// Key handling in the Focus view: command mode + insert (live passthrough to the agent).
-    async fn focus_key(&mut self, key: KeyEvent) {
+    /// Forward one keystroke live to the selected lane's agent (insert-mode passthrough),
+    /// so its own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
+    async fn send_agent_key(&mut self, key: KeyEvent) {
+        if let (Some(id), Some((spec, literal))) =
+            (self.selected_lane().map(|l| l.id), translate_key(&key))
+        {
+            let _ = self
+                .client
+                .call(
+                    "agent.key",
+                    Some(json!({ "lane_id": id, "key": spec, "literal": literal })),
+                )
+                .await;
+        }
+    }
+
+    /// Key handling in the Split view: fleet sidebar + the selected lane's live output. Like
+    /// Focus, `i` enters insert mode to type straight to the agent here (esc returns); ↵/→
+    /// still zooms into full-screen Focus.
+    async fn split_key(&mut self, key: KeyEvent) {
         if self.focus_insert {
-            // Esc leaves insert mode; everything else is forwarded live to the agent so its
-            // own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
             if key.code == KeyCode::Esc {
                 self.focus_insert = false;
                 return;
             }
-            if let (Some(id), Some((spec, literal))) =
-                (self.selected_lane().map(|l| l.id), translate_key(&key))
-            {
-                let _ = self
-                    .client
-                    .call(
-                        "agent.key",
-                        Some(json!({ "lane_id": id, "key": spec, "literal": literal })),
-                    )
-                    .await;
+            self.send_agent_key(key).await;
+            return;
+        }
+        if self.filtering {
+            self.filter_key(key);
+            return;
+        }
+        if key.code == KeyCode::Char('i') {
+            self.focus_insert = true;
+            return;
+        }
+        if let Some(action) = keybinds::nav(key) {
+            self.apply(action).await;
+        }
+    }
+
+    /// Key handling in the Focus view: command mode + insert (live passthrough to the agent).
+    async fn focus_key(&mut self, key: KeyEvent) {
+        if self.focus_insert {
+            if key.code == KeyCode::Esc {
+                self.focus_insert = false;
+                return;
             }
+            self.send_agent_key(key).await;
             return;
         }
         match key.code {
