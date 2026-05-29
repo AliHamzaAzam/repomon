@@ -964,23 +964,35 @@ impl App {
     }
 
     async fn spawn_agent(&mut self) {
-        if let Some(id) = self.selected_lane().map(|l| l.id) {
-            match self
-                .client
-                .call(
-                    "agent.spawn",
-                    Some(json!({ "lane_id": id, "agent": "claude-code" })),
-                )
-                .await
-            {
-                Ok(_) => {
-                    self.status = "spawned claude".into();
-                    self.view = View::Focus;
-                    self.focus_insert = false;
-                }
-                Err(e) => self.status = format!("spawn failed: {e}"),
+        let Some(id) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        let agent = self.default_agent_name().await;
+        match self
+            .client
+            .call(
+                "agent.spawn",
+                Some(json!({ "lane_id": id, "agent": &agent })),
+            )
+            .await
+        {
+            Ok(_) => {
+                self.status = format!("spawned {agent}");
+                self.view = View::Focus;
+                self.focus_insert = false;
             }
+            Err(e) => self.status = format!("spawn failed: {e}"),
         }
+    }
+
+    /// The configured default agent's name (what New Lane preselects), falling back to claude.
+    async fn default_agent_name(&self) -> String {
+        self.client
+            .call_typed::<Vec<AgentChoice>>("agent.detect", None)
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().find(|a| a.default).map(|a| a.name))
+            .unwrap_or_else(|| "claude-code".to_string())
     }
 
     /// Adopt an external agent (one running in another terminal): the daemon resumes its
