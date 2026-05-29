@@ -64,7 +64,8 @@ pub async fn run_cli() -> Result<()> {
         return Ok(());
     }
 
-    let cd = app::run(client).await?;
+    let theme = theme::Theme::from_accent(config.accent.as_deref());
+    let cd = app::run(client, theme).await?;
     if let Some(path) = cd {
         emit_cd(&path);
     }

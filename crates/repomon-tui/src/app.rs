@@ -213,7 +213,14 @@ impl App {
     }
 
     async fn handle_event(&mut self, ev: Event) {
-        let Event::Key(key) = ev else { return };
+        let key = match ev {
+            Event::Key(key) => key,
+            Event::Mouse(me) => {
+                self.handle_mouse(me);
+                return;
+            }
+            _ => return,
+        };
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -355,6 +362,31 @@ impl App {
                 )
             }
             Err(e) => self.status = format!("export failed: {e}"),
+        }
+    }
+
+    /// Scroll-wheel navigation: move the selection (or the grid cursor) up/down.
+    fn handle_mouse(&mut self, me: ratatui::crossterm::event::MouseEvent) {
+        use ratatui::crossterm::event::MouseEventKind;
+        let down = match me.kind {
+            MouseEventKind::ScrollDown => true,
+            MouseEventKind::ScrollUp => false,
+            _ => return,
+        };
+        if self.view == View::Grid {
+            let n = self.grid_lane_ids().len();
+            if down && self.grid_active + 1 < n {
+                self.grid_active += 1;
+            } else if !down {
+                self.grid_active = self.grid_active.saturating_sub(1);
+            }
+        } else {
+            let n = self.visible_lanes().len();
+            if down && n > 0 && self.selected + 1 < n {
+                self.selected += 1;
+            } else if !down {
+                self.selected = self.selected.saturating_sub(1);
+            }
         }
     }
 
@@ -652,16 +684,18 @@ impl App {
 }
 
 /// Run the interactive TUI. Returns a path to cd into on exit, if requested.
-pub async fn run(client: DaemonClient) -> Result<Option<PathBuf>> {
+pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> {
     let _ = client
         .call("subscribe", Some(json!({ "topics": ["*"] })))
         .await;
     let mut events = client.subscribe();
 
     let mut app = App::new(client);
+    app.theme = theme;
     app.refresh().await;
 
     let mut terminal = ratatui::init();
+    enable_mouse();
     let (in_tx, mut in_rx) = mpsc::channel::<Event>(128);
     std::thread::spawn(move || {
         while let Ok(ev) = ratatui::crossterm::event::read() {
@@ -672,9 +706,20 @@ pub async fn run(client: DaemonClient) -> Result<Option<PathBuf>> {
     });
 
     let outcome = event_loop(&mut terminal, &mut app, &mut in_rx, &mut events).await;
+    disable_mouse();
     ratatui::restore();
     outcome?;
     Ok(app.cd_target)
+}
+
+fn enable_mouse() {
+    use ratatui::crossterm::event::EnableMouseCapture;
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+}
+
+fn disable_mouse() {
+    use ratatui::crossterm::event::DisableMouseCapture;
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
 }
 
 async fn event_loop(
@@ -734,11 +779,13 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         app.status = "no agent running in this lane".into();
         return;
     }
+    disable_mouse();
     ratatui::restore();
     let _ = std::process::Command::new("tmux")
         .args(["attach", "-t", &target])
         .status();
     *terminal = ratatui::init();
+    enable_mouse();
     let _ = terminal.clear();
     app.last_viewport.clear(); // force a viewport resync after returning
 }

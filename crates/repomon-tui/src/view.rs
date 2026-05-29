@@ -615,7 +615,7 @@ fn footer(keys: &str, app: &App) -> Paragraph<'static> {
 }
 
 fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
-    padded_line(width, left, right, app.theme.bold())
+    padded_line(width, left, right, app.theme.header_style())
 }
 
 fn padded_line(width: u16, left: &str, right: &str, left_style: Style) -> Line<'static> {

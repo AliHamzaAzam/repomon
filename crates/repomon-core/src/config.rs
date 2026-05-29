@@ -30,6 +30,8 @@ pub struct Config {
     pub time_format: String,
     /// The tmux session repomon manages agents in.
     pub tmux_session: String,
+    /// Optional accent color name (e.g. "cyan"); default monochrome.
+    pub accent: Option<String>,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
 }
@@ -41,6 +43,7 @@ impl Default for Config {
             socket_path: None,
             time_format: DEFAULT_TIME_FORMAT.to_string(),
             tmux_session: DEFAULT_TMUX_SESSION.to_string(),
+            accent: None,
             repos: HashMap::new(),
         }
     }

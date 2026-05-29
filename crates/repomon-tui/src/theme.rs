@@ -25,6 +25,13 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Build a theme from an optional accent color name (config-driven).
+    pub fn from_accent(name: Option<&str>) -> Self {
+        Theme {
+            accent: name.and_then(color_from_name),
+        }
+    }
+
     /// Selected row: reverse video, nothing else.
     pub fn selected(&self) -> Style {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -35,11 +42,34 @@ impl Theme {
     pub fn dim(&self) -> Style {
         Style::default().add_modifier(Modifier::DIM)
     }
+    /// Header/title style: bold, tinted with the accent if one is configured.
+    pub fn header_style(&self) -> Style {
+        let s = Style::default().add_modifier(Modifier::BOLD);
+        match self.accent {
+            Some(c) => s.fg(c),
+            None => s,
+        }
+    }
     /// Accent style if an accent is configured, else plain.
     pub fn accented(&self) -> Style {
         match self.accent {
             Some(c) => Style::default().fg(c),
             None => Style::default(),
         }
+    }
+}
+
+/// Map a config color name to a ratatui color. Unknown names stay monochrome.
+fn color_from_name(name: &str) -> Option<Color> {
+    match name.trim().to_lowercase().as_str() {
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "white" => Some(Color::White),
+        "gray" | "grey" => Some(Color::Gray),
+        _ => None,
     }
 }
