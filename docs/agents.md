@@ -64,28 +64,42 @@ to its custom command (if any) or the built-in binary, appends an optional task,
 
 ## Interacting
 
-In the Split and Focus views, `i` enters **insert** mode and every keystroke is forwarded
-live to the agent via tmux `send-keys` — printable chars, Enter, Backspace, arrows,
-**Shift+Tab** (so Claude's mode cycling works), `Ctrl-<key>` (e.g. `Ctrl-C`), and **`Esc`**
-(the agent needs it to interrupt/clear). Because `Esc` is forwarded, you leave insert mode
-with **`Ctrl-O`** instead. **Option/Alt + Arrow** (word jump) and **Alt + Backspace** (word
-delete) are forwarded too — your terminal must send Option as Meta (Terminal.app → Profiles →
-Keyboard → "Use Option as Meta key").
+There are two ways to drive an agent, and they trade off fidelity vs. staying in repomon's chrome.
 
-The Focus view shows a `capture-pane -e` snapshot (colors render), which is a *picture* of the
-tail, so it has limits:
+### Open it as a real terminal (the native way) — `↵`/`→`/`a`
 
-- **Scroll back** through long output (e.g. a plan) with **`PgUp`/`PgDn`** — these work in
-  *both* command and insert mode and always reach repomon. The mouse wheel also scrolls, but
-  it's unreliable through tmux/some terminals (it may scroll your outer terminal instead), so
-  `PgUp`/`PgDn` is the dependable way. `↵`/`esc` (or typing) returns to the live tail.
-- **Select & copy**: **drag** over lines in the pane — copied to your clipboard automatically
-  on release (line-granular). `y` releases the mouse if you prefer native terminal selection.
-- **Paste an image**: copy an image, then press **`v`** — repomon saves it to a temp PNG and
-  inserts the path into the agent's input (Claude reads images referenced by path). For native
-  ⌘V paste, **`a`** attach into the real terminal.
-- For full fidelity (native scrollback, character-precise selection, image paste), **`a`**
-  attaches the raw tmux window — a real terminal.
+Pressing **`↵`** (Split/Grid), or **`↵` / `→` / `a`** (Focus), **attaches** to the agent's own
+tmux pane. This is a *genuine terminal* — there is **no difference** from running the agent in a
+plain terminal window: native wheel scrolling and scrollback, character-precise mouse
+selection, **⌘V image paste** straight into Claude, full color, every key. Detach with
+**`Ctrl-b d`** (the repomon-managed tmux prefix) to come back to the fleet.
+
+repomon configures its tmux server to feel native: `mouse on` (wheel scroll + drag-select),
+`set-clipboard on` (OSC-52 passthrough), a 50k-line scrollback, and drag-select copies straight
+to the system clipboard via `pbcopy`. Because you're in the real process, anything the agent
+supports in a terminal — including image paste — works exactly as it would standalone.
+
+> Why attach rather than emulate? The in-app view is a `capture-pane` *picture* plus
+> `send-keys`; it can't carry a nested terminal's scroll wheel or real clipboard-image paste.
+> Attaching hands you the actual PTY, so the focused agent is indistinguishable from native.
+
+### Quick mediated type — `i`
+
+For a fast one-liner without the attach context-switch, **`i`** enters **insert** mode and
+forwards each keystroke via `send-keys` — printable chars, Enter, Backspace, arrows,
+**Shift+Tab** (Claude's mode cycling), `Ctrl-<key>` (e.g. `Ctrl-C`), and **`Esc`** (the agent
+needs it to interrupt/clear). Because `Esc` is forwarded, leave insert with **`Ctrl-O`**.
+**Option/Alt + Arrow** (word jump) and **Alt + Backspace** (word delete) forward too — set
+Terminal.app → Profiles → Keyboard → "Use Option as Meta key". This view is a snapshot, so:
+
+- **Scroll back** with **`PgUp`/`PgDn`** (work in both modes; always reach repomon). Typing or
+  `↵`/`esc` returns to the live tail.
+- **Select & copy**: drag over lines — copied to the clipboard on release (line-granular).
+- **Paste an image**: press **`v`** — repomon saves the clipboard image to a temp PNG and inserts
+  its path (Claude reads images referenced by path).
+
+For anything the snapshot can't do (precise selection, wheel scroll, ⌘V image paste), just open
+the real terminal with `↵`.
 
 `AgentKind::command()` maps kinds to binaries:
 

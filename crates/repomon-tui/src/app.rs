@@ -378,10 +378,10 @@ impl App {
             {
                 self.grid_active += 1;
             }
+            // ↵ opens the active tile's agent in its real tmux pane (a native terminal).
             KeyCode::Enter if n > 0 => {
                 self.select_grid_active();
-                self.view = View::Focus;
-                self.focus_insert = false;
+                self.attach_request = self.selected_lane().map(|l| l.id);
             }
             // Per-tile actions act on the active tile.
             KeyCode::Char('e') => {
@@ -1055,6 +1055,12 @@ impl App {
             self.filter_key(key);
             return;
         }
+        // ↵ opens the selected agent in its real tmux pane (a native terminal); → zooms to the
+        // Focus monitor; `i` is a quick mediated type without leaving repomon.
+        if key.code == KeyCode::Enter {
+            self.attach_request = self.selected_lane().map(|l| l.id);
+            return;
+        }
         if key.code == KeyCode::Char('i') {
             self.focus_insert = true;
             return;
@@ -1091,9 +1097,15 @@ impl App {
             return;
         }
         match key.code {
-            // i / ↵ / → all drop into insert: → is "zoom in" and Focus is the deepest level,
-            // so the next step in is typing to the agent.
-            KeyCode::Char('i') | KeyCode::Enter | KeyCode::Right => {
+            // ↵ / → "go all the way in" = attach to the agent's real tmux pane: a genuine
+            // terminal with native scroll, selection/copy, and image paste. `a` is an alias.
+            KeyCode::Enter | KeyCode::Right => {
+                self.reset_scroll();
+                self.attach_request = self.selected_lane().map(|l| l.id);
+            }
+            // `i` is the lightweight alternative: type to the agent without leaving repomon's
+            // chrome (mediated send-keys — handy for a quick one-liner).
+            KeyCode::Char('i') => {
                 self.reset_scroll();
                 self.focus_insert = true;
             }

@@ -139,6 +139,7 @@ impl TmuxRuntime {
                 command,
             ])?;
         }
+        self.configure();
         Ok(self.target(lane))
     }
 
@@ -184,6 +185,28 @@ impl TmuxRuntime {
         Ok(())
     }
 
+    /// Make the attached experience feel like a native terminal: mouse on (wheel scroll +
+    /// drag-select), system-clipboard passthrough, and drag-select copies to the clipboard.
+    /// Server-global, so calling it once per session creation is enough (idempotent).
+    pub fn configure(&self) {
+        let _ = self.run(&["set", "-g", "mouse", "on"]);
+        let _ = self.run(&["set", "-g", "set-clipboard", "on"]);
+        // History deep enough to scroll back through a long plan.
+        let _ = self.run(&["set", "-g", "history-limit", "50000"]);
+        for table in ["copy-mode", "copy-mode-vi"] {
+            let _ = self.run(&[
+                "bind",
+                "-T",
+                table,
+                "MouseDragEnd1Pane",
+                "send",
+                "-X",
+                "copy-pipe-and-cancel",
+                "pbcopy",
+            ]);
+        }
+    }
+
     /// The `session:window` target for an arbitrary named window (e.g. a terminal).
     pub fn target_named(&self, name: &str) -> String {
         format!("{}:{}", self.session, name)
@@ -218,6 +241,7 @@ impl TmuxRuntime {
                 &cwd,
             ])?;
         }
+        self.configure();
         Ok(self.target_named(name))
     }
 

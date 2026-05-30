@@ -17,12 +17,13 @@ use crate::theme;
 const FLEET_KEYS: &str =
     "↑↓ ↵ open  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane · tab session  ·  i interact · ↵/→ focus  ·  e spawn · o adopt · t term  ·  ←/esc back";
+    "↑↓ lane · tab session  ·  ↵ open (real terminal) · → focus · i quick-type  ·  e spawn · o adopt · t term  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
-    "i/↵/→ type · PgUp scroll · v image · a attach  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
+    "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
-const GRID_KEYS: &str = "←→ move · ↵ focus  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
+const GRID_KEYS: &str =
+    "←→ move · ↵ open (real terminal)  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
 
@@ -451,7 +452,7 @@ fn render_focus(f: &mut Frame, app: &App) {
         ))
     } else {
         Line::from(Span::styled(
-            " ○ COMMAND — i/→ type · PgUp scroll · drag-select copies · v paste-image · a attach ",
+            " ○ COMMAND — ↵/→ open real terminal (native scroll/copy/paste) · i quick-type · PgUp scroll ",
             app.theme.dim(),
         ))
     };

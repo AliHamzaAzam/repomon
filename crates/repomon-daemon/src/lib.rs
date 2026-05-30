@@ -58,6 +58,11 @@ impl Ctx {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
         let tmux = TmuxRuntime::new(config.tmux_session.clone());
+        // Make any already-running session attach-native (mouse, clipboard, deep scrollback);
+        // spawns reapply it, but an existing tmux server outlives a daemon restart.
+        if tmux.session_exists() {
+            tmux.configure();
+        }
         let (events, _rx) = broadcast::channel(512);
         Arc::new(Ctx {
             store,
