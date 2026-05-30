@@ -68,8 +68,19 @@ In the Split and Focus views, `i` enters **insert** mode and every keystroke is 
 live to the agent via tmux `send-keys` — printable chars, Enter, Backspace, arrows,
 **Shift+Tab** (so Claude's mode cycling works), `Ctrl-<key>` (e.g. `Ctrl-C`), and **`Esc`**
 (the agent needs it to interrupt/clear). Because `Esc` is forwarded, you leave insert mode
-with **`Ctrl-O`** instead. Output is captured with `capture-pane -e`, so the agent's colors
-render. For an unmediated session, `a` (in Focus) attaches the raw tmux window.
+with **`Ctrl-O`** instead. **Option/Alt + Arrow** (word jump) and **Alt + Backspace** (word
+delete) are forwarded too — your terminal must send Option as Meta (Terminal.app → Profiles →
+Keyboard → "Use Option as Meta key").
+
+The Focus view shows a `capture-pane -e` snapshot (colors render), which is a *picture* of the
+tail, so it has limits:
+
+- **Scroll back** through long output (e.g. a plan) with **`PgUp`/`PgDn`** or the mouse wheel;
+  `↵`/`esc` returns to the live tail.
+- **Select & copy** with your cursor: press **`y`** to release the mouse so the terminal owns
+  it (drag-select + ⌘C), then `y` again to restore scroll-wheel nav.
+- For full fidelity (native scrollback, selection, everything), **`a`** attaches the raw tmux
+  window — a real terminal.
 
 `AgentKind::command()` maps kinds to binaries:
 

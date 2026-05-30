@@ -75,6 +75,13 @@ pub struct App {
     /// True while Focus is driving a repomon-managed agent — so when it exits (`/exit` or
     /// stop) we can drop back out of Focus instead of staring at a dead pane.
     focus_managed: bool,
+    /// Whether repomon captures the mouse (for scroll-wheel nav). When off, the terminal owns
+    /// the mouse so you can drag-select and copy the rendered output natively.
+    pub mouse_on: bool,
+    /// Scrollback: lines scrolled up from the live tail in Focus (0 = following). `scroll_buf`
+    /// holds a deep capture taken when you start scrolling.
+    pub scroll: usize,
+    pub scroll_buf: Option<String>,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
     pub timeline: Option<TimelineData>,
@@ -139,6 +146,9 @@ impl App {
             output: HashMap::new(),
             focus_insert: false,
             focus_managed: false,
+            mouse_on: true,
+            scroll: 0,
+            scroll_buf: None,
             grid_active: 0,
             timeline: None,
             timeline_zoom: Zoom::Day,
@@ -299,6 +309,7 @@ impl App {
         if sel != self.session_lane {
             self.session_lane = sel;
             self.session_idx = 0;
+            self.reset_scroll(); // scrollback buffer belonged to the previous lane
         }
         let n = self
             .selected_lane()
@@ -416,7 +427,17 @@ impl App {
         let key = match ev {
             Event::Key(key) => key,
             Event::Mouse(me) => {
-                self.handle_mouse(me);
+                use ratatui::crossterm::event::MouseEventKind;
+                // In Focus the wheel scrolls the agent's output; elsewhere it moves the cursor.
+                if self.view == View::Focus && !self.focus_insert {
+                    match me.kind {
+                        MouseEventKind::ScrollUp => self.scroll_up(3).await,
+                        MouseEventKind::ScrollDown => self.scroll_down(3),
+                        _ => {}
+                    }
+                } else {
+                    self.handle_mouse(me);
+                }
                 return;
             }
             _ => return,
@@ -1040,7 +1061,13 @@ impl App {
         match key.code {
             // i / ↵ / → all drop into insert: → is "zoom in" and Focus is the deepest level,
             // so the next step in is typing to the agent.
-            KeyCode::Char('i') | KeyCode::Enter | KeyCode::Right => self.focus_insert = true,
+            KeyCode::Char('i') | KeyCode::Enter | KeyCode::Right => {
+                self.reset_scroll();
+                self.focus_insert = true;
+            }
+            // Scroll back through the agent's output (e.g. to read a long plan).
+            KeyCode::PageUp | KeyCode::Up => self.scroll_up(10).await,
+            KeyCode::PageDown | KeyCode::Down => self.scroll_down(10),
             KeyCode::Tab => self.cycle_session(true),
             KeyCode::BackTab => self.cycle_session(false),
             KeyCode::Char('e') => self.spawn_agent().await,
@@ -1051,6 +1078,9 @@ impl App {
             KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
             KeyCode::Char('m') => self.merge_lane().await,
             KeyCode::Char('c') => self.cd_to_lane(),
+            KeyCode::Char('y') => self.toggle_mouse(),
+            // esc/← stops scrolling first, then leaves to Split.
+            KeyCode::Esc | KeyCode::Left if self.scroll > 0 => self.reset_scroll(),
             KeyCode::Esc | KeyCode::Left => self.view = View::Split,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
@@ -1242,6 +1272,54 @@ impl App {
         }
     }
 
+    /// Toggle whether repomon captures the mouse. Off → the terminal owns the mouse, so you can
+    /// drag-select and copy the rendered output (and use the terminal's own scrollback).
+    fn toggle_mouse(&mut self) {
+        self.mouse_on = !self.mouse_on;
+        if self.mouse_on {
+            enable_mouse();
+            self.status = "mouse on — scroll-wheel navigates".into();
+        } else {
+            disable_mouse();
+            self.status =
+                "mouse off — drag to select & copy in your terminal (y re-enables)".into();
+        }
+    }
+
+    /// Scroll the Focus pane back through history, grabbing a deep capture the first time.
+    async fn scroll_up(&mut self, lines: usize) {
+        if self.scroll_buf.is_none() {
+            if let Some(id) = self.selected_lane().map(|l| l.id) {
+                if let Ok(v) = self
+                    .client
+                    .call(
+                        "agent.capture",
+                        Some(json!({ "lane_id": id, "lines": 2000 })),
+                    )
+                    .await
+                {
+                    self.scroll_buf = v
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .map(str::to_string);
+                }
+            }
+        }
+        self.scroll = self.scroll.saturating_add(lines);
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
+        if self.scroll == 0 {
+            self.scroll_buf = None;
+        }
+    }
+
+    fn reset_scroll(&mut self) {
+        self.scroll = 0;
+        self.scroll_buf = None;
+    }
+
     async fn stop_agent(&mut self) {
         if let Some(id) = self.selected_lane().map(|l| l.id) {
             let _ = self
@@ -1398,6 +1476,7 @@ impl App {
             Action::AdoptAgent => self.adopt_agent().await,
             Action::OpenTerminal => self.open_terminal().await,
             Action::AttachTerminal => self.attach_latest_terminal().await,
+            Action::ToggleMouse => self.toggle_mouse(),
         }
         // Grid uses its own cursor; keep it in range.
         if self.view == View::Grid {
@@ -1482,6 +1561,9 @@ async fn event_loop(
         app.sync_terminals().await;
         app.sync_session_cursor();
         app.check_focus_alive();
+        if app.view != View::Focus && app.scroll != 0 {
+            app.reset_scroll();
+        }
         terminal.draw(|f| view::render(f, app))?;
         if app.should_quit {
             return Ok(());
@@ -1590,13 +1672,18 @@ fn leaves_insert(key: &KeyEvent) -> bool {
 
 fn translate_key(key: &KeyEvent) -> Option<(String, bool)> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let spec = match key.code {
-        KeyCode::Char(c) => {
-            if ctrl {
-                return Some((format!("C-{}", c.to_ascii_lowercase()), false));
-            }
-            return Some((c.to_string(), true)); // literal printable
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if let KeyCode::Char(c) = key.code {
+        if ctrl {
+            return Some((format!("C-{}", c.to_ascii_lowercase()), false));
         }
+        // Alt+<char> (e.g. the terminal sending Option as Meta): forward as a tmux M- key.
+        if alt {
+            return Some((format!("M-{c}"), false));
+        }
+        return Some((c.to_string(), true)); // literal printable
+    }
+    let base = match key.code {
         KeyCode::Esc => "Escape", // the agent needs Esc (interrupt / clear); ^O leaves insert
         KeyCode::Enter => "Enter",
         KeyCode::Backspace => "BSpace",
@@ -1613,7 +1700,16 @@ fn translate_key(key: &KeyEvent) -> Option<(String, bool)> {
         KeyCode::PageDown => "PageDown",
         _ => return None,
     };
-    Some((spec.to_string(), false))
+    // Carry Alt/Ctrl so Option+Arrow (word jump), Ctrl+Arrow, Alt+Backspace (word delete), …
+    // reach the agent as tmux M-/C- keys.
+    let prefix = if ctrl {
+        "C-"
+    } else if alt {
+        "M-"
+    } else {
+        ""
+    };
+    Some((format!("{prefix}{base}"), false))
 }
 
 /// Await the next forwardable event, collapsing lag. `None` means the stream closed.
@@ -1638,6 +1734,32 @@ mod tests {
         assert_eq!(translate_key(&esc), Some(("Escape".to_string(), false)));
         // ...and it does NOT leave insert mode.
         assert!(!leaves_insert(&esc));
+    }
+
+    #[test]
+    fn alt_and_ctrl_arrows_forward_word_jump() {
+        // Option/Alt + Arrow (word jump) and Ctrl + Arrow reach the agent as tmux M-/C- keys.
+        let alt_left = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(
+            translate_key(&alt_left),
+            Some(("M-Left".to_string(), false))
+        );
+        let ctrl_right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(
+            translate_key(&ctrl_right),
+            Some(("C-Right".to_string(), false))
+        );
+        // Alt+Backspace (delete word) and Alt+<char> too.
+        let alt_bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(
+            translate_key(&alt_bs),
+            Some(("M-BSpace".to_string(), false))
+        );
+        let alt_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(translate_key(&alt_b), Some(("M-b".to_string(), false)));
+        // A plain arrow is unmodified.
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(translate_key(&left), Some(("Left".to_string(), false)));
     }
 
     #[test]

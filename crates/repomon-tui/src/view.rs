@@ -20,7 +20,7 @@ const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  i interact · ↵/→ focus  ·  e spawn · o adopt · t term  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
-    "i/↵/→ type · tab session  ·  e spawn · o adopt · t term · s stop  ·  a attach · m merge · c cd  ·  ←/esc back";
+    "i/↵/→ type · PgUp scroll · y select/copy  ·  e spawn · o adopt · t term · s stop · a attach  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str = "←→ move · ↵ focus  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
 const NEWLANE_KEYS: &str =
@@ -431,18 +431,30 @@ fn render_focus(f: &mut Frame, app: &App) {
         )));
     }
     let avail = (rows[1].height as usize).saturating_sub(1);
-    body.extend(output_tail(app, lane.map(|l| l.id), avail));
+    // While scrolled, show the deep capture window; otherwise follow the live tail.
+    match (app.scroll, &app.scroll_buf) {
+        (s, Some(buf)) if s > 0 => body.extend(scrolled_output(buf, avail, s)),
+        _ => body.extend(output_tail(app, lane.map(|l| l.id), avail)),
+    }
     f.render_widget(Paragraph::new(body), rows[1]);
 
-    // A clear mode toggle indicator: reverse-video INSERT vs dim COMMAND.
-    let mode = if app.focus_insert {
+    // Mode indicator: SCROLL while paging back, else reverse-video INSERT vs dim COMMAND.
+    let mode = if app.scroll > 0 {
+        Line::from(Span::styled(
+            format!(
+                " ↑ SCROLL +{} lines — PgUp/PgDn or wheel · ↵/esc back to live ",
+                app.scroll
+            ),
+            app.theme.selected(),
+        ))
+    } else if app.focus_insert {
         Line::from(Span::styled(
             " ● INSERT — keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
             app.theme.selected(),
         ))
     } else {
         Line::from(Span::styled(
-            " ○ COMMAND — i/→ type to agent · s stop · a attach · m merge · c cd · esc back ",
+            " ○ COMMAND — i/→ type · PgUp scroll · y select/copy · a attach · s stop · esc back ",
             app.theme.dim(),
         ))
     };
@@ -654,6 +666,25 @@ fn output_tail(app: &App, lane_id: Option<LaneId>, height: usize) -> Vec<Line<'s
 
 fn line_is_blank(line: &Line) -> bool {
     line.spans.iter().all(|s| s.content.trim().is_empty())
+}
+
+/// A `height`-line window of `raw` (a deep capture, ANSI-colored), scrolled up `scroll` lines
+/// from the bottom — used for Focus scrollback. Clamps so the top of the buffer is the limit.
+fn scrolled_output(raw: &str, height: usize, scroll: usize) -> Vec<Line<'static>> {
+    use ansi_to_tui::IntoText;
+    let mut lines: Vec<Line<'static>> = raw
+        .into_text()
+        .map(|t| t.lines)
+        .unwrap_or_else(|_| raw.lines().map(|l| Line::raw(l.to_string())).collect());
+    while lines.last().map(line_is_blank).unwrap_or(false) {
+        lines.pop();
+    }
+    let total = lines.len();
+    let h = height.max(1);
+    let s = scroll.min(total.saturating_sub(h)); // can't scroll past the top
+    let end = total - s;
+    let start = end.saturating_sub(h);
+    lines[start..end].to_vec()
 }
 
 fn focus_status_line(lane: &Lane) -> String {
