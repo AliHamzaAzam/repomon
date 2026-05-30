@@ -146,7 +146,9 @@ impl App {
             output: HashMap::new(),
             focus_insert: false,
             focus_managed: false,
-            mouse_on: true,
+            // Mouse capture OFF by default so you can drag-select & copy the agent's output in
+            // any mode; `y` opts into capture for scroll-wheel scrolling/navigation.
+            mouse_on: false,
             scroll: 0,
             scroll_buf: None,
             grid_active: 0,
@@ -1278,11 +1280,11 @@ impl App {
         self.mouse_on = !self.mouse_on;
         if self.mouse_on {
             enable_mouse();
-            self.status = "mouse on — scroll-wheel navigates".into();
+            self.status =
+                "mouse captured — wheel scrolls/navigates · drag-select off (y to release)".into();
         } else {
             disable_mouse();
-            self.status =
-                "mouse off — drag to select & copy in your terminal (y re-enables)".into();
+            self.status = "mouse released — drag to select & copy · y for wheel-scroll".into();
         }
     }
 
@@ -1502,7 +1504,9 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     app.refresh().await;
 
     let mut terminal = ratatui::init();
-    enable_mouse();
+    if app.mouse_on {
+        enable_mouse();
+    }
     let (in_tx, mut in_rx) = mpsc::channel::<Event>(128);
     // Read stdin on a thread, but pause it (via `input_suspended`) during a tmux attach so we
     // don't fight tmux for the terminal — otherwise keystrokes get split and the session
@@ -1627,7 +1631,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     ratatui::restore();
     tmux_attach(&target);
     *terminal = ratatui::init();
-    enable_mouse();
+    if app.mouse_on {
+        enable_mouse();
+    }
     let _ = terminal.clear();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
@@ -1644,7 +1650,9 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     ratatui::restore();
     tmux_attach(target);
     *terminal = ratatui::init();
-    enable_mouse();
+    if app.mouse_on {
+        enable_mouse();
+    }
     let _ = terminal.clear();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
