@@ -430,12 +430,9 @@ fn render_focus(f: &mut Frame, app: &App) {
             app.theme.dim(),
         )));
     }
-    let avail = (rows[1].height as usize).saturating_sub(1);
-    // While scrolled, show the deep capture window; otherwise follow the live tail.
-    match (app.scroll, &app.scroll_buf) {
-        (s, Some(buf)) if s > 0 => body.extend(scrolled_output(buf, avail, s)),
-        _ => body.extend(output_tail(app, lane.map(|l| l.id), avail)),
-    }
+    let out_y0 = rows[1].y + body.len() as u16;
+    let avail = (rows[1].height as usize).saturating_sub(body.len());
+    body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
     f.render_widget(Paragraph::new(body), rows[1]);
 
     // Mode indicator: SCROLL while paging back, else reverse-video INSERT vs dim COMMAND.
@@ -668,10 +665,43 @@ fn line_is_blank(line: &Line) -> bool {
     line.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
-/// A `height`-line window of `raw` (a deep capture, ANSI-colored), scrolled up `scroll` lines
-/// from the bottom — used for Focus scrollback. Clamps so the top of the buffer is the limit.
-fn scrolled_output(raw: &str, height: usize, scroll: usize) -> Vec<Line<'static>> {
+/// The `[start, end)` window of a `total`-line buffer showing `height` lines, scrolled up
+/// `scroll` from the bottom (clamped so the top of the buffer is the limit).
+fn output_window(total: usize, height: usize, scroll: usize) -> (usize, usize) {
+    let h = height.max(1);
+    if total <= h {
+        return (0, total);
+    }
+    let s = scroll.min(total - h);
+    let end = total - s;
+    (end - h, end)
+}
+
+/// The Focus pane's visible lines: the live tail (or the scrollback window), ANSI-colored,
+/// with drag-selected lines highlighted. Records the geometry on `app` so the mouse handler
+/// can map a screen row back to a buffer line for selection/copy.
+fn focus_output(
+    app: &App,
+    lane_id: Option<LaneId>,
+    avail: usize,
+    out_y0: u16,
+) -> Vec<Line<'static>> {
     use ansi_to_tui::IntoText;
+    let raw: String = if app.scroll > 0 {
+        app.scroll_buf.clone().unwrap_or_default()
+    } else {
+        lane_id
+            .and_then(|id| app.output.get(&id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    if raw.trim().is_empty() {
+        app.focus_geom.set((out_y0, 0, 0));
+        return vec![Line::from(Span::styled(
+            "(no live output — press e to start claude here)".to_string(),
+            app.theme.dim(),
+        ))];
+    }
     let mut lines: Vec<Line<'static>> = raw
         .into_text()
         .map(|t| t.lines)
@@ -679,12 +709,26 @@ fn scrolled_output(raw: &str, height: usize, scroll: usize) -> Vec<Line<'static>
     while lines.last().map(line_is_blank).unwrap_or(false) {
         lines.pop();
     }
-    let total = lines.len();
-    let h = height.max(1);
-    let s = scroll.min(total.saturating_sub(h)); // can't scroll past the top
-    let end = total - s;
-    let start = end.saturating_sub(h);
-    lines[start..end].to_vec()
+    let (start, end) = output_window(lines.len(), avail, app.scroll);
+    app.focus_geom.set((out_y0, start, end - start));
+
+    let sel = match (app.sel_anchor, app.sel_head) {
+        (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+        _ => None,
+    };
+    lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let mut l = line.clone();
+            if let Some((lo, hi)) = sel {
+                if (lo..=hi).contains(&(start + i)) {
+                    l = l.style(app.theme.selected());
+                }
+            }
+            l
+        })
+        .collect()
 }
 
 fn focus_status_line(lane: &Lane) -> String {

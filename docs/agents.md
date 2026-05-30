@@ -75,13 +75,14 @@ Keyboard → "Use Option as Meta key").
 The Focus view shows a `capture-pane -e` snapshot (colors render), which is a *picture* of the
 tail, so it has limits:
 
-- **Select & copy** with your cursor: just drag-select and ⌘C — repomon leaves the mouse to
-  your terminal by default, in every mode. (Press **`y`** to *capture* the mouse for
-  scroll-wheel scrolling/nav; `y` again to release.)
-- **Scroll back** through long output (e.g. a plan) with **`PgUp`/`PgDn`** (or the mouse wheel
-  once you've pressed `y`); `↵`/`esc` returns to the live tail.
-- For full fidelity (native scrollback, selection, everything), **`a`** attaches the raw tmux
-  window — a real terminal.
+- **Scroll back** through long output (e.g. a plan) with the **mouse wheel** or **`PgUp`/`PgDn`**;
+  `↵`/`esc` returns to the live tail.
+- **Select & copy**: **drag** over lines in the pane — the selection is copied to your system
+  clipboard automatically when you release (line-granular). Status shows `copied N lines`.
+- Prefer your terminal's own selection/scroll instead? Press **`y`** to release the mouse (then
+  drag-select natively); `y` again re-captures it.
+- For full fidelity (native scrollback, character-precise selection, everything), **`a`**
+  attaches the raw tmux window — a real terminal.
 
 `AgentKind::command()` maps kinds to binaries:
 

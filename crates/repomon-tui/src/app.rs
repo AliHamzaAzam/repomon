@@ -82,6 +82,12 @@ pub struct App {
     /// holds a deep capture taken when you start scrolling.
     pub scroll: usize,
     pub scroll_buf: Option<String>,
+    /// Focus drag-selection (buffer line indices). On release the range is copied to the
+    /// clipboard. `focus_geom` = (first output screen row, window-start line, visible count),
+    /// set during render so the mouse handler can map a screen row to a buffer line.
+    pub sel_anchor: Option<usize>,
+    pub sel_head: Option<usize>,
+    pub focus_geom: std::cell::Cell<(u16, usize, usize)>,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
     pub timeline: Option<TimelineData>,
@@ -146,11 +152,14 @@ impl App {
             output: HashMap::new(),
             focus_insert: false,
             focus_managed: false,
-            // Mouse capture OFF by default so you can drag-select & copy the agent's output in
-            // any mode; `y` opts into capture for scroll-wheel scrolling/navigation.
-            mouse_on: false,
+            // Mouse captured so the wheel scrolls the agent pane and drag-selects copy to the
+            // clipboard. `y` releases it for native terminal selection/scroll if preferred.
+            mouse_on: true,
             scroll: 0,
             scroll_buf: None,
+            sel_anchor: None,
+            sel_head: None,
+            focus_geom: std::cell::Cell::new((0, 0, 0)),
             grid_active: 0,
             timeline: None,
             timeline_zoom: Zoom::Day,
@@ -429,16 +438,27 @@ impl App {
         let key = match ev {
             Event::Key(key) => key,
             Event::Mouse(me) => {
-                use ratatui::crossterm::event::MouseEventKind;
-                // In Focus the wheel scrolls the agent's output; elsewhere it moves the cursor.
-                if self.view == View::Focus && !self.focus_insert {
-                    match me.kind {
+                use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+                // In Focus the wheel scrolls the agent's output and a drag selects lines (copied
+                // to the clipboard on release); elsewhere the wheel moves the cursor.
+                match self.view {
+                    View::Focus if !self.focus_insert => match me.kind {
                         MouseEventKind::ScrollUp => self.scroll_up(3).await,
                         MouseEventKind::ScrollDown => self.scroll_down(3),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.sel_anchor = self.focus_line_at(me.row);
+                            self.sel_head = self.sel_anchor;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if self.sel_anchor.is_some() => {
+                            if let Some(i) = self.focus_line_at(me.row) {
+                                self.sel_head = Some(i);
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
                         _ => {}
-                    }
-                } else {
-                    self.handle_mouse(me);
+                    },
+                    View::Focus => {} // insert mode: leave the mouse alone
+                    _ => self.handle_mouse(me),
                 }
                 return;
             }
@@ -1308,6 +1328,7 @@ impl App {
             }
         }
         self.scroll = self.scroll.saturating_add(lines);
+        self.clear_selection();
     }
 
     fn scroll_down(&mut self, lines: usize) {
@@ -1315,11 +1336,71 @@ impl App {
         if self.scroll == 0 {
             self.scroll_buf = None;
         }
+        self.clear_selection();
     }
 
     fn reset_scroll(&mut self) {
         self.scroll = 0;
         self.scroll_buf = None;
+        self.clear_selection();
+    }
+
+    fn clear_selection(&mut self) {
+        self.sel_anchor = None;
+        self.sel_head = None;
+    }
+
+    /// The plain-text (ANSI-stripped) lines of the focused agent's pane — the same line set the
+    /// Focus view renders, so a buffer index maps 1:1 to a rendered row.
+    fn focus_buffer(&self) -> Vec<String> {
+        let raw = if self.scroll > 0 {
+            self.scroll_buf.clone().unwrap_or_default()
+        } else {
+            self.selected_lane()
+                .and_then(|l| self.output.get(&l.id))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let mut lines: Vec<String> = strip_ansi(&raw).lines().map(str::to_string).collect();
+        while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+        lines
+    }
+
+    /// Map a mouse screen row to a buffer line index, using the geometry the view recorded.
+    fn focus_line_at(&self, row: u16) -> Option<usize> {
+        let (out_y0, start, count) = self.focus_geom.get();
+        if count == 0 || row < out_y0 {
+            return None;
+        }
+        let r = (row - out_y0) as usize;
+        if r >= count {
+            return None;
+        }
+        let idx = start + r;
+        (idx < self.focus_buffer().len()).then_some(idx)
+    }
+
+    /// Copy the current drag-selection (whole lines) to the system clipboard and clear it.
+    fn copy_selection(&mut self) {
+        let (a, h) = match (self.sel_anchor, self.sel_head) {
+            (Some(a), Some(h)) => (a, h),
+            _ => return,
+        };
+        let lines = self.focus_buffer();
+        let lo = a.min(h);
+        let hi = a.max(h).min(lines.len().saturating_sub(1));
+        if lo < lines.len() {
+            let text = lines[lo..=hi].join("\n");
+            let n = hi - lo + 1;
+            copy_to_clipboard(&text);
+            self.status = format!(
+                "copied {n} line{} to clipboard",
+                if n == 1 { "" } else { "s" }
+            );
+        }
+        self.clear_selection();
     }
 
     async fn stop_agent(&mut self) {
@@ -1672,6 +1753,48 @@ fn tmux_attach(target: &str) {
 
 /// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
 /// is sent with `send-keys -l`; named keys (Enter, Tab, BTab, arrows, C-c, …) without it.
+/// Strip ANSI escape sequences (CSI and simple `ESC x`) to get plain text for selection/copy.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break; // end of the CSI sequence
+                    }
+                }
+            } else {
+                chars.next(); // a one-character escape
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Copy `text` to the system clipboard (macOS `pbcopy`, falling back to Linux tools).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for prog in ["pbcopy", "wl-copy", "xclip"] {
+        let mut cmd = Command::new(prog);
+        if prog == "xclip" {
+            cmd.args(["-selection", "clipboard"]);
+        }
+        if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return;
+        }
+    }
+}
+
 /// The keystroke that leaves insert mode. It's `Ctrl-O` (not `Esc`) because the agent itself
 /// needs `Esc` for interrupt/clear, so `Esc` is forwarded rather than captured.
 fn leaves_insert(key: &KeyEvent) -> bool {
@@ -1768,6 +1891,17 @@ mod tests {
         // A plain arrow is unmodified.
         let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(translate_key(&left), Some(("Left".to_string(), false)));
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(
+            strip_ansi("\x1b[31mhello\x1b[0m world"),
+            "hello world".to_string()
+        );
+        // Cursor-move and SGR sequences both go; plain text is untouched.
+        assert_eq!(strip_ansi("a\x1b[2Kb\x1b[1;32mc"), "abc".to_string());
+        assert_eq!(strip_ansi("plain"), "plain".to_string());
     }
 
     #[test]
