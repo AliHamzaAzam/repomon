@@ -1767,6 +1767,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     let _ = terminal.clear();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
+    app.status = "back from the agent (it's still running) — ↵ to reopen".into();
 }
 
 /// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.

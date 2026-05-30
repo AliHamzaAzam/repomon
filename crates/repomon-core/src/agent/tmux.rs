@@ -205,6 +205,25 @@ impl TmuxRuntime {
                 "pbcopy",
             ]);
         }
+
+        // A thin status bar that always shows the way back, so detaching is discoverable.
+        let _ = self.run(&["set", "-g", "status", "on"]);
+        let _ = self.run(&["set", "-g", "status-interval", "0"]); // static → no idle redraw
+        let _ = self.run(&["set", "-g", "status-style", "bg=colour236,fg=colour250"]);
+        let _ = self.run(&["set", "-g", "status-left", "#[bold] repomon #[nobold]"]);
+        let _ = self.run(&["set", "-g", "status-left-length", "20"]);
+        let _ = self.run(&[
+            "set",
+            "-g",
+            "status-right",
+            "#[reverse] F12 #[noreverse] or #[reverse] ^B d #[noreverse] back to repomon ",
+        ]);
+        let _ = self.run(&["set", "-g", "status-right-length", "60"]);
+
+        // Detach keys: F12 leaves with one press (root table); prefix-d is the tmux default;
+        // prefix-q is an easy mnemonic. Detach leaves the agent running in the background.
+        let _ = self.run(&["bind", "-n", "F12", "detach-client"]);
+        let _ = self.run(&["bind", "q", "detach-client"]);
     }
 
     /// The `session:window` target for an arbitrary named window (e.g. a terminal).

@@ -71,13 +71,17 @@ There are two ways to drive an agent, and they trade off fidelity vs. staying in
 Pressing **`↵`** (Split/Grid), or **`↵` / `→` / `a`** (Focus), **attaches** to the agent's own
 tmux pane. This is a *genuine terminal* — there is **no difference** from running the agent in a
 plain terminal window: native wheel scrolling and scrollback, character-precise mouse
-selection, **⌘V image paste** straight into Claude, full color, every key. Detach with
-**`Ctrl-b d`** (the repomon-managed tmux prefix) to come back to the fleet.
+selection, **⌘V image paste** straight into Claude, full color, every key.
+
+**To come back to repomon, press `F12`** (single key) — or `Ctrl-b d`, or `Ctrl-b q`. A thin
+status bar along the bottom of the attached pane always shows this. Detaching leaves the agent
+**running in the background**; don't type `exit` or `Ctrl-C` unless you actually want to end it.
 
 repomon configures its tmux server to feel native: `mouse on` (wheel scroll + drag-select),
-`set-clipboard on` (OSC-52 passthrough), a 50k-line scrollback, and drag-select copies straight
-to the system clipboard via `pbcopy`. Because you're in the real process, anything the agent
-supports in a terminal — including image paste — works exactly as it would standalone.
+`set-clipboard on` (OSC-52 passthrough), a 50k-line scrollback, drag-select copies straight to
+the system clipboard via `pbcopy`, and a status bar showing the detach key. Because you're in
+the real process, anything the agent supports in a terminal — including image paste — works
+exactly as it would standalone.
 
 > Why attach rather than emulate? The in-app view is a `capture-pane` *picture* plus
 > `send-keys`; it can't carry a nested terminal's scroll wheel or real clipboard-image paste.
