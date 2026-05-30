@@ -442,7 +442,7 @@ impl App {
                 // In Focus the wheel scrolls the agent's output and a drag selects lines (copied
                 // to the clipboard on release); elsewhere the wheel moves the cursor.
                 match self.view {
-                    View::Focus if !self.focus_insert => match me.kind {
+                    View::Focus => match me.kind {
                         MouseEventKind::ScrollUp => self.scroll_up(3).await,
                         MouseEventKind::ScrollDown => self.scroll_down(3),
                         MouseEventKind::Down(MouseButton::Left) => {
@@ -457,7 +457,6 @@ impl App {
                         MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
                         _ => {}
                     },
-                    View::Focus => {} // insert mode: leave the mouse alone
                     _ => self.handle_mouse(me),
                 }
                 return;
@@ -1077,6 +1076,17 @@ impl App {
                 self.focus_insert = false;
                 return;
             }
+            // Scroll the captured history even while typing (the wheel is unreliable through
+            // tmux/terminals; these keys always reach repomon). Other keys go to the agent, and
+            // typing returns to the live tail.
+            match key.code {
+                KeyCode::PageUp => return self.scroll_up(10).await,
+                KeyCode::PageDown => return self.scroll_down(10),
+                _ => {}
+            }
+            if self.scroll > 0 {
+                self.reset_scroll();
+            }
             self.send_agent_key(key).await;
             return;
         }
@@ -1100,6 +1110,7 @@ impl App {
             KeyCode::Char('a') => self.attach_request = self.selected_lane().map(|l| l.id),
             KeyCode::Char('m') => self.merge_lane().await,
             KeyCode::Char('c') => self.cd_to_lane(),
+            KeyCode::Char('v') => self.paste_image().await,
             KeyCode::Char('y') => self.toggle_mouse(),
             // esc/← stops scrolling first, then leaves to Split.
             KeyCode::Esc | KeyCode::Left if self.scroll > 0 => self.reset_scroll(),
@@ -1291,6 +1302,32 @@ impl App {
         } else {
             self.status =
                 "cd-on-exit needs the `repomon` shell function (see README) — not active".into();
+        }
+    }
+
+    /// Paste a clipboard image into the focused agent: save it to a temp file and insert the
+    /// path into the agent's input (Claude reads images referenced by path). For native paste,
+    /// `a` attach + ⌘V is the real-terminal route.
+    async fn paste_image(&mut self) {
+        let Some(id) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        match clipboard_image_to_file() {
+            Some(path) => {
+                let _ = self
+                    .client
+                    .call(
+                        "agent.send_input",
+                        Some(json!({ "lane_id": id, "text": format!("{path} "), "enter": false })),
+                    )
+                    .await;
+                self.reset_scroll();
+                self.focus_insert = true;
+                self.status = format!("pasted image → {path}");
+            }
+            None => {
+                self.status = "no image in the clipboard (a attach + ⌘V for native paste)".into()
+            }
         }
     }
 
@@ -1792,6 +1829,52 @@ fn copy_to_clipboard(text: &str) {
             let _ = child.wait();
             return;
         }
+    }
+}
+
+/// Save a clipboard image to a temp PNG and return its path (macOS), so it can be referenced
+/// to an agent. Tries `pngpaste`, then AppleScript. `None` if the clipboard has no image.
+fn clipboard_image_to_file() -> Option<String> {
+    use std::process::Command;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = format!("/tmp/repomon-paste-{}-{nanos}.png", std::process::id());
+
+    if Command::new("pngpaste")
+        .arg(&path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && std::path::Path::new(&path).exists()
+    {
+        return Some(path);
+    }
+
+    let set_f = format!("set f to open for access POSIX file \"{path}\" with write permission");
+    let lines: [&str; 10] = [
+        "try",
+        "set d to the clipboard as «class PNGf»",
+        "on error",
+        "return \"noimage\"",
+        "end try",
+        &set_f,
+        "set eof f to 0",
+        "write d to f",
+        "close access f",
+        "return \"ok\"",
+    ];
+    let mut cmd = Command::new("osascript");
+    for l in &lines {
+        cmd.arg("-e").arg(l);
+    }
+    let out = cmd.output().ok()?;
+    if String::from_utf8_lossy(&out.stdout).trim() == "ok" && std::path::Path::new(&path).exists() {
+        Some(path)
+    } else {
+        let _ = std::fs::remove_file(&path);
+        None
     }
 }
 

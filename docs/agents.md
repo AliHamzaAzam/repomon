@@ -75,13 +75,16 @@ Keyboard → "Use Option as Meta key").
 The Focus view shows a `capture-pane -e` snapshot (colors render), which is a *picture* of the
 tail, so it has limits:
 
-- **Scroll back** through long output (e.g. a plan) with the **mouse wheel** or **`PgUp`/`PgDn`**;
-  `↵`/`esc` returns to the live tail.
-- **Select & copy**: **drag** over lines in the pane — the selection is copied to your system
-  clipboard automatically when you release (line-granular). Status shows `copied N lines`.
-- Prefer your terminal's own selection/scroll instead? Press **`y`** to release the mouse (then
-  drag-select natively); `y` again re-captures it.
-- For full fidelity (native scrollback, character-precise selection, everything), **`a`**
+- **Scroll back** through long output (e.g. a plan) with **`PgUp`/`PgDn`** — these work in
+  *both* command and insert mode and always reach repomon. The mouse wheel also scrolls, but
+  it's unreliable through tmux/some terminals (it may scroll your outer terminal instead), so
+  `PgUp`/`PgDn` is the dependable way. `↵`/`esc` (or typing) returns to the live tail.
+- **Select & copy**: **drag** over lines in the pane — copied to your clipboard automatically
+  on release (line-granular). `y` releases the mouse if you prefer native terminal selection.
+- **Paste an image**: copy an image, then press **`v`** — repomon saves it to a temp PNG and
+  inserts the path into the agent's input (Claude reads images referenced by path). For native
+  ⌘V paste, **`a`** attach into the real terminal.
+- For full fidelity (native scrollback, character-precise selection, image paste), **`a`**
   attaches the raw tmux window — a real terminal.
 
 `AgentKind::command()` maps kinds to binaries:

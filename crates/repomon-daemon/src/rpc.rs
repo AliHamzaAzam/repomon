@@ -75,6 +75,12 @@ struct AgentSpawn {
 struct AgentInput {
     lane_id: repomon_core::model::LaneId,
     text: String,
+    /// Press Enter after the text (default). `false` just inserts it (e.g. a pasted path).
+    #[serde(default = "default_true")]
+    enter: bool,
+}
+fn default_true() -> bool {
+    true
 }
 #[derive(Deserialize)]
 struct AgentSignal {
@@ -576,11 +582,17 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "agent.send_input" => {
             let p: AgentInput = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let (lane, text) = (p.lane_id, p.text);
-            tokio::task::spawn_blocking(move || tmux.send_text(lane, &text))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
+            let (lane, text, enter) = (p.lane_id, p.text, p.enter);
+            tokio::task::spawn_blocking(move || {
+                if enter {
+                    tmux.send_text(lane, &text)
+                } else {
+                    tmux.send_literal(lane, &text)
+                }
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
             Ok(Value::Null)
         }
         "agent.signal" => {

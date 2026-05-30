@@ -20,7 +20,7 @@ const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  i interact · ↵/→ focus  ·  e spawn · o adopt · t term  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
-    "i/↵/→ type · PgUp scroll · drag-select  ·  e spawn · o adopt · t term · s stop · a attach  ·  ←/esc back";
+    "i/↵/→ type · PgUp scroll · v image · a attach  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str = "←→ move · ↵ focus  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
 const NEWLANE_KEYS: &str =
@@ -446,12 +446,12 @@ fn render_focus(f: &mut Frame, app: &App) {
         ))
     } else if app.focus_insert {
         Line::from(Span::styled(
-            " ● INSERT — keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
+            " ● INSERT — keys → agent (esc · ⇧⇥ · ^C) · PgUp/PgDn scrolls · ^O to command ",
             app.theme.selected(),
         ))
     } else {
         Line::from(Span::styled(
-            " ○ COMMAND — i/→ type · PgUp scroll · drag to select & copy · a attach · esc back ",
+            " ○ COMMAND — i/→ type · PgUp scroll · drag-select copies · v paste-image · a attach ",
             app.theme.dim(),
         ))
     };
