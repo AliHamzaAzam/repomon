@@ -1,6 +1,6 @@
 //! Application state and the interactive event loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -88,6 +88,9 @@ pub struct App {
     pub sel_anchor: Option<usize>,
     pub sel_head: Option<usize>,
     pub focus_geom: std::cell::Cell<(u16, usize, usize)>,
+    /// Lanes where the user disabled auto-continue this session (echoes the daemon's set so the
+    /// `C` key can toggle without a round-trip).
+    pub ac_off: HashSet<LaneId>,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
     pub timeline: Option<TimelineData>,
@@ -160,6 +163,7 @@ impl App {
             sel_anchor: None,
             sel_head: None,
             focus_geom: std::cell::Cell::new((0, 0, 0)),
+            ac_off: HashSet::new(),
             grid_active: 0,
             timeline: None,
             timeline_zoom: Zoom::Day,
@@ -1502,6 +1506,32 @@ impl App {
         }
     }
 
+    /// Arm/disarm auto-continue (resume on usage limit) for the selected lane.
+    async fn toggle_auto_continue(&mut self) {
+        let Some(id) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        let enabled = self.ac_off.contains(&id); // currently off → turning on
+        if enabled {
+            self.ac_off.remove(&id);
+        } else {
+            self.ac_off.insert(id);
+        }
+        let _ = self
+            .client
+            .call(
+                "agent.auto_continue",
+                Some(json!({ "lane_id": id, "enabled": enabled })),
+            )
+            .await;
+        self.status = if enabled {
+            "auto-continue on for this lane".into()
+        } else {
+            "auto-continue off for this lane (resume manually on a usage limit)".into()
+        };
+        self.refresh().await;
+    }
+
     async fn apply(&mut self, action: Action) {
         match action {
             Action::MoveUp => self.selected = self.selected.saturating_sub(1),
@@ -1609,6 +1639,7 @@ impl App {
             Action::OpenTerminal => self.open_terminal().await,
             Action::AttachTerminal => self.attach_latest_terminal().await,
             Action::ToggleMouse => self.toggle_mouse(),
+            Action::ToggleAutoContinue => self.toggle_auto_continue().await,
         }
         // Grid uses its own cursor; keep it in range.
         if self.view == View::Grid {

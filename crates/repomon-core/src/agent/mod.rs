@@ -7,6 +7,7 @@
 //! daemon also falls back to "is the tmux window alive?".
 
 pub mod claude;
+pub mod limit;
 pub mod tmux;
 
 use std::path::Path;
@@ -17,6 +18,7 @@ use chrono::{DateTime, Utc};
 use crate::model::{AgentKind, AgentStatus};
 
 pub use claude::TranscriptSummary;
+pub use limit::{detect_usage_limit, UsageLimit};
 pub use tmux::{shell_quote, TmuxRuntime};
 
 /// How recently a file must have changed for its agent to count as "running".

@@ -101,6 +101,11 @@ struct AgentCapture {
     lines: Option<u32>,
 }
 #[derive(Deserialize)]
+struct AgentAutoContinue {
+    lane_id: repomon_core::model::LaneId,
+    enabled: bool,
+}
+#[derive(Deserialize)]
 struct AgentAdd {
     name: String,
     command: String,
@@ -650,6 +655,25 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .map_err(internal)?;
             Ok(json!({ "target": ctx.tmux.target(p.lane_id), "available": available }))
         }
+        // Arm/disarm auto-continue (resume on usage limit) for one lane, this session.
+        "agent.auto_continue" => {
+            let p: AgentAutoContinue = parse(params)?;
+            {
+                let mut off = ctx.auto_continue_off.lock().await;
+                if p.enabled {
+                    off.remove(&p.lane_id);
+                } else {
+                    off.insert(p.lane_id);
+                    // Drop any active pause so the lane reverts to its natural status now.
+                    ctx.rate_limits.lock().await.remove(&p.lane_id);
+                }
+            }
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_STATUS,
+                json!({ "lane_id": p.lane_id, "status": "auto-continue" }),
+            );
+            Ok(Value::Null)
+        }
 
         // ---- plain terminals (a shell per worktree, several allowed) ----
         "terminal.open" => {
@@ -805,6 +829,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // bounds how many sessions are actually running — keep that many of the most recent.
     let live = live_cwds_cached(ctx).await;
 
+    // Usage-limit pauses (from the auto-continue watcher): when a managed lane is paused and
+    // auto-continue is armed, its managed session shows as RateLimited with a resume time.
+    let rate_limits = ctx.rate_limits.lock().await.clone();
+    let auto_off = ctx.auto_continue_off.lock().await.clone();
+    let global_auto = ctx.config.read().await.auto_continue;
+
     for (lane, mut summaries) in lanes.iter_mut().zip(per_lane) {
         if let Some(live) = &live {
             let key = lane
@@ -828,10 +858,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 session.external = !(managed && idx == 0);
                 lane.agent_sessions.push(session);
             }
-            continue;
-        }
-        // No parseable transcript: surface a repomon-spawned agent if its window is alive.
-        if managed {
+        } else if managed {
+            // No parseable transcript: surface a repomon-spawned agent if its window is alive.
             let kind = metas
                 .iter()
                 .find(|m| m.id == lane.id)
@@ -852,7 +880,19 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 status: AgentStatus::Running,
                 external: false,
                 session_id: None,
+                resume_at: None,
             });
+        }
+
+        // Overlay a usage-limit pause onto the managed (non-external) session.
+        if let Some(rl) = rate_limits.get(&lane.id) {
+            let armed = global_auto && !auto_off.contains(&lane.id);
+            if armed {
+                if let Some(sess) = lane.agent_sessions.iter_mut().find(|s| !s.external) {
+                    sess.status = AgentStatus::RateLimited;
+                    sess.resume_at = rl.reset_at;
+                }
+            }
         }
     }
 }

@@ -4,10 +4,12 @@
 //! [`rpc`] dispatch, the [`socket`] server, and [`pubsub`]. The `repomond` binary is a thin
 //! wrapper around [`serve`]; the integration tests drive [`Ctx`] + [`serve`] directly.
 
+pub mod auto_continue;
 pub mod pubsub;
 pub mod rpc;
 pub mod socket;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,7 +40,12 @@ pub struct Ctx {
     pub viewport: Mutex<Vec<LaneId>>,
     /// Cache of how many live `claude` processes have each working dir (ps/lsof, ~2s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
-    pub live_cwds: Mutex<Option<(Instant, std::collections::HashMap<PathBuf, usize>)>>,
+    pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
+    /// Lanes currently paused on a usage limit, with their reset time — written by the
+    /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
+    pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
+    /// Lanes where the user disabled auto-continue this session (the `C` key).
+    pub auto_continue_off: Mutex<HashSet<LaneId>>,
     pub shutdown: Notify,
 }
 
@@ -76,6 +83,8 @@ impl Ctx {
             events,
             viewport: Mutex::new(Vec::new()),
             live_cwds: Mutex::new(None),
+            rate_limits: Mutex::new(HashMap::new()),
+            auto_continue_off: Mutex::new(HashSet::new()),
             shutdown: Notify::new(),
         })
     }

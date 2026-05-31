@@ -186,6 +186,9 @@ pub enum AgentStatus {
     Running,
     /// Waiting for user input — this is what drives the `⏸` "needs you" flag.
     Waiting,
+    /// Paused on a usage limit; repomon auto-continues it at the reset time (so it does *not*
+    /// count as "needs you" while auto-continue is armed).
+    RateLimited,
     #[default]
     Idle,
     Ended,
@@ -196,6 +199,7 @@ impl AgentStatus {
         match self {
             AgentStatus::Running => "running",
             AgentStatus::Waiting => "waiting",
+            AgentStatus::RateLimited => "rate-limited",
             AgentStatus::Idle => "idle",
             AgentStatus::Ended => "ended",
         }
@@ -230,6 +234,10 @@ pub struct AgentSession {
     /// exact session even when several run in the same worktree.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When a rate-limited agent will be auto-continued (UTC). Overlaid by the daemon for the
+    /// `RateLimited` status; `None` when the reset time couldn't be parsed (periodic retry).
+    #[serde(default)]
+    pub resume_at: Option<DateTime<Utc>>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

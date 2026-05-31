@@ -8,6 +8,7 @@ pub const DIRTY: &str = "●";
 pub const CLEAN: &str = "○";
 pub const AGENT_ACTIVE: &str = "▶";
 pub const WAITING: &str = "⏸";
+pub const RATE_LIMITED: &str = "⏳";
 pub const UP: char = '↑';
 pub const DOWN: char = '↓';
 

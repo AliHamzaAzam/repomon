@@ -15,9 +15,9 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane · tab session  ·  ↵ open (real terminal) · → focus · i quick-type  ·  e spawn · o adopt · t term  ·  ←/esc back";
+    "↑↓ lane · tab session  ·  ↵ open (real terminal) · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const FOCUS_CMD_KEYS: &str =
     "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
@@ -616,12 +616,26 @@ fn agent_badge(lane: &Lane) -> String {
     } else {
         String::new()
     };
-    if waiting > 0 {
+    let rate_limited = sessions
+        .iter()
+        .find(|s| s.status == AgentStatus::RateLimited);
+    if let Some(rl) = rate_limited {
+        format!("⏳ rate-limited · {}{count}{tag}", fmt_resume(rl.resume_at))
+    } else if waiting > 0 {
         format!("⏸ needs you{count}{tag}")
     } else if running > 0 {
         format!("▶ running{count}{tag}")
     } else {
         format!("idle{count}{tag}")
+    }
+}
+
+/// How a pending auto-continue reads in a badge: the local resume time, or "retrying" when the
+/// reset time couldn't be parsed (periodic retry).
+fn fmt_resume(resume_at: Option<DateTime<Utc>>) -> String {
+    match resume_at {
+        Some(t) => format!("resume {}", t.with_timezone(&Local).format("%-I:%M %p")),
+        None => "retrying".to_string(),
     }
 }
 
@@ -961,6 +975,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             let glyph = match sess.status.as_str() {
                 "waiting" => "⏸",
                 "running" => "▶",
+                "rate-limited" => "⏳",
                 _ => "●",
             };
             let kind = if sess.external { "ext " } else { "mine" };
@@ -969,10 +984,16 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                 .clone()
                 .or_else(|| sess.session_id.clone().map(|s| s.chars().take(8).collect()))
                 .unwrap_or_else(|| sess.agent.short().to_string());
+            // For a rate-limited agent, show when it auto-continues instead of the last-active age.
+            let trailer = if sess.status == repomon_core::model::AgentStatus::RateLimited {
+                format!("rate-limited · {}", fmt_resume(sess.resume_at))
+            } else {
+                ago(sess.last_activity_at)
+            };
             lines.push(Line::raw(format!(
                 "  {cursor} {glyph} {kind}  {:<40}  {}",
                 trunc(&label, 40),
-                ago(sess.last_activity_at)
+                trailer
             )));
         }
     }
@@ -1038,17 +1059,12 @@ fn repo_header(width: u16, name: &str) -> Line<'static> {
 fn lane_row(lane: &Lane, now: DateTime<Utc>) -> Line<'static> {
     use repomon_core::model::AgentStatus;
     let glyph = status_glyph(lane);
-    let active = if lane
-        .agent_sessions
-        .iter()
-        .any(|s| s.status == AgentStatus::Waiting)
-    {
+    let any = |st: AgentStatus| lane.agent_sessions.iter().any(|s| s.status == st);
+    let active = if any(AgentStatus::RateLimited) {
+        theme::RATE_LIMITED // ⏳ paused on a usage limit, auto-continuing
+    } else if any(AgentStatus::Waiting) {
         theme::WAITING // ⏸ needs you
-    } else if lane
-        .agent_sessions
-        .iter()
-        .any(|s| s.status == AgentStatus::Running)
-    {
+    } else if any(AgentStatus::Running) {
         theme::AGENT_ACTIVE // ▶ working
     } else {
         " "

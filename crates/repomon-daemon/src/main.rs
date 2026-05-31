@@ -99,6 +99,11 @@ async fn main() {
     // Stream visible agents' output to subscribed TUIs.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
+    // Auto-continue agents paused on a usage limit (resume at the reset time).
+    tokio::spawn(repomon_daemon::auto_continue::auto_continue_watcher(
+        ctx.clone(),
+    ));
+
     // Index commit history in the background (timeline / sessions / search).
     {
         let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());

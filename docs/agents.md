@@ -115,6 +115,27 @@ the real terminal with `↵`.
 | `cursor`      | `cursor-agent` |
 | other         | the kind string itself |
 
+## Auto-continue on usage limits
+
+When a Claude agent hits its usage limit it prints "limit reached · resets at <time>" and stops
+mid-work. repomon **auto-continues** it: a background watcher in the daemon scans each managed
+agent's pane (~every 20 s), and when it sees the blocking message it schedules a resume — at the
+parsed reset time (+60 s), or on a 5-minute periodic retry if the time can't be read — then types
+the continue message (`continue` + Enter). The lane shows **`⏳ rate-limited · resume 3:00 PM`**
+while it waits. This runs even with the TUI closed, so durable agents you left running get
+resumed on their own.
+
+- **On by default** for every repomon-managed agent. The transcript doesn't record limit info, so
+  detection reads the tmux pane; the "approaching usage limit" warning never triggers it.
+- **Per-lane off:** press **`C`** on a lane to disable auto-continue for it this session (it then
+  shows the normal `⏸ needs you` when paused). **Globally:** set `auto_continue = false` in
+  `config.toml`. Change the typed message with `auto_continue_message` (default `"continue"`).
+- **Give-up:** after 6 attempts that don't take, it stops and flags the lane **needs you** so you
+  can step in.
+- Only **managed** agents (with a tmux window) are touched — external sessions have no window to
+  type into. The detection/parse and the state machine are pure and unit-tested
+  (`agent/limit.rs`, `auto_continue.rs`).
+
 ## External sessions (running in another terminal)
 
 Because status comes from the transcript, a `claude` you start in any other terminal inside a

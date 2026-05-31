@@ -39,6 +39,11 @@ pub struct Config {
     /// New Lane picker alongside the auto-detected built-ins, e.g.:
     /// `[agents]` then `claude-yolo = "claude --dangerously-skip-permissions"`.
     pub agents: HashMap<String, String>,
+    /// Auto-continue managed agents that pause on a usage limit (resume at the reset time).
+    /// On by default; a per-lane key (`C`) can disable it for a single lane this session.
+    pub auto_continue: bool,
+    /// What to type when auto-continuing a rate-limited agent (sent with Enter).
+    pub auto_continue_message: String,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
 }
@@ -53,6 +58,8 @@ impl Default for Config {
             accent: None,
             default_agent: None,
             agents: HashMap::new(),
+            auto_continue: true,
+            auto_continue_message: "continue".to_string(),
             repos: HashMap::new(),
         }
     }

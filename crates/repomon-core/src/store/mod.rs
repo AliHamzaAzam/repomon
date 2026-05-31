@@ -605,6 +605,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
         status: AgentStatus::Idle,
         external: false,
         session_id: None,
+        resume_at: None,
     })
 }
 
@@ -827,6 +828,7 @@ mod tests {
             status: AgentStatus::Running,
             external: false,
             session_id: None,
+            resume_at: None,
         };
         let id = s.upsert_session(sess.clone()).await.unwrap();
         // Upsert again (same manifest) updates rather than duplicates.
