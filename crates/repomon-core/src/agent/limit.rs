@@ -111,17 +111,24 @@ fn try_parse_time_at(b: &[u8], start: usize) -> Option<NaiveTime> {
         i = j;
     }
 
-    // Optional spaces, then an am/pm marker.
+    // Optional spaces, then an am/pm marker — allowing periods (am, a.m., pm, p.m.).
     let mut k = i;
     while k < b.len() && b[k] == b' ' {
         k += 1;
     }
-    let pm = if k + 1 < b.len() && b[k] == b'a' && b[k + 1] == b'm' {
-        Some(false)
-    } else if k + 1 < b.len() && b[k] == b'p' && b[k + 1] == b'm' {
-        Some(true)
-    } else {
-        None
+    let pm = match b.get(k) {
+        Some(m @ (b'a' | b'p')) => {
+            let mut p = k + 1;
+            if b.get(p) == Some(&b'.') {
+                p += 1; // the '.' in "a.m."
+            }
+            if b.get(p) == Some(&b'm') {
+                Some(*m == b'p')
+            } else {
+                None
+            }
+        }
+        _ => None,
     };
 
     // Require a minute or an am/pm marker so bare integers (e.g. "5-hour") don't match.
@@ -213,5 +220,15 @@ mod tests {
             .unwrap()
             .with_timezone(&Local);
         assert_eq!(t.hour(), 15);
+    }
+
+    #[test]
+    fn parses_meridiem_with_periods() {
+        // Some locales render "p.m."; treat it the same as "pm".
+        let now = Local.with_ymd_and_hms(2026, 6, 1, 8, 0, 0).unwrap();
+        let t = parse_reset_at("resets at 4:34 p.m.", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!((t.hour(), t.minute()), (16, 34));
     }
 }
