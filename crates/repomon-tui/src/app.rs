@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::text::Line;
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
     AgentChoice, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
@@ -51,6 +52,13 @@ impl Zoom {
 }
 
 /// All UI state. `view` reads these fields directly.
+/// A lane's captured pane: the raw text (for selection/copy and scrollback) plus its styled
+/// lines, parsed once per `event.agent.output` delta so the render path only has to slice.
+pub struct Pane {
+    pub raw: String,
+    pub lines: Vec<Line<'static>>,
+}
+
 pub struct App {
     pub client: DaemonClient,
     pub theme: Theme,
@@ -68,8 +76,9 @@ pub struct App {
     pub nl_agents: Vec<AgentChoice>,
     pub should_quit: bool,
     pub cd_target: Option<PathBuf>,
-    /// Latest captured pane content per lane, pushed by `event.agent.output`.
-    pub output: HashMap<LaneId, String>,
+    /// Latest captured pane per lane (raw text + pre-parsed styled lines), pushed by
+    /// `event.agent.output`. Parsing once on update keeps it off the per-frame render path.
+    pub output: HashMap<LaneId, Pane>,
     /// Whether Focus is in insert mode (keystrokes forwarded live to the agent).
     pub focus_insert: bool,
     /// True while Focus is driving a repomon-managed agent — so when it exits (`/exit` or
@@ -82,6 +91,8 @@ pub struct App {
     /// holds a deep capture taken when you start scrolling.
     pub scroll: usize,
     pub scroll_buf: Option<String>,
+    /// The scrollback snapshot's pre-parsed styled lines (parsed once when `scroll_buf` is set).
+    pub scroll_lines: Option<Vec<Line<'static>>>,
     /// Focus drag-selection (buffer line indices). On release the range is copied to the
     /// clipboard. `focus_geom` = (first output screen row, window-start line, visible count),
     /// set during render so the mouse handler can map a screen row to a buffer line.
@@ -160,6 +171,7 @@ impl App {
             mouse_on: true,
             scroll: 0,
             scroll_buf: None,
+            scroll_lines: None,
             sel_anchor: None,
             sel_head: None,
             focus_geom: std::cell::Cell::new((0, 0, 0)),
@@ -196,12 +208,10 @@ impl App {
         }
     }
 
-    /// Pull fresh fleet state from the daemon.
+    /// Pull fresh fleet state from the daemon: lanes, today's commits, and repos. Used at
+    /// startup and on git/repo notifications.
     pub async fn refresh(&mut self) {
-        match self.client.call_typed::<Vec<Lane>>("lane.list", None).await {
-            Ok(l) => self.lanes = l,
-            Err(e) => self.status = format!("lane.list failed: {e}"),
-        }
+        self.refresh_lanes().await;
         match self
             .client
             .call_typed::<Vec<Commit>>("commit.today", None)
@@ -212,6 +222,16 @@ impl App {
         }
         if let Ok(r) = self.client.call_typed::<Vec<Repo>>("repo.list", None).await {
             self.repos = r;
+        }
+    }
+
+    /// Pull just the lane list — the only thing needing per-second freshness in live views (so
+    /// an agent that exits on its own is noticed promptly). Commits/repos change on git events,
+    /// which arrive as notifications that trigger a full [`refresh`].
+    pub async fn refresh_lanes(&mut self) {
+        match self.client.call_typed::<Vec<Lane>>("lane.list", None).await {
+            Ok(l) => self.lanes = l,
+            Err(e) => self.status = format!("lane.list failed: {e}"),
         }
         self.clamp_selection();
     }
@@ -429,7 +449,10 @@ impl App {
                 note.params.get("lane_id").and_then(|v| v.as_i64()),
                 note.params.get("content").and_then(|v| v.as_str()),
             ) {
-                self.output.insert(id, content.to_string());
+                // Parse the ANSI once, here, instead of on every render of this pane.
+                let raw = content.to_string();
+                let lines = view::parse_pane(&raw);
+                self.output.insert(id, Pane { raw, lines });
             }
         } else {
             self.refresh().await;
@@ -1377,6 +1400,7 @@ impl App {
                         .get("content")
                         .and_then(|c| c.as_str())
                         .map(str::to_string);
+                    self.scroll_lines = self.scroll_buf.as_deref().map(view::parse_pane);
                 }
             }
         }
@@ -1388,6 +1412,7 @@ impl App {
         self.scroll = self.scroll.saturating_sub(lines);
         if self.scroll == 0 {
             self.scroll_buf = None;
+            self.scroll_lines = None;
         }
         self.clear_selection();
     }
@@ -1395,6 +1420,7 @@ impl App {
     fn reset_scroll(&mut self) {
         self.scroll = 0;
         self.scroll_buf = None;
+        self.scroll_lines = None;
         self.clear_selection();
     }
 
@@ -1411,7 +1437,7 @@ impl App {
         } else {
             self.selected_lane()
                 .and_then(|l| self.output.get(&l.id))
-                .cloned()
+                .map(|p| p.raw.clone())
                 .unwrap_or_default()
         };
         let mut lines: Vec<String> = strip_ansi(&raw).lines().map(str::to_string).collect();
@@ -1707,6 +1733,17 @@ fn enable_mouse() {
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
 }
 
+/// Discard any terminal input still buffered after returning from a tmux attach — mouse-tracking
+/// reports, the detach key's tail, terminal query replies — so it isn't replayed as a glitchy
+/// backlog when the reader thread resumes. Call while the reader is still parked, since only one
+/// place may read crossterm events at a time.
+fn drain_pending_input() {
+    use ratatui::crossterm::event;
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+}
+
 fn disable_mouse() {
     use ratatui::crossterm::event::DisableMouseCapture;
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
@@ -1735,15 +1772,31 @@ async fn event_loop(
         }
         if let Some(lane) = app.attach_request.take() {
             do_attach(terminal, app, lane).await;
+            while in_rx.try_recv().is_ok() {} // drop anything queued before the reader parked
             continue;
         }
         if let Some(target) = app.attach_target.take() {
             do_attach_target(terminal, app, &target).await;
+            while in_rx.try_recv().is_ok() {}
             continue;
         }
         tokio::select! {
             maybe = in_rx.recv() => match maybe {
-                Some(ev) => app.handle_event(ev).await,
+                Some(ev) => {
+                    app.handle_event(ev).await;
+                    // Coalesce already-buffered input (paste bursts, any post-attach backlog)
+                    // into one frame instead of one redraw per event. Stop early if an event
+                    // requests an attach or quit so it's handled at the top of the next loop.
+                    while app.attach_request.is_none()
+                        && app.attach_target.is_none()
+                        && !app.should_quit
+                    {
+                        match in_rx.try_recv() {
+                            Ok(ev) => app.handle_event(ev).await,
+                            Err(_) => break,
+                        }
+                    }
+                }
                 None => return Ok(()),
             },
             note = next_note(events), if events_alive => match note {
@@ -1752,9 +1805,10 @@ async fn event_loop(
             },
             _ = tick.tick() => {
                 // Keep agent state fresh in views that show it, so an agent that exits on its
-                // own (e.g. `/exit`) is noticed promptly and Focus drops back to Split.
+                // own (e.g. `/exit`) is noticed promptly and Focus drops back to Split. Only the
+                // lane list needs this cadence; commits/repos refresh on git notifications.
                 if matches!(app.view, View::Focus | View::Split | View::Grid) {
-                    app.refresh().await;
+                    app.refresh_lanes().await;
                 }
             }
         }
@@ -1796,6 +1850,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         enable_mouse();
     }
     let _ = terminal.clear();
+    drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
@@ -1816,6 +1871,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
         enable_mouse();
     }
     let _ = terminal.clear();
+    drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list

@@ -10,7 +10,10 @@
 //! all-important status — **Waiting** (the agent finished its turn and needs you) vs
 //! **Running** (mid tool-loop) vs **Idle** (gone quiet).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
@@ -157,8 +160,54 @@ pub fn newest_transcript_in(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// Parse a transcript into a summary.
+/// Process-global memo for [`parse_transcript`], keyed by path and invalidated by file mtime.
+fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, TranscriptSummary)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, TranscriptSummary)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Parse a transcript into a summary, memoised by file mtime.
+///
+/// `summary_for`/`summaries_for` call this on every fleet refresh (~1/s in live views). Without
+/// the memo, an idle-but-recent session's whole JSONL is re-read and re-parsed each time. The
+/// cache is keyed by path and invalidated when the file's mtime changes, so it stays correct
+/// while making repeated refreshes of unchanged transcripts nearly free.
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = mtime {
+        if let Ok(c) = cache().lock() {
+            if let Some((cached, summary)) = c.get(path) {
+                if *cached == mtime {
+                    let mut s = summary.clone();
+                    // `status` is the one *time*-derived field: a transcript that stops changing
+                    // still decays to Idle after IDLE_AFTER even though its mtime — our cache key
+                    // — never moves again. The content-derived Waiting/Running stays valid while
+                    // the file is unchanged, so only the idle transition needs re-applying here.
+                    if Utc::now() - s.last_activity > IDLE_AFTER {
+                        s.status = AgentStatus::Idle;
+                    }
+                    return Some(s);
+                }
+            }
+        }
+    }
+    let summary = parse_transcript_inner(path)?;
+    if let Some(mtime) = mtime {
+        if let Ok(mut c) = cache().lock() {
+            // Bound memory: transcript paths accumulate as sessions end. A periodic clear keeps
+            // the map from growing without limit — it simply re-warms on the next refresh.
+            if c.len() >= 1024 {
+                c.clear();
+            }
+            c.insert(path.to_path_buf(), (mtime, summary.clone()));
+        }
+    }
+    Some(summary)
+}
+
+/// Parse a transcript into a summary (uncached — see [`parse_transcript`]).
+fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
     let text = std::fs::read_to_string(path).ok()?;
     let last_activity: DateTime<Utc> = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -432,6 +481,67 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, lines.join("\n")).unwrap();
         path
+    }
+
+    #[test]
+    fn parse_transcript_memoises_by_mtime() {
+        let root = tempfile::tempdir().unwrap();
+        let line = r#"{"type":"user","cwd":"/code/x","message":{"content":"hello"}}"#;
+        let path = write_transcript(root.path(), "sess.jsonl", &[line]);
+
+        // First parse populates the cache.
+        let s1 = parse_transcript(&path).expect("parses");
+
+        // Poison the cached summary, then parse again with the file unchanged: a cache hit must
+        // return the poisoned value (proving it did not re-read the file).
+        {
+            let mut c = cache().lock().unwrap();
+            c.get_mut(&path).unwrap().1.title = Some("SENTINEL".into());
+        }
+        let s2 = parse_transcript(&path).expect("parses");
+        assert_eq!(
+            s2.title.as_deref(),
+            Some("SENTINEL"),
+            "should be a cache hit"
+        );
+
+        // Staling the stored mtime forces a miss: the real content (not the sentinel) comes back.
+        {
+            let mut c = cache().lock().unwrap();
+            c.get_mut(&path).unwrap().0 = SystemTime::UNIX_EPOCH;
+        }
+        let s3 = parse_transcript(&path).expect("parses");
+        assert_ne!(
+            s3.title.as_deref(),
+            Some("SENTINEL"),
+            "stale mtime re-parses"
+        );
+        assert_eq!(s3.title, s1.title);
+    }
+
+    #[test]
+    fn cache_hit_still_decays_to_idle() {
+        let root = tempfile::tempdir().unwrap();
+        // An assistant turn with no tool call → Waiting (needs you); freshly written → not idle.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+        let path = write_transcript(root.path(), "idle.jsonl", &[line]);
+        assert_eq!(
+            parse_transcript(&path).unwrap().status,
+            AgentStatus::Waiting
+        );
+
+        // Backdate the cached summary's last_activity past IDLE_AFTER *without* touching the file
+        // (so its mtime — our cache key — is unchanged). The next call is a cache hit that must
+        // still report Idle: status decays by the clock, not by a file change.
+        {
+            let mut c = cache().lock().unwrap();
+            c.get_mut(&path).unwrap().1.last_activity = Utc::now() - Duration::minutes(20);
+        }
+        assert_eq!(
+            parse_transcript(&path).unwrap().status,
+            AgentStatus::Idle,
+            "a frozen transcript still decays to Idle on a cache hit"
+        );
     }
 
     #[test]

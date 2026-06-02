@@ -370,7 +370,7 @@ fn render_split(f: &mut Frame, app: &App) {
     let id = app.selected_lane().map(|l| l.id);
     let has_output = id
         .and_then(|i| app.output.get(&i))
-        .map(|s| !s.trim().is_empty())
+        .map(|p| !p.raw.trim().is_empty())
         .unwrap_or(false);
     let right = if has_output {
         output_tail(app, id, body[1].height as usize)
@@ -651,23 +651,27 @@ fn ago(t: DateTime<Utc>) -> String {
     }
 }
 
+/// Parse a captured pane (with `-e` ANSI escapes) into styled lines, trimming the trailing blank
+/// rows tmux pads the pane with. Called once per `event.agent.output` delta (in
+/// `App::on_notification`) and cached, so the render path only slices — it never re-parses.
+pub(crate) fn parse_pane(raw: &str) -> Vec<Line<'static>> {
+    use ansi_to_tui::IntoText;
+    let mut lines: Vec<Line<'static>> = raw
+        .into_text()
+        .map(|t| t.lines)
+        .unwrap_or_else(|_| raw.lines().map(|l| Line::raw(l.to_string())).collect());
+    while lines.last().map(line_is_blank).unwrap_or(false) {
+        lines.pop();
+    }
+    lines
+}
+
 /// The last `height` lines of a lane's captured output, ANSI-colored, or a placeholder.
 fn output_tail(app: &App, lane_id: Option<LaneId>, height: usize) -> Vec<Line<'static>> {
-    use ansi_to_tui::IntoText;
-    let content = lane_id.and_then(|id| app.output.get(&id));
-    match content {
-        Some(text) if !text.trim().is_empty() => {
-            // Parse the captured pane (with `-e` escapes) into styled lines.
-            let mut lines = text
-                .into_text()
-                .map(|t| t.lines)
-                .unwrap_or_else(|_| text.lines().map(|l| Line::raw(l.to_string())).collect());
-            // Drop trailing blank rows tmux pads the pane with.
-            while lines.last().map(line_is_blank).unwrap_or(false) {
-                lines.pop();
-            }
-            let start = lines.len().saturating_sub(height.max(1));
-            lines.split_off(start)
+    match lane_id.and_then(|id| app.output.get(&id)) {
+        Some(p) if !p.raw.trim().is_empty() => {
+            let start = p.lines.len().saturating_sub(height.max(1));
+            p.lines[start..].to_vec()
         }
         _ => vec![Line::from(Span::styled(
             "(no live output — press e to start claude here)".to_string(),
@@ -701,28 +705,21 @@ fn focus_output(
     avail: usize,
     out_y0: u16,
 ) -> Vec<Line<'static>> {
-    use ansi_to_tui::IntoText;
-    let raw: String = if app.scroll > 0 {
-        app.scroll_buf.clone().unwrap_or_default()
+    // Pre-parsed lines: the scrollback snapshot when scrolled, else the live tail. (Both are
+    // parsed once on update — see `parse_pane` — so this hot path only slices.)
+    let lines: &[Line<'static>] = if app.scroll > 0 {
+        app.scroll_lines.as_deref().unwrap_or(&[])
     } else {
         lane_id
             .and_then(|id| app.output.get(&id))
-            .cloned()
-            .unwrap_or_default()
+            .map_or(&[], |p| p.lines.as_slice())
     };
-    if raw.trim().is_empty() {
+    if lines.is_empty() {
         app.focus_geom.set((out_y0, 0, 0));
         return vec![Line::from(Span::styled(
             "(no live output — press e to start claude here)".to_string(),
             app.theme.dim(),
         ))];
-    }
-    let mut lines: Vec<Line<'static>> = raw
-        .into_text()
-        .map(|t| t.lines)
-        .unwrap_or_else(|_| raw.lines().map(|l| Line::raw(l.to_string())).collect());
-    while lines.last().map(line_is_blank).unwrap_or(false) {
-        lines.pop();
     }
     let (start, end) = output_window(lines.len(), avail, app.scroll);
     app.focus_geom.set((out_y0, start, end - start));
