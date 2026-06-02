@@ -22,8 +22,9 @@ use repomon_core::TmuxRuntime;
 use crate::{pubsub, Ctx};
 
 const TICK: Duration = Duration::from_secs(20);
-const RETRY_MIN: i64 = 5; // retry cadence when the reset time is unknown / a send didn't take
-const MAX_ATTEMPTS: u32 = 6; // after this many sends, give up and surface needs-you
+const RETRY_MIN: i64 = 5; // retry cadence after a known reset time, or when a send didn't take
+const UNKNOWN_RETRY_MIN: i64 = 20; // coarse retry when no reset time is known (don't spam)
+const GIVE_UP_AFTER_HOURS: i64 = 6; // stop this long after first detecting the pause (>5h window)
 const SEND_COOLDOWN_SECS: i64 = 90; // suppress re-detect of the stale on-screen message
 const RESET_BUFFER_SECS: i64 = 60; // resume a little after the stated reset, never before
 
@@ -33,14 +34,19 @@ pub struct RateLimit {
     pub reset_at: Option<DateTime<Utc>>,
 }
 
-/// The watcher's private scheduling state for one lane. (The reset time itself lives in the
-/// public [`RateLimit`] for the TUI; here we only track *when to act*.)
+/// The watcher's private scheduling state for one lane.
 #[derive(Debug, Clone)]
 struct Sched {
+    /// When the pause was first detected — gives the wall-clock give-up horizon.
+    started: DateTime<Utc>,
+    /// The parsed reset time, if any (drives the retry cadence: precise vs coarse).
+    reset_at: Option<DateTime<Utc>>,
     next_attempt: DateTime<Utc>,
-    attempts: u32,
     gave_up: bool,
     cooldown_until: Option<DateTime<Utc>>,
+    /// We've already pressed Enter on Claude's "Stop and wait for limit to reset" menu for this
+    /// pause, so don't press it again (reset only when the lane clears).
+    menu_confirmed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -50,9 +56,11 @@ enum Action {
         reset_at: Option<DateTime<Utc>>,
         next_attempt: DateTime<Utc>,
     },
+    /// Press Enter to pick option 1 ("Stop and wait for limit to reset") on the interactive menu.
+    ChooseWait,
     /// Type the continue message now.
     Send,
-    /// Out of attempts — stop and surface needs-you.
+    /// Waited too long without resuming — stop and surface needs-you.
     GiveUp,
     /// The pause is gone — the agent resumed.
     Clear,
@@ -93,15 +101,21 @@ fn decide(
                 if s.gave_up {
                     return Action::Nothing;
                 }
+                // Give up on a wall-clock horizon, not an attempt count: when no reset time is
+                // shown we must keep waiting through the multi-hour window without quitting early.
+                if now - s.started > chrono::Duration::hours(GIVE_UP_AFTER_HOURS) {
+                    return Action::GiveUp;
+                }
                 if s.cooldown_until.map(|c| now < c).unwrap_or(false) {
                     return Action::Nothing;
                 }
+                // Pick "Stop and wait for limit to reset" once, before ever typing `continue` —
+                // otherwise the continue text would land in the menu.
+                if lim.menu && !s.menu_confirmed {
+                    return Action::ChooseWait;
+                }
                 if now >= s.next_attempt {
-                    if s.attempts + 1 > MAX_ATTEMPTS {
-                        Action::GiveUp
-                    } else {
-                        Action::Send
-                    }
+                    Action::Send
                 } else {
                     Action::Nothing
                 }
@@ -189,10 +203,12 @@ async fn apply(
             sched.insert(
                 lane,
                 Sched {
+                    started: now,
+                    reset_at,
                     next_attempt,
-                    attempts: 0,
                     gave_up: false,
                     cooldown_until: None,
+                    menu_confirmed: false,
                 },
             );
             ctx.rate_limits
@@ -204,14 +220,28 @@ async fn apply(
                 serde_json::json!({ "lane_id": lane, "status": "rate-limited" }),
             );
         }
+        Action::ChooseWait => {
+            // Press Enter to confirm the menu's default option 1 ("Stop and wait …").
+            let tmux = ctx.tmux.clone();
+            let _ = tokio::task::spawn_blocking(move || tmux.send_key(lane, "Enter")).await;
+            if let Some(s) = sched.get_mut(&lane) {
+                s.menu_confirmed = true;
+                s.cooldown_until = Some(now + chrono::Duration::seconds(SEND_COOLDOWN_SECS));
+            }
+        }
         Action::Send => {
             let tmux = ctx.tmux.clone();
             let msg = message.to_string();
             let _ = tokio::task::spawn_blocking(move || tmux.send_text(lane, &msg)).await;
             if let Some(s) = sched.get_mut(&lane) {
-                s.attempts += 1;
+                // Retry sooner when we know the reset time; coarsely when we're guessing.
+                let cadence = if s.reset_at.is_some() {
+                    RETRY_MIN
+                } else {
+                    UNKNOWN_RETRY_MIN
+                };
                 s.cooldown_until = Some(now + chrono::Duration::seconds(SEND_COOLDOWN_SECS));
-                s.next_attempt = now + chrono::Duration::minutes(RETRY_MIN);
+                s.next_attempt = now + chrono::Duration::minutes(cadence);
             }
         }
         Action::GiveUp => {
@@ -246,35 +276,40 @@ mod tests {
         Utc.timestamp_opt(1_700_000_000, 0).unwrap()
     }
 
-    fn sched(next_in_secs: i64, attempts: u32, gave_up: bool, cooldown_in: Option<i64>) -> Sched {
+    fn sched(next_in_secs: i64, gave_up: bool, cooldown_in: Option<i64>) -> Sched {
         let n = now();
         Sched {
+            started: n,
+            reset_at: None,
             next_attempt: n + chrono::Duration::seconds(next_in_secs),
-            attempts,
             gave_up,
             cooldown_until: cooldown_in.map(|s| n + chrono::Duration::seconds(s)),
+            menu_confirmed: true, // default: menu already handled, so tests reach the Send path
         }
+    }
+
+    fn lim(reset_at: Option<DateTime<Utc>>, menu: bool) -> UsageLimit {
+        UsageLimit { reset_at, menu }
     }
 
     #[test]
     fn disabled_lane_never_tracks_or_sends() {
-        let lim = UsageLimit { reset_at: None };
-        assert_eq!(decide(None, Some(&lim), false, now()), Action::Nothing);
+        assert_eq!(
+            decide(None, Some(&lim(None, false)), false, now()),
+            Action::Nothing
+        );
     }
 
     #[test]
     fn disabled_mid_pause_reverts() {
-        let s = sched(-10, 0, false, None);
+        let s = sched(-10, false, None);
         assert_eq!(decide(Some(&s), None, false, now()), Action::Clear);
     }
 
     #[test]
     fn new_detection_tracks_with_reset_buffer() {
         let reset = now() + chrono::Duration::hours(2);
-        let lim = UsageLimit {
-            reset_at: Some(reset),
-        };
-        let action = decide(None, Some(&lim), true, now());
+        let action = decide(None, Some(&lim(Some(reset), false)), true, now());
         assert_eq!(
             action,
             Action::Track {
@@ -286,8 +321,7 @@ mod tests {
 
     #[test]
     fn new_detection_without_time_uses_periodic_retry() {
-        let lim = UsageLimit { reset_at: None };
-        let action = decide(None, Some(&lim), true, now());
+        let action = decide(None, Some(&lim(None, false)), true, now());
         assert_eq!(
             action,
             Action::Track {
@@ -299,42 +333,75 @@ mod tests {
 
     #[test]
     fn waits_until_next_attempt() {
-        let s = sched(120, 0, false, None); // attempt is in the future
-        let lim = UsageLimit { reset_at: None };
-        assert_eq!(decide(Some(&s), Some(&lim), true, now()), Action::Nothing);
+        let s = sched(120, false, None); // attempt is in the future
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            Action::Nothing
+        );
     }
 
     #[test]
     fn sends_when_due() {
-        let s = sched(-1, 0, false, None);
-        let lim = UsageLimit { reset_at: None };
-        assert_eq!(decide(Some(&s), Some(&lim), true, now()), Action::Send);
+        let s = sched(-1, false, None);
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            Action::Send
+        );
     }
 
     #[test]
     fn cooldown_suppresses_send() {
-        let s = sched(-1, 1, false, Some(60)); // due, but cooling down
-        let lim = UsageLimit { reset_at: None };
-        assert_eq!(decide(Some(&s), Some(&lim), true, now()), Action::Nothing);
+        let s = sched(-1, false, Some(60)); // due, but cooling down
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            Action::Nothing
+        );
     }
 
     #[test]
-    fn gives_up_after_max_attempts() {
-        let s = sched(-1, MAX_ATTEMPTS, false, None);
-        let lim = UsageLimit { reset_at: None };
-        assert_eq!(decide(Some(&s), Some(&lim), true, now()), Action::GiveUp);
+    fn gives_up_after_long_wait() {
+        let mut s = sched(-1, false, None);
+        s.started = now() - chrono::Duration::hours(GIVE_UP_AFTER_HOURS + 1);
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            Action::GiveUp
+        );
     }
 
     #[test]
     fn gave_up_stays_quiet() {
-        let s = sched(-1, MAX_ATTEMPTS, true, None);
-        let lim = UsageLimit { reset_at: None };
-        assert_eq!(decide(Some(&s), Some(&lim), true, now()), Action::Nothing);
+        let s = sched(-1, true, None);
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            Action::Nothing
+        );
     }
 
     #[test]
     fn clears_when_message_gone() {
-        let s = sched(-1, 1, false, None);
+        let s = sched(-1, false, None);
         assert_eq!(decide(Some(&s), None, true, now()), Action::Clear);
+    }
+
+    #[test]
+    fn confirms_menu_before_continue() {
+        // The interactive menu is up and we haven't chosen yet: pick option 1, don't type
+        // `continue` — even though a send is otherwise due.
+        let mut s = sched(-1, false, None);
+        s.menu_confirmed = false;
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, true)), true, now()),
+            Action::ChooseWait
+        );
+    }
+
+    #[test]
+    fn does_not_reconfirm_menu_once_chosen() {
+        // Menu text still on screen but already confirmed → proceed to send `continue`.
+        let s = sched(-1, false, None); // menu_confirmed: true by default
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, true)), true, now()),
+            Action::Send
+        );
     }
 }

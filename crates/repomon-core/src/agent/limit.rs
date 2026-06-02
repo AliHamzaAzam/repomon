@@ -14,17 +14,25 @@ pub struct UsageLimit {
     /// When the limit resets (UTC), if a clock time could be parsed from the message. `None`
     /// means the caller should retry periodically rather than wait for a precise moment.
     pub reset_at: Option<DateTime<Utc>>,
+    /// Claude's newer interactive "What do you want to do?" menu is on screen. The caller must
+    /// pick option 1 ("Stop and wait for limit to reset") — a bare Enter on the default — before
+    /// it can resume.
+    pub menu: bool,
 }
 
 /// Detect the **blocking** usage-limit state in an agent's recent pane text. Returns `None` for
 /// ordinary output and for the non-blocking "approaching usage limit" warning.
 pub fn detect_usage_limit(pane: &str) -> Option<UsageLimit> {
     let lower = pane.to_lowercase();
-    if !is_blocked(&lower) {
+    // The newer flow shows an interactive menu whose first option is "Stop and wait for limit to
+    // reset"; it carries none of the classic "limit reached" phrasing, so detect it explicitly.
+    let menu = lower.contains("stop and wait for limit to reset");
+    if !is_blocked(&lower) && !menu {
         return None;
     }
     Some(UsageLimit {
         reset_at: parse_reset_at(&lower, Local::now()),
+        menu,
     })
 }
 
@@ -186,6 +194,33 @@ mod tests {
         let pane = "Claude usage limit reached. Please try again later.";
         let lim = detect_usage_limit(pane).expect("block");
         assert_eq!(lim.reset_at, None);
+        assert!(!lim.menu, "the classic message is not the interactive menu");
+    }
+
+    #[test]
+    fn detects_interactive_menu() {
+        // The newer flow: an interactive menu with no "limit reached" phrasing and no time.
+        let pane = "What do you want to do?\n\
+            ❯ 1. Stop and wait for limit to reset\n\
+              2. Upgrade your plan\n\
+              3. Upgrade to Team plan\n\
+            Enter to confirm · Esc to cancel";
+        let lim = detect_usage_limit(pane).expect("should detect the menu");
+        assert!(lim.menu, "menu flag should be set");
+        assert_eq!(lim.reset_at, None, "no time shown → retry periodically");
+    }
+
+    #[test]
+    fn menu_with_reset_time_parses_it() {
+        // If the menu (or the screen after picking option 1) shows a reset time, capture it.
+        let pane = "Your limit will reset at 3:00 PM.\n\
+            What do you want to do?\n\
+            ❯ 1. Stop and wait for limit to reset\n\
+              2. Upgrade your plan";
+        let lim = detect_usage_limit(pane).expect("menu");
+        assert!(lim.menu);
+        let local = lim.reset_at.expect("3pm").with_timezone(&Local);
+        assert_eq!(local.hour(), 15);
     }
 
     #[test]
