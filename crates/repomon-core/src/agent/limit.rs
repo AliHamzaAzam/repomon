@@ -8,6 +8,11 @@
 
 use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone, Utc};
 
+/// A parsed reset time this far (or less) in the past is treated as "just reset, resume now"
+/// rather than rolled to tomorrow — Claude's resets are always within a few hours, so a time well
+/// beyond this is a genuine next-day (cross-midnight) reset.
+const GRACE_PAST_HOURS: i64 = 6;
+
 /// A detected usage-limit pause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageLimit {
@@ -36,25 +41,39 @@ pub fn detect_usage_limit(pane: &str) -> Option<UsageLimit> {
     })
 }
 
-/// A real block always says the limit was *reached* (paired with a reset / try-again cue). The
-/// "approaching usage limit" warning has no "reached" phrase, so it never trips this.
+/// Whether the pane shows a *blocking* limit. Covers Claude's several phrasings: the classic
+/// "usage limit reached … resets at X", the "You've hit your session limit · resets 3am" notice,
+/// and any screen offering "/upgrade to increase your usage limit". The "approaching … limit"
+/// heads-up is a warning, not a block, so it's explicitly excluded.
 fn is_blocked(lower: &str) -> bool {
+    if lower.contains("approaching") {
+        return false;
+    }
+    // A strong, Claude-specific signal that stands on its own.
+    if lower.contains("upgrade to increase your usage limit") {
+        return true;
+    }
     let reached = lower.contains("usage limit reached")
         || lower.contains("reached your usage limit")
-        || lower.contains("limit reached");
+        || lower.contains("limit reached")
+        || lower.contains("hit your usage limit")
+        || lower.contains("hit your session limit");
     let reset_cue = lower.contains("reset") || lower.contains("try again");
     reached && reset_cue
 }
 
-/// Parse the reset time from a (lowercased) limit message, relative to `now` in local time —
-/// Claude formats the reset time in the machine's local timezone. Rolls to tomorrow if the time
-/// has already passed today. Returns `None` if no clock time is present.
+/// Claude always states the *next* reset, which is at most a few hours out, formatted in the
+/// machine's local timezone. So today's occurrence is the answer when it's upcoming **or only
+/// recently passed** (within [`GRACE_PAST_HOURS`]) — the latter means the limit just reset and a
+/// stuck agent we notice a moment late should resume now, not wait a day. Only a time that's
+/// *well* in the past (a cross-midnight "resets 3am" seen at night) rolls to tomorrow. Returns
+/// `None` if no clock time is present.
 fn parse_reset_at(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     let time = find_reset_time(lower)?;
     let date = now.date_naive();
     let naive = date.and_time(time);
     let mut dt = Local.from_local_datetime(&naive).earliest()?;
-    if dt <= now {
+    if now - dt > Duration::hours(GRACE_PAST_HOURS) {
         let naive2 = (date + Duration::days(1)).and_time(time);
         dt = Local.from_local_datetime(&naive2).earliest()?;
     }
@@ -233,19 +252,47 @@ mod tests {
     }
 
     #[test]
-    fn rolls_to_tomorrow_when_time_already_passed() {
+    fn rolls_to_tomorrow_only_when_well_past() {
         let now = Local.with_ymd_and_hms(2026, 6, 1, 18, 0, 0).unwrap(); // 6pm
+
+        // Just passed (3h ago, within grace) → today, so a stuck agent resumes promptly.
         let at_3pm = parse_reset_at("resets at 3:00 pm", now)
             .unwrap()
             .with_timezone(&Local);
-        assert_eq!(at_3pm.day(), 2); // tomorrow
+        assert_eq!(at_3pm.day(), 1); // today
         assert_eq!(at_3pm.hour(), 15);
 
+        // Well in the past (cross-midnight "3am" seen at 6pm = 15h) → tomorrow.
+        let at_3am = parse_reset_at("resets at 3am", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(at_3am.day(), 2); // tomorrow
+        assert_eq!(at_3am.hour(), 3);
+
+        // Still upcoming today.
         let at_11pm = parse_reset_at("resets at 11:00 pm", now)
             .unwrap()
             .with_timezone(&Local);
         assert_eq!(at_11pm.day(), 1); // still today
         assert_eq!(at_11pm.hour(), 23);
+    }
+
+    #[test]
+    fn detects_session_limit_notice() {
+        // Claude's "session limit" phrasing — no "limit reached", no menu, but a reset time and
+        // an upgrade cue. (The reported real-world miss.)
+        let pane = "You've hit your session limit · resets 3am (Asia/Karachi)\n\
+            /upgrade to increase your usage limit.";
+        let lim = detect_usage_limit(pane).expect("session limit is a block");
+        assert!(!lim.menu, "this notice is not the interactive menu");
+        let local = lim.reset_at.expect("3am").with_timezone(&Local);
+        assert_eq!(local.hour(), 3);
+    }
+
+    #[test]
+    fn upgrade_cue_alone_is_a_block() {
+        let pane = "/upgrade to increase your usage limit.";
+        assert!(detect_usage_limit(pane).is_some());
     }
 
     #[test]
