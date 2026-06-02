@@ -2,7 +2,7 @@
 //! two-space indents, reverse-video selection, no color.
 
 use chrono::{DateTime, Local, Utc};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -10,25 +10,37 @@ use ratatui::Frame;
 
 use repomon_core::model::{Commit, DirtyState, Lane, LaneId, RepoId};
 
-use crate::app::{AgField, App};
+use crate::app::{AgField, App, ClickZone};
 use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane · tab session  ·  ↵ open (real terminal) · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
-const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
+    "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
+const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
     "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str =
-    "←→ move · ↵ open (real terminal)  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
+    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
+const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
 
+/// Record a clickable lane region for the mouse handler to hit-test (see `App::handle_click`).
+fn click_zone(app: &App, rect: Rect, lane: LaneId, interactive: bool) {
+    app.click_zones.borrow_mut().push(ClickZone {
+        rect,
+        lane,
+        interactive,
+    });
+}
+
 /// Render the current view.
 pub fn render(f: &mut Frame, app: &App) {
+    // Clickable lane regions are recomputed each frame by the per-view renderers below.
+    app.click_zones.borrow_mut().clear();
     match app.view {
         View::Fleet => render_fleet(f, app),
         View::Split => render_split(f, app),
@@ -344,7 +356,7 @@ fn analytics_char(level: u8) -> &'static str {
 fn render_fleet(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
-    f.render_widget(Paragraph::new(fleet_lines(app, area.width)), rows[0]);
+    f.render_widget(Paragraph::new(fleet_lines(app, rows[0])), rows[0]);
     f.render_widget(footer(FLEET_KEYS, app), rows[1]);
 }
 
@@ -365,7 +377,7 @@ fn render_split(f: &mut Frame, app: &App) {
         rows[0],
     );
     let body = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(rows[1]);
-    f.render_widget(Paragraph::new(sidebar_lines(app)), body[0]);
+    f.render_widget(Paragraph::new(sidebar_lines(app, body[0])), body[0]);
     // Live agent output if there is any, otherwise the lane's git detail.
     let id = app.selected_lane().map(|l| l.id);
     let has_output = id
@@ -378,6 +390,10 @@ fn render_split(f: &mut Frame, app: &App) {
         detail_lines(app)
     };
     f.render_widget(Paragraph::new(right), body[1]);
+    // Clicking the pane focuses the selected agent for typing (double-click → real terminal).
+    if let Some(id) = id {
+        click_zone(app, body[1], id, true);
+    }
 
     // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
     let mode = if app.focus_insert {
@@ -528,6 +544,7 @@ fn render_grid(f: &mut Frame, app: &App) {
                 continue;
             }
             let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
+            click_zone(app, *cell, ids[idx], true);
             f.render_widget(
                 Paragraph::new(tile_lines(
                     app,
@@ -535,6 +552,7 @@ fn render_grid(f: &mut Frame, app: &App) {
                     ids[idx],
                     cell.height as usize,
                     idx == active,
+                    idx == active && app.focus_insert,
                 )),
                 *cell,
             );
@@ -560,7 +578,12 @@ fn render_grid(f: &mut Frame, app: &App) {
         ))),
         rows[2],
     );
-    f.render_widget(footer(GRID_KEYS, app), rows[3]);
+    let keys = if app.focus_insert {
+        GRID_INSERT_KEYS
+    } else {
+        GRID_KEYS
+    };
+    f.render_widget(footer(keys, app), rows[3]);
 }
 
 fn tile_lines(
@@ -569,8 +592,15 @@ fn tile_lines(
     id: LaneId,
     height: usize,
     active: bool,
+    focused: bool,
 ) -> Vec<Line<'static>> {
-    let marker = if active { "▎" } else { " " };
+    let marker = if focused {
+        "▶"
+    } else if active {
+        "▎"
+    } else {
+        " "
+    };
     let head = match lane {
         Some(l) => format!(
             "{marker}{}/{}  {}",
@@ -580,7 +610,15 @@ fn tile_lines(
         ),
         None => format!("{marker}lane {id}"),
     };
-    let style = if active {
+    // When click-focused, the tile is capturing keystrokes — make that unmistakable.
+    let head = if focused {
+        format!("{head}  ⌨ typing (^O / click-out to blur)")
+    } else {
+        head
+    };
+    let style = if focused {
+        app.theme.selected()
+    } else if active {
         app.theme.bold()
     } else {
         app.theme.dim()
@@ -816,7 +854,8 @@ fn render_new_lane(f: &mut Frame, app: &App) {
 
 // ---- shared line builders ----------------------------------------------------
 
-fn fleet_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
+    let width = content.width;
     let now = Utc::now();
     let mut lines = Vec::new();
     lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
@@ -862,6 +901,22 @@ fn fleet_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         if i == app.selected {
             line = line.style(app.theme.selected());
         }
+        // Record this row's on-screen rect so a click selects the lane (no live pane here, so a
+        // single click only selects; double-click opens the real terminal).
+        let li = lines.len() as u16;
+        if li < content.height {
+            click_zone(
+                app,
+                Rect {
+                    x: content.x,
+                    y: content.y + li,
+                    width: content.width,
+                    height: 1,
+                },
+                lane.id,
+                false,
+            );
+        }
         lines.push(line);
     }
 
@@ -879,7 +934,7 @@ fn fleet_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-fn sidebar_lines(app: &App) -> Vec<Line<'static>> {
+fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     let now = Utc::now();
     let visible = app.visible_lanes();
     let mut lines = vec![
@@ -905,6 +960,20 @@ fn sidebar_lines(app: &App) -> Vec<Line<'static>> {
         let _ = now;
         if i == app.selected {
             line = line.style(app.theme.selected());
+        }
+        let li = lines.len() as u16;
+        if li < content.height {
+            click_zone(
+                app,
+                Rect {
+                    x: content.x,
+                    y: content.y + li,
+                    width: content.width,
+                    height: 1,
+                },
+                lane.id,
+                true,
+            );
         }
         lines.push(line);
     }

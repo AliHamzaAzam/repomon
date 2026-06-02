@@ -84,7 +84,7 @@ async fn renders_fleet_with_a_registered_repo() {
         screen.contains("feat: initial commit"),
         "today commit missing:\n{screen}"
     );
-    assert!(screen.contains("needs-you"), "footer missing:\n{screen}");
+    assert!(screen.contains("click select"), "footer missing:\n{screen}");
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

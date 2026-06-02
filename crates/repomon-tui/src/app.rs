@@ -1,5 +1,6 @@
 //! Application state and the interactive event loop.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
@@ -59,6 +61,30 @@ pub struct Pane {
     pub lines: Vec<Line<'static>>,
 }
 
+/// A clickable lane region recorded during render (in `view.rs`) and hit-tested by the mouse
+/// handler. `interactive` = a single-click focuses the lane for typing in place (Grid tiles,
+/// Split panes/rows); otherwise a single-click only selects it (Fleet rows, which show no pane).
+#[derive(Clone, Copy)]
+pub struct ClickZone {
+    pub rect: Rect,
+    pub lane: LaneId,
+    pub interactive: bool,
+}
+
+/// Two left-clicks on the same lane within this window count as a double-click (→ open the real
+/// terminal). A single click focuses the lane for typing in place.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Whether a click on `lane` at `now` completes a double-click, given the previous click (time +
+/// lane). True only when the previous click was on the *same* lane within [`DOUBLE_CLICK`].
+fn is_double_click(
+    prev: Option<(std::time::Instant, LaneId)>,
+    lane: LaneId,
+    now: std::time::Instant,
+) -> bool {
+    matches!(prev, Some((t, l)) if l == lane && now.duration_since(t) < DOUBLE_CLICK)
+}
+
 pub struct App {
     pub client: DaemonClient,
     pub theme: Theme,
@@ -99,6 +125,11 @@ pub struct App {
     pub sel_anchor: Option<usize>,
     pub sel_head: Option<usize>,
     pub focus_geom: std::cell::Cell<(u16, usize, usize)>,
+    /// Clickable lane regions for the current frame, recorded during render and read by the mouse
+    /// handler. Cleared and repopulated every render.
+    pub click_zones: RefCell<Vec<ClickZone>>,
+    /// Last left-click (time + lane) for double-click detection.
+    last_click: Option<(std::time::Instant, LaneId)>,
     /// Lanes where the user disabled auto-continue this session (echoes the daemon's set so the
     /// `C` key can toggle without a round-trip).
     pub ac_off: HashSet<LaneId>,
@@ -175,6 +206,8 @@ impl App {
             sel_anchor: None,
             sel_head: None,
             focus_geom: std::cell::Cell::new((0, 0, 0)),
+            click_zones: RefCell::new(Vec::new()),
+            last_click: None,
             ac_off: HashSet::new(),
             grid_active: 0,
             timeline: None,
@@ -389,6 +422,16 @@ impl App {
     /// Key handling in the babysit Grid: a linear cursor over the live tiles (arrows move it,
     /// dots show position), `↵` focuses the active tile, and esc/spc/q leave the view.
     async fn grid_key(&mut self, key: KeyEvent) {
+        // Click-focused a tile? Keystrokes go straight to that agent (like Split/Focus insert);
+        // ^O blurs, as does a click on empty space.
+        if self.focus_insert {
+            if leaves_insert(&key) {
+                self.focus_insert = false;
+                return;
+            }
+            self.send_agent_key(key).await;
+            return;
+        }
         let n = self.grid_lane_ids().len();
         if self.grid_active >= n {
             self.grid_active = n.saturating_sub(1);
@@ -484,7 +527,14 @@ impl App {
                         MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
                         _ => {}
                     },
-                    _ => self.handle_mouse(me),
+                    // Grid/Fleet/Split: a left-click focuses the clicked lane (double-click opens
+                    // its real terminal, a click on empty space blurs); the wheel still navigates.
+                    _ => match me.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.handle_click(me.column, me.row).await
+                        }
+                        _ => self.handle_mouse(me),
+                    },
                 }
                 return;
             }
@@ -979,6 +1029,49 @@ impl App {
                 )
             }
             Err(e) => self.status = format!("export failed: {e}"),
+        }
+    }
+
+    /// Make `id` the active lane: move the Fleet cursor to it and, in Grid, the tile cursor too,
+    /// so `selected_lane()` (which key-forwarding targets) points at it.
+    fn activate_lane(&mut self, id: LaneId) {
+        if let Some(pos) = self.visible_lanes().iter().position(|l| l.id == id) {
+            self.selected = pos;
+        }
+        if self.view == View::Grid {
+            if let Some(gi) = self.grid_lane_ids().iter().position(|&l| l == id) {
+                self.grid_active = gi;
+            }
+        }
+    }
+
+    /// A left-click in Grid/Fleet/Split. Hit-test the lane regions recorded during render: a click
+    /// inside one focuses that lane (single-click → type in place for interactive zones; another
+    /// click within `DOUBLE_CLICK` → open its real terminal). A click on empty space blurs.
+    async fn handle_click(&mut self, col: u16, row: u16) {
+        let hit = self
+            .click_zones
+            .borrow()
+            .iter()
+            .find(|z| z.rect.contains(Position { x: col, y: row }))
+            .copied();
+        match hit {
+            Some(z) => {
+                let now = std::time::Instant::now();
+                let dbl = is_double_click(self.last_click, z.lane, now);
+                self.last_click = Some((now, z.lane));
+                self.activate_lane(z.lane);
+                if dbl {
+                    self.focus_insert = false;
+                    self.attach_request = Some(z.lane); // double-click → real terminal
+                } else {
+                    self.focus_insert = z.interactive; // single-click → type in place / select
+                }
+            }
+            None => {
+                self.focus_insert = false; // clicked the gutter → blur
+                self.last_click = None;
+            }
         }
     }
 
@@ -1568,6 +1661,7 @@ impl App {
                 }
             }
             Action::ZoomIn => {
+                self.focus_insert = false; // don't carry click-focus typing across screens
                 self.view = match self.view {
                     View::Fleet => View::Split,
                     View::Split => View::Focus,
@@ -1575,16 +1669,21 @@ impl App {
                     other => other,
                 }
             }
-            Action::ZoomOut => match self.view {
-                View::Focus => self.view = View::Split,
-                View::Split => self.view = View::Fleet,
-                View::Grid => self.view = View::Fleet,
-                View::NewLane => self.view = View::Fleet,
-                View::Timeline | View::Sessions | View::Search | View::AddRepo | View::Agents => {
-                    self.view = View::Fleet
+            Action::ZoomOut => {
+                self.focus_insert = false;
+                match self.view {
+                    View::Focus => self.view = View::Split,
+                    View::Split => self.view = View::Fleet,
+                    View::Grid => self.view = View::Fleet,
+                    View::NewLane => self.view = View::Fleet,
+                    View::Timeline
+                    | View::Sessions
+                    | View::Search
+                    | View::AddRepo
+                    | View::Agents => self.view = View::Fleet,
+                    View::Fleet => self.should_quit = true,
                 }
-                View::Fleet => self.should_quit = true,
-            },
+            }
             Action::Goto(target) => {
                 self.view = target;
                 match target {
@@ -2040,6 +2139,31 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_click_needs_same_lane_within_window() {
+        let t0 = std::time::Instant::now();
+        // Same lane, well within the window → double-click.
+        assert!(is_double_click(
+            Some((t0, 5)),
+            5,
+            t0 + Duration::from_millis(100)
+        ));
+        // Same lane but too slow → single clicks.
+        assert!(!is_double_click(
+            Some((t0, 5)),
+            5,
+            t0 + Duration::from_millis(500)
+        ));
+        // A different lane is never a double-click, however fast.
+        assert!(!is_double_click(
+            Some((t0, 5)),
+            7,
+            t0 + Duration::from_millis(50)
+        ));
+        // No previous click → not a double-click.
+        assert!(!is_double_click(None, 5, t0));
+    }
 
     #[test]
     fn esc_is_forwarded_not_captured() {
