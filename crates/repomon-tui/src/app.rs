@@ -85,6 +85,19 @@ fn is_double_click(
     matches!(prev, Some((t, l)) if l == lane && now.duration_since(t) < DOUBLE_CLICK)
 }
 
+/// Editable settings shown in the Settings view (a subset of the daemon config).
+#[derive(Default)]
+pub struct Settings {
+    pub accent: String,
+    pub auto_continue: bool,
+    pub auto_continue_message: String,
+}
+
+/// Accent choices the Settings view cycles through (`mono` = no color).
+const ACCENTS: &[&str] = &[
+    "cyan", "green", "magenta", "amber", "blue", "red", "white", "mono",
+];
+
 pub struct App {
     pub client: DaemonClient,
     pub theme: Theme,
@@ -137,6 +150,10 @@ pub struct App {
     pub ac_off: HashSet<LaneId>,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
+    /// Settings view state.
+    pub settings: Settings,
+    pub settings_idx: usize,
+    pub settings_editing: bool,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -213,6 +230,9 @@ impl App {
             hover_lane: None,
             ac_off: HashSet::new(),
             grid_active: 0,
+            settings: Settings::default(),
+            settings_idx: 0,
+            settings_editing: false,
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -334,7 +354,8 @@ impl App {
             | View::Sessions
             | View::Search
             | View::AddRepo
-            | View::Agents => Vec::new(),
+            | View::Agents
+            | View::Settings => Vec::new(),
         }
     }
 
@@ -562,6 +583,7 @@ impl App {
             View::Sessions => self.sessions_key(key).await,
             View::AddRepo => self.addrepo_key(key).await,
             View::Agents => self.agents_key(key).await,
+            View::Settings => self.settings_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -763,6 +785,111 @@ impl App {
     }
 
     /// Key handling for the agent manager: a list of agents plus an add/edit form.
+    async fn load_settings(&mut self) {
+        self.settings_idx = 0;
+        self.settings_editing = false;
+        if let Ok(v) = self.client.call("config.get", None).await {
+            self.apply_settings_value(&v);
+        }
+    }
+
+    fn apply_settings_value(&mut self, v: &serde_json::Value) {
+        if let Some(a) = v.get("accent") {
+            self.settings.accent = a
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "cyan".to_string());
+        }
+        if let Some(b) = v.get("auto_continue").and_then(|x| x.as_bool()) {
+            self.settings.auto_continue = b;
+        }
+        if let Some(m) = v.get("auto_continue_message").and_then(|x| x.as_str()) {
+            self.settings.auto_continue_message = m.to_string();
+        }
+    }
+
+    /// Persist the current settings to the daemon config and apply the accent live.
+    async fn save_settings(&mut self) {
+        let params = json!({
+            "accent": self.settings.accent,
+            "auto_continue": self.settings.auto_continue,
+            "auto_continue_message": self.settings.auto_continue_message,
+        });
+        match self.client.call("config.set", Some(params)).await {
+            Ok(v) => self.apply_settings_value(&v),
+            Err(e) => self.status = format!("settings save failed: {e}"),
+        }
+        // Re-theme the whole TUI from the new accent immediately.
+        self.theme = Theme::from_accent(Some(&self.settings.accent));
+    }
+
+    async fn settings_key(&mut self, key: KeyEvent) {
+        if self.settings_editing {
+            match key.code {
+                KeyCode::Char(c) => self.settings.auto_continue_message.push(c),
+                KeyCode::Backspace => {
+                    self.settings.auto_continue_message.pop();
+                }
+                KeyCode::Enter => {
+                    self.settings_editing = false;
+                    self.save_settings().await;
+                }
+                KeyCode::Esc => {
+                    self.settings_editing = false;
+                    self.load_settings().await; // discard the in-progress edit
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_idx = self.settings_idx.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings_idx = (self.settings_idx + 1).min(2)
+            }
+            KeyCode::Left => self.adjust_setting(false).await,
+            KeyCode::Right => self.adjust_setting(true).await,
+            KeyCode::Char(' ') | KeyCode::Enter => self.activate_setting().await,
+            KeyCode::Esc => self.view = View::Fleet,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    async fn adjust_setting(&mut self, forward: bool) {
+        match self.settings_idx {
+            0 => {
+                let n = ACCENTS.len();
+                let cur = ACCENTS
+                    .iter()
+                    .position(|a| *a == self.settings.accent)
+                    .unwrap_or(0);
+                let next = if forward {
+                    (cur + 1) % n
+                } else {
+                    (cur + n - 1) % n
+                };
+                self.settings.accent = ACCENTS[next].to_string();
+                self.save_settings().await;
+            }
+            1 => {
+                self.settings.auto_continue = !self.settings.auto_continue;
+                self.save_settings().await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn activate_setting(&mut self) {
+        match self.settings_idx {
+            0 | 1 => self.adjust_setting(true).await,
+            2 => self.settings_editing = true,
+            _ => {}
+        }
+    }
+
     async fn agents_key(&mut self, key: KeyEvent) {
         if self.ag_editing {
             match key.code {
@@ -1698,7 +1825,8 @@ impl App {
                     | View::Sessions
                     | View::Search
                     | View::AddRepo
-                    | View::Agents => self.view = View::Fleet,
+                    | View::Agents
+                    | View::Settings => self.view = View::Fleet,
                     View::Fleet => self.should_quit = true,
                 }
             }
@@ -1718,6 +1846,7 @@ impl App {
                         self.load_browse(cwd).await;
                     }
                     View::Agents => self.enter_agents(None).await,
+                    View::Settings => self.load_settings().await,
                     _ => {}
                 }
             }

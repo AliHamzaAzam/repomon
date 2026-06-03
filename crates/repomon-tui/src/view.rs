@@ -16,7 +16,7 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
@@ -53,6 +53,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Search => render_search(f, app),
         View::AddRepo => render_addrepo(f, app),
         View::Agents => render_agents(f, app),
+        View::Settings => render_settings(f, app),
     }
 }
 
@@ -145,6 +146,77 @@ fn render_agents(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
     f.render_widget(footer(AGENTS_KEYS, app), rows[2]);
+}
+
+const SETTINGS_KEYS: &str = "↑↓ select  ·  ←/→ change · space/↵ toggle/edit  ·  esc back";
+const SETTINGS_EDIT_KEYS: &str = "type the continue message  ·  ↵ save · esc cancel";
+
+/// The settings view: accent color (cycles, live preview), auto-continue on/off, and the
+/// continue message — each persisted to `~/.config/repomon/config.toml` via the daemon.
+fn render_settings(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · SETTINGS", &fmt_clock(), app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+
+    let s = &app.settings;
+    let auto = if s.auto_continue { "on" } else { "off" };
+    let msg_cur = if app.settings_editing { "_" } else { "" };
+    let items: [(&str, String, &str); 3] = [
+        ("accent", s.accent.clone(), "←/→ cycle · live preview"),
+        ("auto-continue", auto.to_string(), "space toggles"),
+        (
+            "continue message",
+            format!("{}{msg_cur}", s.auto_continue_message),
+            "↵ edit",
+        ),
+    ];
+    let mut lines = vec![Line::raw("")];
+    for (i, (name, value, hint)) in items.iter().enumerate() {
+        let selected = i == app.settings_idx;
+        let marker = if selected { "▸" } else { " " };
+        let row = if selected {
+            Line::from(Span::styled(
+                format!("  {marker} {name:<18}{value:<14}  {hint}"),
+                app.theme.selected(),
+            ))
+        } else {
+            Line::from(vec![
+                Span::raw(format!("  {marker} ")),
+                Span::styled(format!("{name:<18}"), app.theme.muted()),
+                Span::styled(format!("{value:<14}"), app.theme.accented()),
+                Span::styled(format!("  {hint}"), app.theme.muted()),
+            ])
+        };
+        lines.push(row);
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  accent: cyan/green/magenta/amber/blue/red/white, a #hex in config.toml, or mono"
+            .to_string(),
+        app.theme.muted(),
+    )));
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    let keys = if app.settings_editing {
+        SETTINGS_EDIT_KEYS
+    } else {
+        SETTINGS_KEYS
+    };
+    f.render_widget(footer(keys, app), rows[2]);
 }
 
 const ADDREPO_KEYS: &str =

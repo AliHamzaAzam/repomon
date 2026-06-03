@@ -119,6 +119,16 @@ struct AgentSetDefault {
     #[serde(default)]
     name: Option<String>,
 }
+/// A partial config update from the Settings view — only the present fields are applied.
+#[derive(Deserialize)]
+struct ConfigSet {
+    #[serde(default)]
+    accent: Option<String>,
+    #[serde(default)]
+    auto_continue: Option<bool>,
+    #[serde(default)]
+    auto_continue_message: Option<String>,
+}
 #[derive(Deserialize)]
 struct AgentAdopt {
     lane_id: repomon_core::model::LaneId,
@@ -481,6 +491,40 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 json!({ "default": p.name }),
             );
             Ok(Value::Null)
+        }
+        "config.get" => {
+            let cfg = ctx.config.read().await;
+            Ok(json!({
+                "accent": cfg.accent,
+                "auto_continue": cfg.auto_continue,
+                "auto_continue_message": cfg.auto_continue_message,
+            }))
+        }
+        "config.set" => {
+            let p: ConfigSet = parse(params)?;
+            {
+                let mut cfg = ctx.config.write().await;
+                let prev = cfg.clone();
+                if let Some(a) = p.accent {
+                    cfg.accent = Some(a);
+                }
+                if let Some(b) = p.auto_continue {
+                    cfg.auto_continue = b;
+                }
+                if let Some(m) = p.auto_continue_message {
+                    cfg.auto_continue_message = m;
+                }
+                if let Err(e) = cfg.save_to(&ctx.config_path) {
+                    *cfg = prev;
+                    return Err(internal(e));
+                }
+            }
+            let cfg = ctx.config.read().await;
+            Ok(json!({
+                "accent": cfg.accent,
+                "auto_continue": cfg.auto_continue,
+                "auto_continue_message": cfg.auto_continue_message,
+            }))
         }
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
