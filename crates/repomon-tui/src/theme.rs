@@ -111,6 +111,10 @@ impl Theme {
             _ => s,
         }
     }
+    /// Mouse-hover highlight — bold, distinct from the reverse-video selection.
+    pub fn hover(&self) -> Style {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
     /// Accent foreground (dividers, dirty marks, active markers), else plain.
     pub fn accented(&self) -> Style {
         match (self.colored, self.accent) {

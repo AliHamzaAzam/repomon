@@ -130,6 +130,8 @@ pub struct App {
     pub click_zones: RefCell<Vec<ClickZone>>,
     /// Last left-click (time + lane) for double-click detection.
     last_click: Option<(std::time::Instant, LaneId)>,
+    /// The lane the mouse is currently hovering (highlighted on render). `None` = not over a lane.
+    pub hover_lane: Option<LaneId>,
     /// Lanes where the user disabled auto-continue this session (echoes the daemon's set so the
     /// `C` key can toggle without a round-trip).
     pub ac_off: HashSet<LaneId>,
@@ -208,6 +210,7 @@ impl App {
             focus_geom: std::cell::Cell::new((0, 0, 0)),
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
+            hover_lane: None,
             ac_off: HashSet::new(),
             grid_active: 0,
             timeline: None,
@@ -509,6 +512,11 @@ impl App {
             Event::Key(key) => key,
             Event::Mouse(me) => {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+                // Bare movement just updates the hovered lane (highlighted on render).
+                if matches!(me.kind, MouseEventKind::Moved) {
+                    self.update_hover(me.column, me.row);
+                    return;
+                }
                 // In Focus the wheel scrolls the agent's output and a drag selects lines (copied
                 // to the clipboard on release); elsewhere the wheel moves the cursor.
                 match self.view {
@@ -1043,6 +1051,16 @@ impl App {
                 self.grid_active = gi;
             }
         }
+    }
+
+    /// Update the hovered lane from the mouse position by hit-testing the recorded click zones.
+    fn update_hover(&mut self, col: u16, row: u16) {
+        self.hover_lane = self
+            .click_zones
+            .borrow()
+            .iter()
+            .find(|z| z.rect.contains(Position { x: col, y: row }))
+            .map(|z| z.lane);
     }
 
     /// A left-click in Grid/Fleet/Split. Hit-test the lane regions recorded during render: a click
@@ -1829,7 +1847,12 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
 
 fn enable_mouse() {
     use ratatui::crossterm::event::EnableMouseCapture;
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = ratatui::crossterm::execute!(out, EnableMouseCapture);
+    // Also request any-motion tracking (mode 1003) so bare hover — no button — is reported.
+    let _ = out.write_all(b"\x1b[?1003h");
+    let _ = out.flush();
 }
 
 /// Discard any terminal input still buffered after returning from a tmux attach — mouse-tracking
@@ -1845,7 +1868,11 @@ fn drain_pending_input() {
 
 fn disable_mouse() {
     use ratatui::crossterm::event::DisableMouseCapture;
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[?1003l"); // stop any-motion tracking
+    let _ = out.flush();
+    let _ = ratatui::crossterm::execute!(out, DisableMouseCapture);
 }
 
 async fn event_loop(

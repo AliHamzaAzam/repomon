@@ -560,6 +560,7 @@ fn render_grid(f: &mut Frame, app: &App) {
                     cell.height as usize,
                     idx == active,
                     idx == active && app.focus_insert,
+                    app.hover_lane == Some(ids[idx]),
                 )),
                 cell,
             );
@@ -620,6 +621,7 @@ fn tile_lines(
     height: usize,
     active: bool,
     focused: bool,
+    hovered: bool,
 ) -> Vec<Line<'static>> {
     let marker = if focused {
         "▶"
@@ -640,6 +642,8 @@ fn tile_lines(
         app.theme.selected()
     } else if active {
         app.theme.bold()
+    } else if hovered {
+        app.theme.hover()
     } else {
         app.theme.dim()
     };
@@ -937,7 +941,11 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
             current = Some(lane.repo.id);
             lines.push(repo_header(width, &lane.repo.name, app));
         }
-        let line = lane_row(lane, now, app, i == app.selected);
+        let selected = i == app.selected;
+        let mut line = lane_row(lane, now, app, selected);
+        if !selected && app.hover_lane == Some(lane.id) {
+            line = line.style(app.theme.hover());
+        }
         // Record this row's on-screen rect so a click selects the lane (no live pane here, so a
         // single click only selects; double-click opens the real terminal).
         let li = lines.len() as u16;
@@ -994,7 +1002,7 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         let counts = dirty_str(&lane.state.dirty);
         let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
         let _ = now;
-        let line = if i == app.selected {
+        let mut line = if i == app.selected {
             Line::from(Span::styled(
                 format!(" {glyph}{rest}"),
                 app.theme.selected(),
@@ -1011,6 +1019,9 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
                 Span::raw(rest),
             ])
         };
+        if i != app.selected && app.hover_lane == Some(lane.id) {
+            line = line.style(app.theme.hover());
+        }
         let li = lines.len() as u16;
         if li < content.height {
             click_zone(
