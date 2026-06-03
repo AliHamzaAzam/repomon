@@ -377,8 +377,18 @@ fn render_split(f: &mut Frame, app: &App) {
         ]),
         rows[0],
     );
-    let body = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(rows[1]);
+    // Sidebar │ detail/output, separated by a vertical rule.
+    let body = Layout::horizontal([
+        Constraint::Length(26),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(rows[1]);
     f.render_widget(Paragraph::new(sidebar_lines(app, body[0])), body[0]);
+    let divider: Vec<Line> = (0..body[1].height)
+        .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
+        .collect();
+    f.render_widget(Paragraph::new(divider), body[1]);
     // Live agent output if there is any, otherwise the lane's git detail.
     let id = app.selected_lane().map(|l| l.id);
     let has_output = id
@@ -386,14 +396,14 @@ fn render_split(f: &mut Frame, app: &App) {
         .map(|p| !p.raw.trim().is_empty())
         .unwrap_or(false);
     let right = if has_output {
-        output_tail(app, id, body[1].height as usize)
+        output_tail(app, id, body[2].height as usize)
     } else {
         detail_lines(app)
     };
-    f.render_widget(Paragraph::new(right), body[1]);
+    f.render_widget(Paragraph::new(right), body[2]);
     // Clicking the pane focuses the selected agent for typing (double-click → real terminal).
     if let Some(id) = id {
-        click_zone(app, body[1], id, true);
+        click_zone(app, body[2], id, true);
     }
 
     // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
@@ -526,26 +536,22 @@ fn render_grid(f: &mut Frame, app: &App) {
 
     let active = app.grid_active.min(n - 1);
 
-    // Two columns; rows as needed for the visible tiles.
+    // Two columns (when wide enough); rows as needed — with a vertical/horizontal rule between
+    // tiles so each live pane reads as its own box.
     let cols = if area.width >= 80 { 2 } else { 1 };
     let tile_rows = n.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..tile_rows)
-        .map(|_| Constraint::Ratio(1, tile_rows as u32))
-        .collect();
-    let grid_rows = Layout::vertical(row_constraints).split(rows[1]);
+    let grid_rows = Layout::vertical(interleaved(tile_rows)).split(rows[1]);
 
-    for (r, row_area) in grid_rows.iter().enumerate() {
-        let col_constraints: Vec<Constraint> = (0..cols)
-            .map(|_| Constraint::Ratio(1, cols as u32))
-            .collect();
-        let cells = Layout::horizontal(col_constraints).split(*row_area);
-        for (c, cell) in cells.iter().enumerate() {
+    for r in 0..tile_rows {
+        let cells = Layout::horizontal(interleaved(cols)).split(grid_rows[r * 2]);
+        for c in 0..cols {
             let idx = r * cols + c;
             if idx >= n {
                 continue;
             }
+            let cell = cells[c * 2];
             let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
-            click_zone(app, *cell, ids[idx], true);
+            click_zone(app, cell, ids[idx], true);
             f.render_widget(
                 Paragraph::new(tile_lines(
                     app,
@@ -555,7 +561,22 @@ fn render_grid(f: &mut Frame, app: &App) {
                     idx == active,
                     idx == active && app.focus_insert,
                 )),
-                *cell,
+                cell,
+            );
+            // Vertical rule between this tile and the next column's tile.
+            if c + 1 < cols && idx + 1 < n {
+                let vd = cells[c * 2 + 1];
+                let vline: Vec<Line> = (0..vd.height)
+                    .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
+                    .collect();
+                f.render_widget(Paragraph::new(vline), vd);
+            }
+        }
+        // Horizontal rule between this row of tiles and the next.
+        if r + 1 < tile_rows {
+            f.render_widget(
+                Paragraph::new(rule(grid_rows[r * 2 + 1].width, false, app)),
+                grid_rows[r * 2 + 1],
             );
         }
     }
@@ -1152,6 +1173,20 @@ fn section_header(width: u16, title: &str, rest: &str, right: &str, app: &App) -
         Span::raw(" ".repeat(pad)),
         Span::styled(right.to_string(), app.theme.muted()),
     ])
+}
+
+/// Layout constraints for `count` equal cells separated by single-cell dividers:
+/// `[Fill(1), Length(1), Fill(1), …]`. The cell at logical index `i` is at split index `i * 2`,
+/// the divider after it at `i * 2 + 1`.
+fn interleaved(count: usize) -> Vec<Constraint> {
+    let mut v = Vec::new();
+    for i in 0..count {
+        if i > 0 {
+            v.push(Constraint::Length(1));
+        }
+        v.push(Constraint::Fill(1));
+    }
+    v
 }
 
 fn rule(width: u16, heavy: bool, app: &App) -> Line<'static> {

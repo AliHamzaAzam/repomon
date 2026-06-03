@@ -19,6 +19,8 @@ pub const DOWN: char = '↓';
 // Horizontal rules.
 pub const HEAVY: char = '━';
 pub const LIGHT: char = '─';
+// Vertical rule (column divider).
+pub const VLIGHT: char = '│';
 
 // Density blocks, low to high (timeline).
 pub const DENSITY: [&str; 6] = [" ", "▁", "░", "▒", "▓", "█"];
