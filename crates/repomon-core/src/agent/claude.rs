@@ -85,7 +85,35 @@ pub fn default_config_base() -> PathBuf {
 /// All Claude config dirs to consider: the default `~/.claude`, any `~/.claude-*` that holds a
 /// `projects/` dir (e.g. a separate work account run with `CLAUDE_CONFIG_DIR=~/.claude-work`),
 /// and an explicit `$CLAUDE_CONFIG_DIR` if set. Each contains a `projects/` subdir.
+///
+/// Cached with a short TTL: this is called per-lane on every `lane.list`, and the underlying
+/// `read_dir($HOME)` is the dominant cost there. The set of config dirs changes ~never, so a
+/// process-global cache (re-scanned every ~45 s) turns ~10 `$HOME` scans per refresh into ~0.
 pub fn config_bases() -> Vec<PathBuf> {
+    use std::time::{Duration, Instant};
+    // Tests mutate env / home and expect immediate results — never cache there.
+    if cfg!(test) {
+        return config_bases_uncached();
+    }
+    type Cache = Mutex<Option<(Instant, Vec<PathBuf>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(45);
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cell.lock() {
+        if let Some((t, bases)) = &*g {
+            if t.elapsed() < TTL {
+                return bases.clone();
+            }
+        }
+    }
+    let fresh = config_bases_uncached();
+    if let Ok(mut g) = cell.lock() {
+        *g = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+fn config_bases_uncached() -> Vec<PathBuf> {
     let mut bases = vec![default_config_base()];
     if let Ok(rd) = std::fs::read_dir(home()) {
         for e in rd.flatten() {

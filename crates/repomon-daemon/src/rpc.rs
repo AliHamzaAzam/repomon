@@ -1112,7 +1112,9 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
     {
         let cache = ctx.live_cwds.lock().await;
         if let Some((t, map)) = &*cache {
-            if t.elapsed() < std::time::Duration::from_secs(2) {
+            // pgrep+lsof is slow (lsof spikes to 100-500ms on macOS); keep it well off the hot
+            // path. A `/exit`-ed session may linger up to this long — acceptable.
+            if t.elapsed() < std::time::Duration::from_secs(10) {
                 return Some(map.clone());
             }
         }

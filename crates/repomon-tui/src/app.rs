@@ -150,6 +150,9 @@ pub struct App {
     last_click: Option<(std::time::Instant, LaneId)>,
     /// The lane the mouse is currently hovering (highlighted on render). `None` = not over a lane.
     pub hover_lane: Option<LaneId>,
+    /// Set by `on_notification` for non-output events; the event loop coalesces a notification
+    /// burst into a single `refresh()`.
+    refresh_pending: bool,
     /// Lanes where the user disabled auto-continue this session (echoes the daemon's set so the
     /// `C` key can toggle without a round-trip).
     pub ac_off: HashSet<LaneId>,
@@ -235,6 +238,7 @@ impl App {
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
             hover_lane: None,
+            refresh_pending: false,
             ac_off: HashSet::new(),
             grid_active: 0,
             settings: Settings::default(),
@@ -530,7 +534,10 @@ impl App {
                 self.output.insert(id, Pane { raw, lines });
             }
         } else {
-            self.refresh().await;
+            // Don't refresh inline — the event loop coalesces a burst of notifications into a
+            // single refresh (each `refresh()` is a ~100ms lane.list, and bursts/exit-focus
+            // backlogs would otherwise stack into a multi-hundred-ms stall).
+            self.refresh_pending = true;
             // A repo may have new commits; refetch the selected lane's history next tick.
             self.recent_commits_lane = None;
         }
@@ -2042,13 +2049,11 @@ fn cycle(options: &[&str], current: &str, forward: bool) -> String {
 }
 
 fn enable_mouse() {
+    // Button/scroll/drag tracking only. We deliberately do NOT request any-motion tracking
+    // (mode 1003): it floods a redraw per mouse move on terminals that report it, and Terminal.app
+    // doesn't report it anyway, so hover stayed inert there. (Re-add behind an opt-in flag later.)
     use ratatui::crossterm::event::EnableMouseCapture;
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    let _ = ratatui::crossterm::execute!(out, EnableMouseCapture);
-    // Also request any-motion tracking (mode 1003) so bare hover — no button — is reported.
-    let _ = out.write_all(b"\x1b[?1003h");
-    let _ = out.flush();
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
 }
 
 /// Discard any terminal input still buffered after returning from a tmux attach — mouse-tracking
@@ -2064,11 +2069,7 @@ fn drain_pending_input() {
 
 fn disable_mouse() {
     use ratatui::crossterm::event::DisableMouseCapture;
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[?1003l"); // stop any-motion tracking
-    let _ = out.flush();
-    let _ = ratatui::crossterm::execute!(out, DisableMouseCapture);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
 }
 
 async fn event_loop(
@@ -2122,7 +2123,27 @@ async fn event_loop(
                 None => return Ok(()),
             },
             note = next_note(events), if events_alive => match note {
-                Some(n) => app.on_notification(n).await,
+                Some(n) => {
+                    app.on_notification(n).await;
+                    // Coalesce a burst of notifications (and the backlog buffered while parked in
+                    // a focused attach) into a single refresh instead of one ~100ms refresh each.
+                    loop {
+                        match events.try_recv() {
+                            Ok(n) => app.on_notification(n).await,
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                                app.refresh_pending = true;
+                            }
+                            Err(broadcast::error::TryRecvError::Closed) => {
+                                events_alive = false;
+                                break;
+                            }
+                        }
+                    }
+                    if std::mem::take(&mut app.refresh_pending) {
+                        app.refresh().await;
+                    }
+                }
                 None => events_alive = false,
             },
             _ = tick.tick() => {

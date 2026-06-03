@@ -46,19 +46,28 @@ impl Lanes {
     pub async fn list(&self) -> Result<Vec<Lane>> {
         let repos = self.store.list_repos().await?;
         let metas = self.store.list_lane_meta().await?;
-        let mut lanes = Vec::new();
 
-        for repo in repos {
-            let rp = repo.path.clone();
-            let entries = match tokio::task::spawn_blocking(move || worktree::list(&rp))
-                .await
-                .map_err(join_err)?
-            {
-                Ok(e) => e,
-                // A repo that's gone missing on disk shouldn't sink the whole fleet view.
-                Err(_) => continue,
-            };
+        // Phase 1a — list each repo's worktrees in parallel (`git worktree list` is a subprocess
+        // per repo; running them concurrently turns N×~10ms into ~one list's wall time).
+        let repo_handles: Vec<_> = repos
+            .iter()
+            .map(|repo| {
+                let rp = repo.path.clone();
+                tokio::task::spawn_blocking(move || worktree::list(&rp))
+            })
+            .collect();
+        let mut repo_entries = Vec::new();
+        for (repo, h) in repos.into_iter().zip(repo_handles) {
+            // A repo that's gone missing on disk shouldn't sink the whole fleet view.
+            if let Ok(entries) = h.await.map_err(join_err)? {
+                repo_entries.push((repo, entries));
+            }
+        }
 
+        // Phase 1b — upsert each worktree's DB rows (cheap), collecting what each needs for its
+        // (expensive) git-state read, which we then run in parallel.
+        let mut pending = Vec::new();
+        for (repo, entries) in repo_entries {
             let mut keep = Vec::new();
             for entry in entries {
                 if entry.bare {
@@ -90,52 +99,68 @@ impl Lanes {
                     .get_or_create_lane(repo.id, entry.path.to_string_lossy().into_owned())
                     .await?;
 
-                // Live state; fall back to a prunable placeholder if the worktree dir is gone.
-                let p = entry.path.clone();
-                let wid = wt.id;
-                let mut state =
-                    match tokio::task::spawn_blocking(move || reader::read_state(&p, wid))
-                        .await
-                        .map_err(join_err)?
-                    {
-                        Ok(s) => s,
-                        Err(_) => WorktreeState {
-                            worktree_id: wt.id,
-                            head,
-                            branch: entry.branch.clone(),
-                            upstream: None,
-                            ahead: 0,
-                            behind: 0,
-                            dirty: Default::default(),
-                            last_commit_at: None,
-                            locked: entry.locked.is_some(),
-                            prunable: true,
-                        },
-                    };
-                state.locked = entry.locked.is_some();
-                if entry.prunable.is_some() {
-                    state.prunable = true;
-                }
-
-                let pinned = metas
-                    .iter()
-                    .find(|m| m.id == lane_id)
-                    .map(|m| m.pinned)
-                    .unwrap_or(false);
-                let last_activity_at = state.last_commit_at.unwrap_or(repo.added_at);
-
-                lanes.push(Lane {
-                    id: lane_id,
-                    repo: repo.clone(),
-                    worktree: wt,
-                    state,
-                    agent_sessions: Vec::new(),
-                    last_activity_at,
-                    pinned,
-                });
+                pending.push((repo.clone(), entry, wt, lane_id, head));
             }
 
             self.store.prune_worktrees(repo.id, keep).await?;
+        }
+
+        // Phase 2 — read each worktree's live git state IN PARALLEL. `read_state` (gix status) is
+        // the dominant cost of `lane.list`; spawning them concurrently turns N×~10ms sequential
+        // into roughly one read's wall time.
+        let handles: Vec<_> = pending
+            .iter()
+            .map(|(_, entry, wt, _, _)| {
+                let p = entry.path.clone();
+                let wid = wt.id;
+                tokio::task::spawn_blocking(move || reader::read_state(&p, wid))
+            })
+            .collect();
+        let mut states = Vec::with_capacity(handles.len());
+        for h in handles {
+            states.push(h.await.map_err(join_err)?);
+        }
+
+        // Phase 3 — assemble the lanes.
+        let mut lanes = Vec::with_capacity(pending.len());
+        for ((repo, entry, wt, lane_id, head), st) in pending.into_iter().zip(states) {
+            // Fall back to a prunable placeholder if the worktree dir is gone.
+            let mut state = match st {
+                Ok(s) => s,
+                Err(_) => WorktreeState {
+                    worktree_id: wt.id,
+                    head,
+                    branch: entry.branch.clone(),
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    dirty: Default::default(),
+                    last_commit_at: None,
+                    locked: entry.locked.is_some(),
+                    prunable: true,
+                },
+            };
+            state.locked = entry.locked.is_some();
+            if entry.prunable.is_some() {
+                state.prunable = true;
+            }
+
+            let pinned = metas
+                .iter()
+                .find(|m| m.id == lane_id)
+                .map(|m| m.pinned)
+                .unwrap_or(false);
+            let last_activity_at = state.last_commit_at.unwrap_or(repo.added_at);
+
+            lanes.push(Lane {
+                id: lane_id,
+                repo,
+                worktree: wt,
+                state,
+                agent_sessions: Vec::new(),
+                last_activity_at,
+                pinned,
+            });
         }
 
         sort_lanes(&mut lanes);
