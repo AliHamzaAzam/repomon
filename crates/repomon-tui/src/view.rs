@@ -1010,6 +1010,10 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     let right = format!("today · {} commits", app.commits.len());
     lines.push(section_header(width, "FLEET", &rest, &right, app));
     lines.push(rule(width, false, app));
+    lines.push(Line::from(Span::styled(
+        "  +staged ~modified ?untracked · ↑ahead ↓behind".to_string(),
+        app.theme.muted(),
+    )));
     lines.push(Line::raw(""));
 
     if app.filtering || !app.filter.is_empty() {
@@ -1342,12 +1346,12 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
         .map(|s| s.agent.short().to_string())
         .unwrap_or_default();
     let mid = format!(
-        "{:<12} {:<26} {:<11} {:<7} {:<7} ",
+        "{:<12} {:<36} {:<11} {:<7} {:<7} ",
         trunc(&lane_name(lane), 12),
-        lane_branch(lane),
+        trunc(&lane_branch(lane), 36),
         dirty_str(&lane.state.dirty),
         ahead_behind_str(lane.state.ahead, lane.state.behind),
-        agent,
+        trunc(&agent, 7),
     );
     let time = rel_time(lane.last_activity_at, now);
     if selected {
