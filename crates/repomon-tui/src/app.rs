@@ -85,6 +85,24 @@ fn is_double_click(
     matches!(prev, Some((t, l)) if l == lane && now.duration_since(t) < DOUBLE_CLICK)
 }
 
+/// Editable settings shown in the Settings view (a subset of the daemon config).
+#[derive(Default)]
+pub struct Settings {
+    pub accent: String,
+    pub default_agent: String,
+    pub auto_continue: bool,
+    pub auto_continue_message: String,
+    pub worktree_template: String,
+}
+
+/// Accent choices the Settings view cycles through (`mono` = no color).
+const ACCENTS: &[&str] = &[
+    "cyan", "green", "magenta", "amber", "blue", "red", "white", "mono",
+];
+
+/// Number of editable rows in the Settings view.
+const SETTINGS_COUNT: usize = 5;
+
 pub struct App {
     pub client: DaemonClient,
     pub theme: Theme,
@@ -130,11 +148,19 @@ pub struct App {
     pub click_zones: RefCell<Vec<ClickZone>>,
     /// Last left-click (time + lane) for double-click detection.
     last_click: Option<(std::time::Instant, LaneId)>,
+    /// The lane the mouse is currently hovering (highlighted on render). `None` = not over a lane.
+    pub hover_lane: Option<LaneId>,
     /// Lanes where the user disabled auto-continue this session (echoes the daemon's set so the
     /// `C` key can toggle without a round-trip).
     pub ac_off: HashSet<LaneId>,
     /// Active tile in the babysit grid.
     pub grid_active: usize,
+    /// Settings view state.
+    pub settings: Settings,
+    pub settings_idx: usize,
+    pub settings_editing: bool,
+    /// Screen row of the first settings item (for click hit-testing), set during render.
+    pub settings_geom: std::cell::Cell<u16>,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -208,8 +234,13 @@ impl App {
             focus_geom: std::cell::Cell::new((0, 0, 0)),
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
+            hover_lane: None,
             ac_off: HashSet::new(),
             grid_active: 0,
+            settings: Settings::default(),
+            settings_idx: 0,
+            settings_editing: false,
+            settings_geom: std::cell::Cell::new(0),
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -331,7 +362,8 @@ impl App {
             | View::Sessions
             | View::Search
             | View::AddRepo
-            | View::Agents => Vec::new(),
+            | View::Agents
+            | View::Settings => Vec::new(),
         }
     }
 
@@ -509,6 +541,11 @@ impl App {
             Event::Key(key) => key,
             Event::Mouse(me) => {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+                // Bare movement just updates the hovered lane (highlighted on render).
+                if matches!(me.kind, MouseEventKind::Moved) {
+                    self.update_hover(me.column, me.row);
+                    return;
+                }
                 // In Focus the wheel scrolls the agent's output and a drag selects lines (copied
                 // to the clipboard on release); elsewhere the wheel moves the cursor.
                 match self.view {
@@ -527,6 +564,12 @@ impl App {
                         MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
                         _ => {}
                     },
+                    // Settings: a click selects + activates the row under the cursor.
+                    View::Settings => {
+                        if let MouseEventKind::Down(MouseButton::Left) = me.kind {
+                            self.settings_click(me.row).await;
+                        }
+                    }
                     // Grid/Fleet/Split: a left-click focuses the clicked lane (double-click opens
                     // its real terminal, a click on empty space blurs); the wheel still navigates.
                     _ => match me.kind {
@@ -554,6 +597,7 @@ impl App {
             View::Sessions => self.sessions_key(key).await,
             View::AddRepo => self.addrepo_key(key).await,
             View::Agents => self.agents_key(key).await,
+            View::Settings => self.settings_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -755,6 +799,149 @@ impl App {
     }
 
     /// Key handling for the agent manager: a list of agents plus an add/edit form.
+    async fn load_settings(&mut self) {
+        self.settings_idx = 0;
+        self.settings_editing = false;
+        self.load_agents().await; // populate nl_agents for the default-agent picker
+        if let Ok(v) = self.client.call("config.get", None).await {
+            self.apply_settings_value(&v);
+        }
+    }
+
+    fn apply_settings_value(&mut self, v: &serde_json::Value) {
+        let s = |x: &serde_json::Value| x.as_str().map(|t| t.to_string());
+        if let Some(a) = v.get("accent") {
+            self.settings.accent = s(a).unwrap_or_else(|| "cyan".to_string());
+        }
+        if let Some(d) = v.get("default_agent") {
+            self.settings.default_agent = s(d).unwrap_or_default();
+        }
+        if let Some(b) = v.get("auto_continue").and_then(|x| x.as_bool()) {
+            self.settings.auto_continue = b;
+        }
+        if let Some(m) = v.get("auto_continue_message").and_then(|x| x.as_str()) {
+            self.settings.auto_continue_message = m.to_string();
+        }
+        if let Some(w) = v.get("worktree_template").and_then(|x| x.as_str()) {
+            self.settings.worktree_template = w.to_string();
+        }
+    }
+
+    /// Persist the current settings to the daemon config and apply the accent live.
+    async fn save_settings(&mut self) {
+        let default_agent = if self.settings.default_agent.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!(self.settings.default_agent)
+        };
+        let params = json!({
+            "accent": self.settings.accent,
+            "default_agent": default_agent,
+            "auto_continue": self.settings.auto_continue,
+            "auto_continue_message": self.settings.auto_continue_message,
+            "worktree_template": self.settings.worktree_template,
+        });
+        match self.client.call("config.set", Some(params)).await {
+            Ok(v) => self.apply_settings_value(&v),
+            Err(e) => self.status = format!("settings save failed: {e}"),
+        }
+        // Re-theme the whole TUI from the new accent immediately.
+        self.theme = Theme::from_accent(Some(&self.settings.accent));
+    }
+
+    /// The text field edited by the current row, if it's a text setting.
+    fn settings_edit_field(&mut self) -> Option<&mut String> {
+        match self.settings_idx {
+            3 => Some(&mut self.settings.auto_continue_message),
+            4 => Some(&mut self.settings.worktree_template),
+            _ => None,
+        }
+    }
+
+    async fn settings_key(&mut self, key: KeyEvent) {
+        if self.settings_editing {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(f) = self.settings_edit_field() {
+                        f.push(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(f) = self.settings_edit_field() {
+                        f.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    self.settings_editing = false;
+                    self.save_settings().await;
+                }
+                KeyCode::Esc => {
+                    self.settings_editing = false;
+                    self.load_settings().await; // discard the in-progress edit
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_idx = self.settings_idx.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings_idx = (self.settings_idx + 1).min(SETTINGS_COUNT - 1)
+            }
+            KeyCode::Left => self.adjust_setting(false).await,
+            KeyCode::Right => self.adjust_setting(true).await,
+            KeyCode::Char(' ') | KeyCode::Enter => self.activate_setting().await,
+            KeyCode::Esc => self.view = View::Fleet,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Click on a settings row (from the mouse): select it and activate it.
+    async fn settings_click(&mut self, row: u16) {
+        let first = self.settings_geom.get();
+        if row >= first {
+            let idx = (row - first) as usize;
+            if idx < SETTINGS_COUNT {
+                self.settings_idx = idx;
+                self.activate_setting().await;
+            }
+        }
+    }
+
+    async fn adjust_setting(&mut self, forward: bool) {
+        match self.settings_idx {
+            0 => {
+                self.settings.accent = cycle(ACCENTS, &self.settings.accent, forward);
+                self.save_settings().await;
+            }
+            1 => {
+                let names: Vec<String> = self.nl_agents.iter().map(|a| a.name.clone()).collect();
+                if !names.is_empty() {
+                    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                    self.settings.default_agent =
+                        cycle(&refs, &self.settings.default_agent, forward);
+                    self.save_settings().await;
+                }
+            }
+            2 => {
+                self.settings.auto_continue = !self.settings.auto_continue;
+                self.save_settings().await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn activate_setting(&mut self) {
+        match self.settings_idx {
+            0..=2 => self.adjust_setting(true).await,
+            3..=4 => self.settings_editing = true,
+            _ => {}
+        }
+    }
+
     async fn agents_key(&mut self, key: KeyEvent) {
         if self.ag_editing {
             match key.code {
@@ -1043,6 +1230,16 @@ impl App {
                 self.grid_active = gi;
             }
         }
+    }
+
+    /// Update the hovered lane from the mouse position by hit-testing the recorded click zones.
+    fn update_hover(&mut self, col: u16, row: u16) {
+        self.hover_lane = self
+            .click_zones
+            .borrow()
+            .iter()
+            .find(|z| z.rect.contains(Position { x: col, y: row }))
+            .map(|z| z.lane);
     }
 
     /// A left-click in Grid/Fleet/Split. Hit-test the lane regions recorded during render: a click
@@ -1680,7 +1877,8 @@ impl App {
                     | View::Sessions
                     | View::Search
                     | View::AddRepo
-                    | View::Agents => self.view = View::Fleet,
+                    | View::Agents
+                    | View::Settings => self.view = View::Fleet,
                     View::Fleet => self.should_quit = true,
                 }
             }
@@ -1700,6 +1898,7 @@ impl App {
                         self.load_browse(cwd).await;
                     }
                     View::Agents => self.enter_agents(None).await,
+                    View::Settings => self.load_settings().await,
                     _ => {}
                 }
             }
@@ -1827,9 +2026,29 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     Ok(app.cd_target)
 }
 
+/// Cycle `current` to the next/previous option (wrapping). Returns `current` if `options` is empty.
+fn cycle(options: &[&str], current: &str, forward: bool) -> String {
+    if options.is_empty() {
+        return current.to_string();
+    }
+    let n = options.len();
+    let cur = options.iter().position(|o| *o == current).unwrap_or(0);
+    let next = if forward {
+        (cur + 1) % n
+    } else {
+        (cur + n - 1) % n
+    };
+    options[next].to_string()
+}
+
 fn enable_mouse() {
     use ratatui::crossterm::event::EnableMouseCapture;
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = ratatui::crossterm::execute!(out, EnableMouseCapture);
+    // Also request any-motion tracking (mode 1003) so bare hover — no button — is reported.
+    let _ = out.write_all(b"\x1b[?1003h");
+    let _ = out.flush();
 }
 
 /// Discard any terminal input still buffered after returning from a tmux attach — mouse-tracking
@@ -1845,7 +2064,11 @@ fn drain_pending_input() {
 
 fn disable_mouse() {
     use ratatui::crossterm::event::DisableMouseCapture;
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[?1003l"); // stop any-motion tracking
+    let _ = out.flush();
+    let _ = ratatui::crossterm::execute!(out, DisableMouseCapture);
 }
 
 async fn event_loop(

@@ -30,6 +30,17 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
     serde_json::to_value(v).map_err(internal)
 }
 
+/// The editable subset of the config exposed to the Settings view.
+fn config_json(cfg: &repomon_core::config::Config) -> Value {
+    json!({
+        "accent": cfg.accent,
+        "auto_continue": cfg.auto_continue,
+        "auto_continue_message": cfg.auto_continue_message,
+        "default_agent": cfg.default_agent,
+        "worktree_template": cfg.worktree_template,
+    })
+}
+
 #[derive(Deserialize)]
 struct RepoAdd {
     path: String,
@@ -118,6 +129,20 @@ struct AgentRemove {
 struct AgentSetDefault {
     #[serde(default)]
     name: Option<String>,
+}
+/// A partial config update from the Settings view — only the present fields are applied.
+#[derive(Deserialize)]
+struct ConfigSet {
+    #[serde(default)]
+    accent: Option<String>,
+    #[serde(default)]
+    auto_continue: Option<bool>,
+    #[serde(default)]
+    auto_continue_message: Option<String>,
+    #[serde(default)]
+    default_agent: Option<String>,
+    #[serde(default)]
+    worktree_template: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentAdopt {
@@ -481,6 +506,38 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 json!({ "default": p.name }),
             );
             Ok(Value::Null)
+        }
+        "config.get" => {
+            let cfg = ctx.config.read().await;
+            Ok(config_json(&cfg))
+        }
+        "config.set" => {
+            let p: ConfigSet = parse(params)?;
+            {
+                let mut cfg = ctx.config.write().await;
+                let prev = cfg.clone();
+                if let Some(a) = p.accent {
+                    cfg.accent = Some(a);
+                }
+                if let Some(b) = p.auto_continue {
+                    cfg.auto_continue = b;
+                }
+                if let Some(m) = p.auto_continue_message {
+                    cfg.auto_continue_message = m;
+                }
+                if let Some(d) = p.default_agent {
+                    cfg.default_agent = Some(d);
+                }
+                if let Some(w) = p.worktree_template {
+                    cfg.worktree_template = w;
+                }
+                if let Err(e) = cfg.save_to(&ctx.config_path) {
+                    *cfg = prev;
+                    return Err(internal(e));
+                }
+            }
+            let cfg = ctx.config.read().await;
+            Ok(config_json(&cfg))
         }
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;

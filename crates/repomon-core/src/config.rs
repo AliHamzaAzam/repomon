@@ -30,7 +30,10 @@ pub struct Config {
     pub time_format: String,
     /// The tmux session repomon manages agents in.
     pub tmux_session: String,
-    /// Optional accent color name (e.g. "cyan"); default monochrome.
+    /// Accent color for headers, the selected lane, section dividers, and dirty marks. A named
+    /// color (`cyan`, `green`, `magenta`, `amber`, …) or a `#rrggbb`/`#rgb` hex. Unset defaults to
+    /// cyan; `"mono"` (or `"none"`/`"off"`) turns all color off for the original monochrome look.
+    /// (Status colors — running=green, needs-you=amber, rate-limited=cyan — are fixed.)
     pub accent: Option<String>,
     /// The agent preselected in New Lane (a built-in kind like "claude-code" or a custom
     /// name). `None` falls back to the first listed agent.

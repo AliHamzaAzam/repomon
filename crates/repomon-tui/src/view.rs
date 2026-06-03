@@ -1,5 +1,6 @@
-//! Rendering for the four views. Brutalist mono: light/heavy rules, single-char glyphs,
-//! two-space indents, reverse-video selection, no color.
+//! Rendering for the views. Flat, brutalist layout — light/heavy rules, single-char glyphs,
+//! two-space indents — with a semantic color palette over the top (status colors + a
+//! configurable accent; see [`crate::theme`]). `accent = "mono"` restores the no-color look.
 
 use chrono::{DateTime, Local, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -15,7 +16,7 @@ use crate::keybinds::View;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
@@ -52,6 +53,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Search => render_search(f, app),
         View::AddRepo => render_addrepo(f, app),
         View::Agents => render_agents(f, app),
+        View::Settings => render_settings(f, app),
     }
 }
 
@@ -71,7 +73,7 @@ fn render_agents(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             header_line(area.width, "REPOMON · AGENTS", &fmt_clock(), app),
-            rule(area.width, true),
+            rule(area.width, true, app),
         ]),
         rows[0],
     );
@@ -146,6 +148,99 @@ fn render_agents(f: &mut Frame, app: &App) {
     f.render_widget(footer(AGENTS_KEYS, app), rows[2]);
 }
 
+const SETTINGS_KEYS: &str = "↑↓ / click a row  ·  ←/→ change · space/↵ toggle/edit  ·  esc back";
+const SETTINGS_EDIT_KEYS: &str = "type the continue message  ·  ↵ save · esc cancel";
+
+/// The settings view: accent color (cycles, live preview), auto-continue on/off, and the
+/// continue message — each persisted to `~/.config/repomon/config.toml` via the daemon.
+fn render_settings(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · SETTINGS", &fmt_clock(), app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+
+    let s = &app.settings;
+    let editing = app.settings_editing;
+    let cur = |i: usize| {
+        if editing && app.settings_idx == i {
+            "_"
+        } else {
+            ""
+        }
+    };
+    let default_agent = if s.default_agent.is_empty() {
+        "(first listed)".to_string()
+    } else {
+        s.default_agent.clone()
+    };
+    let items: [(&str, String, &str); 5] = [
+        ("accent", s.accent.clone(), "←/→ cycle · live"),
+        ("default agent", default_agent, "←/→ cycle"),
+        (
+            "auto-continue",
+            if s.auto_continue { "on" } else { "off" }.to_string(),
+            "space toggles",
+        ),
+        (
+            "continue message",
+            format!("{}{}", s.auto_continue_message, cur(3)),
+            "↵ edit",
+        ),
+        (
+            "worktree template",
+            format!("{}{}", s.worktree_template, cur(4)),
+            "↵ edit",
+        ),
+    ];
+    // Items start one row below the body top (after a leading blank) — record it for clicks.
+    app.settings_geom.set(rows[1].y + 1);
+    let mut lines = vec![Line::raw("")];
+    for (i, (name, value, hint)) in items.iter().enumerate() {
+        let selected = i == app.settings_idx;
+        let marker = if selected { "▸" } else { " " };
+        let row = if selected {
+            Line::from(Span::styled(
+                format!("  {marker} {name:<18}{value:<22}  {hint}"),
+                app.theme.selected(),
+            ))
+        } else {
+            Line::from(vec![
+                Span::raw(format!("  {marker} ")),
+                Span::styled(format!("{name:<18}"), app.theme.muted()),
+                Span::styled(format!("{value:<22}"), app.theme.accented()),
+                Span::styled(format!("  {hint}"), app.theme.muted()),
+            ])
+        };
+        lines.push(row);
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ or click a row to change it · accent also takes a #hex in config.toml".to_string(),
+        app.theme.muted(),
+    )));
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    let keys = if app.settings_editing {
+        SETTINGS_EDIT_KEYS
+    } else {
+        SETTINGS_KEYS
+    };
+    f.render_widget(footer(keys, app), rows[2]);
+}
+
 const ADDREPO_KEYS: &str =
     "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here  ·  esc back";
 
@@ -166,7 +261,7 @@ fn render_addrepo(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             header_line(area.width, "REPOMON · ADD REPO", &fmt_clock(), app),
-            rule(area.width, true),
+            rule(area.width, true, app),
             Line::from(Span::styled(path_line, app.theme.dim())),
         ]),
         rows[0],
@@ -203,7 +298,7 @@ fn render_timeline(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
     let mut lines = vec![
         header_line(area.width, "REPOMON · TIMELINE", &fmt_clock(), app),
-        rule(area.width, true),
+        rule(area.width, true, app),
         Line::raw(""),
     ];
     match &app.timeline {
@@ -239,7 +334,7 @@ fn render_timeline(f: &mut Frame, app: &App) {
             }
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled("CORRELATIONS", app.theme.bold())));
-            lines.push(rule(area.width, false));
+            lines.push(rule(area.width, false, app));
             lines.push(Line::raw(""));
             if t.correlations.is_empty() {
                 lines.push(Line::raw("  (none above threshold)".to_string()));
@@ -266,7 +361,7 @@ fn render_sessions(f: &mut Frame, app: &App) {
     let total: i64 = app.sessions.iter().map(|s| s.duration_minutes()).sum();
     let mut lines = vec![
         header_line(area.width, "REPOMON · SESSIONS", &fmt_clock(), app),
-        rule(area.width, true),
+        rule(area.width, true, app),
         Line::raw(""),
         Line::from(Span::styled(
             format!(
@@ -316,7 +411,7 @@ fn render_search(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
     let mut lines = vec![
         header_line(area.width, "REPOMON · SEARCH", &fmt_clock(), app),
-        rule(area.width, true),
+        rule(area.width, true, app),
         Line::raw(""),
         Line::raw(format!("  search commits: {}_", app.search_query)),
         Line::raw(""),
@@ -372,12 +467,22 @@ fn render_split(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             header_line(area.width, "REPOMON", &fmt_clock(), app),
-            rule(area.width, true),
+            rule(area.width, true, app),
         ]),
         rows[0],
     );
-    let body = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(rows[1]);
+    // Sidebar │ detail/output, separated by a vertical rule.
+    let body = Layout::horizontal([
+        Constraint::Length(26),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(rows[1]);
     f.render_widget(Paragraph::new(sidebar_lines(app, body[0])), body[0]);
+    let divider: Vec<Line> = (0..body[1].height)
+        .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
+        .collect();
+    f.render_widget(Paragraph::new(divider), body[1]);
     // Live agent output if there is any, otherwise the lane's git detail.
     let id = app.selected_lane().map(|l| l.id);
     let has_output = id
@@ -385,14 +490,14 @@ fn render_split(f: &mut Frame, app: &App) {
         .map(|p| !p.raw.trim().is_empty())
         .unwrap_or(false);
     let right = if has_output {
-        output_tail(app, id, body[1].height as usize)
+        output_tail(app, id, body[2].height as usize)
     } else {
         detail_lines(app)
     };
-    f.render_widget(Paragraph::new(right), body[1]);
+    f.render_widget(Paragraph::new(right), body[2]);
     // Clicking the pane focuses the selected agent for typing (double-click → real terminal).
     if let Some(id) = id {
-        click_zone(app, body[1], id, true);
+        click_zone(app, body[2], id, true);
     }
 
     // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
@@ -404,7 +509,7 @@ fn render_split(f: &mut Frame, app: &App) {
     } else {
         Line::from(Span::styled(
             " ○ i type to the selected agent · ↵/→ full-screen focus ",
-            app.theme.dim(),
+            app.theme.muted(),
         ))
     };
     f.render_widget(Paragraph::new(mode), rows[2]);
@@ -435,7 +540,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             header_line(area.width, &title, &fmt_clock(), app),
-            rule(area.width, true),
+            rule(area.width, true, app),
         ]),
         rows[0],
     );
@@ -469,7 +574,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     } else {
         Line::from(Span::styled(
             " ○ COMMAND — ↵/→ open real terminal (native scroll/copy/paste) · i quick-type · PgUp scroll ",
-            app.theme.dim(),
+            app.theme.muted(),
         ))
     };
     f.render_widget(Paragraph::new(mode), rows[2]);
@@ -501,7 +606,7 @@ fn render_grid(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             header_line(area.width, &header, &fmt_clock(), app),
-            rule(area.width, true),
+            rule(area.width, true, app),
         ]),
         rows[0],
     );
@@ -525,26 +630,22 @@ fn render_grid(f: &mut Frame, app: &App) {
 
     let active = app.grid_active.min(n - 1);
 
-    // Two columns; rows as needed for the visible tiles.
+    // Two columns (when wide enough); rows as needed — with a vertical/horizontal rule between
+    // tiles so each live pane reads as its own box.
     let cols = if area.width >= 80 { 2 } else { 1 };
     let tile_rows = n.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..tile_rows)
-        .map(|_| Constraint::Ratio(1, tile_rows as u32))
-        .collect();
-    let grid_rows = Layout::vertical(row_constraints).split(rows[1]);
+    let grid_rows = Layout::vertical(interleaved(tile_rows)).split(rows[1]);
 
-    for (r, row_area) in grid_rows.iter().enumerate() {
-        let col_constraints: Vec<Constraint> = (0..cols)
-            .map(|_| Constraint::Ratio(1, cols as u32))
-            .collect();
-        let cells = Layout::horizontal(col_constraints).split(*row_area);
-        for (c, cell) in cells.iter().enumerate() {
+    for r in 0..tile_rows {
+        let cells = Layout::horizontal(interleaved(cols)).split(grid_rows[r * 2]);
+        for c in 0..cols {
             let idx = r * cols + c;
             if idx >= n {
                 continue;
             }
+            let cell = cells[c * 2];
             let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
-            click_zone(app, *cell, ids[idx], true);
+            click_zone(app, cell, ids[idx], true);
             f.render_widget(
                 Paragraph::new(tile_lines(
                     app,
@@ -553,31 +654,52 @@ fn render_grid(f: &mut Frame, app: &App) {
                     cell.height as usize,
                     idx == active,
                     idx == active && app.focus_insert,
+                    app.hover_lane == Some(ids[idx]),
                 )),
-                *cell,
+                cell,
+            );
+            // Vertical rule between this tile and the next column's tile.
+            if c + 1 < cols && idx + 1 < n {
+                let vd = cells[c * 2 + 1];
+                let vline: Vec<Line> = (0..vd.height)
+                    .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
+                    .collect();
+                f.render_widget(Paragraph::new(vline), vd);
+            }
+        }
+        // Horizontal rule between this row of tiles and the next.
+        if r + 1 < tile_rows {
+            f.render_widget(
+                Paragraph::new(rule(grid_rows[r * 2 + 1].width, false, app)),
+                grid_rows[r * 2 + 1],
             );
         }
     }
 
-    // Instagram-style position indicator at the bottom (above the footer): a dot per tile,
-    // filled for the active one, plus its name — so what's selected is clear at a glance.
-    let dots: String = (0..n)
-        .map(|i| if i == active { "●" } else { "○" })
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Instagram-style position indicator at the bottom (above the footer): a dot per tile, the
+    // active one filled and accent-colored, plus its name — so what's selected is clear at a glance.
     let label = app
         .lanes
         .iter()
         .find(|l| l.id == ids[active])
         .map(|l| format!("{}/{}", l.repo.name, lane_name(l)))
         .unwrap_or_default();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("  {dots}    {}/{n}  {label}", active + 1),
-            app.theme.bold(),
-        ))),
-        rows[2],
-    );
+    let mut spans = vec![Span::raw("  ")];
+    for i in 0..n {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        if i == active {
+            spans.push(Span::styled("●", app.theme.accented()));
+        } else {
+            spans.push(Span::styled("○", app.theme.muted()));
+        }
+    }
+    spans.push(Span::styled(
+        format!("    {}/{n}  {label}", active + 1),
+        app.theme.bold(),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), rows[2]);
     let keys = if app.focus_insert {
         GRID_INSERT_KEYS
     } else {
@@ -593,6 +715,7 @@ fn tile_lines(
     height: usize,
     active: bool,
     focused: bool,
+    hovered: bool,
 ) -> Vec<Line<'static>> {
     let marker = if focused {
         "▶"
@@ -601,38 +724,47 @@ fn tile_lines(
     } else {
         " "
     };
-    let head = match lane {
-        Some(l) => format!(
-            "{marker}{}/{}  {}",
-            l.repo.name,
-            lane_name(l),
-            agent_badge(l)
-        ),
+    let (badge, badge_style) = match lane {
+        Some(l) => agent_badge(l, app),
+        None => (String::new(), Style::default()),
+    };
+    let label = match lane {
+        Some(l) => format!("{marker}{}/{}  ", l.repo.name, lane_name(l)),
         None => format!("{marker}lane {id}"),
     };
-    // When click-focused, the tile is capturing keystrokes — make that unmistakable.
-    let head = if focused {
-        format!("{head}  ⌨ typing (^O / click-out to blur)")
-    } else {
-        head
-    };
-    let style = if focused {
+    let base = if focused {
         app.theme.selected()
     } else if active {
         app.theme.bold()
+    } else if hovered {
+        app.theme.hover()
     } else {
         app.theme.dim()
     };
-    let mut lines = vec![Line::from(Span::styled(head, style))];
+    let mut spans = vec![Span::styled(label, base)];
+    if !badge.is_empty() {
+        // While focused the whole header is the reverse-video bar; otherwise the badge is colored.
+        let bs = if focused { base } else { badge_style };
+        spans.push(Span::styled(badge, bs));
+    }
+    // When click-focused, the tile is capturing keystrokes — make that unmistakable.
+    if focused {
+        spans.push(Span::styled(
+            "  ⌨ typing (^O / click-out to blur)".to_string(),
+            base,
+        ));
+    }
+    let mut lines = vec![Line::from(spans)];
     lines.extend(output_tail(app, Some(id), height.saturating_sub(1)));
     lines
 }
 
-fn agent_badge(lane: &Lane) -> String {
+/// The status badge text for a lane's agents, plus the style (color) for that status.
+fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
     use repomon_core::model::AgentStatus;
     let sessions = &lane.agent_sessions;
     if sessions.is_empty() {
-        return String::new();
+        return (String::new(), Style::default());
     }
     let n = sessions.len();
     let waiting = sessions
@@ -658,13 +790,16 @@ fn agent_badge(lane: &Lane) -> String {
         .iter()
         .find(|s| s.status == AgentStatus::RateLimited);
     if let Some(rl) = rate_limited {
-        format!("⏳ rate-limited · {}{count}{tag}", fmt_resume(rl.resume_at))
+        (
+            format!("⏳ rate-limited · {}{count}{tag}", fmt_resume(rl.resume_at)),
+            app.theme.rate_limited(),
+        )
     } else if waiting > 0 {
-        format!("⏸ needs you{count}{tag}")
+        (format!("⏸ needs you{count}{tag}"), app.theme.needs_you())
     } else if running > 0 {
-        format!("▶ running{count}{tag}")
+        (format!("▶ running{count}{tag}"), app.theme.running())
     } else {
-        format!("idle{count}{tag}")
+        (format!("idle{count}{tag}"), app.theme.idle())
     }
 }
 
@@ -808,7 +943,7 @@ fn render_new_lane(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
     let mut lines = vec![
         header_line(area.width, "REPOMON · NEW LANE", &fmt_clock(), app),
-        rule(area.width, true),
+        rule(area.width, true, app),
         Line::raw(""),
     ];
     let repo_name = app
@@ -843,7 +978,7 @@ fn render_new_lane(f: &mut Frame, app: &App) {
     lines.push(Line::raw("  source    HEAD".to_string()));
     lines.push(Line::raw(format!("  path      {preview_path}   [auto]")));
     lines.push(Line::raw(""));
-    lines.push(rule(area.width, false));
+    lines.push(rule(area.width, false, app));
     lines.push(Line::raw(""));
     if !app.status.is_empty() {
         lines.push(Line::raw(format!("  {}", app.status)));
@@ -859,7 +994,7 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     let now = Utc::now();
     let mut lines = Vec::new();
     lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
-    lines.push(rule(width, true));
+    lines.push(rule(width, true, app));
     lines.push(Line::raw(""));
 
     let visible = app.visible_lanes();
@@ -868,13 +1003,13 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         .iter()
         .filter(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()))
         .count();
-    let left = format!(
-        "FLEET  {} lanes · {repos} repos · {needs} need you",
+    let rest = format!(
+        "  {} lanes · {repos} repos · {needs} need you",
         visible.len()
     );
     let right = format!("today · {} commits", app.commits.len());
-    lines.push(padded_line(width, &left, &right, app.theme.bold()));
-    lines.push(rule(width, false));
+    lines.push(section_header(width, "FLEET", &rest, &right, app));
+    lines.push(rule(width, false, app));
     lines.push(Line::raw(""));
 
     if app.filtering || !app.filter.is_empty() {
@@ -894,12 +1029,16 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     let mut current: Option<RepoId> = None;
     for (i, lane) in visible.iter().enumerate() {
         if current != Some(lane.repo.id) {
+            if current.is_some() {
+                lines.push(Line::raw("")); // a gap between repo groups
+            }
             current = Some(lane.repo.id);
-            lines.push(repo_header(width, &lane.repo.name));
+            lines.push(repo_header(width, &lane.repo.name, app));
         }
-        let mut line = lane_row(lane, now);
-        if i == app.selected {
-            line = line.style(app.theme.selected());
+        let selected = i == app.selected;
+        let mut line = lane_row(lane, now, app, selected);
+        if !selected && app.hover_lane == Some(lane.id) {
+            line = line.style(app.theme.hover());
         }
         // Record this row's on-screen rect so a click selects the lane (no live pane here, so a
         // single click only selects; double-click opens the real terminal).
@@ -921,8 +1060,8 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::raw(""));
-    lines.push(padded_line(width, "TODAY", &tz_offset(), app.theme.bold()));
-    lines.push(rule(width, false));
+    lines.push(section_header(width, "TODAY", "", &tz_offset(), app));
+    lines.push(rule(width, false, app));
     lines.push(Line::raw(""));
     for c in app.commits.iter().take(12) {
         lines.push(commit_line(c, app));
@@ -940,7 +1079,7 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("FLEET {}", visible.len()),
-            app.theme.bold(),
+            app.theme.header_style(),
         )),
         Line::raw(""),
     ];
@@ -950,16 +1089,32 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
             current = Some(lane.repo.id);
             lines.push(Line::from(Span::styled(
                 lane.repo.name.clone(),
-                app.theme.dim(),
+                app.theme.muted(),
             )));
         }
         let glyph = status_glyph(lane);
         let counts = dirty_str(&lane.state.dirty);
-        let text = format!(" {glyph} {:<10} {}", trunc(&lane_name(lane), 10), counts);
-        let mut line = Line::raw(text);
+        let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
         let _ = now;
-        if i == app.selected {
-            line = line.style(app.theme.selected());
+        let mut line = if i == app.selected {
+            Line::from(Span::styled(
+                format!(" {glyph}{rest}"),
+                app.theme.selected(),
+            ))
+        } else {
+            let glyph_style = if lane.state.dirty.is_clean() {
+                app.theme.muted()
+            } else {
+                app.theme.accented()
+            };
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(glyph.to_string(), glyph_style),
+                Span::raw(rest),
+            ])
+        };
+        if i != app.selected && app.hover_lane == Some(lane.id) {
+            line = line.style(app.theme.hover());
         }
         let li = lines.len() as u16;
         if li < content.height {
@@ -990,7 +1145,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("{} · {}", lane.repo.name, lane_name(lane)),
-            app.theme.bold(),
+            app.theme.header_style(),
         )),
         Line::raw(""),
         Line::raw(format!("  path     {}", lane.worktree.path.display())),
@@ -1034,7 +1189,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
         };
         lines.push(Line::from(Span::styled(
             format!("  agents   {n} active · {waiting} waiting{hint}"),
-            app.theme.bold(),
+            app.theme.header_style(),
         )));
         for (i, sess) in lane.agent_sessions.iter().enumerate() {
             let cursor = if i == app.session_idx { "‣" } else { " " };
@@ -1056,11 +1211,12 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             } else {
                 ago(sess.last_activity_at)
             };
-            lines.push(Line::raw(format!(
-                "  {cursor} {glyph} {kind}  {:<40}  {}",
-                trunc(&label, 40),
-                trailer
-            )));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {cursor} ")),
+                Span::styled(glyph.to_string(), app.theme.status(sess.status)),
+                Span::raw(format!(" {kind}  {:<40}  ", trunc(&label, 40))),
+                Span::styled(trailer, app.theme.muted()),
+            ]));
         }
     }
     // Plain shell terminals (no agent) — open as many as you like with `t`.
@@ -1074,7 +1230,10 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     };
     lines.push(Line::raw(term_line));
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("RECENT COMMITS", app.theme.bold())));
+    lines.push(Line::from(Span::styled(
+        "RECENT COMMITS",
+        app.theme.header_style(),
+    )));
     lines.push(Line::raw(""));
     // The latest commits on this worktree's branch (loaded per-selection), so a feature
     // branch or a repo with nothing today still shows its history.
@@ -1091,65 +1250,120 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
 // ---- atoms -------------------------------------------------------------------
 
 fn footer(keys: &str, app: &App) -> Paragraph<'static> {
-    Paragraph::new(Line::from(Span::styled(keys.to_string(), app.theme.dim())))
+    Paragraph::new(Line::from(Span::styled(
+        keys.to_string(),
+        app.theme.muted(),
+    )))
 }
 
 fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
-    padded_line(width, left, right, app.theme.header_style())
-}
-
-fn padded_line(width: u16, left: &str, right: &str, left_style: Style) -> Line<'static> {
+    // The view title is the accent; the clock on the right is muted.
     let used = left.chars().count() + right.chars().count();
     let pad = (width as usize).saturating_sub(used);
     Line::from(vec![
-        Span::styled(left.to_string(), left_style),
+        Span::styled(left.to_string(), app.theme.header_style()),
         Span::raw(" ".repeat(pad)),
-        Span::raw(right.to_string()),
+        Span::styled(right.to_string(), app.theme.muted()),
     ])
 }
 
-fn rule(width: u16, heavy: bool) -> Line<'static> {
+/// A clear section divider: an accent title, the rest of the left text muted, and an optional
+/// muted right-aligned tail. Used for FLEET / TODAY / AGENTS-style headings.
+fn section_header(width: u16, title: &str, rest: &str, right: &str, app: &App) -> Line<'static> {
+    let used = title.chars().count() + rest.chars().count() + right.chars().count();
+    let pad = (width as usize).saturating_sub(used);
+    Line::from(vec![
+        Span::styled(title.to_string(), app.theme.header_style()),
+        Span::styled(rest.to_string(), app.theme.muted()),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right.to_string(), app.theme.muted()),
+    ])
+}
+
+/// Layout constraints for `count` equal cells separated by single-cell dividers:
+/// `[Fill(1), Length(1), Fill(1), …]`. The cell at logical index `i` is at split index `i * 2`,
+/// the divider after it at `i * 2 + 1`.
+fn interleaved(count: usize) -> Vec<Constraint> {
+    let mut v = Vec::new();
+    for i in 0..count {
+        if i > 0 {
+            v.push(Constraint::Length(1));
+        }
+        v.push(Constraint::Fill(1));
+    }
+    v
+}
+
+fn rule(width: u16, heavy: bool, app: &App) -> Line<'static> {
+    // Heavy header rules take the accent; light section rules are muted — so dividers read as a
+    // distinct layer instead of blending with the white body text.
     let c = if heavy { theme::HEAVY } else { theme::LIGHT };
-    Line::raw(c.to_string().repeat(width as usize))
+    let style = if heavy {
+        app.theme.accented()
+    } else {
+        app.theme.muted()
+    };
+    Line::from(Span::styled(c.to_string().repeat(width as usize), style))
 }
 
-fn repo_header(width: u16, name: &str) -> Line<'static> {
-    let prefix = format!("  {name} ");
-    let dashes = (width as usize).saturating_sub(prefix.chars().count());
-    Line::raw(format!(
-        "{prefix}{}",
-        theme::LIGHT.to_string().repeat(dashes)
-    ))
+fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
+    // "  NAME ─────…" — the repo name in the accent, the rule muted, so each group is delineated.
+    let used = 2 + name.chars().count() + 1;
+    let dashes = (width as usize).saturating_sub(used);
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(name.to_string(), app.theme.header_style()),
+        Span::raw(" "),
+        Span::styled(theme::LIGHT.to_string().repeat(dashes), app.theme.muted()),
+    ])
 }
 
-fn lane_row(lane: &Lane, now: DateTime<Utc>) -> Line<'static> {
+fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<'static> {
     use repomon_core::model::AgentStatus;
     let glyph = status_glyph(lane);
     let any = |st: AgentStatus| lane.agent_sessions.iter().any(|s| s.status == st);
-    let active = if any(AgentStatus::RateLimited) {
-        theme::RATE_LIMITED // ⏳ paused on a usage limit, auto-continuing
+    let (active, active_style) = if any(AgentStatus::RateLimited) {
+        (theme::RATE_LIMITED, app.theme.rate_limited()) // ⏳ paused on a usage limit
     } else if any(AgentStatus::Waiting) {
-        theme::WAITING // ⏸ needs you
+        (theme::WAITING, app.theme.needs_you()) // ⏸ needs you
     } else if any(AgentStatus::Running) {
-        theme::AGENT_ACTIVE // ▶ working
+        (theme::AGENT_ACTIVE, app.theme.running()) // ▶ working
     } else {
-        " "
+        (" ", app.theme.dim())
+    };
+    let glyph_style = if lane.state.dirty.is_clean() {
+        app.theme.muted()
+    } else {
+        app.theme.accented()
     };
     let agent = lane
         .agent_sessions
         .first()
         .map(|s| s.agent.short().to_string())
         .unwrap_or_default();
-    let text = format!(
-        "  {glyph} {active} {:<12} {:<26} {:<11} {:<7} {:<7} {}",
+    let mid = format!(
+        "{:<12} {:<26} {:<11} {:<7} {:<7} ",
         trunc(&lane_name(lane), 12),
         lane_branch(lane),
         dirty_str(&lane.state.dirty),
         ahead_behind_str(lane.state.ahead, lane.state.behind),
         agent,
-        rel_time(lane.last_activity_at, now),
     );
-    Line::raw(text)
+    let time = rel_time(lane.last_activity_at, now);
+    if selected {
+        // A clean reverse-video bar for the selection (per-cell colors would muddy it).
+        let text = format!("  {glyph} {active} {mid}{time}");
+        return Line::from(Span::styled(text, app.theme.selected()));
+    }
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(" "),
+        Span::styled(active.to_string(), active_style),
+        Span::raw(" "),
+        Span::raw(mid),
+        Span::styled(time, app.theme.muted()),
+    ])
 }
 
 fn commit_line(c: &Commit, app: &App) -> Line<'static> {
@@ -1160,7 +1374,11 @@ fn commit_line(c: &Commit, app: &App) -> Line<'static> {
         .find(|l| l.repo.id == c.repo_id)
         .map(|l| l.repo.name.clone())
         .unwrap_or_else(|| format!("repo{}", c.repo_id));
-    Line::raw(format!("  {time}  {:<18} {}", trunc(&repo, 18), c.summary))
+    Line::from(vec![
+        Span::styled(format!("  {time}  "), app.theme.muted()),
+        Span::styled(format!("{:<18} ", trunc(&repo, 18)), app.theme.muted()),
+        Span::raw(c.summary.clone()),
+    ])
 }
 
 fn status_glyph(lane: &Lane) -> &'static str {
