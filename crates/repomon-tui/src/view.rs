@@ -148,7 +148,7 @@ fn render_agents(f: &mut Frame, app: &App) {
     f.render_widget(footer(AGENTS_KEYS, app), rows[2]);
 }
 
-const SETTINGS_KEYS: &str = "↑↓ select  ·  ←/→ change · space/↵ toggle/edit  ·  esc back";
+const SETTINGS_KEYS: &str = "↑↓ / click a row  ·  ←/→ change · space/↵ toggle/edit  ·  esc back";
 const SETTINGS_EDIT_KEYS: &str = "type the continue message  ·  ↵ save · esc cancel";
 
 /// The settings view: accent color (cycles, live preview), auto-continue on/off, and the
@@ -170,31 +170,54 @@ fn render_settings(f: &mut Frame, app: &App) {
     );
 
     let s = &app.settings;
-    let auto = if s.auto_continue { "on" } else { "off" };
-    let msg_cur = if app.settings_editing { "_" } else { "" };
-    let items: [(&str, String, &str); 3] = [
-        ("accent", s.accent.clone(), "←/→ cycle · live preview"),
-        ("auto-continue", auto.to_string(), "space toggles"),
+    let editing = app.settings_editing;
+    let cur = |i: usize| {
+        if editing && app.settings_idx == i {
+            "_"
+        } else {
+            ""
+        }
+    };
+    let default_agent = if s.default_agent.is_empty() {
+        "(first listed)".to_string()
+    } else {
+        s.default_agent.clone()
+    };
+    let items: [(&str, String, &str); 5] = [
+        ("accent", s.accent.clone(), "←/→ cycle · live"),
+        ("default agent", default_agent, "←/→ cycle"),
+        (
+            "auto-continue",
+            if s.auto_continue { "on" } else { "off" }.to_string(),
+            "space toggles",
+        ),
         (
             "continue message",
-            format!("{}{msg_cur}", s.auto_continue_message),
+            format!("{}{}", s.auto_continue_message, cur(3)),
+            "↵ edit",
+        ),
+        (
+            "worktree template",
+            format!("{}{}", s.worktree_template, cur(4)),
             "↵ edit",
         ),
     ];
+    // Items start one row below the body top (after a leading blank) — record it for clicks.
+    app.settings_geom.set(rows[1].y + 1);
     let mut lines = vec![Line::raw("")];
     for (i, (name, value, hint)) in items.iter().enumerate() {
         let selected = i == app.settings_idx;
         let marker = if selected { "▸" } else { " " };
         let row = if selected {
             Line::from(Span::styled(
-                format!("  {marker} {name:<18}{value:<14}  {hint}"),
+                format!("  {marker} {name:<18}{value:<22}  {hint}"),
                 app.theme.selected(),
             ))
         } else {
             Line::from(vec![
                 Span::raw(format!("  {marker} ")),
                 Span::styled(format!("{name:<18}"), app.theme.muted()),
-                Span::styled(format!("{value:<14}"), app.theme.accented()),
+                Span::styled(format!("{value:<22}"), app.theme.accented()),
                 Span::styled(format!("  {hint}"), app.theme.muted()),
             ])
         };
@@ -202,8 +225,7 @@ fn render_settings(f: &mut Frame, app: &App) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "  accent: cyan/green/magenta/amber/blue/red/white, a #hex in config.toml, or mono"
-            .to_string(),
+        "  ↑↓ or click a row to change it · accent also takes a #hex in config.toml".to_string(),
         app.theme.muted(),
     )));
     if !app.status.is_empty() {

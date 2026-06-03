@@ -111,9 +111,15 @@ impl Theme {
             _ => s,
         }
     }
-    /// Mouse-hover highlight — bold, distinct from the reverse-video selection.
+    /// Mouse-hover highlight — bold plus a subtle row background (when colored), distinct from the
+    /// reverse-video selection. (Needs a terminal that reports mouse motion; not all do.)
     pub fn hover(&self) -> Style {
-        Style::default().add_modifier(Modifier::BOLD)
+        let s = Style::default().add_modifier(Modifier::BOLD);
+        if self.colored {
+            s.bg(Color::Indexed(236))
+        } else {
+            s
+        }
     }
     /// Accent foreground (dividers, dirty marks, active markers), else plain.
     pub fn accented(&self) -> Style {

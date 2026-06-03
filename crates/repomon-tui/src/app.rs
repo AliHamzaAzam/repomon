@@ -89,14 +89,19 @@ fn is_double_click(
 #[derive(Default)]
 pub struct Settings {
     pub accent: String,
+    pub default_agent: String,
     pub auto_continue: bool,
     pub auto_continue_message: String,
+    pub worktree_template: String,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
 const ACCENTS: &[&str] = &[
     "cyan", "green", "magenta", "amber", "blue", "red", "white", "mono",
 ];
+
+/// Number of editable rows in the Settings view.
+const SETTINGS_COUNT: usize = 5;
 
 pub struct App {
     pub client: DaemonClient,
@@ -154,6 +159,8 @@ pub struct App {
     pub settings: Settings,
     pub settings_idx: usize,
     pub settings_editing: bool,
+    /// Screen row of the first settings item (for click hit-testing), set during render.
+    pub settings_geom: std::cell::Cell<u16>,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -233,6 +240,7 @@ impl App {
             settings: Settings::default(),
             settings_idx: 0,
             settings_editing: false,
+            settings_geom: std::cell::Cell::new(0),
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -556,6 +564,12 @@ impl App {
                         MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
                         _ => {}
                     },
+                    // Settings: a click selects + activates the row under the cursor.
+                    View::Settings => {
+                        if let MouseEventKind::Down(MouseButton::Left) = me.kind {
+                            self.settings_click(me.row).await;
+                        }
+                    }
                     // Grid/Fleet/Split: a left-click focuses the clicked lane (double-click opens
                     // its real terminal, a click on empty space blurs); the wheel still navigates.
                     _ => match me.kind {
@@ -788,17 +802,19 @@ impl App {
     async fn load_settings(&mut self) {
         self.settings_idx = 0;
         self.settings_editing = false;
+        self.load_agents().await; // populate nl_agents for the default-agent picker
         if let Ok(v) = self.client.call("config.get", None).await {
             self.apply_settings_value(&v);
         }
     }
 
     fn apply_settings_value(&mut self, v: &serde_json::Value) {
+        let s = |x: &serde_json::Value| x.as_str().map(|t| t.to_string());
         if let Some(a) = v.get("accent") {
-            self.settings.accent = a
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "cyan".to_string());
+            self.settings.accent = s(a).unwrap_or_else(|| "cyan".to_string());
+        }
+        if let Some(d) = v.get("default_agent") {
+            self.settings.default_agent = s(d).unwrap_or_default();
         }
         if let Some(b) = v.get("auto_continue").and_then(|x| x.as_bool()) {
             self.settings.auto_continue = b;
@@ -806,14 +822,24 @@ impl App {
         if let Some(m) = v.get("auto_continue_message").and_then(|x| x.as_str()) {
             self.settings.auto_continue_message = m.to_string();
         }
+        if let Some(w) = v.get("worktree_template").and_then(|x| x.as_str()) {
+            self.settings.worktree_template = w.to_string();
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
     async fn save_settings(&mut self) {
+        let default_agent = if self.settings.default_agent.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!(self.settings.default_agent)
+        };
         let params = json!({
             "accent": self.settings.accent,
+            "default_agent": default_agent,
             "auto_continue": self.settings.auto_continue,
             "auto_continue_message": self.settings.auto_continue_message,
+            "worktree_template": self.settings.worktree_template,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -823,12 +849,27 @@ impl App {
         self.theme = Theme::from_accent(Some(&self.settings.accent));
     }
 
+    /// The text field edited by the current row, if it's a text setting.
+    fn settings_edit_field(&mut self) -> Option<&mut String> {
+        match self.settings_idx {
+            3 => Some(&mut self.settings.auto_continue_message),
+            4 => Some(&mut self.settings.worktree_template),
+            _ => None,
+        }
+    }
+
     async fn settings_key(&mut self, key: KeyEvent) {
         if self.settings_editing {
             match key.code {
-                KeyCode::Char(c) => self.settings.auto_continue_message.push(c),
+                KeyCode::Char(c) => {
+                    if let Some(f) = self.settings_edit_field() {
+                        f.push(c);
+                    }
+                }
                 KeyCode::Backspace => {
-                    self.settings.auto_continue_message.pop();
+                    if let Some(f) = self.settings_edit_field() {
+                        f.pop();
+                    }
                 }
                 KeyCode::Enter => {
                     self.settings_editing = false;
@@ -847,7 +888,7 @@ impl App {
                 self.settings_idx = self.settings_idx.saturating_sub(1)
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.settings_idx = (self.settings_idx + 1).min(2)
+                self.settings_idx = (self.settings_idx + 1).min(SETTINGS_COUNT - 1)
             }
             KeyCode::Left => self.adjust_setting(false).await,
             KeyCode::Right => self.adjust_setting(true).await,
@@ -858,23 +899,34 @@ impl App {
         }
     }
 
+    /// Click on a settings row (from the mouse): select it and activate it.
+    async fn settings_click(&mut self, row: u16) {
+        let first = self.settings_geom.get();
+        if row >= first {
+            let idx = (row - first) as usize;
+            if idx < SETTINGS_COUNT {
+                self.settings_idx = idx;
+                self.activate_setting().await;
+            }
+        }
+    }
+
     async fn adjust_setting(&mut self, forward: bool) {
         match self.settings_idx {
             0 => {
-                let n = ACCENTS.len();
-                let cur = ACCENTS
-                    .iter()
-                    .position(|a| *a == self.settings.accent)
-                    .unwrap_or(0);
-                let next = if forward {
-                    (cur + 1) % n
-                } else {
-                    (cur + n - 1) % n
-                };
-                self.settings.accent = ACCENTS[next].to_string();
+                self.settings.accent = cycle(ACCENTS, &self.settings.accent, forward);
                 self.save_settings().await;
             }
             1 => {
+                let names: Vec<String> = self.nl_agents.iter().map(|a| a.name.clone()).collect();
+                if !names.is_empty() {
+                    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                    self.settings.default_agent =
+                        cycle(&refs, &self.settings.default_agent, forward);
+                    self.save_settings().await;
+                }
+            }
+            2 => {
                 self.settings.auto_continue = !self.settings.auto_continue;
                 self.save_settings().await;
             }
@@ -884,8 +936,8 @@ impl App {
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0 | 1 => self.adjust_setting(true).await,
-            2 => self.settings_editing = true,
+            0..=2 => self.adjust_setting(true).await,
+            3..=4 => self.settings_editing = true,
             _ => {}
         }
     }
@@ -1972,6 +2024,21 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     ratatui::restore();
     outcome?;
     Ok(app.cd_target)
+}
+
+/// Cycle `current` to the next/previous option (wrapping). Returns `current` if `options` is empty.
+fn cycle(options: &[&str], current: &str, forward: bool) -> String {
+    if options.is_empty() {
+        return current.to_string();
+    }
+    let n = options.len();
+    let cur = options.iter().position(|o| *o == current).unwrap_or(0);
+    let next = if forward {
+        (cur + 1) % n
+    } else {
+        (cur + n - 1) % n
+    };
+    options[next].to_string()
 }
 
 fn enable_mouse() {
