@@ -138,6 +138,7 @@ impl Lanes {
                     last_commit_at: None,
                     locked: entry.locked.is_some(),
                     prunable: true,
+                    last_change_at: None,
                 },
             };
             state.locked = entry.locked.is_some();
@@ -529,6 +530,29 @@ mod tests {
         let after = lanes.list().await.unwrap();
         assert_eq!(after.len(), 1);
         assert!(after[0].worktree.is_main);
+    }
+
+    #[tokio::test]
+    async fn worktree_file_activity_is_detected() {
+        use chrono::Utc;
+        let (dir, store, cfg) = repo_with_commit().await;
+        let reg = Registry::new(store.clone());
+        reg.add(dir.path()).await.unwrap();
+        let lanes = Lanes::new(store, cfg);
+
+        // A clean worktree has no recent file-change signal.
+        let before = lanes.list().await.unwrap();
+        assert!(before[0].state.last_change_at.is_none());
+
+        // Writing an untracked file makes the worktree show recent activity (the "file activity"
+        // signal the daemon uses to surface agents that leave no transcript).
+        std::fs::write(dir.path().join("scratch.txt"), "work\n").unwrap();
+        let after = lanes.list().await.unwrap();
+        let changed = after[0]
+            .state
+            .last_change_at
+            .expect("a dirty worktree should report a change time");
+        assert!((Utc::now() - changed).num_seconds().abs() < 60);
     }
 
     #[tokio::test]

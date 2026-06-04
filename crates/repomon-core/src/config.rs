@@ -47,6 +47,19 @@ pub struct Config {
     pub auto_continue: bool,
     /// What to type when auto-continuing a rate-limited agent (sent with Enter).
     pub auto_continue_message: String,
+    /// Master switch for desktop/in-app notifications on agent state changes. When off, no
+    /// individual `notify_*` trigger fires.
+    pub notify_enabled: bool,
+    /// Notify when an agent finishes its turn / is waiting on you (`Running` → `Waiting`).
+    pub notify_needs_you: bool,
+    /// Notify when an agent pauses on a usage/rate limit.
+    pub notify_rate_limited: bool,
+    /// Notify when a rate-limited agent is auto-continued and resumes work.
+    pub notify_resumed: bool,
+    /// Notify when an agent goes idle / its session ends (off by default — can be noisy).
+    pub notify_idle: bool,
+    /// Play the system notification sound with each desktop notification.
+    pub notify_sound: bool,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
 }
@@ -63,6 +76,12 @@ impl Default for Config {
             agents: HashMap::new(),
             auto_continue: true,
             auto_continue_message: "continue".to_string(),
+            notify_enabled: true,
+            notify_needs_you: true,
+            notify_rate_limited: true,
+            notify_resumed: true,
+            notify_idle: false,
+            notify_sound: true,
             repos: HashMap::new(),
         }
     }

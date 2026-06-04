@@ -38,6 +38,12 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "auto_continue_message": cfg.auto_continue_message,
         "default_agent": cfg.default_agent,
         "worktree_template": cfg.worktree_template,
+        "notify_enabled": cfg.notify_enabled,
+        "notify_needs_you": cfg.notify_needs_you,
+        "notify_rate_limited": cfg.notify_rate_limited,
+        "notify_resumed": cfg.notify_resumed,
+        "notify_idle": cfg.notify_idle,
+        "notify_sound": cfg.notify_sound,
     })
 }
 
@@ -143,6 +149,18 @@ struct ConfigSet {
     default_agent: Option<String>,
     #[serde(default)]
     worktree_template: Option<String>,
+    #[serde(default)]
+    notify_enabled: Option<bool>,
+    #[serde(default)]
+    notify_needs_you: Option<bool>,
+    #[serde(default)]
+    notify_rate_limited: Option<bool>,
+    #[serde(default)]
+    notify_resumed: Option<bool>,
+    #[serde(default)]
+    notify_idle: Option<bool>,
+    #[serde(default)]
+    notify_sound: Option<bool>,
 }
 #[derive(Deserialize)]
 struct AgentAdopt {
@@ -531,6 +549,24 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 if let Some(w) = p.worktree_template {
                     cfg.worktree_template = w;
                 }
+                if let Some(b) = p.notify_enabled {
+                    cfg.notify_enabled = b;
+                }
+                if let Some(b) = p.notify_needs_you {
+                    cfg.notify_needs_you = b;
+                }
+                if let Some(b) = p.notify_rate_limited {
+                    cfg.notify_rate_limited = b;
+                }
+                if let Some(b) = p.notify_resumed {
+                    cfg.notify_resumed = b;
+                }
+                if let Some(b) = p.notify_idle {
+                    cfg.notify_idle = b;
+                }
+                if let Some(b) = p.notify_sound {
+                    cfg.notify_sound = b;
+                }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
                     return Err(internal(e));
@@ -853,6 +889,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
 /// cap on how many concurrent sessions to surface per worktree.
 const SESSION_WINDOW_HOURS: i64 = 6;
 const MAX_SESSIONS_PER_LANE: usize = 8;
+/// How recently a worktree's files must have changed to infer an *active* (but unidentified)
+/// agent in it — the fallback that surfaces Claude Code worktree-isolated subagents, which leave
+/// no transcript or process of their own. Short, so the indicator tracks actual work.
+const ACTIVITY_WINDOW_SECS: i64 = 90;
 
 async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();
@@ -938,7 +978,37 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 external: false,
                 session_id: None,
                 resume_at: None,
+                inferred: false,
             });
+        } else if let Some(changed) = lane.state.last_change_at {
+            // No identified agent, but a *non-main* worktree's files changed very recently — infer
+            // an active agent we can't name (e.g. a Claude Code worktree-isolated subagent, which
+            // runs inside its parent's process and leaves no transcript or process here). The main
+            // checkout is excluded so hand-edits there don't masquerade as an agent.
+            let active = !lane.worktree.is_main
+                && (chrono::Utc::now() - changed).num_seconds() < ACTIVITY_WINDOW_SECS;
+            if active {
+                if changed > lane.last_activity_at {
+                    lane.last_activity_at = changed;
+                }
+                lane.agent_sessions.push(AgentSession {
+                    id: 0,
+                    agent: AgentKind::Other("active".into()),
+                    repo_id: lane.repo.id,
+                    worktree_id: Some(lane.worktree.id),
+                    started_at: changed,
+                    last_activity_at: changed,
+                    ended_at: None,
+                    manifest_path: std::path::PathBuf::new(),
+                    tool_call_count: 0,
+                    title: Some("active — file activity".into()),
+                    status: AgentStatus::Running,
+                    external: true,
+                    session_id: None,
+                    resume_at: None,
+                    inferred: true,
+                });
+            }
         }
 
         // Overlay a usage-limit pause onto the managed (non-external) session.

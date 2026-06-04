@@ -44,6 +44,24 @@ pub fn head_info(repo: &gix::Repository) -> Result<HeadInfo> {
 
 /// Count staged / unstaged / untracked changes via the gix status iterator.
 pub fn dirty_state(repo: &gix::Repository) -> Result<DirtyState> {
+    Ok(dirty_and_activity(repo, None)?.0)
+}
+
+/// How many changed worktree files to `stat` for the activity mtime before giving up. Any single
+/// recently-touched file already proves activity, so a small cap keeps the syscalls bounded even
+/// for a worktree with thousands of changes.
+const ACTIVITY_STAT_CAP: u32 = 512;
+
+/// Count dirty entries AND, in the same status walk, find the newest mtime among the changed
+/// worktree files. `worktree_root` enables the mtime capture (the relative paths from the status
+/// iterator are joined onto it and `stat`ed); pass `None` to skip it (plain dirty count).
+///
+/// The mtime is repomon's "file activity" signal: a worktree being actively edited by an agent
+/// that leaves no transcript or process of its own still shows that work is happening.
+fn dirty_and_activity(
+    repo: &gix::Repository,
+    worktree_root: Option<&Path>,
+) -> Result<(DirtyState, Option<DateTime<Utc>>)> {
     use gix::status::index_worktree::Item as IwItem;
     use gix::status::Item;
 
@@ -53,19 +71,44 @@ pub fn dirty_state(repo: &gix::Repository) -> Result<DirtyState> {
         .map_err(gix_err)?;
 
     let mut d = DirtyState::default();
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stats = 0u32;
     for item in iter {
         match item.map_err(gix_err)? {
             // HEAD tree vs index → staged.
             Item::TreeIndex(_) => d.staged += 1,
-            Item::IndexWorktree(iw) => match iw {
-                IwItem::Modification { .. } => d.unstaged += 1,
-                // Default status() excludes ignored files, so directory contents are untracked.
-                IwItem::DirectoryContents { .. } => d.untracked += 1,
-                IwItem::Rewrite { .. } => d.unstaged += 1,
-            },
+            Item::IndexWorktree(iw) => {
+                // Worktree-side changes reflect live file edits; stat the path for its mtime.
+                if let Some(root) = worktree_root {
+                    if stats < ACTIVITY_STAT_CAP {
+                        stats += 1;
+                        note_mtime(root, iw.rela_path(), &mut newest);
+                    }
+                }
+                match iw {
+                    IwItem::Modification { .. } => d.unstaged += 1,
+                    // Default status() excludes ignored files, so directory contents are untracked.
+                    IwItem::DirectoryContents { .. } => d.untracked += 1,
+                    IwItem::Rewrite { .. } => d.unstaged += 1,
+                }
+            }
         }
     }
-    Ok(d)
+    Ok((d, newest.map(DateTime::<Utc>::from)))
+}
+
+/// Update `newest` with the mtime of `root/rela`, if it's newer (best-effort; ignores errors).
+fn note_mtime(root: &Path, rela: &gix::bstr::BStr, newest: &mut Option<std::time::SystemTime>) {
+    let Ok(rel) = rela.to_path() else {
+        return;
+    };
+    if let Ok(md) = std::fs::symlink_metadata(root.join(rel)) {
+        if let Ok(m) = md.modified() {
+            if newest.is_none_or(|n| m > n) {
+                *newest = Some(m);
+            }
+        }
+    }
 }
 
 /// Ahead/behind counts vs the current branch's upstream, plus the upstream's short name.
@@ -127,7 +170,7 @@ pub fn head_commit_time(repo: &gix::Repository) -> Result<Option<DateTime<Utc>>>
 pub fn read_state(path: &Path, worktree_id: WorktreeId) -> Result<WorktreeState> {
     let repo = open(path)?;
     let hi = head_info(&repo)?;
-    let dirty = dirty_state(&repo)?;
+    let (dirty, last_change_at) = dirty_and_activity(&repo, Some(path))?;
     let (ahead, behind, upstream) = ahead_behind(&repo)?;
     let last_commit_at = head_commit_time(&repo).ok().flatten();
     let head = hi
@@ -144,6 +187,7 @@ pub fn read_state(path: &Path, worktree_id: WorktreeId) -> Result<WorktreeState>
         last_commit_at,
         locked: false,
         prunable: false,
+        last_change_at,
     })
 }
 

@@ -13,6 +13,7 @@ use repomon_core::model::{Commit, DirtyState, Lane, LaneId, RepoId};
 
 use crate::app::{AgField, App, ClickZone};
 use crate::keybinds::View;
+use crate::notify::NotifKind;
 use crate::theme;
 
 const FLEET_KEYS: &str =
@@ -54,6 +55,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::AddRepo => render_addrepo(f, app),
         View::Agents => render_agents(f, app),
         View::Settings => render_settings(f, app),
+        View::Notifications => render_notifications(f, app),
     }
 }
 
@@ -183,14 +185,11 @@ fn render_settings(f: &mut Frame, app: &App) {
     } else {
         s.default_agent.clone()
     };
-    let items: [(&str, String, &str); 5] = [
+    let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
+    let items: [(&str, String, &str); 11] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
-        (
-            "auto-continue",
-            if s.auto_continue { "on" } else { "off" }.to_string(),
-            "space toggles",
-        ),
+        ("auto-continue", onoff(s.auto_continue), "space toggles"),
         (
             "continue message",
             format!("{}{}", s.auto_continue_message, cur(3)),
@@ -201,6 +200,17 @@ fn render_settings(f: &mut Frame, app: &App) {
             format!("{}{}", s.worktree_template, cur(4)),
             "↵ edit",
         ),
+        // Notifications group — the master switch then per-trigger toggles (indented).
+        ("notifications", onoff(s.notify_enabled), "master · space"),
+        ("  · needs you", onoff(s.notify_needs_you), "space toggles"),
+        (
+            "  · usage limit",
+            onoff(s.notify_rate_limited),
+            "space toggles",
+        ),
+        ("  · auto-resumed", onoff(s.notify_resumed), "space toggles"),
+        ("  · went idle", onoff(s.notify_idle), "space toggles"),
+        ("  · sound", onoff(s.notify_sound), "space toggles"),
     ];
     // Items start one row below the body top (after a leading blank) — record it for clicks.
     app.settings_geom.set(rows[1].y + 1);
@@ -402,6 +412,60 @@ fn render_sessions(f: &mut Frame, app: &App) {
             "e export-md  ·  1 fleet · 2 timeline · 3 sessions · 4 search  ·  q quit",
             app,
         ),
+        rows[1],
+    );
+}
+
+fn notif_style(app: &App, kind: NotifKind) -> Style {
+    match kind {
+        NotifKind::NeedsYou => app.theme.needs_you(),
+        NotifKind::RateLimited => app.theme.rate_limited(),
+        NotifKind::Resumed => app.theme.running(),
+        NotifKind::Idle => app.theme.muted(),
+    }
+}
+
+fn render_notifications(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let mut lines = vec![
+        header_line(area.width, "REPOMON · NOTIFICATIONS", &fmt_clock(), app),
+        rule(area.width, true, app),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("{} event(s) · newest first", app.notifications.len()),
+            app.theme.dim(),
+        )),
+        Line::raw(""),
+    ];
+    if app.notifications.is_empty() {
+        lines.push(Line::raw(
+            "  no notifications yet — agent state changes show up here".to_string(),
+        ));
+    }
+    // Two lines per event (title + detail); reserve room for the header block already pushed.
+    let budget = (rows[0].height as usize).saturating_sub(lines.len()) / 2;
+    for ev in app
+        .notifications
+        .iter()
+        .rev()
+        .skip(app.notif_scroll)
+        .take(budget)
+    {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(ev.when.format("%H:%M:%S").to_string(), app.theme.muted()),
+            Span::raw("  "),
+            Span::styled(ev.title.clone(), notif_style(app, ev.kind)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("            "),
+            Span::styled(ev.body.clone(), app.theme.dim()),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(
+        footer("↑↓ scroll · c clear  ·  1 fleet · ←/esc back · q quit", app),
         rows[1],
     );
 }
@@ -1254,6 +1318,16 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
 // ---- atoms -------------------------------------------------------------------
 
 fn footer(keys: &str, app: &App) -> Paragraph<'static> {
+    use ratatui::style::Modifier;
+    // A fresh notification takes over the footer line briefly (then the key hints return).
+    if let Some((msg, since)) = &app.notif_banner {
+        if since.elapsed() < crate::app::NOTIF_BANNER_TTL {
+            return Paragraph::new(Line::from(Span::styled(
+                format!("🔔 {msg}"),
+                app.theme.needs_you().add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
     Paragraph::new(Line::from(Span::styled(
         keys.to_string(),
         app.theme.muted(),
@@ -1323,15 +1397,29 @@ fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
 }
 
 fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<'static> {
+    use ratatui::style::Modifier;
     use repomon_core::model::AgentStatus;
     let glyph = status_glyph(lane);
-    let any = |st: AgentStatus| lane.agent_sessions.iter().any(|s| s.status == st);
+    // Only *real* (non-inferred) sessions drive the named status glyphs; an inferred "file
+    // activity" session falls through to the soft ◐ so we never claim a specific agent.
+    let any = |st: AgentStatus| {
+        lane.agent_sessions
+            .iter()
+            .any(|s| !s.inferred && s.status == st)
+    };
+    let any_inferred = lane.agent_sessions.iter().any(|s| s.inferred);
     let (active, active_style) = if any(AgentStatus::RateLimited) {
         (theme::RATE_LIMITED, app.theme.rate_limited()) // ⏳ paused on a usage limit
     } else if any(AgentStatus::Waiting) {
         (theme::WAITING, app.theme.needs_you()) // ⏸ needs you
     } else if any(AgentStatus::Running) {
         (theme::AGENT_ACTIVE, app.theme.running()) // ▶ working
+    } else if any_inferred {
+        // ◐ active — files are changing but we can't name the agent (worktree subagent).
+        (
+            theme::INFERRED_ACTIVE,
+            app.theme.running().add_modifier(Modifier::DIM),
+        )
     } else {
         (" ", app.theme.dim())
     };

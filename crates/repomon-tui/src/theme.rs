@@ -13,6 +13,8 @@ pub const CLEAN: &str = "○";
 pub const AGENT_ACTIVE: &str = "▶";
 pub const WAITING: &str = "⏸";
 pub const RATE_LIMITED: &str = "⏳";
+/// An *inferred* active agent (worktree file activity we can't attribute to a named session).
+pub const INFERRED_ACTIVE: &str = "◐";
 pub const UP: char = '↑';
 pub const DOWN: char = '↓';
 

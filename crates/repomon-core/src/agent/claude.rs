@@ -59,6 +59,7 @@ impl TranscriptSummary {
             external: false, // overlay flips this based on tmux ownership
             session_id: self.session_id,
             resume_at: None,
+            inferred: false,
         }
     }
 }

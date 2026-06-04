@@ -1,11 +1,11 @@
 //! Application state and the interactive event loop.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,7 +13,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
-    AgentChoice, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
+    AgentChoice, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData,
+    WorkSession,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -21,8 +22,16 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::client::DaemonClient;
 use crate::keybinds::{self, Action, View};
+use crate::notify::{self, NotifEvent, NotifKind};
 use crate::theme::Theme;
 use crate::view;
+
+/// How long an in-app notification banner stays up before reverting to the footer hints.
+pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
+/// Don't re-fire the same lane's notification within this window (suppresses status flapping).
+const NOTIF_DEBOUNCE: Duration = Duration::from_secs(30);
+/// Cap on the in-app notification history feed.
+const NOTIF_HISTORY_CAP: usize = 200;
 
 /// Agent kinds offered when creating a lane (cycled with Tab).
 pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "aider"];
@@ -93,6 +102,12 @@ pub struct Settings {
     pub auto_continue: bool,
     pub auto_continue_message: String,
     pub worktree_template: String,
+    pub notify_enabled: bool,
+    pub notify_needs_you: bool,
+    pub notify_rate_limited: bool,
+    pub notify_resumed: bool,
+    pub notify_idle: bool,
+    pub notify_sound: bool,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -101,7 +116,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 5;
+const SETTINGS_COUNT: usize = 11;
 
 pub struct App {
     pub client: DaemonClient,
@@ -164,6 +179,19 @@ pub struct App {
     pub settings_editing: bool,
     /// Screen row of the first settings item (for click hit-testing), set during render.
     pub settings_geom: std::cell::Cell<u16>,
+    /// Last-seen agent status per lane, for notification edge-detection. `None` = no real agent.
+    prev_status: HashMap<LaneId, Option<AgentStatus>>,
+    /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
+    /// every already-running agent at once).
+    notif_seeded: bool,
+    /// Per-lane debounce: the last time a notification fired for a lane (suppresses flapping).
+    notif_debounce: HashMap<LaneId, Instant>,
+    /// In-app notification history (newest last), shown in the Notifications view.
+    pub notifications: VecDeque<NotifEvent>,
+    /// Scroll offset (rows from the top) in the Notifications view.
+    pub notif_scroll: usize,
+    /// A transient banner shown above the footer after a notification fires; auto-clears.
+    pub notif_banner: Option<(String, Instant)>,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -241,10 +269,26 @@ impl App {
             refresh_pending: false,
             ac_off: HashSet::new(),
             grid_active: 0,
-            settings: Settings::default(),
+            // Notify defaults mirror the daemon config defaults, so alerts behave sensibly even
+            // before the first `config.get` lands (load_settings refreshes them at startup).
+            settings: Settings {
+                notify_enabled: true,
+                notify_needs_you: true,
+                notify_rate_limited: true,
+                notify_resumed: true,
+                notify_idle: false,
+                notify_sound: true,
+                ..Settings::default()
+            },
             settings_idx: 0,
             settings_editing: false,
             settings_geom: std::cell::Cell::new(0),
+            prev_status: HashMap::new(),
+            notif_seeded: false,
+            notif_debounce: HashMap::new(),
+            notifications: VecDeque::new(),
+            notif_scroll: 0,
+            notif_banner: None,
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -301,7 +345,102 @@ impl App {
             Ok(l) => self.lanes = l,
             Err(e) => self.status = format!("lane.list failed: {e}"),
         }
+        self.detect_notifications();
         self.clamp_selection();
+    }
+
+    /// A lane's notification-relevant status: the highest-priority status among its *real*
+    /// (non-inferred) agent sessions. `None` when the lane has no identified agent — inferred
+    /// "file activity" placeholders are deliberately ignored so they don't drive named alerts.
+    fn lane_status(lane: &Lane) -> Option<AgentStatus> {
+        use AgentStatus::*;
+        let real = || lane.agent_sessions.iter().filter(|s| !s.inferred);
+        [RateLimited, Waiting, Running, Idle, Ended]
+            .into_iter()
+            .find(|&want| real().any(|s| s.status == want))
+    }
+
+    /// Diff the freshly-fetched lane statuses against the previous snapshot and fire a
+    /// notification on each meaningful transition. The first call only seeds the snapshot.
+    fn detect_notifications(&mut self) {
+        // Snapshot the new per-lane statuses.
+        let now_status: Vec<(LaneId, Option<AgentStatus>)> = self
+            .lanes
+            .iter()
+            .map(|l| (l.id, Self::lane_status(l)))
+            .collect();
+
+        if !self.notif_seeded {
+            self.prev_status = now_status.into_iter().collect();
+            self.notif_seeded = true;
+            return;
+        }
+
+        // Decide what to fire first (updating the snapshot + debounce as we go), then deliver —
+        // delivery composes from `self.lanes` and mutates `self`, so it can't run while we still
+        // hold a borrow into the lanes here.
+        let mut fires: Vec<(LaneId, NotifKind)> = Vec::new();
+        for (id, now) in now_status {
+            let prev = self.prev_status.get(&id).copied().flatten();
+            self.prev_status.insert(id, now);
+            if now == prev {
+                continue;
+            }
+            let Some(kind) = transition_kind(prev, now) else {
+                continue;
+            };
+            if !self.notif_enabled_for(kind) {
+                continue;
+            }
+            // Debounce per lane so a flapping agent can't spam.
+            if let Some(t) = self.notif_debounce.get(&id) {
+                if t.elapsed() < NOTIF_DEBOUNCE {
+                    continue;
+                }
+            }
+            self.notif_debounce.insert(id, Instant::now());
+            fires.push((id, kind));
+        }
+        for (id, kind) in fires {
+            self.fire_notification(id, kind);
+        }
+    }
+
+    /// Whether the given notification kind is enabled (master switch ∧ per-kind toggle).
+    fn notif_enabled_for(&self, kind: NotifKind) -> bool {
+        if !self.settings.notify_enabled {
+            return false;
+        }
+        match kind {
+            NotifKind::NeedsYou => self.settings.notify_needs_you,
+            NotifKind::RateLimited => self.settings.notify_rate_limited,
+            NotifKind::Resumed => self.settings.notify_resumed,
+            NotifKind::Idle => self.settings.notify_idle,
+        }
+    }
+
+    /// Compose + deliver a notification for a lane: native popup, in-app banner, history entry.
+    fn fire_notification(&mut self, id: LaneId, kind: NotifKind) {
+        // Compose under an immutable borrow that ends before we mutate `self`.
+        let Some((title, body)) = self
+            .lanes
+            .iter()
+            .find(|l| l.id == id)
+            .map(|l| notify::compose(kind, l))
+        else {
+            return;
+        };
+        notify::send_native(&title, &body, self.settings.notify_sound);
+        self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        self.notifications.push_back(NotifEvent {
+            when: chrono::Local::now(),
+            kind,
+            title,
+            body,
+        });
+        while self.notifications.len() > NOTIF_HISTORY_CAP {
+            self.notifications.pop_front();
+        }
     }
 
     pub fn visible_lanes(&self) -> Vec<&Lane> {
@@ -367,7 +506,8 @@ impl App {
             | View::Search
             | View::AddRepo
             | View::Agents
-            | View::Settings => Vec::new(),
+            | View::Settings
+            | View::Notifications => Vec::new(),
         }
     }
 
@@ -605,6 +745,7 @@ impl App {
             View::AddRepo => self.addrepo_key(key).await,
             View::Agents => self.agents_key(key).await,
             View::Settings => self.settings_key(key).await,
+            View::Notifications => self.notifications_key(key),
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -832,6 +973,25 @@ impl App {
         if let Some(w) = v.get("worktree_template").and_then(|x| x.as_str()) {
             self.settings.worktree_template = w.to_string();
         }
+        let b = |key: &str| v.get(key).and_then(|x| x.as_bool());
+        if let Some(x) = b("notify_enabled") {
+            self.settings.notify_enabled = x;
+        }
+        if let Some(x) = b("notify_needs_you") {
+            self.settings.notify_needs_you = x;
+        }
+        if let Some(x) = b("notify_rate_limited") {
+            self.settings.notify_rate_limited = x;
+        }
+        if let Some(x) = b("notify_resumed") {
+            self.settings.notify_resumed = x;
+        }
+        if let Some(x) = b("notify_idle") {
+            self.settings.notify_idle = x;
+        }
+        if let Some(x) = b("notify_sound") {
+            self.settings.notify_sound = x;
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
@@ -847,6 +1007,12 @@ impl App {
             "auto_continue": self.settings.auto_continue,
             "auto_continue_message": self.settings.auto_continue_message,
             "worktree_template": self.settings.worktree_template,
+            "notify_enabled": self.settings.notify_enabled,
+            "notify_needs_you": self.settings.notify_needs_you,
+            "notify_rate_limited": self.settings.notify_rate_limited,
+            "notify_resumed": self.settings.notify_resumed,
+            "notify_idle": self.settings.notify_idle,
+            "notify_sound": self.settings.notify_sound,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -937,14 +1103,57 @@ impl App {
                 self.settings.auto_continue = !self.settings.auto_continue;
                 self.save_settings().await;
             }
+            5 => {
+                self.settings.notify_enabled = !self.settings.notify_enabled;
+                self.save_settings().await;
+            }
+            6 => {
+                self.settings.notify_needs_you = !self.settings.notify_needs_you;
+                self.save_settings().await;
+            }
+            7 => {
+                self.settings.notify_rate_limited = !self.settings.notify_rate_limited;
+                self.save_settings().await;
+            }
+            8 => {
+                self.settings.notify_resumed = !self.settings.notify_resumed;
+                self.save_settings().await;
+            }
+            9 => {
+                self.settings.notify_idle = !self.settings.notify_idle;
+                self.save_settings().await;
+            }
+            10 => {
+                self.settings.notify_sound = !self.settings.notify_sound;
+                self.save_settings().await;
+            }
             _ => {}
         }
     }
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 => self.adjust_setting(true).await,
+            0..=2 | 5..=10 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
+            _ => {}
+        }
+    }
+
+    /// Key handling for the Notifications history view: scroll, clear, or leave.
+    fn notifications_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.notif_scroll = self.notif_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.notif_scroll = self.notif_scroll.saturating_add(1);
+            }
+            KeyCode::Char('c') => {
+                self.notifications.clear();
+                self.notif_scroll = 0;
+            }
+            KeyCode::Esc | KeyCode::Left => self.view = View::Fleet,
+            KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
     }
@@ -1885,7 +2094,8 @@ impl App {
                     | View::Search
                     | View::AddRepo
                     | View::Agents
-                    | View::Settings => self.view = View::Fleet,
+                    | View::Settings
+                    | View::Notifications => self.view = View::Fleet,
                     View::Fleet => self.should_quit = true,
                 }
             }
@@ -1906,6 +2116,7 @@ impl App {
                     }
                     View::Agents => self.enter_agents(None).await,
                     View::Settings => self.load_settings().await,
+                    View::Notifications => self.notif_scroll = 0,
                     _ => {}
                 }
             }
@@ -1994,6 +2205,9 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     let mut app = App::new(client);
     app.theme = theme;
     app.refresh().await;
+    // Prime the notification toggles (and default-agent picker) from the daemon config so alerts
+    // honor the user's settings even if they never open the Settings view this session.
+    app.load_settings().await;
 
     let mut terminal = ratatui::init();
     if app.mouse_on {
@@ -2031,6 +2245,23 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     ratatui::restore();
     outcome?;
     Ok(app.cd_target)
+}
+
+/// Map a lane's agent-status transition to the notification it should fire, if any. `None`
+/// means "no real agent". Priority resolves cases like `Running → RateLimited` to the limit.
+fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> Option<NotifKind> {
+    use AgentStatus::*;
+    match (prev, now) {
+        // Hit a usage limit.
+        (p, Some(RateLimited)) if p != Some(RateLimited) => Some(NotifKind::RateLimited),
+        // Auto-resumed after a limit.
+        (Some(RateLimited), Some(Running)) => Some(NotifKind::Resumed),
+        // Finished its turn / needs you.
+        (p, Some(Waiting)) if p != Some(Waiting) => Some(NotifKind::NeedsYou),
+        // Was active, now quiet (idle / ended / the session went away).
+        (Some(Running) | Some(Waiting), Some(Idle) | Some(Ended) | None) => Some(NotifKind::Idle),
+        _ => None,
+    }
 }
 
 /// Cycle `current` to the next/previous option (wrapping). Returns `current` if `options` is empty.
@@ -2086,6 +2317,12 @@ async fn event_loop(
         app.sync_terminals().await;
         app.sync_session_cursor();
         app.check_focus_alive();
+        // Expire a stale notification banner so the footer hints come back.
+        if let Some((_, since)) = &app.notif_banner {
+            if since.elapsed() >= NOTIF_BANNER_TTL {
+                app.notif_banner = None;
+            }
+        }
         if app.view != View::Focus && app.scroll != 0 {
             app.reset_scroll();
         }
@@ -2147,12 +2384,12 @@ async fn event_loop(
                 None => events_alive = false,
             },
             _ = tick.tick() => {
-                // Keep agent state fresh in views that show it, so an agent that exits on its
-                // own (e.g. `/exit`) is noticed promptly and Focus drops back to Split. Only the
-                // lane list needs this cadence; commits/repos refresh on git notifications.
-                if matches!(app.view, View::Focus | View::Split | View::Grid) {
-                    app.refresh_lanes().await;
-                }
+                // Refresh the lane list every second in *all* views: it keeps agent state fresh
+                // (an agent that exits on its own is noticed promptly, Focus drops back to Split)
+                // AND it's what drives notification edge-detection, which must work even when the
+                // user is looking at Fleet or another view. lane.list is cheap (~55ms) at 1Hz and
+                // only runs while the TUI is open; commits/repos still refresh on git events.
+                app.refresh_lanes().await;
             }
         }
     }
@@ -2383,6 +2620,44 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_transitions() {
+        use AgentStatus::*;
+        // The headline alerts.
+        assert_eq!(
+            transition_kind(Some(Running), Some(Waiting)),
+            Some(NotifKind::NeedsYou)
+        );
+        assert_eq!(
+            transition_kind(None, Some(Waiting)),
+            Some(NotifKind::NeedsYou)
+        );
+        assert_eq!(
+            transition_kind(Some(Running), Some(RateLimited)),
+            Some(NotifKind::RateLimited)
+        );
+        assert_eq!(
+            transition_kind(Some(RateLimited), Some(Running)),
+            Some(NotifKind::Resumed)
+        );
+        // Gave up on the limit and now needs you.
+        assert_eq!(
+            transition_kind(Some(RateLimited), Some(Waiting)),
+            Some(NotifKind::NeedsYou)
+        );
+        // Went quiet (idle / ended / the agent went away).
+        assert_eq!(
+            transition_kind(Some(Running), Some(Idle)),
+            Some(NotifKind::Idle)
+        );
+        assert_eq!(transition_kind(Some(Waiting), None), Some(NotifKind::Idle));
+        // Non-events: you replied, work simply started, or nothing changed.
+        assert_eq!(transition_kind(Some(Waiting), Some(Running)), None);
+        assert_eq!(transition_kind(None, Some(Running)), None);
+        assert_eq!(transition_kind(Some(Idle), Some(Running)), None);
+        assert_eq!(transition_kind(Some(Waiting), Some(Waiting)), None);
+    }
 
     #[test]
     fn double_click_needs_same_lane_within_window() {

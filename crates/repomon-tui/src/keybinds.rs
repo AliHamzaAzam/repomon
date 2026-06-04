@@ -27,6 +27,8 @@ pub enum View {
     Agents,
     /// Settings: accent color, auto-continue, etc.
     Settings,
+    /// History of fired agent-state notifications.
+    Notifications,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -87,6 +89,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),
         KeyCode::Char('3') => Some(Action::Goto(View::Sessions)),
         KeyCode::Char('4') => Some(Action::Goto(View::Search)),
+        KeyCode::Char('5') => Some(Action::Goto(View::Notifications)),
         _ => None,
     }
 }
