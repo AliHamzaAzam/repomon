@@ -116,6 +116,17 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Play the notification chime once, off-thread — a preview used when the user enables sound in
+/// Settings so they can confirm it's audible without waiting for an agent to change state.
+pub fn play_chime() {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        let _ = std::process::Command::new("afplay")
+            .arg(NOTIFY_SOUND_FILE)
+            .output();
+    });
+}
+
 /// Fire a native desktop notification, best-effort and without blocking the caller: the actual
 /// `osascript`/`notify-send` invocation runs (and is reaped) on a detached thread.
 pub fn send_native(title: &str, body: &str, sound: bool) {
@@ -125,18 +136,30 @@ pub fn send_native(title: &str, body: &str, sound: bool) {
     });
 }
 
+/// A system sound file played for an audible notification (see [`run_native`]).
+#[cfg(target_os = "macos")]
+const NOTIFY_SOUND_FILE: &str = "/System/Library/Sounds/Glass.aiff";
+
 #[cfg(target_os = "macos")]
 fn run_native(title: &str, body: &str, sound: bool) {
+    // Show the visual banner. We deliberately do NOT use osascript's own `sound name`: on recent
+    // macOS the notification is attributed to "Script Editor", whose notification sound is usually
+    // off, so the chime is silently dropped even though the call succeeds.
     let script = format!(
-        "display notification \"{}\" with title \"{}\"{}",
+        "display notification \"{}\" with title \"{}\"",
         escape(body),
         escape(title),
-        if sound { " sound name \"Ping\"" } else { "" },
     );
     let _ = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
         .output();
+    // Play the sound directly instead — `afplay` is audible regardless of notification settings.
+    if sound {
+        let _ = std::process::Command::new("afplay")
+            .arg(NOTIFY_SOUND_FILE)
+            .output();
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

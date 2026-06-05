@@ -1145,6 +1145,10 @@ impl App {
             }
             11 => {
                 self.settings.notify_sound = !self.settings.notify_sound;
+                // Preview the chime immediately so "is sound working?" is answered on the spot.
+                if self.settings.notify_sound {
+                    notify::play_chime();
+                }
                 self.save_settings().await;
             }
             _ => {}
