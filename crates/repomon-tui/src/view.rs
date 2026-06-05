@@ -56,6 +56,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Agents => render_agents(f, app),
         View::Settings => render_settings(f, app),
         View::Notifications => render_notifications(f, app),
+        View::SpawnPick => render_spawn_pick(f, app),
     }
 }
 
@@ -186,7 +187,7 @@ fn render_settings(f: &mut Frame, app: &App) {
         s.default_agent.clone()
     };
     let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-    let items: [(&str, String, &str); 11] = [
+    let items: [(&str, String, &str); 12] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
         ("auto-continue", onoff(s.auto_continue), "space toggles"),
@@ -199,6 +200,11 @@ fn render_settings(f: &mut Frame, app: &App) {
             "worktree template",
             format!("{}{}", s.worktree_template, cur(4)),
             "↵ edit",
+        ),
+        (
+            "ask which agent on spawn",
+            onoff(s.spawn_prompt),
+            "space toggles",
         ),
         // Notifications group — the master switch then per-trigger toggles (indented).
         ("notifications", onoff(s.notify_enabled), "master · space"),
@@ -467,6 +473,84 @@ fn render_notifications(f: &mut Frame, app: &App) {
     f.render_widget(
         footer("↑↓ scroll · c clear  ·  1 fleet · ←/esc back · q quit", app),
         rows[1],
+    );
+}
+
+/// The quick agent picker shown when spawning onto a lane (when "ask which agent on spawn" is
+/// on). Lists the same agents as the Agents view, with the default highlighted; ↑↓ or a number
+/// picks, ↵ spawns, esc cancels.
+fn render_spawn_pick(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let lane_label = app
+        .spawn_pick_lane
+        .and_then(|id| app.lanes.iter().find(|l| l.id == id))
+        .map(|l| format!("{} / {}", l.repo.name, lane_branch(l)))
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · SPAWN AGENT", &lane_label, app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  choose an agent to spawn:".to_string(),
+            app.theme.dim(),
+        )),
+        Line::raw(""),
+    ];
+    if app.nl_agents.is_empty() {
+        lines.push(Line::raw(
+            "  no agents detected — press A to manage launch commands".to_string(),
+        ));
+    }
+    for (i, a) in app.nl_agents.iter().enumerate() {
+        let num = i + 1;
+        let cursor = if i == app.spawn_pick_idx { "‣" } else { " " };
+        // A short tag: the default star, or a PATH warning for an undetected command.
+        let tag = if a.default {
+            "★ default"
+        } else if !a.detected {
+            "✗ not on PATH"
+        } else {
+            ""
+        };
+        if i == app.spawn_pick_idx {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {cursor} {num}  {:<18} {:<14} {}",
+                    trunc(&a.name, 18),
+                    tag,
+                    trunc(&a.command, 40)
+                ),
+                app.theme.selected(),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {cursor} {num}  ")),
+                Span::styled(format!("{:<18}", trunc(&a.name, 18)), app.theme.accented()),
+                Span::styled(format!(" {tag:<14}"), app.theme.muted()),
+                Span::styled(format!(" {}", trunc(&a.command, 40)), app.theme.dim()),
+            ]));
+        }
+    }
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    f.render_widget(
+        footer("↑↓ pick · 1-9 jump · ↵ spawn · esc cancel", app),
+        rows[2],
     );
 }
 

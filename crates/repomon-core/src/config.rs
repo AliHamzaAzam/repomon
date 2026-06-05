@@ -47,6 +47,9 @@ pub struct Config {
     pub auto_continue: bool,
     /// What to type when auto-continuing a rate-limited agent (sent with Enter).
     pub auto_continue_message: String,
+    /// Prompt (with a quick agent picker) every time you spawn an agent on a lane (`e`). When
+    /// off, `e` spawns the configured default agent immediately.
+    pub spawn_prompt: bool,
     /// Master switch for desktop/in-app notifications on agent state changes. When off, no
     /// individual `notify_*` trigger fires.
     pub notify_enabled: bool,
@@ -76,6 +79,7 @@ impl Default for Config {
             agents: HashMap::new(),
             auto_continue: true,
             auto_continue_message: "continue".to_string(),
+            spawn_prompt: true,
             notify_enabled: true,
             notify_needs_you: true,
             notify_rate_limited: true,

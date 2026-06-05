@@ -29,6 +29,8 @@ pub enum View {
     Settings,
     /// History of fired agent-state notifications.
     Notifications,
+    /// Quick picker for which agent to spawn on the selected lane.
+    SpawnPick,
 }
 
 /// A user intent derived from a key press in navigation mode.

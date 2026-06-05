@@ -86,6 +86,41 @@ async fn renders_fleet_with_a_registered_repo() {
     );
     assert!(screen.contains("click select"), "footer missing:\n{screen}");
 
+    // The spawn picker lists the agents for the selected lane, with the default tagged and a
+    // PATH warning for an undetected command.
+    use repomon_core::model::AgentChoice;
+    use repomon_tui::keybinds::View;
+    app.nl_agents = vec![
+        AgentChoice {
+            name: "claude-code".into(),
+            command: "claude".into(),
+            detected: true,
+            custom: false,
+            default: true,
+        },
+        AgentChoice {
+            name: "codex".into(),
+            command: "codex".into(),
+            detected: false,
+            custom: false,
+            default: false,
+        },
+    ];
+    app.spawn_pick_idx = 0;
+    app.spawn_pick_lane = Some(app.lanes[0].id);
+    app.view = View::SpawnPick;
+    let pick = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        pick.contains("SPAWN AGENT"),
+        "picker header missing:\n{pick}"
+    );
+    assert!(pick.contains("claude-code"), "agent name missing:\n{pick}");
+    assert!(pick.contains("default"), "default tag missing:\n{pick}");
+    assert!(
+        pick.contains("not on PATH"),
+        "PATH warning missing:\n{pick}"
+    );
+
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }

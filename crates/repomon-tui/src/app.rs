@@ -102,6 +102,7 @@ pub struct Settings {
     pub auto_continue: bool,
     pub auto_continue_message: String,
     pub worktree_template: String,
+    pub spawn_prompt: bool,
     pub notify_enabled: bool,
     pub notify_needs_you: bool,
     pub notify_rate_limited: bool,
@@ -116,7 +117,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 11;
+const SETTINGS_COUNT: usize = 12;
 
 pub struct App {
     pub client: DaemonClient,
@@ -192,6 +193,11 @@ pub struct App {
     pub notif_scroll: usize,
     /// A transient banner shown above the footer after a notification fires; auto-clears.
     pub notif_banner: Option<(String, Instant)>,
+    /// Spawn-picker state: which agent row is highlighted, the lane to spawn into, and the view
+    /// to return to on cancel.
+    pub spawn_pick_idx: usize,
+    pub spawn_pick_lane: Option<LaneId>,
+    spawn_return: Option<View>,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -272,6 +278,7 @@ impl App {
             // Notify defaults mirror the daemon config defaults, so alerts behave sensibly even
             // before the first `config.get` lands (load_settings refreshes them at startup).
             settings: Settings {
+                spawn_prompt: true,
                 notify_enabled: true,
                 notify_needs_you: true,
                 notify_rate_limited: true,
@@ -289,6 +296,9 @@ impl App {
             notifications: VecDeque::new(),
             notif_scroll: 0,
             notif_banner: None,
+            spawn_pick_idx: 0,
+            spawn_pick_lane: None,
+            spawn_return: None,
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -507,7 +517,8 @@ impl App {
             | View::AddRepo
             | View::Agents
             | View::Settings
-            | View::Notifications => Vec::new(),
+            | View::Notifications
+            | View::SpawnPick => Vec::new(),
         }
     }
 
@@ -746,6 +757,7 @@ impl App {
             View::Agents => self.agents_key(key).await,
             View::Settings => self.settings_key(key).await,
             View::Notifications => self.notifications_key(key),
+            View::SpawnPick => self.spawn_pick_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -974,6 +986,9 @@ impl App {
             self.settings.worktree_template = w.to_string();
         }
         let b = |key: &str| v.get(key).and_then(|x| x.as_bool());
+        if let Some(x) = b("spawn_prompt") {
+            self.settings.spawn_prompt = x;
+        }
         if let Some(x) = b("notify_enabled") {
             self.settings.notify_enabled = x;
         }
@@ -1007,6 +1022,7 @@ impl App {
             "auto_continue": self.settings.auto_continue,
             "auto_continue_message": self.settings.auto_continue_message,
             "worktree_template": self.settings.worktree_template,
+            "spawn_prompt": self.settings.spawn_prompt,
             "notify_enabled": self.settings.notify_enabled,
             "notify_needs_you": self.settings.notify_needs_you,
             "notify_rate_limited": self.settings.notify_rate_limited,
@@ -1104,26 +1120,30 @@ impl App {
                 self.save_settings().await;
             }
             5 => {
-                self.settings.notify_enabled = !self.settings.notify_enabled;
+                self.settings.spawn_prompt = !self.settings.spawn_prompt;
                 self.save_settings().await;
             }
             6 => {
-                self.settings.notify_needs_you = !self.settings.notify_needs_you;
+                self.settings.notify_enabled = !self.settings.notify_enabled;
                 self.save_settings().await;
             }
             7 => {
-                self.settings.notify_rate_limited = !self.settings.notify_rate_limited;
+                self.settings.notify_needs_you = !self.settings.notify_needs_you;
                 self.save_settings().await;
             }
             8 => {
-                self.settings.notify_resumed = !self.settings.notify_resumed;
+                self.settings.notify_rate_limited = !self.settings.notify_rate_limited;
                 self.save_settings().await;
             }
             9 => {
-                self.settings.notify_idle = !self.settings.notify_idle;
+                self.settings.notify_resumed = !self.settings.notify_resumed;
                 self.save_settings().await;
             }
             10 => {
+                self.settings.notify_idle = !self.settings.notify_idle;
+                self.save_settings().await;
+            }
+            11 => {
                 self.settings.notify_sound = !self.settings.notify_sound;
                 self.save_settings().await;
             }
@@ -1133,7 +1153,7 @@ impl App {
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=10 => self.adjust_setting(true).await,
+            0..=2 | 5..=11 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
@@ -1708,12 +1728,32 @@ impl App {
         let Some(id) = self.selected_lane().map(|l| l.id) else {
             return;
         };
-        let agent = self.default_agent_name().await;
+        // With the picker on (default), `e` prompts for which agent every time; otherwise it
+        // spawns the configured default immediately.
+        if self.settings.spawn_prompt {
+            self.enter_spawn_pick(id).await;
+        } else {
+            let agent = self.default_agent_name().await;
+            self.do_spawn(id, &agent).await;
+        }
+    }
+
+    /// Open the quick agent picker for `lane`, remembering where to return on cancel.
+    async fn enter_spawn_pick(&mut self, lane: LaneId) {
+        self.load_agents().await; // populates nl_agents (+ marks the default)
+        self.spawn_pick_idx = self.nl_agents.iter().position(|a| a.default).unwrap_or(0);
+        self.spawn_pick_lane = Some(lane);
+        self.spawn_return = Some(self.view);
+        self.view = View::SpawnPick;
+    }
+
+    /// Spawn `agent` into `lane`: on success drop into Focus, ready to drive it.
+    async fn do_spawn(&mut self, id: LaneId, agent: &str) {
         match self
             .client
             .call(
                 "agent.spawn",
-                Some(json!({ "lane_id": id, "agent": &agent })),
+                Some(json!({ "lane_id": id, "agent": agent })),
             )
             .await
         {
@@ -1723,6 +1763,46 @@ impl App {
                 self.focus_insert = false;
             }
             Err(e) => self.status = format!("spawn failed: {e}"),
+        }
+    }
+
+    /// Key handling for the spawn picker: move, jump by number, spawn, or cancel.
+    async fn spawn_pick_key(&mut self, key: KeyEvent) {
+        let n = self.nl_agents.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if n > 0 => {
+                self.spawn_pick_idx = (self.spawn_pick_idx + n - 1) % n;
+            }
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                self.spawn_pick_idx = (self.spawn_pick_idx + 1) % n;
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                let i = (c as usize) - ('1' as usize);
+                if i < n {
+                    self.spawn_pick_idx = i;
+                    self.confirm_spawn_pick().await;
+                }
+            }
+            KeyCode::Enter | KeyCode::Right => self.confirm_spawn_pick().await,
+            KeyCode::Esc | KeyCode::Left => {
+                self.view = self.spawn_return.take().unwrap_or(View::Fleet);
+            }
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Spawn the highlighted agent into the remembered lane.
+    async fn confirm_spawn_pick(&mut self) {
+        let agent = self
+            .nl_agents
+            .get(self.spawn_pick_idx)
+            .map(|a| a.name.clone());
+        let lane = self.spawn_pick_lane.take();
+        self.spawn_return = None;
+        match (agent, lane) {
+            (Some(agent), Some(id)) => self.do_spawn(id, &agent).await,
+            _ => self.view = View::Fleet,
         }
     }
 
@@ -2095,7 +2175,8 @@ impl App {
                     | View::AddRepo
                     | View::Agents
                     | View::Settings
-                    | View::Notifications => self.view = View::Fleet,
+                    | View::Notifications
+                    | View::SpawnPick => self.view = View::Fleet,
                     View::Fleet => self.should_quit = true,
                 }
             }

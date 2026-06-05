@@ -38,6 +38,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "auto_continue_message": cfg.auto_continue_message,
         "default_agent": cfg.default_agent,
         "worktree_template": cfg.worktree_template,
+        "spawn_prompt": cfg.spawn_prompt,
         "notify_enabled": cfg.notify_enabled,
         "notify_needs_you": cfg.notify_needs_you,
         "notify_rate_limited": cfg.notify_rate_limited,
@@ -149,6 +150,8 @@ struct ConfigSet {
     default_agent: Option<String>,
     #[serde(default)]
     worktree_template: Option<String>,
+    #[serde(default)]
+    spawn_prompt: Option<bool>,
     #[serde(default)]
     notify_enabled: Option<bool>,
     #[serde(default)]
@@ -548,6 +551,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 }
                 if let Some(w) = p.worktree_template {
                     cfg.worktree_template = w;
+                }
+                if let Some(b) = p.spawn_prompt {
+                    cfg.spawn_prompt = b;
                 }
                 if let Some(b) = p.notify_enabled {
                     cfg.notify_enabled = b;
