@@ -218,6 +218,16 @@ fn render_settings(f: &mut Frame, app: &App) {
         ("  · went idle", onoff(s.notify_idle), "space toggles"),
         ("  · sound", onoff(s.notify_sound), "space toggles"),
     ];
+    // Size the columns to the content so values and hints line up no matter how long a label is:
+    // the name column fits the widest label (+gap), the value column fits the default worktree
+    // template (the longest value). Longer user-typed values just overflow gracefully.
+    let name_w = items
+        .iter()
+        .map(|(n, _, _)| n.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let val_w = 28usize;
     // Items start one row below the body top (after a leading blank) — record it for clicks.
     app.settings_geom.set(rows[1].y + 1);
     let mut lines = vec![Line::raw("")];
@@ -226,14 +236,14 @@ fn render_settings(f: &mut Frame, app: &App) {
         let marker = if selected { "▸" } else { " " };
         let row = if selected {
             Line::from(Span::styled(
-                format!("  {marker} {name:<18}{value:<22}  {hint}"),
+                format!("  {marker} {name:<name_w$}{value:<val_w$}  {hint}"),
                 app.theme.selected(),
             ))
         } else {
             Line::from(vec![
                 Span::raw(format!("  {marker} ")),
-                Span::styled(format!("{name:<18}"), app.theme.muted()),
-                Span::styled(format!("{value:<22}"), app.theme.accented()),
+                Span::styled(format!("{name:<name_w$}"), app.theme.muted()),
+                Span::styled(format!("{value:<val_w$}"), app.theme.accented()),
                 Span::styled(format!("  {hint}"), app.theme.muted()),
             ])
         };
