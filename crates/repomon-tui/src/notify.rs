@@ -10,7 +10,7 @@ use chrono::{DateTime, Local};
 use repomon_core::model::{AgentSession, Lane};
 
 /// The kind of agent state-change that fired a notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotifKind {
     /// Agent finished its turn / is waiting on you.
     NeedsYou,

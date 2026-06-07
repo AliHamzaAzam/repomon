@@ -185,8 +185,10 @@ pub struct App {
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
     notif_seeded: bool,
-    /// Per-lane debounce: the last time a notification fired for a lane (suppresses flapping).
-    notif_debounce: HashMap<LaneId, Instant>,
+    /// Debounce keyed by (lane, kind): the last time each *kind* of alert fired for a lane.
+    /// Keying on the kind suppresses a flapping identical alert without swallowing a genuinely
+    /// different transition (e.g. a usage-limit alert right after a needs-you one).
+    notif_debounce: HashMap<(LaneId, NotifKind), Instant>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
     /// Scroll offset (rows from the top) in the Notifications view.
@@ -352,10 +354,15 @@ impl App {
     /// which arrive as notifications that trigger a full [`refresh`].
     pub async fn refresh_lanes(&mut self) {
         match self.client.call_typed::<Vec<Lane>>("lane.list", None).await {
-            Ok(l) => self.lanes = l,
+            Ok(l) => {
+                self.lanes = l;
+                // Run notification edge-detection only on a *successful* fetch. Seeding off a
+                // failed first call (empty lanes) would make the next good refresh treat every
+                // running agent as a fresh transition — the startup storm seeding prevents.
+                self.detect_notifications();
+            }
             Err(e) => self.status = format!("lane.list failed: {e}"),
         }
-        self.detect_notifications();
         self.clamp_selection();
     }
 
@@ -386,6 +393,12 @@ impl App {
             return;
         }
 
+        // Drop bookkeeping for lanes that no longer exist, so the maps don't grow across a long
+        // session of create/delete churn.
+        let live: HashSet<LaneId> = self.lanes.iter().map(|l| l.id).collect();
+        self.prev_status.retain(|id, _| live.contains(id));
+        self.notif_debounce.retain(|&(id, _), _| live.contains(&id));
+
         // Decide what to fire first (updating the snapshot + debounce as we go), then deliver —
         // delivery composes from `self.lanes` and mutates `self`, so it can't run while we still
         // hold a borrow into the lanes here.
@@ -402,13 +415,14 @@ impl App {
             if !self.notif_enabled_for(kind) {
                 continue;
             }
-            // Debounce per lane so a flapping agent can't spam.
-            if let Some(t) = self.notif_debounce.get(&id) {
+            // Debounce per (lane, kind): suppress a flapping identical alert, but never swallow a
+            // genuinely different transition for the same lane.
+            if let Some(t) = self.notif_debounce.get(&(id, kind)) {
                 if t.elapsed() < NOTIF_DEBOUNCE {
                     continue;
                 }
             }
-            self.notif_debounce.insert(id, Instant::now());
+            self.notif_debounce.insert((id, kind), Instant::now());
             fires.push((id, kind));
         }
         for (id, kind) in fires {
@@ -1170,7 +1184,9 @@ impl App {
                 self.notif_scroll = self.notif_scroll.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.notif_scroll = self.notif_scroll.saturating_add(1);
+                // Clamp to the last event so scrolling past the end can't blank the feed.
+                let max = self.notifications.len().saturating_sub(1);
+                self.notif_scroll = (self.notif_scroll + 1).min(max);
             }
             KeyCode::Char('c') => {
                 self.notifications.clear();
