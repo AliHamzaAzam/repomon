@@ -13,8 +13,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
-    AgentChoice, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData,
-    WorkSession,
+    AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
+    TimelineData, WorkSession,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -28,7 +28,7 @@ use crate::view;
 
 /// How long an in-app notification banner stays up before reverting to the footer hints.
 pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
-/// Don't re-fire the same lane's notification within this window (suppresses status flapping).
+/// Don't re-fire the same session's notification within this window (suppresses status flapping).
 const NOTIF_DEBOUNCE: Duration = Duration::from_secs(30);
 /// Cap on the in-app notification history feed.
 const NOTIF_HISTORY_CAP: usize = 200;
@@ -180,15 +180,18 @@ pub struct App {
     pub settings_editing: bool,
     /// Screen row of the first settings item (for click hit-testing), set during render.
     pub settings_geom: std::cell::Cell<u16>,
-    /// Last-seen agent status per lane, for notification edge-detection. `None` = no real agent.
-    prev_status: HashMap<LaneId, Option<AgentStatus>>,
+    /// Last-seen status per real agent session, for notification edge-detection. A session that
+    /// left the snapshot is expressed by key absence (there is no `None` value), which is what
+    /// lets each agent in a shared lane fire its own alerts instead of one rolled-up status.
+    prev_status: HashMap<(LaneId, SessKey), AgentStatus>,
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
     notif_seeded: bool,
-    /// Debounce keyed by (lane, kind): the last time each *kind* of alert fired for a lane.
-    /// Keying on the kind suppresses a flapping identical alert without swallowing a genuinely
-    /// different transition (e.g. a usage-limit alert right after a needs-you one).
-    notif_debounce: HashMap<(LaneId, NotifKind), Instant>,
+    /// Debounce keyed by (lane, session, kind): the last time each *kind* of alert fired for a
+    /// session. Keying on the kind suppresses a flapping identical alert without swallowing a
+    /// genuinely different transition (e.g. a usage-limit alert right after a needs-you one);
+    /// keying on the session lets two agents in one lane each raise the same kind of alert.
+    notif_debounce: HashMap<(LaneId, SessKey, NotifKind), Instant>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
     /// Scroll offset (rows from the top) in the Notifications view.
@@ -366,67 +369,64 @@ impl App {
         self.clamp_selection();
     }
 
-    /// A lane's notification-relevant status: the highest-priority status among its *real*
-    /// (non-inferred) agent sessions. `None` when the lane has no identified agent — inferred
-    /// "file activity" placeholders are deliberately ignored so they don't drive named alerts.
-    fn lane_status(lane: &Lane) -> Option<AgentStatus> {
-        use AgentStatus::*;
-        let real = || lane.agent_sessions.iter().filter(|s| !s.inferred);
-        [RateLimited, Waiting, Running, Idle, Ended]
-            .into_iter()
-            .find(|&want| real().any(|s| s.status == want))
-    }
-
-    /// Diff the freshly-fetched lane statuses against the previous snapshot and fire a
+    /// Diff the freshly-fetched per-session statuses against the previous snapshot and fire a
     /// notification on each meaningful transition. The first call only seeds the snapshot.
     fn detect_notifications(&mut self) {
-        // Snapshot the new per-lane statuses.
-        let now_status: Vec<(LaneId, Option<AgentStatus>)> = self
+        // Snapshot the new statuses, one entry per real agent session.
+        let now: HashMap<(LaneId, SessKey), AgentStatus> = self
             .lanes
             .iter()
-            .map(|l| (l.id, Self::lane_status(l)))
+            .flat_map(|l| session_statuses(l.id, &l.agent_sessions))
             .collect();
 
         if !self.notif_seeded {
-            self.prev_status = now_status.into_iter().collect();
+            self.prev_status = now;
             self.notif_seeded = true;
             return;
         }
 
-        // Drop bookkeeping for lanes that no longer exist, so the maps don't grow across a long
-        // session of create/delete churn.
-        let live: HashSet<LaneId> = self.lanes.iter().map(|l| l.id).collect();
-        self.prev_status.retain(|id, _| live.contains(id));
-        self.notif_debounce.retain(|&(id, _), _| live.contains(&id));
+        let live_lanes: HashSet<LaneId> = self.lanes.iter().map(|l| l.id).collect();
+        // Lanes that currently have a managed real session — used by the diff to suppress the
+        // identity handoff where the no-transcript `Fallback` key vanishes in the same refresh
+        // its `Transcript` key first appears (the agent didn't stop, it became identifiable).
+        let lanes_with_managed: HashSet<LaneId> = self
+            .lanes
+            .iter()
+            .filter(|l| l.agent_sessions.iter().any(|s| !s.external && !s.inferred))
+            .map(|l| l.id)
+            .collect();
 
-        // Decide what to fire first (updating the snapshot + debounce as we go), then deliver —
-        // delivery composes from `self.lanes` and mutates `self`, so it can't run while we still
-        // hold a borrow into the lanes here.
-        let mut fires: Vec<(LaneId, NotifKind)> = Vec::new();
-        for (id, now) in now_status {
-            let prev = self.prev_status.get(&id).copied().flatten();
-            self.prev_status.insert(id, now);
-            if now == prev {
-                continue;
-            }
-            let Some(kind) = transition_kind(prev, now) else {
-                continue;
-            };
+        // Decide what to fire first (updating the debounce as we go), then deliver — delivery
+        // composes from `self.lanes` and mutates `self`, so it can't run while we still hold a
+        // borrow into the lanes here.
+        let mut fires: Vec<((LaneId, SessKey), NotifKind)> = Vec::new();
+        for (key, kind) in
+            diff_session_transitions(&self.prev_status, &now, &live_lanes, &lanes_with_managed)
+        {
             if !self.notif_enabled_for(kind) {
                 continue;
             }
-            // Debounce per (lane, kind): suppress a flapping identical alert, but never swallow a
-            // genuinely different transition for the same lane.
-            if let Some(t) = self.notif_debounce.get(&(id, kind)) {
+            let dkey = (key.0, key.1.clone(), kind);
+            if let Some(t) = self.notif_debounce.get(&dkey) {
                 if t.elapsed() < NOTIF_DEBOUNCE {
                     continue;
                 }
             }
-            self.notif_debounce.insert((id, kind), Instant::now());
-            fires.push((id, kind));
+            self.notif_debounce.insert(dkey, Instant::now());
+            fires.push((key, kind));
         }
-        for (id, kind) in fires {
-            self.fire_notification(id, kind);
+
+        // Replacing the snapshot wholesale prunes dead lanes AND dead sessions in one move. The
+        // debounce keeps entries for sessions still in the snapshot, plus a grace window so the
+        // maps can't grow across a long session of lane/transcript churn.
+        self.prev_status = now;
+        let prev = &self.prev_status;
+        self.notif_debounce.retain(|(lane, sess, _), t| {
+            prev.contains_key(&(*lane, sess.clone())) || t.elapsed() < NOTIF_DEBOUNCE
+        });
+
+        for ((lane, key), kind) in fires {
+            self.fire_notification(lane, &key, kind);
         }
     }
 
@@ -443,14 +443,15 @@ impl App {
         }
     }
 
-    /// Compose + deliver a notification for a lane: native popup, in-app banner, history entry.
-    fn fire_notification(&mut self, id: LaneId, kind: NotifKind) {
-        // Compose under an immutable borrow that ends before we mutate `self`.
+    /// Compose + deliver a notification about one session: native popup, banner, history entry.
+    fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind) {
+        // Compose under an immutable borrow that ends before we mutate `self`. The session may
+        // be gone when its disappearance was the trigger — compose degrades to a generic line.
         let Some((title, body)) = self
             .lanes
             .iter()
             .find(|l| l.id == id)
-            .map(|l| notify::compose(kind, l))
+            .map(|l| notify::compose(kind, l, session_by_key(l, key)))
         else {
             return;
         };
@@ -2348,8 +2349,107 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     Ok(app.cd_target)
 }
 
-/// Map a lane's agent-status transition to the notification it should fire, if any. `None`
-/// means "no real agent". Priority resolves cases like `Running → RateLimited` to the limit.
+/// Identifies one real agent session within a lane across refreshes.
+///
+/// Transcript-backed sessions key on the Claude session id (the transcript filename stem),
+/// which is stable across polls. `claude --resume` may continue the same logical work in a new
+/// transcript; that reads as one session vanishing and another appearing — acceptable noise. A
+/// lane has at most one real session *without* a transcript id per snapshot (the managed
+/// no-transcript placeholder or the generic process monitor — mutually exclusive branches in
+/// the daemon's `overlay_agents`), so a single `Fallback` sentinel covers it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SessKey {
+    Transcript(String),
+    Fallback,
+}
+
+/// Key/status pairs for one lane's *real* agent sessions. Inferred "file activity" placeholders
+/// are dropped so they never drive named alerts. On a (theoretically impossible) duplicate key,
+/// the higher-priority status wins — the same order the old per-lane rollup used.
+fn session_statuses(
+    lane_id: LaneId,
+    sessions: &[AgentSession],
+) -> Vec<((LaneId, SessKey), AgentStatus)> {
+    let mut out: Vec<((LaneId, SessKey), AgentStatus)> = Vec::new();
+    for s in sessions.iter().filter(|s| !s.inferred) {
+        let key = (
+            lane_id,
+            s.session_id
+                .clone()
+                .map(SessKey::Transcript)
+                .unwrap_or(SessKey::Fallback),
+        );
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, st)) if status_priority(s.status) < status_priority(*st) => *st = s.status,
+            Some(_) => {}
+            None => out.push((key, s.status)),
+        }
+    }
+    out
+}
+
+/// Notification priority of a status (lower = more urgent).
+fn status_priority(s: AgentStatus) -> usize {
+    use AgentStatus::*;
+    [RateLimited, Waiting, Running, Idle, Ended]
+        .iter()
+        .position(|&x| x == s)
+        .unwrap_or(usize::MAX)
+}
+
+/// Diff the previous and current per-session status maps into the notifications to fire.
+///
+/// Sessions present in `now` are edge-detected against their previous status. Sessions that
+/// vanished fire as a transition to `None` (→ Idle if they were active), except when their
+/// whole lane is gone (deleting a lane isn't an agent going quiet) or when a lane's `Fallback`
+/// key was handed off to a transcript-backed key (`lanes_with_managed`): the managed
+/// no-transcript placeholder disappears the moment the agent's transcript becomes parseable,
+/// and firing Idle there would alert on every spawn.
+fn diff_session_transitions(
+    prev: &HashMap<(LaneId, SessKey), AgentStatus>,
+    now: &HashMap<(LaneId, SessKey), AgentStatus>,
+    live_lanes: &HashSet<LaneId>,
+    lanes_with_managed: &HashSet<LaneId>,
+) -> Vec<((LaneId, SessKey), NotifKind)> {
+    let mut out = Vec::new();
+    for (key, &status) in now {
+        let was = prev.get(key).copied();
+        if was == Some(status) {
+            continue;
+        }
+        if let Some(kind) = transition_kind(was, Some(status)) {
+            out.push((key.clone(), kind));
+        }
+    }
+    for (key, &was) in prev {
+        if now.contains_key(key) || !live_lanes.contains(&key.0) {
+            continue;
+        }
+        if key.1 == SessKey::Fallback && lanes_with_managed.contains(&key.0) {
+            continue;
+        }
+        if let Some(kind) = transition_kind(Some(was), None) {
+            out.push((key.clone(), kind));
+        }
+    }
+    out
+}
+
+/// Resolve a session key back to the lane's session, for composing the notification text.
+/// `None` when the session vanished (i.e. its disappearance was the trigger).
+fn session_by_key<'a>(lane: &'a Lane, key: &SessKey) -> Option<&'a AgentSession> {
+    lane.agent_sessions
+        .iter()
+        .filter(|s| !s.inferred)
+        .find(|s| match key {
+            SessKey::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
+            SessKey::Fallback => s.session_id.is_none(),
+        })
+}
+
+/// Map a session's status transition to the notification it should fire, if any. `None` means
+/// the session was absent from that snapshot. Priority resolves cases like
+/// `Running → RateLimited` to the limit.
 fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> Option<NotifKind> {
     use AgentStatus::*;
     match (prev, now) {
@@ -2758,6 +2858,132 @@ mod tests {
         assert_eq!(transition_kind(None, Some(Running)), None);
         assert_eq!(transition_kind(Some(Idle), Some(Running)), None);
         assert_eq!(transition_kind(Some(Waiting), Some(Waiting)), None);
+    }
+
+    /// A minimal real-or-inferred session, mirroring the daemon's `overlay_agents` literals.
+    fn sess(session_id: Option<&str>, status: AgentStatus, inferred: bool) -> AgentSession {
+        AgentSession {
+            id: 0,
+            agent: repomon_core::model::AgentKind::ClaudeCode,
+            repo_id: 1,
+            worktree_id: None,
+            started_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+            ended_at: None,
+            manifest_path: PathBuf::new(),
+            tool_call_count: 0,
+            title: None,
+            status,
+            external: false,
+            session_id: session_id.map(str::to_string),
+            resume_at: None,
+            inferred,
+        }
+    }
+
+    #[test]
+    fn session_statuses_keys_and_filters() {
+        use AgentStatus::*;
+        let sessions = vec![
+            sess(Some("a"), Waiting, false),
+            sess(Some("b"), RateLimited, false),
+            sess(None, Running, true), // inferred file-activity placeholder — excluded
+            sess(None, Running, false),
+        ];
+        let got = session_statuses(7, &sessions);
+        assert_eq!(got.len(), 3);
+        assert!(got.contains(&((7, SessKey::Transcript("a".into())), Waiting)));
+        assert!(got.contains(&((7, SessKey::Transcript("b".into())), RateLimited)));
+        assert!(got.contains(&((7, SessKey::Fallback), Running)));
+
+        // Defensive: a duplicate key keeps the higher-priority status.
+        let dup = vec![sess(None, Idle, false), sess(None, Waiting, false)];
+        assert_eq!(
+            session_statuses(7, &dup),
+            vec![((7, SessKey::Fallback), Waiting)]
+        );
+    }
+
+    #[test]
+    fn two_sessions_fire_independent_streams() {
+        use AgentStatus::*;
+        let k = |id: &str| (1, SessKey::Transcript(id.into()));
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+
+        // One agent finishes its turn while its lane-mate is still rate-limited. The old
+        // per-lane rollup saw "RateLimited" before and after and fired nothing — the masking
+        // this change exists to fix.
+        let prev: HashMap<_, _> = [(k("a"), Running), (k("b"), RateLimited)].into();
+        let now: HashMap<_, _> = [(k("a"), Waiting), (k("b"), RateLimited)].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![(k("a"), NotifKind::NeedsYou)]
+        );
+
+        // And the rate-limited lane-mate resumes independently.
+        let now2: HashMap<_, _> = [(k("a"), Waiting), (k("b"), Running)].into();
+        assert_eq!(
+            diff_session_transitions(&now, &now2, &live, &managed),
+            vec![(k("b"), NotifKind::Resumed)]
+        );
+    }
+
+    #[test]
+    fn disappearance_fires_idle_only_when_lane_lives() {
+        use AgentStatus::*;
+        let k = (1, SessKey::Transcript("a".into()));
+        let prev: HashMap<_, _> = [(k.clone(), Waiting)].into();
+        let now = HashMap::new();
+        let managed = HashSet::new();
+
+        let live: HashSet<LaneId> = [1].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![(k, NotifKind::Idle)]
+        );
+        // The whole lane went away (deleted): not an agent going quiet.
+        assert!(diff_session_transitions(&prev, &now, &HashSet::new(), &managed).is_empty());
+    }
+
+    #[test]
+    fn fallback_handoff_does_not_fire_idle() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [1].into();
+        let prev: HashMap<_, _> = [((1, SessKey::Fallback), Running)].into();
+        let now: HashMap<_, _> = [((1, SessKey::Transcript("a".into())), Running)].into();
+
+        // The managed spawn's transcript became parseable: Fallback hands off to Transcript
+        // within one refresh. The agent didn't stop, so nothing fires.
+        let managed: HashSet<LaneId> = [1].into();
+        assert!(diff_session_transitions(&prev, &now, &live, &managed).is_empty());
+
+        // But with no managed session left in the lane, a vanished fallback is a real stop.
+        let gone = HashMap::new();
+        assert_eq!(
+            diff_session_transitions(&prev, &gone, &live, &HashSet::new()),
+            vec![((1, SessKey::Fallback), NotifKind::Idle)]
+        );
+    }
+
+    #[test]
+    fn new_session_already_waiting_fires_needs_you() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+        let prev = HashMap::new();
+        let k = (1, SessKey::Transcript("a".into()));
+
+        // A second agent appearing mid-run already waiting (e.g. a parallel session that
+        // finished between refreshes) is exactly the alert the user wants.
+        let waiting: HashMap<_, _> = [(k.clone(), Waiting)].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &waiting, &live, &managed),
+            vec![(k.clone(), NotifKind::NeedsYou)]
+        );
+        // Appearing already-running is just work starting; stay quiet.
+        let running: HashMap<_, _> = [(k, Running)].into();
+        assert!(diff_session_transitions(&prev, &running, &live, &managed).is_empty());
     }
 
     #[test]

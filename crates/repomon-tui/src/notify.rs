@@ -1,9 +1,10 @@
 //! Desktop + in-app notifications for agent state changes.
 //!
-//! The TUI watches each lane's agent status across refreshes (see `App::detect_notifications`)
-//! and, on a meaningful transition, composes a notification here: a native macOS popup (via
-//! `osascript`, fired on a short-lived thread so it never blocks the event loop) plus an in-app
-//! banner and a scrollable history feed. Edge detection and the config toggles live in `app`.
+//! The TUI watches each agent session's status across refreshes (see
+//! `App::detect_notifications`) and, on a meaningful transition, composes a notification here:
+//! a native macOS popup (via `osascript`, fired on a short-lived thread so it never blocks the
+//! event loop) plus an in-app banner and a scrollable history feed. Edge detection and the
+//! config toggles live in `app`.
 
 use chrono::{DateTime, Local};
 
@@ -50,20 +51,12 @@ pub struct NotifEvent {
     pub body: String,
 }
 
-/// The session a notification is about: the managed/primary one if present (skipping the
-/// inferred "file activity" placeholders, which never drive named alerts).
-fn primary_session(lane: &Lane) -> Option<&AgentSession> {
-    lane.agent_sessions
-        .iter()
-        .find(|s| !s.external && !s.inferred)
-        .or_else(|| lane.agent_sessions.iter().find(|s| !s.inferred))
-        .or_else(|| lane.agent_sessions.first())
-}
-
-/// Build the `(title, body)` for a notification about `lane`. The body carries the detail the
-/// user asked for: branch, what they asked the agent, tool count, and any reset time.
-pub fn compose(kind: NotifKind, lane: &Lane) -> (String, String) {
-    let sess = primary_session(lane);
+/// Build the `(title, body)` for a notification about one of `lane`'s sessions. The body
+/// carries the detail the user asked for: branch, what they asked the agent, tool count, and
+/// any reset time. `sess` is `None` when the session vanished from the snapshot (its
+/// disappearance was the trigger) — the text degrades to a generic "agent" line rather than
+/// borrowing another session's name and title.
+pub fn compose(kind: NotifKind, lane: &Lane, sess: Option<&AgentSession>) -> (String, String) {
     let agent = sess
         .map(|s| s.agent.short().to_string())
         .unwrap_or_default();
