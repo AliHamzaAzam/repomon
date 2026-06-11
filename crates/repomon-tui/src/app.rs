@@ -52,12 +52,14 @@ pub enum AgField {
 }
 
 impl Zoom {
-    /// (lookback seconds, bucket seconds, label).
+    /// (lookback seconds, minimum bucket seconds, label). The actual bucket size is derived
+    /// from the terminal width at load time (see `load_timeline`), floored at the minimum so a
+    /// huge terminal doesn't ask for sub-minute buckets nobody can read.
     fn params(self) -> (i64, i64, &'static str) {
         match self {
-            Zoom::Day => (24 * 3600, 3600, "day"),
-            Zoom::Week => (7 * 24 * 3600, 6 * 3600, "week"),
-            Zoom::Month => (30 * 24 * 3600, 24 * 3600, "month"),
+            Zoom::Day => (24 * 3600, 5 * 60, "day"),
+            Zoom::Week => (7 * 24 * 3600, 30 * 60, "week"),
+            Zoom::Month => (30 * 24 * 3600, 2 * 3600, "month"),
         }
     }
 }
@@ -247,6 +249,8 @@ pub struct App {
     agents_return: Option<View>,
     last_viewport: Vec<LaneId>,
     last_viewport_focus: Option<(LaneId, String)>,
+    /// Last terminal title emitted (OSC 2), to skip redundant writes.
+    last_title: String,
     attach_request: Option<LaneId>,
     /// A tmux target (e.g. a terminal window) the loop should attach to next.
     attach_target: Option<String>,
@@ -346,6 +350,7 @@ impl App {
             agents_return: None,
             last_viewport: Vec::new(),
             last_viewport_focus: None,
+            last_title: String::new(),
             attach_request: None,
             attach_target: None,
             input_suspended: Arc::new(AtomicBool::new(false)),
@@ -782,6 +787,23 @@ impl App {
         }
     }
 
+    /// Keep the terminal window/tab title on the open repo (OSC 2) so several terminals are
+    /// tellable apart at a glance. Re-emitted only when it changes; the shell resets the title
+    /// on exit as usual.
+    fn sync_title(&mut self) {
+        let title = match self.selected_lane() {
+            Some(l) => format!("repomon · {}/{}", l.repo.name, l.worktree.name),
+            None => "repomon".to_string(),
+        };
+        if title != self.last_title {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = write!(out, "\x1b]2;{title}\x07");
+            let _ = out.flush();
+            self.last_title = title;
+        }
+    }
+
     /// Keep the session cursor in range: reset to 0 when the selected lane changes, and clamp
     /// to the number of sessions on that lane.
     fn sync_session_cursor(&mut self) {
@@ -956,6 +978,15 @@ impl App {
     async fn handle_event(&mut self, ev: Event) {
         let key = match ev {
             Event::Key(key) => key,
+            // Views render from the live frame size every draw, so a resize redraws correctly
+            // on its own; the timeline additionally refetches so its bucket count tracks the
+            // new width (the renderer resamples in the meantime).
+            Event::Resize(_, _) => {
+                if self.view == View::Timeline {
+                    self.load_timeline().await;
+                }
+                return;
+            }
             Event::Mouse(me) => {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
                 // Bare movement just updates the hovered lane (highlighted on render).
@@ -1699,7 +1730,14 @@ impl App {
     }
 
     async fn load_timeline(&mut self) {
-        let (lookback, bucket, _) = self.timeline_zoom.params();
+        let (lookback, min_bucket, _) = self.timeline_zoom.params();
+        // Size buckets to the terminal so the strip fills the width (the renderer resamples to
+        // cover the gap until a resize refetch lands). 26 ≈ repo-label column + margins.
+        let width = ratatui::crossterm::terminal::size()
+            .map(|(w, _)| w as i64)
+            .unwrap_or(100);
+        let buckets = (width - 26).clamp(24, 240);
+        let bucket = (lookback / buckets).max(min_bucket);
         let to = chrono::Utc::now();
         let from = to - chrono::Duration::seconds(lookback);
         let params = json!({
@@ -2679,6 +2717,13 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     let outcome = event_loop(&mut terminal, &mut app, &mut in_rx, &mut events).await;
     disable_mouse();
     ratatui::restore();
+    // Hand the title back to the shell (most shells re-set it at the next prompt anyway).
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b]2;\x07");
+        let _ = out.flush();
+    }
     outcome?;
     Ok(app.cd_target)
 }
@@ -2887,6 +2932,7 @@ async fn event_loop(
         app.sync_recent_commits().await;
         app.sync_terminals().await;
         app.sync_session_cursor();
+        app.sync_title();
         app.check_focus_alive();
         // Expire a stale notification banner so the footer hints come back.
         if let Some((_, since)) = &app.notif_banner {
@@ -3009,6 +3055,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
+    app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
 }
 
@@ -3030,6 +3077,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
+    app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
 }
 

@@ -30,6 +30,22 @@ pub fn density_char(level: u8) -> &'static str {
     DENSITY_CHARS[(level as usize).min(5)]
 }
 
+/// Resample a density row to `width` cells for rendering at the current terminal size. Each
+/// output cell takes the MAX of its source span, so activity peaks survive shrinking; when
+/// stretching, cells repeat (nearest neighbor).
+pub fn resample_max(src: &[u8], width: usize) -> Vec<u8> {
+    if src.is_empty() {
+        return vec![0; width];
+    }
+    (0..width)
+        .map(|i| {
+            let lo = i * src.len() / width;
+            let hi = ((i + 1) * src.len() / width).max(lo + 1).min(src.len());
+            src[lo..hi].iter().copied().max().unwrap_or(0)
+        })
+        .collect()
+}
+
 /// Build the timeline: per-repo density rows + Jaccard correlations over `[from, to)`.
 pub fn build_timeline(
     commits: &[Commit],
@@ -122,6 +138,18 @@ fn correlations(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn resample_keeps_peaks_and_stretches() {
+        // Shrinking: the max of each span survives (the 5 must not vanish).
+        assert_eq!(resample_max(&[0, 5, 0, 0, 1, 1, 0, 2], 4), vec![5, 0, 1, 2]);
+        // Stretching: nearest-neighbor repetition.
+        assert_eq!(resample_max(&[1, 3], 4), vec![1, 1, 3, 3]);
+        // Identity and edge cases.
+        assert_eq!(resample_max(&[1, 2, 3], 3), vec![1, 2, 3]);
+        assert_eq!(resample_max(&[], 3), vec![0, 0, 0]);
+        assert!(resample_max(&[1, 2], 0).is_empty());
+    }
 
     fn commit(repo_id: RepoId, secs: i64, base: DateTime<Utc>) -> Commit {
         Commit {

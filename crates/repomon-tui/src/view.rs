@@ -330,20 +330,25 @@ fn render_timeline(f: &mut Frame, app: &App) {
     ];
     match &app.timeline {
         Some(t) if !t.rows.is_empty() => {
-            let zoom = match app.timeline_zoom {
-                crate::app::Zoom::Day => "day",
-                crate::app::Zoom::Week => "week",
-                crate::app::Zoom::Month => "month",
+            let (zoom, axis_fmt) = match app.timeline_zoom {
+                crate::app::Zoom::Day => ("day", "%H:%M"),
+                crate::app::Zoom::Week => ("week", "%a %d"),
+                crate::app::Zoom::Month => ("month", "%b %d"),
             };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{} · {} buckets   [d]ay [w]eek [m]onth",
-                    zoom,
-                    t.rows.first().map(|r| r.density.len()).unwrap_or(0)
+            let (from, to) = (t.from.with_timezone(&Local), t.to.with_timezone(&Local));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{zoom} · {} – {}   ",
+                        from.format("%b %d %H:%M"),
+                        to.format("%b %d %H:%M")
+                    ),
+                    app.theme.dim(),
                 ),
-                app.theme.dim(),
-            )));
+                Span::styled("[d]ay [w]eek [m]onth", app.theme.muted()),
+            ]));
             lines.push(Line::raw(""));
+
             let label_w = t
                 .rows
                 .iter()
@@ -351,14 +356,46 @@ fn render_timeline(f: &mut Frame, app: &App) {
                 .max()
                 .unwrap_or(8)
                 .min(20);
+            // The strip fills the terminal: resample each row to the available width (peaks
+            // survive shrinking), so the chart adapts instantly to resizes between refetches.
+            let avail = (area.width as usize).saturating_sub(label_w + 6).max(10);
             for row in &t.rows {
-                let bars: String = row.density.iter().map(|&l| analytics_char(l)).collect();
-                lines.push(Line::raw(format!(
-                    "  {:<label_w$}  {}",
-                    trunc(&row.repo_name, label_w),
-                    bars
-                )));
+                let levels = repomon_core::analytics::resample_max(&row.density, avail);
+                let active = levels.iter().any(|&l| l > 0);
+                let mut spans = vec![Span::styled(
+                    format!("  {:<label_w$}  ", trunc(&row.repo_name, label_w)),
+                    if active {
+                        app.theme.accented()
+                    } else {
+                        app.theme.muted()
+                    },
+                )];
+                spans.extend(density_spans(&levels, app));
+                lines.push(Line::from(spans));
             }
+            // Time axis: start, midpoint, and "now" labels under the strip.
+            let mid = from + (to - from) / 2;
+            let (l, m, r) = (
+                from.format(axis_fmt).to_string(),
+                mid.format(axis_fmt).to_string(),
+                to.format(axis_fmt).to_string(),
+            );
+            let mut axis = l.clone();
+            let mid_start = avail.saturating_sub(m.chars().count()) / 2;
+            while axis.chars().count() < mid_start {
+                axis.push(' ');
+            }
+            axis.push_str(&m);
+            let right_start = avail.saturating_sub(r.chars().count());
+            while axis.chars().count() < right_start {
+                axis.push(' ');
+            }
+            axis.push_str(&r);
+            lines.push(Line::from(Span::styled(
+                format!("  {:<label_w$}  {axis}", ""),
+                app.theme.muted(),
+            )));
+
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled("CORRELATIONS", app.theme.bold())));
             lines.push(rule(area.width, false, app));
@@ -366,11 +403,33 @@ fn render_timeline(f: &mut Frame, app: &App) {
             if t.correlations.is_empty() {
                 lines.push(Line::raw("  (none above threshold)".to_string()));
             }
+            let pair_w = t
+                .correlations
+                .iter()
+                .take(8)
+                .flat_map(|c| [c.a.len(), c.b.len()])
+                .max()
+                .unwrap_or(8)
+                .min(20);
             for c in t.correlations.iter().take(8) {
-                lines.push(Line::raw(format!(
-                    "  {} ↔ {}     {} windows     {:.2} overlap",
-                    c.a, c.b, c.windows, c.overlap
-                )));
+                // A 10-cell meter in the accent ramp makes overlap comparable at a glance.
+                let filled = ((c.overlap * 10.0).round() as usize).min(10);
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{:<pair_w$}", trunc(&c.a, pair_w)),
+                        app.theme.accented(),
+                    ),
+                    Span::styled(" ↔ ", app.theme.muted()),
+                    Span::styled(
+                        format!("{:<pair_w$}", trunc(&c.b, pair_w)),
+                        app.theme.accented(),
+                    ),
+                    Span::styled(format!("  {:>3} windows  ", c.windows), app.theme.muted()),
+                    Span::styled("█".repeat(filled), app.theme.density(5)),
+                    Span::styled("░".repeat(10 - filled), app.theme.muted()),
+                    Span::raw(format!(" {:.2} overlap", c.overlap)),
+                ]));
             }
         }
         _ => lines.push(Line::raw(
@@ -379,6 +438,26 @@ fn render_timeline(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
     f.render_widget(footer(DASH_KEYS, app), rows[1]);
+}
+
+/// Density levels → styled block spans, adjacent equal levels merged into one span. The blocks
+/// use shades of the configured accent (see `Theme::density`) so the chart matches the UI.
+fn density_spans(levels: &[u8], app: &App) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < levels.len() {
+        let lvl = levels[i];
+        let mut j = i;
+        while j < levels.len() && levels[j] == lvl {
+            j += 1;
+        }
+        spans.push(Span::styled(
+            analytics_char(lvl).repeat(j - i),
+            app.theme.density(lvl),
+        ));
+        i = j;
+    }
+    spans
 }
 
 fn render_sessions(f: &mut Frame, app: &App) {

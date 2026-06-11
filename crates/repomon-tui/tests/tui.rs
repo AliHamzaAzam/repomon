@@ -139,6 +139,40 @@ async fn renders_fleet_with_a_registered_repo() {
         "miss text missing:\n{jump}"
     );
 
+    // Timeline: the density strip resamples to fill the terminal width; axis + correlation
+    // meter render.
+    use repomon_core::model::{Correlation, TimelineData, TimelineRow};
+    app.timeline = Some(TimelineData {
+        from: chrono::Utc::now() - chrono::Duration::days(30),
+        to: chrono::Utc::now(),
+        bucket_secs: 24 * 3600,
+        rows: vec![TimelineRow {
+            repo_id: 1,
+            repo_name: "alpha".into(),
+            density: vec![0, 1, 2, 3, 4, 5],
+        }],
+        correlations: vec![Correlation {
+            a: "alpha".into(),
+            b: "beta".into(),
+            windows: 5,
+            overlap: 0.42,
+        }],
+    });
+    app.view = View::Timeline;
+    let tl = render_to_string(&app, 100, 40).unwrap();
+    assert!(tl.contains("TIMELINE"), "header missing:\n{tl}");
+    assert!(tl.contains("CORRELATIONS"), "correlations missing:\n{tl}");
+    assert!(tl.contains("0.42 overlap"), "overlap missing:\n{tl}");
+    // 6 source buckets must stretch to fill ~all of the 100-col width, ending in a full block.
+    let strip = tl
+        .lines()
+        .find(|l| l.contains("alpha") && l.contains('█'))
+        .expect("density strip missing");
+    assert!(
+        strip.trim_end().chars().count() > 80,
+        "strip not stretched to width:\n{tl}"
+    );
+
     // Settings: columns line up even with the longest label and value present.
     app.settings.accent = "amber".into();
     app.settings.default_agent = "claude-work".into();
