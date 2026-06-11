@@ -22,7 +22,7 @@ const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
-    "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g next · f find  ·  ←/esc back";
+    "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str =
     "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g next · f find  ·  spc/esc fleet · q quit";
@@ -269,7 +269,7 @@ fn render_settings(f: &mut Frame, app: &App) {
 }
 
 const ADDREPO_KEYS: &str =
-    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here  ·  esc back";
+    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here · x x remove (+ only)  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -778,7 +778,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     let mut body: Vec<Line> = Vec::new();
     if let Some(l) = lane {
         body.push(Line::from(Span::styled(
-            focus_status_line(l),
+            focus_status_line(l, app.session_idx),
             app.theme.dim(),
         )));
     }
@@ -1146,14 +1146,25 @@ fn focus_output(
         .collect()
 }
 
-fn focus_status_line(lane: &Lane) -> String {
+fn focus_status_line(lane: &Lane, idx: usize) -> String {
     let s = &lane.state;
     let branch = lane_branch(lane);
     let ab = ahead_behind_str(s.ahead, s.behind);
-    match lane.agent_sessions.first() {
+    let n = lane.agent_sessions.len();
+    let sess = lane
+        .agent_sessions
+        .get(idx)
+        .or_else(|| lane.agent_sessions.first());
+    match sess {
         Some(sess) => format!(
-            "{} · {} {} · {} · {} calls{}",
+            "{}{} · {} {} · {} · {} calls{}",
             sess.agent.short(),
+            // Several agents share this lane: show which one the keys/pane are on.
+            if n > 1 {
+                format!(" {}/{n} (tab switches)", idx.min(n - 1) + 1)
+            } else {
+                String::new()
+            },
             branch,
             ab,
             sess.status.as_str(),

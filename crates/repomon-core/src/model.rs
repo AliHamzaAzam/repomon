@@ -250,6 +250,11 @@ pub struct AgentSession {
     /// renders these with a softer "active" indicator and they don't drive "needs you" alerts.
     #[serde(default)]
     pub inferred: bool,
+    /// The managed tmux window this session runs in, when repomon manages it. Several agents
+    /// can run side by side in one lane (one window each); keys/captures/stops are routed to
+    /// this window. `None` for external and inferred sessions.
+    #[serde(default)]
+    pub tmux_window: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

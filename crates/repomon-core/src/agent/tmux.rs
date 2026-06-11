@@ -38,14 +38,56 @@ impl TmuxRuntime {
         &self.session
     }
 
-    /// The tmux window name for a lane.
+    /// The tmux window name for a lane's first agent slot.
     pub fn window_name(lane: LaneId) -> String {
         format!("lane-{lane}")
     }
 
-    /// The `session:window` target for a lane.
+    /// The window name for a lane's `slot`-th agent (1-based): `lane-7`, `lane-7-2`, `lane-7-3`…
+    /// Several agents can run side by side in one lane, one window each.
+    pub fn slot_name(lane: LaneId, slot: usize) -> String {
+        if slot <= 1 {
+            Self::window_name(lane)
+        } else {
+            format!("lane-{lane}-{slot}")
+        }
+    }
+
+    /// Filter `names` down to `lane`'s agent windows, in slot order (= spawn order). Exact
+    /// matching, so `lane-1` never claims `lane-12`'s windows.
+    pub fn lane_windows_in(names: &[String], lane: LaneId) -> Vec<String> {
+        let base = Self::window_name(lane);
+        let prefix = format!("{base}-");
+        let mut slots: Vec<(usize, String)> = names
+            .iter()
+            .filter_map(|n| {
+                if *n == base {
+                    Some((1, n.clone()))
+                } else {
+                    let rest = n.strip_prefix(&prefix)?;
+                    let slot: usize = rest.parse().ok().filter(|&s| s >= 2)?;
+                    Some((slot, n.clone()))
+                }
+            })
+            .collect();
+        slots.sort_by_key(|(s, _)| *s);
+        slots.into_iter().map(|(_, n)| n).collect()
+    }
+
+    /// `lane`'s live agent windows, in slot order.
+    pub fn windows_for(&self, lane: LaneId) -> Result<Vec<String>> {
+        Ok(Self::lane_windows_in(&self.list_windows()?, lane))
+    }
+
+    /// The `session:window` target for a lane's first agent slot.
     pub fn target(&self, lane: LaneId) -> String {
         format!("{}:{}", self.session, Self::window_name(lane))
+    }
+
+    /// An *exact* `session:=window` target — tmux otherwise prefix-matches window names, which
+    /// would let `lane-1` resolve to `lane-1-2` once the first slot is gone.
+    fn exact_target(&self, name: &str) -> String {
+        format!("{}:={}", self.session, name)
     }
 
     /// repomon runs its tmux on a dedicated socket (named after the session) so its windows
@@ -103,13 +145,16 @@ impl TmuxRuntime {
             .unwrap_or(false)
     }
 
-    /// Launch `command` for `lane` in `cwd`, (re)creating the window. Returns the target.
+    /// Launch `command` for `lane` in `cwd` in the lane's first *free* agent slot — a running
+    /// agent is never killed, so spawning again runs a second agent side by side. Returns the
+    /// new window's exact target.
     pub fn spawn(&self, lane: LaneId, cwd: &Path, command: &str) -> Result<String> {
-        let window = Self::window_name(lane);
+        let taken = self.windows_for(lane).unwrap_or_default();
+        let window = (1..)
+            .map(|slot| Self::slot_name(lane, slot))
+            .find(|name| !taken.contains(name))
+            .expect("unbounded slot range");
         let cwd = cwd.to_string_lossy();
-        if self.has_window(lane) {
-            let _ = self.kill(lane);
-        }
         if self.session_exists() {
             self.run(&[
                 "new-window",
@@ -140,15 +185,20 @@ impl TmuxRuntime {
             ])?;
         }
         self.configure();
-        Ok(self.target(lane))
+        Ok(self.exact_target(&window))
     }
 
     /// Capture the pane's text, including ANSI color escapes (`-e`).
     pub fn capture(&self, lane: LaneId, lines: Option<u32>) -> Result<String> {
-        if !self.has_window(lane) {
+        self.capture_named(&Self::window_name(lane), lines)
+    }
+
+    /// Capture a specific agent window's pane text.
+    pub fn capture_named(&self, window: &str, lines: Option<u32>) -> Result<String> {
+        if !self.has_named(window) {
             return Ok(String::new());
         }
-        let target = self.target(lane);
+        let target = self.exact_target(window);
         let start = lines.map(|n| format!("-{n}")).unwrap_or_default();
         let mut args = vec!["capture-pane", "-e", "-p", "-t", &target];
         if lines.is_some() {
@@ -160,13 +210,21 @@ impl TmuxRuntime {
 
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
     pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
-        self.run(&["send-keys", "-t", &self.target(lane), "-l", text])?;
+        self.send_literal_named(&Self::window_name(lane), text)
+    }
+
+    pub fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {
+        self.run(&["send-keys", "-t", &self.exact_target(window), "-l", text])?;
         Ok(())
     }
 
     /// Type `text` into the agent and press Enter.
     pub fn send_text(&self, lane: LaneId, text: &str) -> Result<()> {
-        let target = self.target(lane);
+        self.send_text_named(&Self::window_name(lane), text)
+    }
+
+    pub fn send_text_named(&self, window: &str, text: &str) -> Result<()> {
+        let target = self.exact_target(window);
         self.run(&["send-keys", "-t", &target, "-l", text])?;
         self.run(&["send-keys", "-t", &target, "Enter"])?;
         Ok(())
@@ -174,15 +232,17 @@ impl TmuxRuntime {
 
     /// Send a raw key (e.g. `C-c`) to the agent.
     pub fn send_key(&self, lane: LaneId, key: &str) -> Result<()> {
-        let target = self.target(lane);
-        self.run(&["send-keys", "-t", &target, key])?;
+        self.send_key_named(&Self::window_name(lane), key)
+    }
+
+    pub fn send_key_named(&self, window: &str, key: &str) -> Result<()> {
+        self.run(&["send-keys", "-t", &self.exact_target(window), key])?;
         Ok(())
     }
 
-    /// Terminate the agent's window.
+    /// Terminate the agent's first-slot window.
     pub fn kill(&self, lane: LaneId) -> Result<()> {
-        self.run(&["kill-window", "-t", &self.target(lane)])?;
-        Ok(())
+        self.kill_named(&Self::window_name(lane))
     }
 
     /// Make the attached experience feel like a native terminal: mouse on (wheel scroll +
@@ -264,9 +324,10 @@ impl TmuxRuntime {
         Ok(self.target_named(name))
     }
 
-    /// Terminate a named window (e.g. a terminal).
+    /// Terminate a named window (an agent slot or a terminal). Exact-match target, so killing
+    /// `lane-1` can't take out `lane-1-2`.
     pub fn kill_named(&self, name: &str) -> Result<()> {
-        self.run(&["kill-window", "-t", &self.target_named(name)])?;
+        self.run(&["kill-window", "-t", &self.exact_target(name)])?;
         Ok(())
     }
 
@@ -305,6 +366,27 @@ mod tests {
     }
 
     #[test]
+    fn slot_names_and_lane_window_filtering() {
+        assert_eq!(TmuxRuntime::slot_name(7, 1), "lane-7");
+        assert_eq!(TmuxRuntime::slot_name(7, 2), "lane-7-2");
+
+        // Exact matching: lane 1 must not claim lane 12's (or a terminal's) windows, and the
+        // result comes back in slot order regardless of input order.
+        let names: Vec<String> = [
+            "lane-12", "lane-1-3", "term-1", "lane-1", "lane-1-2", "lane-1-x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            TmuxRuntime::lane_windows_in(&names, 1),
+            vec!["lane-1", "lane-1-2", "lane-1-3"]
+        );
+        assert_eq!(TmuxRuntime::lane_windows_in(&names, 12), vec!["lane-12"]);
+        assert!(TmuxRuntime::lane_windows_in(&names, 3).is_empty());
+    }
+
+    #[test]
     fn spawn_capture_send_kill_roundtrip() {
         if !TmuxRuntime::available() {
             eprintln!("tmux not available; skipping live runtime test");
@@ -327,7 +409,22 @@ mod tests {
         let out2 = rt.capture(lane, None).unwrap();
         assert!(out2.contains("SECOND_LINE"), "after send: {out2:?}");
 
+        // A second spawn runs side by side in the next slot (the first agent survives), and
+        // per-window ops hit the right pane even after the first slot goes away.
+        rt.spawn(lane, &cwd, "sh -c 'echo SLOT_TWO; sleep 30'")
+            .unwrap();
+        assert_eq!(rt.windows_for(lane).unwrap(), vec!["lane-1", "lane-1-2"]);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let one = rt.capture(lane, None).unwrap();
+        assert!(one.contains("HELLO_REPOMON"), "slot 1 was: {one:?}");
+        let two = rt.capture_named("lane-1-2", None).unwrap();
+        assert!(two.contains("SLOT_TWO"), "slot 2 was: {two:?}");
+
         rt.kill(lane).unwrap();
+        assert_eq!(rt.windows_for(lane).unwrap(), vec!["lane-1-2"]);
+        // Exact targeting: the primary name must not resolve onto the surviving slot.
+        assert_eq!(rt.capture(lane, None).unwrap(), "");
+        rt.kill_named("lane-1-2").unwrap();
         assert!(!rt.has_window(lane));
 
         // Tear down the test session.

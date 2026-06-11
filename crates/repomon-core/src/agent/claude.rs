@@ -58,6 +58,7 @@ impl TranscriptSummary {
             status: self.status,
             external: false, // overlay flips this based on tmux ownership
             session_id: self.session_id,
+            tmux_window: None, // overlay pairs managed sessions with their windows
             resume_at: None,
             inferred: false,
         }

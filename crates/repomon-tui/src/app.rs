@@ -230,6 +230,9 @@ pub struct App {
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
     pub browse_selected: usize,
+    /// Two-press confirm for unregistering a repo from the browser (`x x`): the repo id armed
+    /// by the first press.
+    repo_remove_pending: Option<i64>,
     /// Agent-manager state: the list, the cursor, and the add/edit form.
     pub agents: Vec<AgentChoice>,
     pub agents_selected: usize,
@@ -243,6 +246,7 @@ pub struct App {
     /// Where `esc` returns from the Agents view (e.g. back to New Lane).
     agents_return: Option<View>,
     last_viewport: Vec<LaneId>,
+    last_viewport_focus: Option<(LaneId, String)>,
     attach_request: Option<LaneId>,
     /// A tmux target (e.g. a terminal window) the loop should attach to next.
     attach_target: Option<String>,
@@ -330,6 +334,7 @@ impl App {
             browse_parent: None,
             browse_entries: Vec::new(),
             browse_selected: 0,
+            repo_remove_pending: None,
             agents: Vec::new(),
             agents_selected: 0,
             ag_editing: false,
@@ -340,6 +345,7 @@ impl App {
             ag_orig: None,
             agents_return: None,
             last_viewport: Vec::new(),
+            last_viewport_focus: None,
             attach_request: None,
             attach_target: None,
             input_suspended: Arc::new(AtomicBool::new(false)),
@@ -724,15 +730,32 @@ impl App {
         }
     }
 
-    /// Tell the daemon which lanes are visible, if that set changed.
+    /// Tell the daemon which lanes are visible — and, in Split/Focus, which agent window the
+    /// selected lane should stream (so Tab between a lane's agents retargets the pane) — if
+    /// either changed.
     pub async fn sync_viewport(&mut self) {
         let live = self.live_lanes();
-        if live != self.last_viewport {
+        let focus = match self.view {
+            View::Split | View::Focus => self
+                .selected_lane()
+                .map(|l| l.id)
+                .zip(self.selected_window()),
+            _ => None,
+        };
+        if live != self.last_viewport || focus != self.last_viewport_focus {
             let _ = self
                 .client
-                .call("viewport.set", Some(json!({ "lane_ids": live })))
+                .call(
+                    "viewport.set",
+                    Some(json!({
+                        "lane_ids": live,
+                        "focus_lane": focus.as_ref().map(|(l, _)| l),
+                        "focus_window": focus.as_ref().map(|(_, w)| w),
+                    })),
+                )
                 .await;
             self.last_viewport = live;
+            self.last_viewport_focus = focus;
         }
     }
 
@@ -882,6 +905,15 @@ impl App {
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
+    }
+
+    /// The managed tmux window of the session the cursor is on (Tab cycles it) — where keys,
+    /// captures, stops, and attaches are routed. `None` falls back to the lane's first slot
+    /// (external/inferred sessions have no window of their own).
+    fn selected_window(&self) -> Option<String> {
+        self.selected_lane()
+            .and_then(|l| l.agent_sessions.get(self.session_idx))
+            .and_then(|s| s.tmux_window.clone())
     }
 
     /// Move the session cursor among the selected lane's agents.
@@ -1058,9 +1090,53 @@ impl App {
             }
             KeyCode::Char('a') => self.add_browsed().await,
             KeyCode::Char('d') => self.discover_here().await,
+            KeyCode::Char('x') => self.remove_browsed().await,
             KeyCode::Esc => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
+        }
+        // Any key other than the confirming second `x` disarms a pending removal.
+        if key.code != KeyCode::Char('x') {
+            self.repo_remove_pending = None;
+        }
+    }
+
+    /// Unregister the selected repo (must already be registered — marked `+`). Two presses of
+    /// `x`: the first arms, the second removes. Only repomon's bookkeeping goes away — the
+    /// project, its worktrees, and any running agents on disk are untouched.
+    async fn remove_browsed(&mut self) {
+        let Some(entry) = self.browse_entries.get(self.browse_selected) else {
+            return;
+        };
+        if !entry.added {
+            self.status = "not a registered repo (only + entries can be removed)".into();
+            self.repo_remove_pending = None;
+            return;
+        }
+        let Some(repo) = self.repos.iter().find(|r| r.path == entry.path) else {
+            self.status = "couldn't match this entry to a registered repo".into();
+            self.repo_remove_pending = None;
+            return;
+        };
+        let (id, name) = (repo.id, repo.name.clone());
+        if self.repo_remove_pending != Some(id) {
+            self.repo_remove_pending = Some(id);
+            self.status = format!("press x again to remove {name} (files on disk stay)");
+            return;
+        }
+        self.repo_remove_pending = None;
+        match self
+            .client
+            .call("repo.remove", Some(json!({ "repo_id": id })))
+            .await
+        {
+            Ok(_) => {
+                self.status = format!("removed {name} — files on disk untouched");
+                self.refresh().await;
+                let here = self.browse_path.clone();
+                self.load_browse(Some(here)).await;
+            }
+            Err(e) => self.status = format!("remove failed: {e}"),
         }
     }
 
@@ -1833,7 +1909,12 @@ impl App {
                 .client
                 .call(
                     "agent.key",
-                    Some(json!({ "lane_id": id, "key": spec, "literal": literal })),
+                    Some(json!({
+                        "lane_id": id,
+                        "key": spec,
+                        "literal": literal,
+                        "window": self.selected_window(),
+                    })),
                 )
                 .await;
         }
@@ -2197,7 +2278,12 @@ impl App {
                     .client
                     .call(
                         "agent.send_input",
-                        Some(json!({ "lane_id": id, "text": format!("{path} "), "enter": false })),
+                        Some(json!({
+                            "lane_id": id,
+                            "text": format!("{path} "),
+                            "enter": false,
+                            "window": self.selected_window(),
+                        })),
                     )
                     .await;
                 self.reset_scroll();
@@ -2232,7 +2318,11 @@ impl App {
                     .client
                     .call(
                         "agent.capture",
-                        Some(json!({ "lane_id": id, "lines": 2000 })),
+                        Some(json!({
+                            "lane_id": id,
+                            "lines": 2000,
+                            "window": self.selected_window(),
+                        })),
                     )
                     .await
                 {
@@ -2326,7 +2416,10 @@ impl App {
         if let Some(id) = self.selected_lane().map(|l| l.id) {
             let _ = self
                 .client
-                .call("agent.stop", Some(json!({ "lane_id": id })))
+                .call(
+                    "agent.stop",
+                    Some(json!({ "lane_id": id, "window": self.selected_window() })),
+                )
                 .await;
             self.status = "stopped agent".into();
             // Don't keep staring at the stopped agent's pane.
@@ -2873,11 +2966,16 @@ async fn event_loop(
     }
 }
 
-/// Suspend the TUI, attach to the lane's tmux window, then re-enter.
+/// Suspend the TUI, attach to the lane's tmux window (the selected agent's, when several run
+/// side by side), then re-enter.
 async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) {
+    let window = app.selected_window();
     let resp = app
         .client
-        .call("agent.target", Some(json!({ "lane_id": lane })))
+        .call(
+            "agent.target",
+            Some(json!({ "lane_id": lane, "window": window })),
+        )
         .await;
     let (target, available) = match resp {
         Ok(v) => (
@@ -3155,6 +3253,7 @@ mod tests {
             session_id: session_id.map(str::to_string),
             resume_at: None,
             inferred,
+            tmux_window: None,
         }
     }
 
