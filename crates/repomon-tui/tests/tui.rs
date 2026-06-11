@@ -121,6 +121,24 @@ async fn renders_fleet_with_a_registered_repo() {
         "PATH warning missing:\n{pick}"
     );
 
+    // The lane switcher lists every lane with an empty query and reports a miss for a query
+    // that matches nothing.
+    app.jump_query = String::new();
+    app.jump_idx = 0;
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("FIND LANE"),
+        "switcher header missing:\n{jump}"
+    );
+    assert!(jump.contains(&repo_name), "lane row missing:\n{jump}");
+    app.jump_query = "zzzznope".into();
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("no lanes match"),
+        "miss text missing:\n{jump}"
+    );
+
     // Settings: columns line up even with the longest label and value present.
     app.settings.accent = "amber".into();
     app.settings.default_agent = "claude-work".into();

@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Local};
 
-use repomon_core::model::{AgentSession, Lane};
+use repomon_core::model::{AgentSession, Lane, LaneId};
 
 /// The kind of agent state-change that fired a notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,6 +47,8 @@ impl NotifKind {
 pub struct NotifEvent {
     pub when: DateTime<Local>,
     pub kind: NotifKind,
+    /// The lane the alert was about — lets the feed jump straight to it.
+    pub lane_id: LaneId,
     pub title: String,
     pub body: String,
 }

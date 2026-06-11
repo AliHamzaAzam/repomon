@@ -203,6 +203,13 @@ pub struct App {
     pub spawn_pick_idx: usize,
     pub spawn_pick_lane: Option<LaneId>,
     spawn_return: Option<View>,
+    /// Fleet shows only lanes needing attention (waiting / stuck on a limit) when set.
+    pub urgent_only: bool,
+    /// Lane-switcher state: the typed query, the highlighted match, and the view to return to
+    /// on cancel.
+    pub jump_query: String,
+    pub jump_idx: usize,
+    jump_return: Option<View>,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -304,6 +311,10 @@ impl App {
             spawn_pick_idx: 0,
             spawn_pick_lane: None,
             spawn_return: None,
+            urgent_only: false,
+            jump_query: String::new(),
+            jump_idx: 0,
+            jump_return: None,
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -358,15 +369,190 @@ impl App {
     pub async fn refresh_lanes(&mut self) {
         match self.client.call_typed::<Vec<Lane>>("lane.list", None).await {
             Ok(l) => {
+                // Keep the cursor on the same lane across the attention re-sort below.
+                let keep = self.selected_lane().map(|l| l.id);
                 self.lanes = l;
                 // Run notification edge-detection only on a *successful* fetch. Seeding off a
                 // failed first call (empty lanes) would make the next good refresh treat every
                 // running agent as a fresh transition — the startup storm seeding prevents.
                 self.detect_notifications();
+                self.sort_lanes();
+                if let Some(id) = keep {
+                    if let Some(i) = self.visible_lanes().iter().position(|l| l.id == id) {
+                        self.selected = i;
+                    }
+                }
             }
             Err(e) => self.status = format!("lane.list failed: {e}"),
         }
         self.clamp_selection();
+    }
+
+    /// Order lanes for display: repo groups keep their original (daemon) order, and within each
+    /// group pinned lanes come first, then by attention (waiting > stuck on a limit > running),
+    /// then most recent activity. Stable, so ties keep the daemon's order — the cursor is
+    /// remapped by the caller since this runs on every refresh.
+    fn sort_lanes(&mut self) {
+        let mut repo_order: HashMap<i64, usize> = HashMap::new();
+        for l in &self.lanes {
+            let next = repo_order.len();
+            repo_order.entry(l.repo.id).or_insert(next);
+        }
+        let attention: HashMap<LaneId, u8> = self
+            .lanes
+            .iter()
+            .map(|l| (l.id, self.lane_attention(l)))
+            .collect();
+        self.lanes.sort_by_key(|l| {
+            (
+                repo_order[&l.repo.id],
+                !l.pinned,
+                attention[&l.id],
+                std::cmp::Reverse(l.last_activity_at),
+            )
+        });
+    }
+
+    /// How urgently this lane needs the user (lower = more urgent), accounting for whether a
+    /// rate-limited agent will be auto-continued (global toggle minus this lane's opt-out).
+    fn lane_attention(&self, lane: &Lane) -> u8 {
+        let armed = self.settings.auto_continue && !self.ac_off.contains(&lane.id);
+        attention_rank(&lane.agent_sessions, armed)
+    }
+
+    /// Whether this lane is blocked on the user: an agent waiting for input, or rate-limited
+    /// with no auto-continue coming.
+    fn lane_needs_attention(&self, lane: &Lane) -> bool {
+        self.lane_attention(lane) <= 1
+    }
+
+    /// Cycle the selection through the lanes blocked on the user, wrapping past the end. While
+    /// a notification banner is fresh, the first press goes to the lane that just alerted.
+    fn jump_attention(&mut self) {
+        let banner_lane = self
+            .notif_banner
+            .as_ref()
+            .filter(|(_, t)| t.elapsed() < NOTIF_BANNER_TTL)
+            .and_then(|_| self.notifications.back())
+            .map(|e| e.lane_id);
+
+        // Resolve the target under one immutable borrow of the lanes, then mutate.
+        let lanes = self.visible_lanes();
+        let hits: Vec<usize> = lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| self.lane_needs_attention(l))
+            .map(|(i, _)| i)
+            .collect();
+        let banner_idx = banner_lane
+            .and_then(|id| lanes.iter().position(|l| l.id == id))
+            .filter(|&i| i != self.selected);
+        let label = |i: usize| format!("{}/{}", lanes[i].repo.name, lanes[i].worktree.name);
+
+        let (target, msg) = if let Some(i) = banner_idx {
+            (Some(i), format!("→ {} (just alerted)", label(i)))
+        } else if hits.is_empty() {
+            (None, "no agents need you".to_string())
+        } else {
+            let next = hits
+                .iter()
+                .copied()
+                .find(|&i| i > self.selected)
+                .unwrap_or(hits[0]);
+            let pos = hits.iter().position(|&i| i == next).unwrap_or(0);
+            (
+                Some(next),
+                format!("needs you {}/{} — {}", pos + 1, hits.len(), label(next)),
+            )
+        };
+        if let Some(i) = target {
+            self.selected = i;
+        }
+        self.status = msg;
+    }
+
+    /// Open the fuzzy lane switcher, remembering where to return on cancel.
+    fn enter_lane_jump(&mut self) {
+        self.jump_query.clear();
+        self.jump_idx = 0;
+        self.jump_return = Some(self.view);
+        self.view = View::LaneJump;
+    }
+
+    /// Lanes matching the switcher query, best first: fuzzy score, then attention, then
+    /// recency. An empty query lists every lane.
+    pub fn lane_jump_matches(&self) -> Vec<&Lane> {
+        let mut hits: Vec<(&Lane, u32)> = self
+            .lanes
+            .iter()
+            .filter_map(|l| {
+                let name = format!("{}/{}", l.repo.name, l.worktree.name);
+                let branch = l.state.branch.as_deref().unwrap_or("");
+                let score = match (
+                    fuzzy_score(&name, &self.jump_query),
+                    fuzzy_score(branch, &self.jump_query),
+                ) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }?;
+                Some((l, score))
+            })
+            .collect();
+        hits.sort_by_key(|(l, score)| {
+            (
+                *score,
+                self.lane_attention(l),
+                std::cmp::Reverse(l.last_activity_at),
+            )
+        });
+        hits.into_iter().map(|(l, _)| l).collect()
+    }
+
+    fn lane_jump_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::BackTab => self.jump_idx = self.jump_idx.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab if self.jump_idx + 1 < self.lane_jump_matches().len() => {
+                self.jump_idx += 1;
+            }
+            KeyCode::Enter => {
+                let id = self.lane_jump_matches().get(self.jump_idx).map(|l| l.id);
+                match id {
+                    Some(id) => self.jump_to_lane(id),
+                    None => self.status = "no lanes match".into(),
+                }
+            }
+            KeyCode::Esc => self.view = self.jump_return.take().unwrap_or(View::Fleet),
+            KeyCode::Backspace => {
+                self.jump_query.pop();
+                self.jump_idx = 0;
+            }
+            KeyCode::Char(c) => {
+                self.jump_query.push(c);
+                self.jump_idx = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Select lane `id` — clearing any filter that hides it — and open it in Focus.
+    fn jump_to_lane(&mut self, id: LaneId) {
+        let find = |me: &Self| me.visible_lanes().iter().position(|l| l.id == id);
+        let mut idx = find(self);
+        if idx.is_none() && (!self.filter.is_empty() || self.urgent_only) {
+            self.filter.clear();
+            self.filtering = false;
+            self.urgent_only = false;
+            idx = find(self);
+        }
+        match idx {
+            Some(i) => {
+                self.selected = i;
+                self.focus_insert = false;
+                self.reset_scroll();
+                self.view = View::Focus;
+            }
+            None => self.status = "that lane no longer exists".into(),
+        }
     }
 
     /// Diff the freshly-fetched per-session statuses against the previous snapshot and fire a
@@ -460,6 +646,7 @@ impl App {
         self.notifications.push_back(NotifEvent {
             when: chrono::Local::now(),
             kind,
+            lane_id: id,
             title,
             body,
         });
@@ -469,14 +656,13 @@ impl App {
     }
 
     pub fn visible_lanes(&self) -> Vec<&Lane> {
-        if self.filter.is_empty() {
-            return self.lanes.iter().collect();
-        }
         let f = self.filter.to_lowercase();
         self.lanes
             .iter()
+            .filter(|l| !self.urgent_only || self.lane_needs_attention(l))
             .filter(|l| {
-                l.repo.name.to_lowercase().contains(&f)
+                f.is_empty()
+                    || l.repo.name.to_lowercase().contains(&f)
                     || l.worktree.name.to_lowercase().contains(&f)
                     || l.state
                         .branch
@@ -492,14 +678,14 @@ impl App {
         self.visible_lanes().into_iter().nth(self.selected)
     }
 
-    /// Lane ids to babysit in the grid: pinned first, then needs-you, then most-active.
+    /// Lane ids to babysit in the grid: pinned first, then by attention, then most-active.
     pub fn grid_lane_ids(&self) -> Vec<LaneId> {
         let mut lanes: Vec<&Lane> = self.visible_lanes();
         lanes.sort_by(|a, b| {
             let key = |l: &Lane| {
                 (
                     !l.pinned,
-                    !l.agent_sessions.iter().any(|s| s.status.needs_you()),
+                    self.lane_attention(l),
                     std::cmp::Reverse(l.last_activity_at),
                 )
             };
@@ -533,7 +719,8 @@ impl App {
             | View::Agents
             | View::Settings
             | View::Notifications
-            | View::SpawnPick => Vec::new(),
+            | View::SpawnPick
+            | View::LaneJump => Vec::new(),
         }
     }
 
@@ -666,7 +853,32 @@ impl App {
                 self.select_grid_active();
                 self.toggle_pin().await;
             }
-            KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Esc => self.view = View::Fleet,
+            // Hop to the next tile whose agent needs you, wrapping.
+            KeyCode::Char('g') if n > 0 => {
+                let ids = self.grid_lane_ids();
+                let need: Vec<usize> = ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, id)| {
+                        self.lanes
+                            .iter()
+                            .find(|l| l.id == **id)
+                            .is_some_and(|l| self.lane_needs_attention(l))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                match need
+                    .iter()
+                    .copied()
+                    .find(|&i| i > self.grid_active)
+                    .or(need.first().copied())
+                {
+                    Some(i) => self.grid_active = i,
+                    None => self.status = "no agents need you".into(),
+                }
+            }
+            KeyCode::Char('f') => self.enter_lane_jump(),
+            KeyCode::Char(' ') | KeyCode::Esc => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
@@ -773,6 +985,7 @@ impl App {
             View::Settings => self.settings_key(key).await,
             View::Notifications => self.notifications_key(key),
             View::SpawnPick => self.spawn_pick_key(key).await,
+            View::LaneJump => self.lane_jump_key(key),
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -1192,6 +1405,19 @@ impl App {
             KeyCode::Char('c') => {
                 self.notifications.clear();
                 self.notif_scroll = 0;
+            }
+            // The feed renders newest-first with `notif_scroll` as the top row; ↵ opens the
+            // lane behind that top event (marked ▸).
+            KeyCode::Enter | KeyCode::Right => {
+                if let Some(id) = self
+                    .notifications
+                    .iter()
+                    .rev()
+                    .nth(self.notif_scroll)
+                    .map(|e| e.lane_id)
+                {
+                    self.jump_to_lane(id);
+                }
             }
             KeyCode::Esc | KeyCode::Left => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
@@ -1698,6 +1924,13 @@ impl App {
             KeyCode::Char('c') => self.cd_to_lane(),
             KeyCode::Char('v') => self.paste_image().await,
             KeyCode::Char('y') => self.toggle_mouse(),
+            // Triage without leaving Focus: retarget to the next agent needing you, or pull up
+            // the lane switcher.
+            KeyCode::Char('g') => {
+                self.reset_scroll();
+                self.jump_attention();
+            }
+            KeyCode::Char('f') => self.enter_lane_jump(),
             // esc/← stops scrolling first, then leaves to Split.
             KeyCode::Esc | KeyCode::Left if self.scroll > 0 => self.reset_scroll(),
             KeyCode::Esc | KeyCode::Left => self.view = View::Split,
@@ -2197,7 +2430,14 @@ impl App {
                     | View::Agents
                     | View::Settings
                     | View::Notifications
-                    | View::SpawnPick => self.view = View::Fleet,
+                    | View::SpawnPick
+                    | View::LaneJump => self.view = View::Fleet,
+                    // Esc in Fleet clears the urgent filter first (like the text filter), then
+                    // quits.
+                    View::Fleet if self.urgent_only => {
+                        self.urgent_only = false;
+                        self.clamp_selection();
+                    }
                     View::Fleet => self.should_quit = true,
                 }
             }
@@ -2265,15 +2505,16 @@ impl App {
                     View::Grid
                 };
             }
-            Action::JumpNeedsYou => {
-                let target = self
-                    .visible_lanes()
-                    .iter()
-                    .position(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()));
-                match target {
-                    Some(i) => self.selected = i,
-                    None => self.status = "no agents need you".into(),
-                }
+            Action::JumpNeedsYou => self.jump_attention(),
+            Action::FindLane => self.enter_lane_jump(),
+            Action::ToggleUrgent => {
+                self.urgent_only = !self.urgent_only;
+                self.status = if self.urgent_only {
+                    "showing only lanes that need you — ! or esc to clear".into()
+                } else {
+                    "showing all lanes".into()
+                };
+                self.clamp_selection();
             }
             Action::StopAgent => self.stop_agent().await,
             Action::Pin => self.toggle_pin().await,
@@ -2347,6 +2588,42 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     ratatui::restore();
     outcome?;
     Ok(app.cd_target)
+}
+
+/// How urgently a lane's sessions need the user: 0 = waiting on you, 1 = rate-limited with no
+/// auto-continue coming, 2 = working, 3 = nothing actionable. Inferred file-activity
+/// placeholders never rank — they can't be acted on.
+fn attention_rank(sessions: &[AgentSession], auto_continue_armed: bool) -> u8 {
+    use AgentStatus::*;
+    sessions
+        .iter()
+        .filter(|s| !s.inferred)
+        .map(|s| match s.status {
+            Waiting => 0,
+            RateLimited if !auto_continue_armed => 1,
+            Running | RateLimited => 2,
+            Idle | Ended => 3,
+        })
+        .min()
+        .unwrap_or(3)
+}
+
+/// Case-insensitive subsequence match of `needle` in `haystack` for the lane switcher. Lower
+/// scores are better: matches that start earlier and sit closer together rank first. Greedy
+/// leftmost matching; an empty needle matches everything with the best score.
+fn fuzzy_score(haystack: &str, needle: &str) -> Option<u32> {
+    let mut hay = haystack.chars().flat_map(char::to_lowercase).enumerate();
+    let mut score = 0u32;
+    let mut prev: Option<usize> = None;
+    for n in needle.chars().flat_map(char::to_lowercase) {
+        let (i, _) = hay.by_ref().find(|&(_, h)| h == n)?;
+        score += match prev {
+            None => i as u32,              // distance from the start
+            Some(p) => (i - p - 1) as u32, // gap since the previous matched char
+        };
+        prev = Some(i);
+    }
+    Some(score)
 }
 
 /// Identifies one real agent session within a lane across refreshes.
@@ -2984,6 +3261,50 @@ mod tests {
         // Appearing already-running is just work starting; stay quiet.
         let running: HashMap<_, _> = [(k, Running)].into();
         assert!(diff_session_transitions(&prev, &running, &live, &managed).is_empty());
+    }
+
+    #[test]
+    fn attention_rank_orders_urgency() {
+        use AgentStatus::*;
+        // Waiting always tops; a rate-limited agent only needs you when nothing will resume it.
+        assert_eq!(attention_rank(&[sess(Some("a"), Waiting, false)], true), 0);
+        assert_eq!(
+            attention_rank(&[sess(Some("a"), RateLimited, false)], false),
+            1
+        );
+        assert_eq!(
+            attention_rank(&[sess(Some("a"), RateLimited, false)], true),
+            2
+        );
+        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 2);
+        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 3);
+        // The most urgent session wins; inferred placeholders never rank.
+        assert_eq!(
+            attention_rank(
+                &[
+                    sess(Some("a"), Running, false),
+                    sess(Some("b"), Waiting, false)
+                ],
+                true
+            ),
+            0
+        );
+        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 3);
+        assert_eq!(attention_rank(&[], true), 3);
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_early_contiguous() {
+        // Contiguous prefix beats a gappy subsequence; case-insensitive; misses are None.
+        let hay = "repomon/feat-x";
+        assert_eq!(fuzzy_score(hay, ""), Some(0));
+        assert_eq!(fuzzy_score(hay, "repo"), Some(0));
+        assert!(fuzzy_score(hay, "repo") < fuzzy_score(hay, "rmn"));
+        assert!(fuzzy_score(hay, "feat") < fuzzy_score(hay, "ftx"));
+        assert_eq!(fuzzy_score(hay, "REPO"), fuzzy_score(hay, "repo"));
+        assert_eq!(fuzzy_score(hay, "zzz"), None);
+        // Later starts cost more, so "feat" in a later position scores worse than at the front.
+        assert!(fuzzy_score("feat-x", "feat") < fuzzy_score("repomon/feat-x", "feat"));
     }
 
     #[test]

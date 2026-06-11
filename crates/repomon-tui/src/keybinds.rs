@@ -31,6 +31,8 @@ pub enum View {
     Notifications,
     /// Quick picker for which agent to spawn on the selected lane.
     SpawnPick,
+    /// Fuzzy lane switcher: type a few characters, jump to any lane across repos.
+    LaneJump,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -57,6 +59,10 @@ pub enum Action {
     AttachTerminal,
     ToggleMouse,
     ToggleAutoContinue,
+    /// Open the fuzzy lane switcher.
+    FindLane,
+    /// Show only lanes needing attention (waiting / stuck on a limit).
+    ToggleUrgent,
     Goto(View),
 }
 
@@ -86,6 +92,8 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('T') => Some(Action::AttachTerminal),
         KeyCode::Char('y') => Some(Action::ToggleMouse),
         KeyCode::Char('C') => Some(Action::ToggleAutoContinue),
+        KeyCode::Char('f') => Some(Action::FindLane),
+        KeyCode::Char('!') => Some(Action::ToggleUrgent),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         KeyCode::Char('1') => Some(Action::Goto(View::Fleet)),
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),

@@ -17,15 +17,15 @@ use crate::notify::NotifKind;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · f find · ! urgent · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
-    "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
+    "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str =
-    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
+    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g next · f find  ·  spc/esc fleet · q quit";
 const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
@@ -57,6 +57,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Settings => render_settings(f, app),
         View::Notifications => render_notifications(f, app),
         View::SpawnPick => render_spawn_pick(f, app),
+        View::LaneJump => render_lane_jump(f, app),
     }
 }
 
@@ -461,15 +462,18 @@ fn render_notifications(f: &mut Frame, app: &App) {
     }
     // Two lines per event (title + detail); reserve room for the header block already pushed.
     let budget = (rows[0].height as usize).saturating_sub(lines.len()) / 2;
-    for ev in app
+    for (i, ev) in app
         .notifications
         .iter()
         .rev()
         .skip(app.notif_scroll)
         .take(budget)
+        .enumerate()
     {
+        // The top row is the one ↵ opens (see `App::notifications_key`).
+        let mark = if i == 0 { "▸ " } else { "  " };
         lines.push(Line::from(vec![
-            Span::raw("  "),
+            Span::styled(mark, app.theme.accented()),
             Span::styled(ev.when.format("%H:%M:%S").to_string(), app.theme.muted()),
             Span::raw("  "),
             Span::styled(ev.title.clone(), notif_style(app, ev.kind)),
@@ -481,7 +485,10 @@ fn render_notifications(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
     f.render_widget(
-        footer("↑↓ scroll · c clear  ·  1 fleet · ←/esc back · q quit", app),
+        footer(
+            "↑↓ scroll · ↵ open lane · c clear  ·  1 fleet · ←/esc back · q quit",
+            app,
+        ),
         rows[1],
     );
 }
@@ -560,6 +567,71 @@ fn render_spawn_pick(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines), rows[1]);
     f.render_widget(
         footer("↑↓ pick · 1-9 jump · ↵ spawn · esc cancel", app),
+        rows[2],
+    );
+}
+
+/// The fuzzy lane switcher (`f`): type to filter every lane across all repos, ↵ opens the
+/// highlighted one in Focus. Matches rank by query score, then by how urgently the lane needs
+/// you, then recency — so with an empty query the most pressing lanes are already on top.
+fn render_lane_jump(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · FIND LANE", &fmt_clock(), app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+
+    let mut lines = vec![
+        Line::raw(""),
+        Line::raw(format!("  find: {}_", app.jump_query)),
+        Line::raw(""),
+    ];
+    let matches = app.lane_jump_matches();
+    if matches.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no lanes match".to_string(),
+            app.theme.dim(),
+        )));
+    }
+    let budget = (rows[1].height as usize).saturating_sub(lines.len()).max(1);
+    for (i, lane) in matches.iter().take(budget).enumerate() {
+        let cursor = if i == app.jump_idx { "‣" } else { " " };
+        let name = format!("{}/{}", lane.repo.name, lane.worktree.name);
+        let (badge, style) = agent_badge(lane, app);
+        if i == app.jump_idx {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {cursor} {:<32} {:<24} {}",
+                    trunc(&name, 32),
+                    trunc(&lane_branch(lane), 24),
+                    badge
+                ),
+                app.theme.selected(),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {cursor} ")),
+                Span::styled(format!("{:<32}", trunc(&name, 32)), app.theme.accented()),
+                Span::styled(
+                    format!(" {:<24}", trunc(&lane_branch(lane), 24)),
+                    app.theme.dim(),
+                ),
+                Span::styled(format!(" {badge}"), style),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    f.render_widget(
+        footer("type to filter · ↑↓ pick · ↵ open · esc cancel", app),
         rows[2],
     );
 }
@@ -1161,8 +1233,13 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         .iter()
         .filter(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()))
         .count();
+    let urgent = if app.urgent_only {
+        " · URGENT only"
+    } else {
+        ""
+    };
     let rest = format!(
-        "  {} lanes · {repos} repos · {needs} need you",
+        "  {} lanes · {repos} repos · {needs} need you{urgent}",
         visible.len()
     );
     let right = format!("today · {} commits", app.commits.len());
