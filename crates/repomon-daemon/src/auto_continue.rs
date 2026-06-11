@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use repomon_core::agent::{detect_usage_limit, UsageLimit};
+use repomon_core::agent::{detect_usage_limit, menu_select_keys, UsageLimit};
 use repomon_core::model::LaneId;
 use repomon_core::TmuxRuntime;
 
@@ -44,8 +44,8 @@ struct Sched {
     next_attempt: DateTime<Utc>,
     gave_up: bool,
     cooldown_until: Option<DateTime<Utc>>,
-    /// We've already pressed Enter on Claude's "Stop and wait for limit to reset" menu for this
-    /// pause, so don't press it again (reset only when the lane clears).
+    /// We've already selected "Stop and wait for limit to reset" on Claude's menu for this
+    /// pause, so don't select it again (reset only when the lane clears).
     menu_confirmed: bool,
 }
 
@@ -56,8 +56,12 @@ enum Action {
         reset_at: Option<DateTime<Utc>>,
         next_attempt: DateTime<Utc>,
     },
-    /// Press Enter to pick option 1 ("Stop and wait for limit to reset") on the interactive menu.
-    ChooseWait,
+    /// Select "Stop and wait for limit to reset" on the interactive menu. The keys are derived
+    /// from the menu as *read from the pane* (the options change position between occurrences,
+    /// so a blind Enter could confirm "Upgrade your plan" instead).
+    ChooseWait {
+        keys: Vec<String>,
+    },
     /// Type the continue message now.
     Send,
     /// Waited too long without resuming — stop and surface needs-you.
@@ -110,9 +114,12 @@ fn decide(
                     return Action::Nothing;
                 }
                 // Pick "Stop and wait for limit to reset" once, before ever typing `continue` —
-                // otherwise the continue text would land in the menu.
-                if lim.menu && !s.menu_confirmed {
-                    return Action::ChooseWait;
+                // otherwise the continue text would land in the menu. The pane was captured
+                // moments ago, so the parsed positions reflect what's actually on screen.
+                if let Some(menu) = lim.menu.as_ref().filter(|_| !s.menu_confirmed) {
+                    return Action::ChooseWait {
+                        keys: menu_select_keys(menu),
+                    };
                 }
                 if now >= s.next_attempt {
                     Action::Send
@@ -220,10 +227,20 @@ async fn apply(
                 serde_json::json!({ "lane_id": lane, "status": "rate-limited" }),
             );
         }
-        Action::ChooseWait => {
-            // Press Enter to confirm the menu's default option 1 ("Stop and wait …").
+        Action::ChooseWait { keys } => {
+            // Walk the cursor to "Stop and wait …" and confirm — the exact keys were derived
+            // from the menu's on-screen positions. A short gap between keys lets the menu's
+            // renderer keep up with repeated arrows.
             let tmux = ctx.tmux.clone();
-            let _ = tokio::task::spawn_blocking(move || tmux.send_key(lane, "Enter")).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                for (i, key) in keys.iter().enumerate() {
+                    if i > 0 {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    let _ = tmux.send_key(lane, key);
+                }
+            })
+            .await;
             if let Some(s) = sched.get_mut(&lane) {
                 s.menu_confirmed = true;
                 s.cooldown_until = Some(now + chrono::Duration::seconds(SEND_COOLDOWN_SECS));
@@ -271,6 +288,7 @@ async fn apply(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use repomon_core::agent::LimitMenu;
 
     fn now() -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000, 0).unwrap()
@@ -288,14 +306,23 @@ mod tests {
         }
     }
 
-    fn lim(reset_at: Option<DateTime<Utc>>, menu: bool) -> UsageLimit {
+    fn lim(reset_at: Option<DateTime<Utc>>, menu: Option<LimitMenu>) -> UsageLimit {
         UsageLimit { reset_at, menu }
+    }
+
+    /// A parsed menu with the cursor on row 0 and the wait option at `wait_idx`.
+    fn menu_at(wait_idx: usize) -> LimitMenu {
+        LimitMenu {
+            selected: Some(0),
+            wait_idx,
+            wait_number: Some(wait_idx as u32 + 1),
+        }
     }
 
     #[test]
     fn disabled_lane_never_tracks_or_sends() {
         assert_eq!(
-            decide(None, Some(&lim(None, false)), false, now()),
+            decide(None, Some(&lim(None, None)), false, now()),
             Action::Nothing
         );
     }
@@ -309,7 +336,7 @@ mod tests {
     #[test]
     fn new_detection_tracks_with_reset_buffer() {
         let reset = now() + chrono::Duration::hours(2);
-        let action = decide(None, Some(&lim(Some(reset), false)), true, now());
+        let action = decide(None, Some(&lim(Some(reset), None)), true, now());
         assert_eq!(
             action,
             Action::Track {
@@ -321,7 +348,7 @@ mod tests {
 
     #[test]
     fn new_detection_without_time_uses_periodic_retry() {
-        let action = decide(None, Some(&lim(None, false)), true, now());
+        let action = decide(None, Some(&lim(None, None)), true, now());
         assert_eq!(
             action,
             Action::Track {
@@ -335,7 +362,7 @@ mod tests {
     fn waits_until_next_attempt() {
         let s = sched(120, false, None); // attempt is in the future
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::Nothing
         );
     }
@@ -344,7 +371,7 @@ mod tests {
     fn sends_when_due() {
         let s = sched(-1, false, None);
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::Send
         );
     }
@@ -353,7 +380,7 @@ mod tests {
     fn cooldown_suppresses_send() {
         let s = sched(-1, false, Some(60)); // due, but cooling down
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::Nothing
         );
     }
@@ -363,7 +390,7 @@ mod tests {
         let mut s = sched(-1, false, None);
         s.started = now() - chrono::Duration::hours(GIVE_UP_AFTER_HOURS + 1);
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::GiveUp
         );
     }
@@ -372,7 +399,7 @@ mod tests {
     fn gave_up_stays_quiet() {
         let s = sched(-1, true, None);
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, false)), true, now()),
+            decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::Nothing
         );
     }
@@ -385,13 +412,30 @@ mod tests {
 
     #[test]
     fn confirms_menu_before_continue() {
-        // The interactive menu is up and we haven't chosen yet: pick option 1, don't type
-        // `continue` — even though a send is otherwise due.
+        // The interactive menu is up and we haven't chosen yet: select the wait option, don't
+        // type `continue` — even though a send is otherwise due. The wait option here is row 2
+        // with the cursor on row 0 (the options move around), so the keys walk down to it: a
+        // blind Enter would have confirmed the wrong option.
         let mut s = sched(-1, false, None);
         s.menu_confirmed = false;
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, true)), true, now()),
-            Action::ChooseWait
+            decide(Some(&s), Some(&lim(None, Some(menu_at(2)))), true, now()),
+            Action::ChooseWait {
+                keys: vec!["Down".into(), "Down".into(), "Enter".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn confirms_preselected_wait_with_enter_only() {
+        // Cursor already on the wait option → just Enter (the classic layout).
+        let mut s = sched(-1, false, None);
+        s.menu_confirmed = false;
+        assert_eq!(
+            decide(Some(&s), Some(&lim(None, Some(menu_at(0)))), true, now()),
+            Action::ChooseWait {
+                keys: vec!["Enter".into()]
+            }
         );
     }
 
@@ -400,7 +444,7 @@ mod tests {
         // Menu text still on screen but already confirmed → proceed to send `continue`.
         let s = sched(-1, false, None); // menu_confirmed: true by default
         assert_eq!(
-            decide(Some(&s), Some(&lim(None, true)), true, now()),
+            decide(Some(&s), Some(&lim(None, Some(menu_at(0)))), true, now()),
             Action::Send
         );
     }
