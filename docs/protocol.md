@@ -12,6 +12,21 @@ little-endian `u32`** length, then that many bytes of UTF-8 JSON.
 Test it by hand: `nc -U /tmp/repomon-$USER.sock` and send framed JSON, or use the `repomon`
 CLI which speaks this protocol.
 
+## Remote transport (WebSocket)
+
+Companion apps (the iOS client) reach the daemon over a **WebSocket bridge** speaking the
+exact same JSON-RPC envelopes — one WS *text frame* per message, no length prefix. Disabled by
+default; `repomon remote enable` generates a bearer token, detects the Tailscale address, and
+writes `[remote] enabled/bind/token` to the config (apply with a daemon restart; pair a phone
+with `repomon remote pair`, which renders a `repomon://<host:port>#<token>` QR).
+
+- **Auth:** checked before the upgrade completes — `Authorization: Bearer <token>` header or a
+  `?token=<token>` query parameter; anything else gets a 401 and no connection.
+- **Bind it privately** (the Tailscale IP). The bridge is full-control: anyone holding the
+  token can read panes and type into agents.
+- `ping` → `"pong"` serves as an application-level keep-alive; events flow after `subscribe`
+  exactly as on the Unix socket.
+
 ## Envelope
 
 ```jsonc
@@ -68,6 +83,9 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
 | `viewport.set` | `{ lane_ids }` | `null` |
 | `subscribe` | `{ topics? }` | `null` |
+| `ping` | — | `"pong"` (remote keep-alive / connectivity probe) |
+| `push.register` | `{ device_token }` | `null` (register an APNs device for push; idempotent) |
+| `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
 
@@ -85,5 +103,6 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `event.agent.status` | `{ lane_id, status }` |
 | `event.agent.output` | `{ lane_id, content }` |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
+| `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`; `prompt` is the agent's pending question verbatim). Emitted only while `[remote]` is enabled; the same alert goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.

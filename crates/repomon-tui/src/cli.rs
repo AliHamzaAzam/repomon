@@ -38,6 +38,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    /// Remote access for companion apps (iOS): enable the bridge, pair a phone.
+    Remote {
+        #[command(subcommand)]
+        cmd: RemoteCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -61,6 +66,26 @@ pub enum LaneCmd {
         #[arg(long)]
         delete_branch: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum RemoteCmd {
+    /// Turn the WebSocket bridge on: generate a token, detect the Tailscale address, write
+    /// the config. Restart the daemon afterwards to apply.
+    Enable {
+        /// Bind address override (default: the Tailscale IPv4 on port 7878).
+        #[arg(long)]
+        bind: Option<String>,
+        /// Rotate the token even if one already exists.
+        #[arg(long)]
+        rotate_token: bool,
+    },
+    /// Show a QR code for the companion app to scan (encodes address + token).
+    Pair,
+    /// Show the remote-access configuration (token masked).
+    Status,
+    /// Turn the bridge off (keeps the token for re-enabling).
+    Disable,
 }
 
 #[derive(Subcommand)]
@@ -131,8 +156,121 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         }
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
+        Command::Remote { cmd } => handle_remote(cmd)?,
     }
     Ok(())
+}
+
+/// `repomon remote …` — manage the companion-app bridge. These edit the config *file* (the
+/// token never crosses the RPC surface); the daemon picks changes up on restart.
+fn handle_remote(cmd: RemoteCmd) -> Result<()> {
+    let path = config::config_path();
+    let mut cfg = Config::load().unwrap_or_default();
+    match cmd {
+        RemoteCmd::Enable { bind, rotate_token } => {
+            let bind = match bind.or_else(|| cfg.remote.bind.clone()) {
+                Some(b) => b,
+                None => {
+                    let ip = tailscale_ip().ok_or_else(|| {
+                        anyhow!(
+                            "couldn't detect a Tailscale IP — is Tailscale running? \
+                             (or pass --bind <ip:port> explicitly)"
+                        )
+                    })?;
+                    format!("{ip}:7878")
+                }
+            };
+            if cfg.remote.token.is_none() || rotate_token {
+                cfg.remote.token = Some(generate_token());
+            }
+            cfg.remote.bind = Some(bind.clone());
+            cfg.remote.enabled = true;
+            cfg.save_to(&path)?;
+            println!("remote bridge enabled on ws://{bind}");
+            println!("apply with: repomon daemon restart");
+            println!("then pair your phone with: repomon remote pair");
+        }
+        RemoteCmd::Disable => {
+            cfg.remote.enabled = false;
+            cfg.save_to(&path)?;
+            println!("remote bridge disabled (token kept) — repomon daemon restart to apply");
+        }
+        RemoteCmd::Pair => {
+            let (Some(bind), Some(token), true) =
+                (&cfg.remote.bind, &cfg.remote.token, cfg.remote.enabled)
+            else {
+                return Err(anyhow!(
+                    "remote access is not enabled — run `repomon remote enable` first"
+                ));
+            };
+            let url = format!("repomon://{bind}#{token}");
+            let code = qrcode::QrCode::new(url.as_bytes())?;
+            let art = code
+                .render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .build();
+            println!("{art}");
+            println!("scan with the repomon iOS app · {url}");
+            println!("(anyone with this QR can drive your agents — share it with no one)");
+        }
+        RemoteCmd::Status => {
+            let state = if cfg.remote.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let bind = cfg.remote.bind.as_deref().unwrap_or("(unset)");
+            let token = match &cfg.remote.token {
+                Some(t) if t.len() >= 8 => format!("{}…{}", &t[..4], &t[t.len() - 4..]),
+                Some(_) => "(set)".into(),
+                None => "(unset)".into(),
+            };
+            println!("remote: {state}");
+            println!("bind:   ws://{bind}");
+            println!("token:  {token}");
+            let push_ready = cfg.push.team_id.is_some()
+                && cfg.push.key_id.is_some()
+                && cfg.push.p8_path.is_some()
+                && cfg.push.bundle_id.is_some();
+            println!(
+                "push:   {}",
+                if push_ready {
+                    "configured"
+                } else {
+                    "not configured ([push] in config.toml: team_id, key_id, p8_path, bundle_id)"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A fresh 32-byte hex bearer token from the OS entropy pool (no extra deps).
+fn generate_token() -> String {
+    let mut buf = [0u8; 32];
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .expect("read /dev/urandom");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The machine's Tailscale IPv4, via the `tailscale` CLI (PATH, then the Mac app bundle).
+fn tailscale_ip() -> Option<String> {
+    for bin in [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ] {
+        if let Ok(out) = std::process::Command::new(bin).args(["ip", "-4"]).output() {
+            if out.status.success() {
+                let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !ip.is_empty() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {

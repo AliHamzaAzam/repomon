@@ -53,6 +53,7 @@ clap = { version = "4.5", features = ["derive"] }
 # --- tui ---
 ratatui = "0.29"
 ansi-to-tui = "7"
+qrcode = { version = "0.14", default-features = false }
 # --- cli / app ergonomics ---
 anyhow = "1"
 # --- dev ---
