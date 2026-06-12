@@ -259,6 +259,11 @@ pub struct AgentSession {
     /// ended a turn. Gives needs-you notifications their "why".
     #[serde(default)]
     pub last_message: Option<String>,
+    /// Set only when the pane is sitting on an interactive dialog (permission prompt, plan
+    /// approval, option question): the dialog's summary. Clients show approve/menu controls
+    /// exactly when this is present — a plain end-of-turn `Waiting` has none.
+    #[serde(default)]
+    pub pending_prompt: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

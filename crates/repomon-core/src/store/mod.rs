@@ -645,6 +645,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
         inferred: false,
         tmux_window: None,
         last_message: None,
+        pending_prompt: None,
     })
 }
 
@@ -871,6 +872,7 @@ mod tests {
             inferred: false,
             tmux_window: None,
             last_message: None,
+            pending_prompt: None,
         };
         let id = s.upsert_session(sess.clone()).await.unwrap();
         // Upsert again (same manifest) updates rather than duplicates.

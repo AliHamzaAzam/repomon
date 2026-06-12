@@ -1126,6 +1126,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 inferred: false,
                 tmux_window: lane_windows.first().cloned(),
                 last_message: None,
+                pending_prompt: None,
             });
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
@@ -1156,6 +1157,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     inferred: true,
                     tmux_window: None,
                     last_message: None,
+                    pending_prompt: None,
                 });
             }
         }
@@ -1172,10 +1174,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         }
     }
 
-    // Permission prompts: a transcript that ends in a tool call reads **Running**, but the
-    // pane may be sitting on an interactive "Do you want…?" dialog — blocked on the user with
-    // nothing in the JSONL to say so. Sniff the panes of managed Running sessions and flip
-    // those to Waiting, carrying the dialog summary as the notification-ready "why".
+    // Interactive dialogs: a transcript that ends in a tool call reads **Running**, but the
+    // pane may be sitting on a permission "Do you want…?" dialog; a turn ending in text reads
+    // **Waiting**, but the pane may be showing an option menu (plan approval, a question with
+    // choices). Neither is in the JSONL. Sniff the panes of managed Running/Waiting sessions:
+    // a detected dialog sets `pending_prompt` (clients gate approve/menu controls on it),
+    // becomes the notification-ready "why", and flips Running → Waiting.
     let candidates: Vec<(usize, usize, String)> = lanes
         .iter()
         .enumerate()
@@ -1184,7 +1188,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 .iter()
                 .enumerate()
                 .filter_map(move |(si, s)| {
-                    (!s.external && !s.inferred && s.status == AgentStatus::Running)
+                    let sniffable = !s.external
+                        && !s.inferred
+                        && matches!(s.status, AgentStatus::Running | AgentStatus::Waiting);
+                    sniffable
                         .then(|| s.tmux_window.clone().map(|w| (li, si, w)))
                         .flatten()
                 })
@@ -1209,7 +1216,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             if let Some(summary) = found {
                 let s = &mut lanes[li].agent_sessions[si];
                 s.status = AgentStatus::Waiting;
-                s.last_message = Some(summary);
+                s.last_message = Some(summary.clone());
+                s.pending_prompt = Some(summary);
             }
         }
     }

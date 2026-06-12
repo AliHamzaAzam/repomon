@@ -97,8 +97,12 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 slot_by_key(lane, &key),
                 cfg.notify_show_why,
             );
-            // The agent's pending question verbatim — what a push's Approve acts on.
-            let prompt = sess.and_then(|s| s.last_message.clone());
+            // The actual on-screen dialog, when there is one — what a push's Approve acts on.
+            let dialog = sess.and_then(|s| s.pending_prompt.clone());
+            // The payload's "prompt" falls back to the agent's last message for context.
+            let prompt = dialog
+                .clone()
+                .or_else(|| sess.and_then(|s| s.last_message.clone()));
             let payload = json!({
                 "lane_id": lane_id,
                 "session_id": sess.and_then(|s| s.session_id.clone()),
@@ -111,7 +115,9 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
 
             // Lock-screen push: a NeedsYou with a pending question gets the actionable
             // category (Approve / Open); everything else is a plain alert.
-            let category = if kind == NotifKind::NeedsYou && prompt.is_some() {
+            // Approve-from-lock-screen only when an actual dialog is up — a plain "finished
+            // its turn" Enter would be a no-op (or worse, submit an empty reply).
+            let category = if kind == NotifKind::NeedsYou && dialog.is_some() {
                 push::CATEGORY_PROMPT
             } else {
                 push::CATEGORY_ALERT

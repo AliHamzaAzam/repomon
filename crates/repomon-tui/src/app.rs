@@ -3289,6 +3289,7 @@ mod tests {
             inferred,
             tmux_window: None,
             last_message: None,
+            pending_prompt: None,
         }
     }
 
