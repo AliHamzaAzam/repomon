@@ -369,6 +369,19 @@ pub struct TimelineData {
     pub correlations: Vec<Correlation>,
 }
 
+/// One conversation item from an agent transcript, rendered for clients that lay text out
+/// themselves (the mobile chat view): a user or assistant message with the full *unwrapped*
+/// text, or an aggregated run of tool calls between messages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptItem {
+    /// "user" | "assistant" | "tools".
+    pub role: String,
+    /// Message text, or for "tools" a compact summary ("Bash ×2 · Edit").
+    pub text: String,
+    /// The entry's timestamp, when the transcript records one.
+    pub at: Option<DateTime<Utc>>,
+}
+
 /// A spawnable agent choice: a built-in kind (detected on PATH) or a configured custom one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentChoice {

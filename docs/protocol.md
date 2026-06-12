@@ -70,6 +70,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |
 | `agent.spawn` | `{ lane_id, agent, task? }` | `{ lane_id, window, agent }` |
 | `agent.capture` | `{ lane_id, lines? }` | `{ content }` (ANSI-colored) |
+| `agent.transcript` | `{ lane_id, session_id?, limit=50 }` | `[TranscriptItem]` — `{ role, text, at? }` with role `user`/`assistant`/`tools`; full unwrapped message text for clients that lay text out themselves (the mobile chat view). Claude sessions only (empty otherwise). |
 | `agent.send_input` | `{ lane_id, text }` | `null` (types text + Enter) |
 | `agent.key` | `{ lane_id, key, literal=false }` | `null` (one keystroke: literal char or key name) |
 | `agent.signal` | `{ lane_id, key }` | `null` |

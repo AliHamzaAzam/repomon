@@ -201,6 +201,18 @@ struct PushDevice {
     device_token: String,
 }
 #[derive(Deserialize)]
+struct AgentTranscript {
+    lane_id: repomon_core::model::LaneId,
+    /// Which session's transcript; `None` = the lane's most recent.
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default = "default_transcript_limit")]
+    limit: usize,
+}
+fn default_transcript_limit() -> usize {
+    50
+}
+#[derive(Deserialize)]
 struct AgentAdopt {
     lane_id: repomon_core::model::LaneId,
     /// Resume this exact session (`claude --resume <id>`); `None` resumes the most recent.
@@ -925,6 +937,29 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "subscribe" => Ok(Value::Null),
         // Liveness probe for remote clients (the WS bridge) and a cheap connectivity check.
         "ping" => Ok(json!("pong")),
+        // The conversation itself, for clients that render text natively (the mobile chat
+        // view) instead of a desktop-width pane capture.
+        "agent.transcript" => {
+            let p: AgentTranscript = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let items = tokio::task::spawn_blocking(move || {
+                let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
+                let summaries = agent::claude::summaries_for(&path, within, MAX_SESSIONS_PER_LANE);
+                let manifest = match &p.session_id {
+                    Some(id) => summaries
+                        .iter()
+                        .find(|s| s.session_id.as_deref() == Some(id.as_str()))
+                        .map(|s| s.manifest_path.clone()),
+                    None => summaries.first().map(|s| s.manifest_path.clone()),
+                };
+                manifest
+                    .map(|m| agent::claude::transcript_tail(&m, p.limit))
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            to_value(items)
+        }
         // Push-notification device registration (the iOS companion).
         "push.register" => {
             let p: PushDevice = parse(params)?;
