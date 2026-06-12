@@ -7,6 +7,7 @@
 pub mod auto_continue;
 pub mod notify_watch;
 pub mod pubsub;
+pub mod push;
 pub mod remote;
 pub mod rpc;
 pub mod socket;

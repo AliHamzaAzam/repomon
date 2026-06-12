@@ -77,6 +77,8 @@ pub struct Config {
     /// Remote access: the WebSocket JSON-RPC bridge that companion apps (iOS) connect
     /// through. Off by default; `repomon remote enable` fills it in.
     pub remote: RemoteConfig,
+    /// APNs push for the iOS companion: alerts reach the phone even with the app closed.
+    pub push: PushConfig,
 }
 
 impl Default for Config {
@@ -103,6 +105,7 @@ impl Default for Config {
             notify_click_focus: true,
             repos: HashMap::new(),
             remote: RemoteConfig::default(),
+            push: PushConfig::default(),
         }
     }
 }
@@ -112,6 +115,25 @@ impl Default for Config {
 #[serde(default)]
 pub struct RepoConfig {
     pub worktree_template: Option<String>,
+}
+
+/// APNs (Apple push) credentials for the iOS companion. The daemon sends pushes directly to
+/// Apple over HTTP/2 using a `.p8` signing key from the Apple Developer account — keep the key
+/// file beside the config (e.g. `~/.config/repomon/AuthKey_XXXX.p8`), never in a repo. Push is
+/// active only when every field is set and at least one device has registered.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PushConfig {
+    /// Apple Developer team id (10 chars).
+    pub team_id: Option<String>,
+    /// The key id of the `.p8` APNs auth key.
+    pub key_id: Option<String>,
+    /// Path to the `.p8` key file.
+    pub p8_path: Option<PathBuf>,
+    /// The app's bundle id (the APNs topic), e.g. `com.azaleas.repomon`.
+    pub bundle_id: Option<String>,
+    /// Use the APNs sandbox endpoint (Xcode/development builds) instead of production.
+    pub sandbox: bool,
 }
 
 /// Remote-access (companion app) settings: a WebSocket listener speaking the same JSON-RPC

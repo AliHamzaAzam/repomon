@@ -13,3 +13,6 @@
 
 # macOS
 .DS_Store
+
+# Secrets that must never land in the repo (APNs signing keys live beside the config)
+*.p8

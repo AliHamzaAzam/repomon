@@ -197,6 +197,10 @@ struct ConfigSet {
     notify_click_focus: Option<bool>,
 }
 #[derive(Deserialize)]
+struct PushDevice {
+    device_token: String,
+}
+#[derive(Deserialize)]
 struct AgentAdopt {
     lane_id: repomon_core::model::LaneId,
     /// Resume this exact session (`claude --resume <id>`); `None` resumes the most recent.
@@ -921,6 +925,23 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "subscribe" => Ok(Value::Null),
         // Liveness probe for remote clients (the WS bridge) and a cheap connectivity check.
         "ping" => Ok(json!("pong")),
+        // Push-notification device registration (the iOS companion).
+        "push.register" => {
+            let p: PushDevice = parse(params)?;
+            ctx.store
+                .register_device(p.device_token)
+                .await
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
+        "push.unregister" => {
+            let p: PushDevice = parse(params)?;
+            ctx.store
+                .unregister_device(p.device_token)
+                .await
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
         "viewport.set" => {
             let p: ViewportSet = parse(params)?;
             *ctx.viewport.lock().await = p.lane_ids;

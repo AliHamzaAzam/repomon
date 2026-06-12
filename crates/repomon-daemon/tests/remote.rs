@@ -71,6 +71,26 @@ async fn bridge_round_trips_rpc_and_events_with_token() {
     };
     assert_eq!(resp["result"], json!([]));
 
+    // Device registration for push round-trips (idempotent re-register, then unregister).
+    for (id, method) in [
+        (10, "push.register"),
+        (11, "push.register"),
+        (12, "push.unregister"),
+    ] {
+        ws.send(Message::text(
+            json!({"jsonrpc":"2.0","id":id,"method":method,
+                   "params":{"device_token":"feedcafe"}})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let resp: Value = match ws.next().await.unwrap().unwrap() {
+            Message::Text(t) => serde_json::from_str(&t).unwrap(),
+            m => panic!("unexpected frame: {m:?}"),
+        };
+        assert!(resp["error"].is_null(), "{method} errored: {resp}");
+    }
+
     // subscribe, then a broadcast arrives as an event frame.
     ws.send(Message::text(
         json!({"jsonrpc":"2.0","id":3,"method":"subscribe"}).to_string(),

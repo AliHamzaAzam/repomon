@@ -20,7 +20,7 @@ use repomon_core::notify::{
 use repomon_core::Config;
 use serde_json::json;
 
-use crate::{rpc, Ctx};
+use crate::{push, rpc, Ctx};
 
 /// How often the watcher re-reads the fleet. Matches the TUI's refresh order of magnitude;
 /// the heavy parts underneath (transcript parses, process probes) are cached.
@@ -97,18 +97,26 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 slot_by_key(lane, &key),
                 cfg.notify_show_why,
             );
-            ctx.broadcast(
-                "event.notification",
-                json!({
-                    "lane_id": lane_id,
-                    "session_id": sess.and_then(|s| s.session_id.clone()),
-                    "kind": kind,
-                    "title": title,
-                    "body": body,
-                    // The agent's pending question verbatim — what a push's Approve acts on.
-                    "prompt": sess.and_then(|s| s.last_message.clone()),
-                }),
-            );
+            // The agent's pending question verbatim — what a push's Approve acts on.
+            let prompt = sess.and_then(|s| s.last_message.clone());
+            let payload = json!({
+                "lane_id": lane_id,
+                "session_id": sess.and_then(|s| s.session_id.clone()),
+                "kind": kind,
+                "title": title,
+                "body": body,
+                "prompt": prompt,
+            });
+            ctx.broadcast("event.notification", payload.clone());
+
+            // Lock-screen push: a NeedsYou with a pending question gets the actionable
+            // category (Approve / Open); everything else is a plain alert.
+            let category = if kind == NotifKind::NeedsYou && prompt.is_some() {
+                push::CATEGORY_PROMPT
+            } else {
+                push::CATEGORY_ALERT
+            };
+            push::send_all(&ctx, &title, &body, category, &payload).await;
         }
     }
 }
