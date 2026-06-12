@@ -1109,6 +1109,48 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             }
         }
     }
+
+    // Permission prompts: a transcript that ends in a tool call reads **Running**, but the
+    // pane may be sitting on an interactive "Do you want…?" dialog — blocked on the user with
+    // nothing in the JSONL to say so. Sniff the panes of managed Running sessions and flip
+    // those to Waiting, carrying the dialog summary as the notification-ready "why".
+    let candidates: Vec<(usize, usize, String)> = lanes
+        .iter()
+        .enumerate()
+        .flat_map(|(li, lane)| {
+            lane.agent_sessions
+                .iter()
+                .enumerate()
+                .filter_map(move |(si, s)| {
+                    (!s.external && !s.inferred && s.status == AgentStatus::Running)
+                        .then(|| s.tmux_window.clone().map(|w| (li, si, w)))
+                        .flatten()
+                })
+        })
+        .collect();
+    if !candidates.is_empty() {
+        let tmux = ctx.tmux.clone();
+        let windows: Vec<String> = candidates.iter().map(|(_, _, w)| w.clone()).collect();
+        let prompts = tokio::task::spawn_blocking(move || {
+            windows
+                .iter()
+                .map(|w| {
+                    tmux.capture_named(w, Some(45))
+                        .ok()
+                        .and_then(|p| agent::prompt::detect_pending_prompt(&p))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        for ((li, si, _), found) in candidates.into_iter().zip(prompts) {
+            if let Some(summary) = found {
+                let s = &mut lanes[li].agent_sessions[si];
+                s.status = AgentStatus::Waiting;
+                s.last_message = Some(summary);
+            }
+        }
+    }
 }
 
 /// List the subdirectories of `start` (default: $HOME) for the repo browser, marking which

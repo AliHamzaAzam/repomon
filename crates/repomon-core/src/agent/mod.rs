@@ -8,6 +8,7 @@
 
 pub mod claude;
 pub mod limit;
+pub mod prompt;
 pub mod tmux;
 
 use std::path::Path;

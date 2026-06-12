@@ -62,7 +62,8 @@ fn is_wait_option(lower_text: &str) -> bool {
 
 /// Parse one menu-option-shaped line: optional `❯` cursor, optional `N.` number, then text.
 /// Returns `(has_cursor, number, text)`; `None` when the line isn't option-shaped.
-fn parse_option_line(line: &str) -> Option<(bool, Option<u32>, String)> {
+/// (Shared with the pending-prompt detector in [`super::prompt`].)
+pub(crate) fn parse_option_line(line: &str) -> Option<(bool, Option<u32>, String)> {
     let clean = strip_ansi(line);
     let mut rest = clean.trim_start();
     let cursor = rest.starts_with('❯');
@@ -139,7 +140,7 @@ pub fn menu_select_keys(menu: &LimitMenu) -> Vec<String> {
 
 /// Drop ANSI CSI/OSC escape sequences (pane captures use `-e`, so menu rows carry color and
 /// inverse-video escapes that would break per-line parsing).
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
