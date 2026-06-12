@@ -8,6 +8,7 @@
 
 pub mod claude;
 pub mod limit;
+pub mod prompt;
 pub mod tmux;
 
 use std::path::Path;
@@ -18,7 +19,7 @@ use chrono::{DateTime, Utc};
 use crate::model::{AgentKind, AgentStatus};
 
 pub use claude::TranscriptSummary;
-pub use limit::{detect_usage_limit, UsageLimit};
+pub use limit::{detect_usage_limit, menu_select_keys, LimitMenu, UsageLimit};
 pub use tmux::{shell_quote, TmuxRuntime};
 
 /// How recently a file must have changed for its agent to count as "running".
@@ -116,6 +117,7 @@ fn activity_summary(kind: AgentKind, manifest: &Path) -> Option<TranscriptSummar
         tool_call_count: 0,
         status,
         title: None,
+        last_message: None,
         config_dir: None,
         session_id: None,
     })

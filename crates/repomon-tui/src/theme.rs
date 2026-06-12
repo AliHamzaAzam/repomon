@@ -13,6 +13,8 @@ pub const CLEAN: &str = "○";
 pub const AGENT_ACTIVE: &str = "▶";
 pub const WAITING: &str = "⏸";
 pub const RATE_LIMITED: &str = "⏳";
+/// An *inferred* active agent (worktree file activity we can't attribute to a named session).
+pub const INFERRED_ACTIVE: &str = "◐";
 pub const UP: char = '↑';
 pub const DOWN: char = '↓';
 
@@ -151,6 +153,41 @@ impl Theme {
             AgentStatus::Waiting => self.needs_you(),
             AgentStatus::RateLimited => self.rate_limited(),
             _ => self.idle(),
+        }
+    }
+
+    /// The accent as RGB, for gradients. Named ANSI accents map to representative truecolor
+    /// values (only used for shading — everything else stays palette-respecting ANSI).
+    fn accent_rgb(&self) -> Option<(u8, u8, u8)> {
+        match self.accent? {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            Color::Red => Some((224, 82, 82)),
+            Color::Green => Some((80, 200, 120)),
+            Color::Yellow => Some((229, 192, 78)),
+            Color::Blue => Some((86, 134, 230)),
+            Color::Magenta => Some((197, 100, 221)),
+            Color::Cyan => Some((64, 192, 208)),
+            Color::White => Some((229, 229, 229)),
+            Color::Gray => Some((150, 150, 150)),
+            _ => None,
+        }
+    }
+
+    /// Style for a commit-density level (0–5): a ramp of accent shades, dark to full, so the
+    /// timeline reads in the same hue as the rest of the UI. Monochrome themes keep the plain
+    /// block glyphs (which already encode the level).
+    pub fn density(&self, level: u8) -> Style {
+        if level == 0 {
+            return self.muted();
+        }
+        match (self.colored, self.accent_rgb()) {
+            (true, Some((r, g, b))) => {
+                // ~35% → 100% brightness across levels 1..=5.
+                let f = 0.35 + 0.1625 * (level.min(5) - 1) as f32;
+                let scale = |c: u8| (c as f32 * f).round().clamp(0.0, 255.0) as u8;
+                Style::default().fg(Color::Rgb(scale(r), scale(g), scale(b)))
+            }
+            _ => Style::default(),
         }
     }
 }

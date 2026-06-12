@@ -19,26 +19,162 @@ pub struct UsageLimit {
     /// When the limit resets (UTC), if a clock time could be parsed from the message. `None`
     /// means the caller should retry periodically rather than wait for a precise moment.
     pub reset_at: Option<DateTime<Utc>>,
-    /// Claude's newer interactive "What do you want to do?" menu is on screen. The caller must
-    /// pick option 1 ("Stop and wait for limit to reset") — a bare Enter on the default — before
-    /// it can resume.
-    pub menu: bool,
+    /// Claude's interactive "What do you want to do?" menu, parsed from the pane when on
+    /// screen. The caller must select the "stop and wait for limit to reset" option — which is
+    /// NOT always option 1 nor always pre-selected (the options move around between
+    /// occurrences) — see [`menu_select_keys`].
+    pub menu: Option<LimitMenu>,
+}
+
+/// The interactive usage-limit menu as read from the pane: where the cursor is and where the
+/// "stop and wait" option actually sits, so the caller selects by position, not by faith.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitMenu {
+    /// 0-based row of the selection cursor (`❯`), if visible.
+    pub selected: Option<usize>,
+    /// 0-based row of the "stop and wait for limit to reset" option.
+    pub wait_idx: usize,
+    /// The number printed beside the wait option ("2. Stop and wait…" → 2), for the
+    /// no-visible-cursor fallback.
+    pub wait_number: Option<u32>,
 }
 
 /// Detect the **blocking** usage-limit state in an agent's recent pane text. Returns `None` for
 /// ordinary output and for the non-blocking "approaching usage limit" warning.
 pub fn detect_usage_limit(pane: &str) -> Option<UsageLimit> {
     let lower = pane.to_lowercase();
-    // The newer flow shows an interactive menu whose first option is "Stop and wait for limit to
-    // reset"; it carries none of the classic "limit reached" phrasing, so detect it explicitly.
-    let menu = lower.contains("stop and wait for limit to reset");
-    if !is_blocked(&lower) && !menu {
+    // The newer flow shows an interactive menu offering "Stop and wait for limit to reset"; it
+    // carries none of the classic "limit reached" phrasing, so detect it explicitly.
+    let menu = parse_menu(pane);
+    if !is_blocked(&lower) && menu.is_none() {
         return None;
     }
     Some(UsageLimit {
         reset_at: parse_reset_at(&lower, Local::now()),
         menu,
     })
+}
+
+/// Whether a stripped option text is the "stop and wait" choice.
+fn is_wait_option(lower_text: &str) -> bool {
+    lower_text.contains("stop and wait") || lower_text.contains("wait for limit")
+}
+
+/// Parse one menu-option-shaped line: optional `❯` cursor, optional `N.` number, then text.
+/// Returns `(has_cursor, number, text)`; `None` when the line isn't option-shaped.
+/// (Shared with the pending-prompt detector in [`super::prompt`].)
+pub(crate) fn parse_option_line(line: &str) -> Option<(bool, Option<u32>, String)> {
+    let clean = strip_ansi(line);
+    let mut rest = clean.trim_start();
+    let cursor = rest.starts_with('❯');
+    if cursor {
+        rest = rest.trim_start_matches('❯').trim_start();
+    }
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .take(2)
+        .collect();
+    let number = if !digits.is_empty() && rest[digits.len()..].starts_with('.') {
+        rest = rest[digits.len() + 1..].trim_start();
+        digits.parse::<u32>().ok()
+    } else {
+        None
+    };
+    // An option row needs at least one of the markers (cursor or number) plus some text —
+    // otherwise every ordinary output line would qualify.
+    if (!cursor && number.is_none()) || rest.is_empty() {
+        return None;
+    }
+    Some((cursor, number, rest.to_string()))
+}
+
+/// Read Claude's usage-limit menu from the pane, anchored on the "stop and wait" option so
+/// numbered lists in ordinary agent output never parse as a menu. The menu block is the run of
+/// contiguous option-shaped lines around that anchor.
+fn parse_menu(pane: &str) -> Option<LimitMenu> {
+    let lines: Vec<&str> = pane.lines().collect();
+    let parsed: Vec<Option<(bool, Option<u32>, String)>> =
+        lines.iter().map(|l| parse_option_line(l)).collect();
+    let anchor = parsed.iter().position(|p| {
+        p.as_ref()
+            .is_some_and(|(_, _, text)| is_wait_option(&text.to_lowercase()))
+    })?;
+    // Expand to the contiguous option block around the anchor.
+    let mut start = anchor;
+    while start > 0 && parsed[start - 1].is_some() {
+        start -= 1;
+    }
+    let mut end = anchor + 1;
+    while end < parsed.len() && parsed[end].is_some() {
+        end += 1;
+    }
+    let block: Vec<&(bool, Option<u32>, String)> = parsed[start..end].iter().flatten().collect();
+    let wait_idx = anchor - start;
+    Some(LimitMenu {
+        selected: block.iter().position(|(cursor, _, _)| *cursor),
+        wait_idx,
+        wait_number: block[wait_idx].1,
+    })
+}
+
+/// The keystrokes (tmux `send-keys` names) that select the menu's wait option: arrow from the
+/// visible cursor to the option's row, then Enter. Without a visible cursor, fall back to the
+/// option's printed number (digit selection confirms immediately; the trailing Enter then lands
+/// harmlessly on the empty input box).
+pub fn menu_select_keys(menu: &LimitMenu) -> Vec<String> {
+    match menu.selected {
+        Some(cur) => {
+            let (from, to) = (cur as i64, menu.wait_idx as i64);
+            let arrow = if to > from { "Down" } else { "Up" };
+            let mut keys = vec![arrow.to_string(); (to - from).unsigned_abs() as usize];
+            keys.push("Enter".into());
+            keys
+        }
+        None => match menu.wait_number {
+            Some(n) => vec![n.to_string(), "Enter".into()],
+            None => vec!["Enter".into()],
+        },
+    }
+}
+
+/// Drop ANSI CSI/OSC escape sequences (pane captures use `-e`, so menu rows carry color and
+/// inverse-video escapes that would break per-line parsing).
+pub(crate) fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: ESC [ … final byte in @-~
+            Some('[') => {
+                chars.next();
+                for n in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] … BEL (or ESC \)
+            Some(']') => {
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if n == '\u{07}' {
+                        break;
+                    }
+                    if n == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Whether the pane shows a *blocking* limit. Covers Claude's several phrasings: the classic
@@ -213,7 +349,10 @@ mod tests {
         let pane = "Claude usage limit reached. Please try again later.";
         let lim = detect_usage_limit(pane).expect("block");
         assert_eq!(lim.reset_at, None);
-        assert!(!lim.menu, "the classic message is not the interactive menu");
+        assert!(
+            lim.menu.is_none(),
+            "the classic message is not the interactive menu"
+        );
     }
 
     #[test]
@@ -225,7 +364,10 @@ mod tests {
               3. Upgrade to Team plan\n\
             Enter to confirm · Esc to cancel";
         let lim = detect_usage_limit(pane).expect("should detect the menu");
-        assert!(lim.menu, "menu flag should be set");
+        let menu = lim.menu.expect("menu should be parsed");
+        assert_eq!(menu.selected, Some(0), "cursor on the first row");
+        assert_eq!(menu.wait_idx, 0);
+        assert_eq!(menu.wait_number, Some(1));
         assert_eq!(lim.reset_at, None, "no time shown → retry periodically");
     }
 
@@ -237,9 +379,82 @@ mod tests {
             ❯ 1. Stop and wait for limit to reset\n\
               2. Upgrade your plan";
         let lim = detect_usage_limit(pane).expect("menu");
-        assert!(lim.menu);
+        assert!(lim.menu.is_some());
         let local = lim.reset_at.expect("3pm").with_timezone(&Local);
         assert_eq!(local.hour(), 15);
+    }
+
+    #[test]
+    fn menu_parses_reordered_options() {
+        // The options move around between occurrences — the wait choice here is option 2 and
+        // the cursor sits on option 1. A blind Enter would pick "Upgrade your plan".
+        let pane = "What do you want to do?\n\
+            ❯ 1. Upgrade your plan\n\
+              2. Stop and wait for limit to reset\n\
+              3. Upgrade to Team plan\n\
+            Enter to confirm · Esc to cancel";
+        let menu = detect_usage_limit(pane)
+            .expect("menu")
+            .menu
+            .expect("parsed");
+        assert_eq!(menu.selected, Some(0));
+        assert_eq!(menu.wait_idx, 1);
+        assert_eq!(menu.wait_number, Some(2));
+        assert_eq!(menu_select_keys(&menu), vec!["Down", "Enter"]);
+    }
+
+    #[test]
+    fn menu_parsing_strips_ansi() {
+        // Pane captures use `-e`, so rows carry color/inverse escapes.
+        let pane = "What do you want to do?\n\
+            \u{1b}[7m❯ 1. Upgrade your plan\u{1b}[0m\n\
+            \u{1b}[2m  2. \u{1b}[1mStop and wait\u{1b}[0m\u{1b}[2m for limit to reset\u{1b}[0m";
+        let menu = detect_usage_limit(pane)
+            .expect("menu")
+            .menu
+            .expect("parsed despite ANSI");
+        assert_eq!(menu.selected, Some(0));
+        assert_eq!(menu.wait_idx, 1);
+        assert_eq!(menu.wait_number, Some(2));
+    }
+
+    #[test]
+    fn numbered_output_is_not_a_menu() {
+        // Ordinary agent output with a numbered list must not parse as a limit menu.
+        let pane = "Here's the plan:\n\
+            1. Refactor the parser\n\
+            2. Add tests\n\
+            3. Ship it";
+        assert!(parse_menu(pane).is_none());
+        assert!(detect_usage_limit(pane).is_none());
+    }
+
+    #[test]
+    fn menu_select_keys_paths() {
+        let menu = |selected, wait_idx, wait_number| LimitMenu {
+            selected,
+            wait_idx,
+            wait_number,
+        };
+        // Cursor already on the wait option → just confirm (the old behavior, now verified).
+        assert_eq!(menu_select_keys(&menu(Some(0), 0, Some(1))), vec!["Enter"]);
+        // Below the cursor → walk down.
+        assert_eq!(
+            menu_select_keys(&menu(Some(0), 2, Some(3))),
+            vec!["Down", "Down", "Enter"]
+        );
+        // Above the cursor → walk up.
+        assert_eq!(
+            menu_select_keys(&menu(Some(2), 0, Some(1))),
+            vec!["Up", "Up", "Enter"]
+        );
+        // No visible cursor → select by printed number.
+        assert_eq!(
+            menu_select_keys(&menu(None, 1, Some(2))),
+            vec!["2", "Enter"]
+        );
+        // No cursor and no number: Enter is the only signal left.
+        assert_eq!(menu_select_keys(&menu(None, 0, None)), vec!["Enter"]);
     }
 
     #[test]
@@ -284,7 +499,10 @@ mod tests {
         let pane = "You've hit your session limit · resets 3am (Asia/Karachi)\n\
             /upgrade to increase your usage limit.";
         let lim = detect_usage_limit(pane).expect("session limit is a block");
-        assert!(!lim.menu, "this notice is not the interactive menu");
+        assert!(
+            lim.menu.is_none(),
+            "this notice is not the interactive menu"
+        );
         let local = lim.reset_at.expect("3am").with_timezone(&Local);
         assert_eq!(local.hour(), 3);
     }

@@ -13,18 +13,19 @@ use repomon_core::model::{Commit, DirtyState, Lane, LaneId, RepoId};
 
 use crate::app::{AgField, App, ClickZone};
 use crate::keybinds::View;
+use crate::notify::NotifKind;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
-    "↵/→ open (real terminal) · i quick-type · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  ←/esc back";
+    "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str =
-    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin  ·  spc/esc fleet · q quit";
+    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g/G next · f find  ·  spc/esc fleet · q quit";
 const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
@@ -54,6 +55,9 @@ pub fn render(f: &mut Frame, app: &App) {
         View::AddRepo => render_addrepo(f, app),
         View::Agents => render_agents(f, app),
         View::Settings => render_settings(f, app),
+        View::Notifications => render_notifications(f, app),
+        View::SpawnPick => render_spawn_pick(f, app),
+        View::LaneJump => render_lane_jump(f, app),
     }
 }
 
@@ -183,14 +187,11 @@ fn render_settings(f: &mut Frame, app: &App) {
     } else {
         s.default_agent.clone()
     };
-    let items: [(&str, String, &str); 5] = [
+    let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
+    let items: [(&str, String, &str); 15] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
-        (
-            "auto-continue",
-            if s.auto_continue { "on" } else { "off" }.to_string(),
-            "space toggles",
-        ),
+        ("auto-continue", onoff(s.auto_continue), "space toggles"),
         (
             "continue message",
             format!("{}{}", s.auto_continue_message, cur(3)),
@@ -201,7 +202,48 @@ fn render_settings(f: &mut Frame, app: &App) {
             format!("{}{}", s.worktree_template, cur(4)),
             "↵ edit",
         ),
+        (
+            "ask which agent on spawn",
+            onoff(s.spawn_prompt),
+            "space toggles",
+        ),
+        // Notifications group — the master switch then per-trigger toggles (indented).
+        ("notifications", onoff(s.notify_enabled), "master · space"),
+        ("  · needs you", onoff(s.notify_needs_you), "space toggles"),
+        (
+            "  · usage limit",
+            onoff(s.notify_rate_limited),
+            "space toggles",
+        ),
+        ("  · auto-resumed", onoff(s.notify_resumed), "space toggles"),
+        ("  · went idle", onoff(s.notify_idle), "space toggles"),
+        ("  · sound", onoff(s.notify_sound), "space toggles"),
+        (
+            "  · show agent's question",
+            onoff(s.notify_show_why),
+            "body = its last message",
+        ),
+        (
+            "  · coalesce bursts",
+            onoff(s.notify_coalesce),
+            "one popup for N alerts",
+        ),
+        (
+            "  · click focuses terminal",
+            onoff(s.notify_click_focus),
+            "needs terminal-notifier",
+        ),
     ];
+    // Size the columns to the content so values and hints line up no matter how long a label is:
+    // the name column fits the widest label (+gap), the value column fits the default worktree
+    // template (the longest value). Longer user-typed values just overflow gracefully.
+    let name_w = items
+        .iter()
+        .map(|(n, _, _)| n.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let val_w = 28usize;
     // Items start one row below the body top (after a leading blank) — record it for clicks.
     app.settings_geom.set(rows[1].y + 1);
     let mut lines = vec![Line::raw("")];
@@ -210,14 +252,14 @@ fn render_settings(f: &mut Frame, app: &App) {
         let marker = if selected { "▸" } else { " " };
         let row = if selected {
             Line::from(Span::styled(
-                format!("  {marker} {name:<18}{value:<22}  {hint}"),
+                format!("  {marker} {name:<name_w$}{value:<val_w$}  {hint}"),
                 app.theme.selected(),
             ))
         } else {
             Line::from(vec![
                 Span::raw(format!("  {marker} ")),
-                Span::styled(format!("{name:<18}"), app.theme.muted()),
-                Span::styled(format!("{value:<22}"), app.theme.accented()),
+                Span::styled(format!("{name:<name_w$}"), app.theme.muted()),
+                Span::styled(format!("{value:<val_w$}"), app.theme.accented()),
                 Span::styled(format!("  {hint}"), app.theme.muted()),
             ])
         };
@@ -242,7 +284,7 @@ fn render_settings(f: &mut Frame, app: &App) {
 }
 
 const ADDREPO_KEYS: &str =
-    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here  ·  esc back";
+    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here · x x remove (+ only)  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -303,20 +345,25 @@ fn render_timeline(f: &mut Frame, app: &App) {
     ];
     match &app.timeline {
         Some(t) if !t.rows.is_empty() => {
-            let zoom = match app.timeline_zoom {
-                crate::app::Zoom::Day => "day",
-                crate::app::Zoom::Week => "week",
-                crate::app::Zoom::Month => "month",
+            let (zoom, axis_fmt) = match app.timeline_zoom {
+                crate::app::Zoom::Day => ("day", "%H:%M"),
+                crate::app::Zoom::Week => ("week", "%a %d"),
+                crate::app::Zoom::Month => ("month", "%b %d"),
             };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{} · {} buckets   [d]ay [w]eek [m]onth",
-                    zoom,
-                    t.rows.first().map(|r| r.density.len()).unwrap_or(0)
+            let (from, to) = (t.from.with_timezone(&Local), t.to.with_timezone(&Local));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{zoom} · {} – {}   ",
+                        from.format("%b %d %H:%M"),
+                        to.format("%b %d %H:%M")
+                    ),
+                    app.theme.dim(),
                 ),
-                app.theme.dim(),
-            )));
+                Span::styled("[d]ay [w]eek [m]onth", app.theme.muted()),
+            ]));
             lines.push(Line::raw(""));
+
             let label_w = t
                 .rows
                 .iter()
@@ -324,14 +371,46 @@ fn render_timeline(f: &mut Frame, app: &App) {
                 .max()
                 .unwrap_or(8)
                 .min(20);
+            // The strip fills the terminal: resample each row to the available width (peaks
+            // survive shrinking), so the chart adapts instantly to resizes between refetches.
+            let avail = (area.width as usize).saturating_sub(label_w + 6).max(10);
             for row in &t.rows {
-                let bars: String = row.density.iter().map(|&l| analytics_char(l)).collect();
-                lines.push(Line::raw(format!(
-                    "  {:<label_w$}  {}",
-                    trunc(&row.repo_name, label_w),
-                    bars
-                )));
+                let levels = repomon_core::analytics::resample_max(&row.density, avail);
+                let active = levels.iter().any(|&l| l > 0);
+                let mut spans = vec![Span::styled(
+                    format!("  {:<label_w$}  ", trunc(&row.repo_name, label_w)),
+                    if active {
+                        app.theme.accented()
+                    } else {
+                        app.theme.muted()
+                    },
+                )];
+                spans.extend(density_spans(&levels, app));
+                lines.push(Line::from(spans));
             }
+            // Time axis: start, midpoint, and "now" labels under the strip.
+            let mid = from + (to - from) / 2;
+            let (l, m, r) = (
+                from.format(axis_fmt).to_string(),
+                mid.format(axis_fmt).to_string(),
+                to.format(axis_fmt).to_string(),
+            );
+            let mut axis = l.clone();
+            let mid_start = avail.saturating_sub(m.chars().count()) / 2;
+            while axis.chars().count() < mid_start {
+                axis.push(' ');
+            }
+            axis.push_str(&m);
+            let right_start = avail.saturating_sub(r.chars().count());
+            while axis.chars().count() < right_start {
+                axis.push(' ');
+            }
+            axis.push_str(&r);
+            lines.push(Line::from(Span::styled(
+                format!("  {:<label_w$}  {axis}", ""),
+                app.theme.muted(),
+            )));
+
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled("CORRELATIONS", app.theme.bold())));
             lines.push(rule(area.width, false, app));
@@ -339,11 +418,33 @@ fn render_timeline(f: &mut Frame, app: &App) {
             if t.correlations.is_empty() {
                 lines.push(Line::raw("  (none above threshold)".to_string()));
             }
+            let pair_w = t
+                .correlations
+                .iter()
+                .take(8)
+                .flat_map(|c| [c.a.len(), c.b.len()])
+                .max()
+                .unwrap_or(8)
+                .min(20);
             for c in t.correlations.iter().take(8) {
-                lines.push(Line::raw(format!(
-                    "  {} ↔ {}     {} windows     {:.2} overlap",
-                    c.a, c.b, c.windows, c.overlap
-                )));
+                // A 10-cell meter in the accent ramp makes overlap comparable at a glance.
+                let filled = ((c.overlap * 10.0).round() as usize).min(10);
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{:<pair_w$}", trunc(&c.a, pair_w)),
+                        app.theme.accented(),
+                    ),
+                    Span::styled(" ↔ ", app.theme.muted()),
+                    Span::styled(
+                        format!("{:<pair_w$}", trunc(&c.b, pair_w)),
+                        app.theme.accented(),
+                    ),
+                    Span::styled(format!("  {:>3} windows  ", c.windows), app.theme.muted()),
+                    Span::styled("█".repeat(filled), app.theme.density(5)),
+                    Span::styled("░".repeat(10 - filled), app.theme.muted()),
+                    Span::raw(format!(" {:.2} overlap", c.overlap)),
+                ]));
             }
         }
         _ => lines.push(Line::raw(
@@ -352,6 +453,26 @@ fn render_timeline(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
     f.render_widget(footer(DASH_KEYS, app), rows[1]);
+}
+
+/// Density levels → styled block spans, adjacent equal levels merged into one span. The blocks
+/// use shades of the configured accent (see `Theme::density`) so the chart matches the UI.
+fn density_spans(levels: &[u8], app: &App) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < levels.len() {
+        let lvl = levels[i];
+        let mut j = i;
+        while j < levels.len() && levels[j] == lvl {
+            j += 1;
+        }
+        spans.push(Span::styled(
+            analytics_char(lvl).repeat(j - i),
+            app.theme.density(lvl),
+        ));
+        i = j;
+    }
+    spans
 }
 
 fn render_sessions(f: &mut Frame, app: &App) {
@@ -403,6 +524,230 @@ fn render_sessions(f: &mut Frame, app: &App) {
             app,
         ),
         rows[1],
+    );
+}
+
+fn notif_style(app: &App, kind: NotifKind) -> Style {
+    match kind {
+        NotifKind::NeedsYou => app.theme.needs_you(),
+        NotifKind::RateLimited => app.theme.rate_limited(),
+        NotifKind::Resumed => app.theme.running(),
+        NotifKind::Idle => app.theme.muted(),
+    }
+}
+
+fn render_notifications(f: &mut Frame, app: &App) {
+    use ratatui::style::Modifier;
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let unread = app.unread_notifs();
+    let counts = if unread > 0 {
+        format!(
+            "{} event(s) · {} new · newest first",
+            app.notifications.len(),
+            unread
+        )
+    } else {
+        format!("{} event(s) · newest first", app.notifications.len())
+    };
+    let mut lines = vec![
+        header_line(area.width, "REPOMON · NOTIFICATIONS", &fmt_clock(), app),
+        rule(area.width, true, app),
+        Line::raw(""),
+        Line::from(Span::styled(counts, app.theme.dim())),
+        Line::raw(""),
+    ];
+    if app.notifications.is_empty() {
+        lines.push(Line::raw(
+            "  no notifications yet — agent state changes show up here".to_string(),
+        ));
+    }
+    // Two lines per event (title + detail); reserve room for the header block already pushed.
+    let budget = ((rows[0].height as usize).saturating_sub(lines.len()) / 2).max(1);
+    // Scroll the window just enough to keep the cursor (▸) on screen.
+    let skip = app.notif_sel.saturating_sub(budget.saturating_sub(1));
+    for (i, ev) in app
+        .notifications
+        .iter()
+        .rev()
+        .enumerate()
+        .skip(skip)
+        .take(budget)
+    {
+        let mark = if i == app.notif_sel { "▸ " } else { "  " };
+        // Unseen events keep a ● until the feed visit ends (they arrived while it was open).
+        let (dot, dot_style) = if ev.read {
+            ("  ", app.theme.muted())
+        } else {
+            ("● ", app.theme.needs_you())
+        };
+        let title_style = if ev.read {
+            notif_style(app, ev.kind)
+        } else {
+            notif_style(app, ev.kind).add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(mark, app.theme.accented()),
+            Span::styled(dot, dot_style),
+            Span::styled(ev.when.format("%H:%M:%S").to_string(), app.theme.muted()),
+            Span::raw("  "),
+            Span::styled(ev.title.clone(), title_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("              "),
+            Span::styled(ev.body.clone(), app.theme.dim()),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    f.render_widget(
+        footer(
+            "↑↓ move · ↵ open · t attach · d dismiss · c clear  ·  1 fleet · ←/esc back · q quit",
+            app,
+        ),
+        rows[1],
+    );
+}
+
+/// The quick agent picker shown when spawning onto a lane (when "ask which agent on spawn" is
+/// on). Lists the same agents as the Agents view, with the default highlighted; ↑↓ or a number
+/// picks, ↵ spawns, esc cancels.
+fn render_spawn_pick(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let lane_label = app
+        .spawn_pick_lane
+        .and_then(|id| app.lanes.iter().find(|l| l.id == id))
+        .map(|l| format!("{} / {}", l.repo.name, lane_branch(l)))
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · SPAWN AGENT", &lane_label, app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  choose an agent to spawn:".to_string(),
+            app.theme.dim(),
+        )),
+        Line::raw(""),
+    ];
+    if app.nl_agents.is_empty() {
+        lines.push(Line::raw(
+            "  no agents detected — press A to manage launch commands".to_string(),
+        ));
+    }
+    for (i, a) in app.nl_agents.iter().enumerate() {
+        let num = i + 1;
+        let cursor = if i == app.spawn_pick_idx { "‣" } else { " " };
+        // A short tag: the default star, or a PATH warning for an undetected command.
+        let tag = if a.default {
+            "★ default"
+        } else if !a.detected {
+            "✗ not on PATH"
+        } else {
+            ""
+        };
+        if i == app.spawn_pick_idx {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {cursor} {num}  {:<18} {:<14} {}",
+                    trunc(&a.name, 18),
+                    tag,
+                    trunc(&a.command, 40)
+                ),
+                app.theme.selected(),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {cursor} {num}  ")),
+                Span::styled(format!("{:<18}", trunc(&a.name, 18)), app.theme.accented()),
+                Span::styled(format!(" {tag:<14}"), app.theme.muted()),
+                Span::styled(format!(" {}", trunc(&a.command, 40)), app.theme.dim()),
+            ]));
+        }
+    }
+    if !app.status.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("  {}", app.status)));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    f.render_widget(
+        footer("↑↓ pick · 1-9 jump · ↵ spawn · esc cancel", app),
+        rows[2],
+    );
+}
+
+/// The fuzzy lane switcher (`f`): type to filter every lane across all repos, ↵ opens the
+/// highlighted one in Focus. Matches rank by query score, then by how urgently the lane needs
+/// you, then recency — so with an empty query the most pressing lanes are already on top.
+fn render_lane_jump(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · FIND LANE", &fmt_clock(), app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+
+    let mut lines = vec![
+        Line::raw(""),
+        Line::raw(format!("  find: {}_", app.jump_query)),
+        Line::raw(""),
+    ];
+    let matches = app.lane_jump_matches();
+    if matches.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no lanes match".to_string(),
+            app.theme.dim(),
+        )));
+    }
+    let budget = (rows[1].height as usize).saturating_sub(lines.len()).max(1);
+    for (i, lane) in matches.iter().take(budget).enumerate() {
+        let cursor = if i == app.jump_idx { "‣" } else { " " };
+        let name = format!("{}/{}", lane.repo.name, lane.worktree.name);
+        let (badge, style) = agent_badge(lane, app);
+        if i == app.jump_idx {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {cursor} {:<32} {:<24} {}",
+                    trunc(&name, 32),
+                    trunc(&lane_branch(lane), 24),
+                    badge
+                ),
+                app.theme.selected(),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {cursor} ")),
+                Span::styled(format!("{:<32}", trunc(&name, 32)), app.theme.accented()),
+                Span::styled(
+                    format!(" {:<24}", trunc(&lane_branch(lane), 24)),
+                    app.theme.dim(),
+                ),
+                Span::styled(format!(" {badge}"), style),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+    f.render_widget(
+        footer("type to filter · ↑↓ pick · ↵ open · esc cancel", app),
+        rows[2],
     );
 }
 
@@ -548,7 +893,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     let mut body: Vec<Line> = Vec::new();
     if let Some(l) = lane {
         body.push(Line::from(Span::styled(
-            focus_status_line(l),
+            focus_status_line(l, app.session_idx),
             app.theme.dim(),
         )));
     }
@@ -916,14 +1261,25 @@ fn focus_output(
         .collect()
 }
 
-fn focus_status_line(lane: &Lane) -> String {
+fn focus_status_line(lane: &Lane, idx: usize) -> String {
     let s = &lane.state;
     let branch = lane_branch(lane);
     let ab = ahead_behind_str(s.ahead, s.behind);
-    match lane.agent_sessions.first() {
+    let n = lane.agent_sessions.len();
+    let sess = lane
+        .agent_sessions
+        .get(idx)
+        .or_else(|| lane.agent_sessions.first());
+    match sess {
         Some(sess) => format!(
-            "{} · {} {} · {} · {} calls{}",
+            "{}{} · {} {} · {} · {} calls{}",
             sess.agent.short(),
+            // Several agents share this lane: show which one the keys/pane are on.
+            if n > 1 {
+                format!(" {}/{n} (tab switches)", idx.min(n - 1) + 1)
+            } else {
+                String::new()
+            },
             branch,
             ab,
             sess.status.as_str(),
@@ -1003,8 +1359,13 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         .iter()
         .filter(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()))
         .count();
+    let urgent = if app.urgent_only {
+        " · URGENT only"
+    } else {
+        ""
+    };
     let rest = format!(
-        "  {} lanes · {repos} repos · {needs} need you",
+        "  {} lanes · {repos} repos · {needs} need you{urgent}",
         visible.len()
     );
     let right = format!("today · {} commits", app.commits.len());
@@ -1254,6 +1615,16 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
 // ---- atoms -------------------------------------------------------------------
 
 fn footer(keys: &str, app: &App) -> Paragraph<'static> {
+    use ratatui::style::Modifier;
+    // A fresh notification takes over the footer line briefly (then the key hints return).
+    if let Some((msg, since)) = &app.notif_banner {
+        if since.elapsed() < crate::app::NOTIF_BANNER_TTL {
+            return Paragraph::new(Line::from(Span::styled(
+                format!("🔔 {msg}"),
+                app.theme.needs_you().add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
     Paragraph::new(Line::from(Span::styled(
         keys.to_string(),
         app.theme.muted(),
@@ -1261,12 +1632,20 @@ fn footer(keys: &str, app: &App) -> Paragraph<'static> {
 }
 
 fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
-    // The view title is the accent; the clock on the right is muted.
-    let used = left.chars().count() + right.chars().count();
+    // The view title is the accent; the clock on the right is muted. Unseen notifications get
+    // a ⚑ badge beside the clock, visible from every view (`5` opens the feed and clears it).
+    let unread = app.unread_notifs();
+    let badge = if unread > 0 {
+        format!("⚑ {unread} · ")
+    } else {
+        String::new()
+    };
+    let used = left.chars().count() + badge.chars().count() + right.chars().count();
     let pad = (width as usize).saturating_sub(used);
     Line::from(vec![
         Span::styled(left.to_string(), app.theme.header_style()),
         Span::raw(" ".repeat(pad)),
+        Span::styled(badge, app.theme.needs_you()),
         Span::styled(right.to_string(), app.theme.muted()),
     ])
 }
@@ -1323,15 +1702,29 @@ fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
 }
 
 fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<'static> {
+    use ratatui::style::Modifier;
     use repomon_core::model::AgentStatus;
     let glyph = status_glyph(lane);
-    let any = |st: AgentStatus| lane.agent_sessions.iter().any(|s| s.status == st);
+    // Only *real* (non-inferred) sessions drive the named status glyphs; an inferred "file
+    // activity" session falls through to the soft ◐ so we never claim a specific agent.
+    let any = |st: AgentStatus| {
+        lane.agent_sessions
+            .iter()
+            .any(|s| !s.inferred && s.status == st)
+    };
+    let any_inferred = lane.agent_sessions.iter().any(|s| s.inferred);
     let (active, active_style) = if any(AgentStatus::RateLimited) {
         (theme::RATE_LIMITED, app.theme.rate_limited()) // ⏳ paused on a usage limit
     } else if any(AgentStatus::Waiting) {
         (theme::WAITING, app.theme.needs_you()) // ⏸ needs you
     } else if any(AgentStatus::Running) {
         (theme::AGENT_ACTIVE, app.theme.running()) // ▶ working
+    } else if any_inferred {
+        // ◐ active — files are changing but we can't name the agent (worktree subagent).
+        (
+            theme::INFERRED_ACTIVE,
+            app.theme.running().add_modifier(Modifier::DIM),
+        )
     } else {
         (" ", app.theme.dim())
     };

@@ -88,6 +88,12 @@ pub struct WorktreeState {
     pub locked: bool,
     #[serde(default)]
     pub prunable: bool,
+    /// Newest mtime among the worktree's changed/untracked files — repomon's "file activity"
+    /// signal. Lets the daemon surface a worktree that's being actively edited by an agent that
+    /// leaves no transcript or process of its own (e.g. a Claude Code worktree-isolated subagent).
+    /// `None` when the worktree is clean. Computed live; not persisted.
+    #[serde(default)]
+    pub last_change_at: Option<DateTime<Utc>>,
 }
 
 /// A single commit, summarized for timelines and the Today view.
@@ -238,6 +244,21 @@ pub struct AgentSession {
     /// `RateLimited` status; `None` when the reset time couldn't be parsed (periodic retry).
     #[serde(default)]
     pub resume_at: Option<DateTime<Utc>>,
+    /// True when this session was *inferred* from raw worktree file activity rather than detected
+    /// from a transcript or live process — i.e. repomon can see the worktree is being worked on
+    /// but can't identify the specific agent (Claude Code worktree-isolated subagents). The UI
+    /// renders these with a softer "active" indicator and they don't drive "needs you" alerts.
+    #[serde(default)]
+    pub inferred: bool,
+    /// The managed tmux window this session runs in, when repomon manages it. Several agents
+    /// can run side by side in one lane (one window each); keys/captures/stops are routed to
+    /// this window. `None` for external and inferred sessions.
+    #[serde(default)]
+    pub tmux_window: Option<String>,
+    /// The agent's most recent message text (truncated) — what it said or asked when it last
+    /// ended a turn. Gives needs-you notifications their "why".
+    #[serde(default)]
+    pub last_message: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

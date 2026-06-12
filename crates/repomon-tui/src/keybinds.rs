@@ -27,6 +27,12 @@ pub enum View {
     Agents,
     /// Settings: accent color, auto-continue, etc.
     Settings,
+    /// History of fired agent-state notifications.
+    Notifications,
+    /// Quick picker for which agent to spawn on the selected lane.
+    SpawnPick,
+    /// Fuzzy lane switcher: type a few characters, jump to any lane across repos.
+    LaneJump,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -53,6 +59,13 @@ pub enum Action {
     AttachTerminal,
     ToggleMouse,
     ToggleAutoContinue,
+    /// Like [`Action::JumpNeedsYou`], but goes all the way: jump to the alerting lane, select
+    /// the session that fired, and attach into its tmux pane.
+    AttachNeedsYou,
+    /// Open the fuzzy lane switcher.
+    FindLane,
+    /// Show only lanes needing attention (waiting / stuck on a limit).
+    ToggleUrgent,
     Goto(View),
 }
 
@@ -70,6 +83,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('c') => Some(Action::CdToLane),
         KeyCode::Char('g') => Some(Action::JumpNeedsYou),
+        KeyCode::Char('G') => Some(Action::AttachNeedsYou),
         KeyCode::Char('a') => Some(Action::Goto(View::AddRepo)),
         KeyCode::Char('A') => Some(Action::Goto(View::Agents)),
         KeyCode::Char(',') => Some(Action::Goto(View::Settings)),
@@ -82,11 +96,14 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('T') => Some(Action::AttachTerminal),
         KeyCode::Char('y') => Some(Action::ToggleMouse),
         KeyCode::Char('C') => Some(Action::ToggleAutoContinue),
+        KeyCode::Char('f') => Some(Action::FindLane),
+        KeyCode::Char('!') => Some(Action::ToggleUrgent),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         KeyCode::Char('1') => Some(Action::Goto(View::Fleet)),
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),
         KeyCode::Char('3') => Some(Action::Goto(View::Sessions)),
         KeyCode::Char('4') => Some(Action::Goto(View::Search)),
+        KeyCode::Char('5') => Some(Action::Goto(View::Notifications)),
         _ => None,
     }
 }

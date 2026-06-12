@@ -86,6 +86,162 @@ async fn renders_fleet_with_a_registered_repo() {
     );
     assert!(screen.contains("click select"), "footer missing:\n{screen}");
 
+    // The spawn picker lists the agents for the selected lane, with the default tagged and a
+    // PATH warning for an undetected command.
+    use repomon_core::model::AgentChoice;
+    use repomon_tui::keybinds::View;
+    app.nl_agents = vec![
+        AgentChoice {
+            name: "claude-code".into(),
+            command: "claude".into(),
+            detected: true,
+            custom: false,
+            default: true,
+        },
+        AgentChoice {
+            name: "codex".into(),
+            command: "codex".into(),
+            detected: false,
+            custom: false,
+            default: false,
+        },
+    ];
+    app.spawn_pick_idx = 0;
+    app.spawn_pick_lane = Some(app.lanes[0].id);
+    app.view = View::SpawnPick;
+    let pick = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        pick.contains("SPAWN AGENT"),
+        "picker header missing:\n{pick}"
+    );
+    assert!(pick.contains("claude-code"), "agent name missing:\n{pick}");
+    assert!(pick.contains("default"), "default tag missing:\n{pick}");
+    assert!(
+        pick.contains("not on PATH"),
+        "PATH warning missing:\n{pick}"
+    );
+
+    // The lane switcher lists every lane with an empty query and reports a miss for a query
+    // that matches nothing.
+    app.jump_query = String::new();
+    app.jump_idx = 0;
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("FIND LANE"),
+        "switcher header missing:\n{jump}"
+    );
+    assert!(jump.contains(&repo_name), "lane row missing:\n{jump}");
+    app.jump_query = "zzzznope".into();
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("no lanes match"),
+        "miss text missing:\n{jump}"
+    );
+
+    // Timeline: the density strip resamples to fill the terminal width; axis + correlation
+    // meter render.
+    use repomon_core::model::{Correlation, TimelineData, TimelineRow};
+    app.timeline = Some(TimelineData {
+        from: chrono::Utc::now() - chrono::Duration::days(30),
+        to: chrono::Utc::now(),
+        bucket_secs: 24 * 3600,
+        rows: vec![TimelineRow {
+            repo_id: 1,
+            repo_name: "alpha".into(),
+            density: vec![0, 1, 2, 3, 4, 5],
+        }],
+        correlations: vec![Correlation {
+            a: "alpha".into(),
+            b: "beta".into(),
+            windows: 5,
+            overlap: 0.42,
+        }],
+    });
+    app.view = View::Timeline;
+    let tl = render_to_string(&app, 100, 40).unwrap();
+    assert!(tl.contains("TIMELINE"), "header missing:\n{tl}");
+    assert!(tl.contains("CORRELATIONS"), "correlations missing:\n{tl}");
+    assert!(tl.contains("0.42 overlap"), "overlap missing:\n{tl}");
+    // 6 source buckets must stretch to fill ~all of the 100-col width, ending in a full block.
+    let strip = tl
+        .lines()
+        .find(|l| l.contains("alpha") && l.contains('█'))
+        .expect("density strip missing");
+    assert!(
+        strip.trim_end().chars().count() > 80,
+        "strip not stretched to width:\n{tl}"
+    );
+
+    // Notifications: the unread ⚑ badge shows in every view's header; the feed renders a
+    // cursor (▸) on the selected row, an unread dot, the new-count, and the action footer.
+    use repomon_tui::notify::{NotifEvent, NotifKind};
+    app.notifications.push_back(NotifEvent {
+        when: chrono::Local::now(),
+        kind: NotifKind::NeedsYou,
+        lane_id: app.lanes[0].id,
+        session_id: None,
+        read: true,
+        title: "⏸ claude needs you — alpha".into(),
+        body: "main · “want me to continue?”".into(),
+    });
+    app.notifications.push_back(NotifEvent {
+        when: chrono::Local::now(),
+        kind: NotifKind::RateLimited,
+        lane_id: app.lanes[0].id,
+        session_id: None,
+        read: false,
+        title: "⏳ claude hit a usage limit — beta".into(),
+        body: "main · resets 06:00".into(),
+    });
+    app.view = View::Fleet;
+    let fl = render_to_string(&app, 100, 40).unwrap();
+    assert!(fl.contains("⚑ 1"), "unread badge missing:\n{fl}");
+    app.view = View::Notifications;
+    app.notif_sel = 1; // cursor on the older (read) event, not the top row
+    let nf = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        nf.contains("2 event(s) · 1 new"),
+        "new count missing:\n{nf}"
+    );
+    assert!(nf.contains("● "), "unread dot missing:\n{nf}");
+    assert!(nf.contains("t attach"), "action footer missing:\n{nf}");
+    let cursor_row = nf
+        .lines()
+        .find(|l| l.trim_start().starts_with('▸'))
+        .expect("cursor row missing");
+    assert!(
+        cursor_row.contains("needs you — alpha"),
+        "cursor not on the selected (older) event:\n{nf}"
+    );
+
+    // Settings: columns line up even with the longest label and value present.
+    app.settings.accent = "amber".into();
+    app.settings.default_agent = "claude-work".into();
+    app.settings.auto_continue = true;
+    app.settings.auto_continue_message = "continue".into();
+    app.settings.worktree_template = "~/code/{repo}-wt/{branch}".into();
+    app.settings.spawn_prompt = true;
+    app.settings.notify_enabled = true;
+    app.view = View::Settings;
+    let st = render_to_string(&app, 120, 40).unwrap();
+    // The long label must not collide with its value (the old "spawnon" bug), and the value
+    // column must start at the same screen column on every row.
+    assert!(!st.contains("spawnon"), "label/value collision:\n{st}");
+    // Value column starts at the same screen column on every row. Measure the column in cells
+    // (chars), not bytes, so the multi-byte ▸ marker on the selected row doesn't skew it. Use
+    // values that are unique (not a word inside any label) so we match the value, not the label.
+    let val_col = |row_label: &str, value: &str| {
+        let line = st.lines().find(|l| l.contains(row_label)).unwrap();
+        let byte = line.find(value).unwrap();
+        line[..byte].chars().count()
+    };
+    let amber = val_col("accent", "amber");
+    let agent = val_col("default agent", "claude-work");
+    let template = val_col("worktree template", "~/code");
+    assert_eq!(amber, agent, "value column misaligned (agent row):\n{st}");
+    assert_eq!(amber, template, "value column misaligned (template):\n{st}");
+
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }

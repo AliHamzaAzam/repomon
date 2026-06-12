@@ -38,6 +38,16 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "auto_continue_message": cfg.auto_continue_message,
         "default_agent": cfg.default_agent,
         "worktree_template": cfg.worktree_template,
+        "spawn_prompt": cfg.spawn_prompt,
+        "notify_enabled": cfg.notify_enabled,
+        "notify_needs_you": cfg.notify_needs_you,
+        "notify_rate_limited": cfg.notify_rate_limited,
+        "notify_resumed": cfg.notify_resumed,
+        "notify_idle": cfg.notify_idle,
+        "notify_sound": cfg.notify_sound,
+        "notify_show_why": cfg.notify_show_why,
+        "notify_coalesce": cfg.notify_coalesce,
+        "notify_click_focus": cfg.notify_click_focus,
     })
 }
 
@@ -89,6 +99,9 @@ struct AgentInput {
     /// Press Enter after the text (default). `false` just inserts it (e.g. a pasted path).
     #[serde(default = "default_true")]
     enter: bool,
+    /// Route to a specific agent window (several can share a lane); `None` = first slot.
+    #[serde(default)]
+    window: Option<String>,
 }
 fn default_true() -> bool {
     true
@@ -97,6 +110,8 @@ fn default_true() -> bool {
 struct AgentSignal {
     lane_id: repomon_core::model::LaneId,
     key: String,
+    #[serde(default)]
+    window: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentKey {
@@ -104,12 +119,29 @@ struct AgentKey {
     key: String,
     #[serde(default)]
     literal: bool,
+    #[serde(default)]
+    window: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentCapture {
     lane_id: repomon_core::model::LaneId,
     #[serde(default)]
     lines: Option<u32>,
+    #[serde(default)]
+    window: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentStop {
+    lane_id: repomon_core::model::LaneId,
+    /// Stop one specific agent window; `None` stops the lane's first slot.
+    #[serde(default)]
+    window: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentTarget {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentAutoContinue {
@@ -143,6 +175,26 @@ struct ConfigSet {
     default_agent: Option<String>,
     #[serde(default)]
     worktree_template: Option<String>,
+    #[serde(default)]
+    spawn_prompt: Option<bool>,
+    #[serde(default)]
+    notify_enabled: Option<bool>,
+    #[serde(default)]
+    notify_needs_you: Option<bool>,
+    #[serde(default)]
+    notify_rate_limited: Option<bool>,
+    #[serde(default)]
+    notify_resumed: Option<bool>,
+    #[serde(default)]
+    notify_idle: Option<bool>,
+    #[serde(default)]
+    notify_sound: Option<bool>,
+    #[serde(default)]
+    notify_show_why: Option<bool>,
+    #[serde(default)]
+    notify_coalesce: Option<bool>,
+    #[serde(default)]
+    notify_click_focus: Option<bool>,
 }
 #[derive(Deserialize)]
 struct AgentAdopt {
@@ -163,6 +215,12 @@ struct TerminalId {
 #[derive(Deserialize)]
 struct ViewportSet {
     lane_ids: Vec<repomon_core::model::LaneId>,
+    /// Which agent window the focused lane's pane should stream (Tab cycling in Focus/Split);
+    /// other viewport lanes stream their first slot.
+    #[serde(default)]
+    focus_lane: Option<repomon_core::model::LaneId>,
+    #[serde(default)]
+    focus_window: Option<String>,
 }
 #[derive(Deserialize)]
 struct LaneMerge {
@@ -531,6 +589,36 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 if let Some(w) = p.worktree_template {
                     cfg.worktree_template = w;
                 }
+                if let Some(b) = p.spawn_prompt {
+                    cfg.spawn_prompt = b;
+                }
+                if let Some(b) = p.notify_enabled {
+                    cfg.notify_enabled = b;
+                }
+                if let Some(b) = p.notify_needs_you {
+                    cfg.notify_needs_you = b;
+                }
+                if let Some(b) = p.notify_rate_limited {
+                    cfg.notify_rate_limited = b;
+                }
+                if let Some(b) = p.notify_resumed {
+                    cfg.notify_resumed = b;
+                }
+                if let Some(b) = p.notify_idle {
+                    cfg.notify_idle = b;
+                }
+                if let Some(b) = p.notify_sound {
+                    cfg.notify_sound = b;
+                }
+                if let Some(b) = p.notify_show_why {
+                    cfg.notify_show_why = b;
+                }
+                if let Some(b) = p.notify_coalesce {
+                    cfg.notify_coalesce = b;
+                }
+                if let Some(b) = p.notify_click_focus {
+                    cfg.notify_click_focus = b;
+                }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
                     return Err(internal(e));
@@ -634,8 +722,11 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let (lane, lines) = (p.lane_id, p.lines);
-            let content = tokio::task::spawn_blocking(move || tmux.capture(lane, lines))
+            let lines = p.lines;
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            let content = tokio::task::spawn_blocking(move || tmux.capture_named(&window, lines))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
@@ -645,11 +736,12 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let p: AgentInput = parse(params)?;
             let tmux = ctx.tmux.clone();
             let (lane, text, enter) = (p.lane_id, p.text, p.enter);
+            let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             tokio::task::spawn_blocking(move || {
                 if enter {
-                    tmux.send_text(lane, &text)
+                    tmux.send_text_named(&window, &text)
                 } else {
-                    tmux.send_literal(lane, &text)
+                    tmux.send_literal_named(&window, &text)
                 }
             })
             .await
@@ -660,8 +752,11 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "agent.signal" => {
             let p: AgentSignal = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let (lane, key) = (p.lane_id, p.key);
-            tokio::task::spawn_blocking(move || tmux.send_key(lane, &key))
+            let key = p.key;
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            tokio::task::spawn_blocking(move || tmux.send_key_named(&window, &key))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
@@ -670,12 +765,15 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "agent.key" => {
             let p: AgentKey = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let (lane, key, literal) = (p.lane_id, p.key, p.literal);
+            let (key, literal) = (p.key, p.literal);
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             tokio::task::spawn_blocking(move || {
                 if literal {
-                    tmux.send_literal(lane, &key)
+                    tmux.send_literal_named(&window, &key)
                 } else {
-                    tmux.send_key(lane, &key)
+                    tmux.send_key_named(&window, &key)
                 }
             })
             .await
@@ -684,11 +782,19 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(Value::Null)
         }
         "agent.stop" => {
-            let p: LaneId = parse(params)?;
+            let p: AgentStop = parse(params)?;
             let tmux = ctx.tmux.clone();
             let lane = p.lane_id;
-            let _ = tokio::task::spawn_blocking(move || tmux.kill(lane)).await;
-            let _ = ctx.store.set_lane_tmux_window(p.lane_id, None).await;
+            let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            let remaining = tokio::task::spawn_blocking(move || {
+                let _ = tmux.kill_named(&window);
+                tmux.windows_for(lane).unwrap_or_default().len()
+            })
+            .await
+            .unwrap_or(0);
+            if remaining == 0 {
+                let _ = ctx.store.set_lane_tmux_window(p.lane_id, None).await;
+            }
             ctx.broadcast(
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "ended" }),
@@ -704,13 +810,17 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(Value::Null)
         }
         "agent.target" => {
-            let p: LaneId = parse(params)?;
+            let p: AgentTarget = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let lane = p.lane_id;
-            let available = tokio::task::spawn_blocking(move || tmux.has_window(lane))
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            let w = window.clone();
+            let available = tokio::task::spawn_blocking(move || tmux.has_named(&w))
                 .await
                 .map_err(internal)?;
-            Ok(json!({ "target": ctx.tmux.target(p.lane_id), "available": available }))
+            let target = format!("{}:={}", ctx.tmux.session(), window);
+            Ok(json!({ "target": target, "available": available }))
         }
         // Arm/disarm auto-continue (resume on usage limit) for one lane, this session.
         "agent.auto_continue" => {
@@ -816,6 +926,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "viewport.set" => {
             let p: ViewportSet = parse(params)?;
             *ctx.viewport.lock().await = p.lane_ids;
+            *ctx.viewport_focus.lock().await = p.focus_lane.zip(p.focus_window);
             Ok(Value::Null)
         }
 
@@ -853,6 +964,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
 /// cap on how many concurrent sessions to surface per worktree.
 const SESSION_WINDOW_HOURS: i64 = 6;
 const MAX_SESSIONS_PER_LANE: usize = 8;
+/// How recently a worktree's files must have changed to infer an *active* (but unidentified)
+/// agent in it — the fallback that surfaces Claude Code worktree-isolated subagents, which leave
+/// no transcript or process of their own. Short, so the indicator tracks actual work.
+const ACTIVITY_WINDOW_SECS: i64 = 90;
 
 async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();
@@ -902,20 +1017,28 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let alive = live.get(&key).copied().unwrap_or(0);
             summaries.truncate(alive); // sorted newest-first; 0 → none
         }
-        let managed = windows.contains(&TmuxRuntime::window_name(lane.id));
+        // The lane's managed agent windows, in slot order (= spawn order). Several agents can
+        // run side by side; pair the newest `k` transcripts with the `k` windows, oldest with
+        // oldest (slot order tracks spawn order, transcripts arrive newest-first). A heuristic,
+        // but it routes keys/captures to the right pane in practice.
+        let lane_windows = TmuxRuntime::lane_windows_in(&windows, lane.id);
+        let managed_n = lane_windows.len();
         if !summaries.is_empty() {
+            let paired = summaries.len().min(managed_n);
             for (idx, s) in summaries.into_iter().enumerate() {
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
                 }
-                // repomon manages at most one session per worktree (its single tmux window);
-                // assume that's the most-recent one. Every other session is running in another
-                // terminal, so it's external and adoptable.
                 let mut session = s.into_session(lane.repo.id, lane.worktree.id);
-                session.external = !(managed && idx == 0);
+                if idx < paired {
+                    session.external = false;
+                    session.tmux_window = Some(lane_windows[paired - 1 - idx].clone());
+                } else {
+                    session.external = true;
+                }
                 lane.agent_sessions.push(session);
             }
-        } else if managed {
+        } else if managed_n > 0 {
             // No parseable transcript: surface a repomon-spawned agent if its window is alive.
             let kind = metas
                 .iter()
@@ -938,7 +1061,41 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 external: false,
                 session_id: None,
                 resume_at: None,
+                inferred: false,
+                tmux_window: lane_windows.first().cloned(),
+                last_message: None,
             });
+        } else if let Some(changed) = lane.state.last_change_at {
+            // No identified agent, but a *non-main* worktree's files changed very recently — infer
+            // an active agent we can't name (e.g. a Claude Code worktree-isolated subagent, which
+            // runs inside its parent's process and leaves no transcript or process here). The main
+            // checkout is excluded so hand-edits there don't masquerade as an agent.
+            let active = !lane.worktree.is_main
+                && (chrono::Utc::now() - changed).num_seconds() < ACTIVITY_WINDOW_SECS;
+            if active {
+                if changed > lane.last_activity_at {
+                    lane.last_activity_at = changed;
+                }
+                lane.agent_sessions.push(AgentSession {
+                    id: 0,
+                    agent: AgentKind::Other("active".into()),
+                    repo_id: lane.repo.id,
+                    worktree_id: Some(lane.worktree.id),
+                    started_at: changed,
+                    last_activity_at: changed,
+                    ended_at: None,
+                    manifest_path: std::path::PathBuf::new(),
+                    tool_call_count: 0,
+                    title: Some("active — file activity".into()),
+                    status: AgentStatus::Running,
+                    external: true,
+                    session_id: None,
+                    resume_at: None,
+                    inferred: true,
+                    tmux_window: None,
+                    last_message: None,
+                });
+            }
         }
 
         // Overlay a usage-limit pause onto the managed (non-external) session.
@@ -949,6 +1106,48 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     sess.status = AgentStatus::RateLimited;
                     sess.resume_at = rl.reset_at;
                 }
+            }
+        }
+    }
+
+    // Permission prompts: a transcript that ends in a tool call reads **Running**, but the
+    // pane may be sitting on an interactive "Do you want…?" dialog — blocked on the user with
+    // nothing in the JSONL to say so. Sniff the panes of managed Running sessions and flip
+    // those to Waiting, carrying the dialog summary as the notification-ready "why".
+    let candidates: Vec<(usize, usize, String)> = lanes
+        .iter()
+        .enumerate()
+        .flat_map(|(li, lane)| {
+            lane.agent_sessions
+                .iter()
+                .enumerate()
+                .filter_map(move |(si, s)| {
+                    (!s.external && !s.inferred && s.status == AgentStatus::Running)
+                        .then(|| s.tmux_window.clone().map(|w| (li, si, w)))
+                        .flatten()
+                })
+        })
+        .collect();
+    if !candidates.is_empty() {
+        let tmux = ctx.tmux.clone();
+        let windows: Vec<String> = candidates.iter().map(|(_, _, w)| w.clone()).collect();
+        let prompts = tokio::task::spawn_blocking(move || {
+            windows
+                .iter()
+                .map(|w| {
+                    tmux.capture_named(w, Some(45))
+                        .ok()
+                        .and_then(|p| agent::prompt::detect_pending_prompt(&p))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        for ((li, si, _), found) in candidates.into_iter().zip(prompts) {
+            if let Some(summary) = found {
+                let s = &mut lanes[li].agent_sessions[si];
+                s.status = AgentStatus::Waiting;
+                s.last_message = Some(summary);
             }
         }
     }

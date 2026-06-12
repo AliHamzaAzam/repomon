@@ -7,6 +7,7 @@ pub mod app;
 pub mod cli;
 pub mod client;
 pub mod keybinds;
+pub mod notify;
 pub mod theme;
 pub mod view;
 

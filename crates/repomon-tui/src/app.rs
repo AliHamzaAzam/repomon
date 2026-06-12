@@ -1,11 +1,11 @@
 //! Application state and the interactive event loop.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,7 +13,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
-    AgentChoice, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo, TimelineData, WorkSession,
+    AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
+    TimelineData, WorkSession,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -21,8 +22,16 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::client::DaemonClient;
 use crate::keybinds::{self, Action, View};
+use crate::notify::{self, NotifEvent, NotifKind};
 use crate::theme::Theme;
 use crate::view;
+
+/// How long an in-app notification banner stays up before reverting to the footer hints.
+pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
+/// Don't re-fire the same session's notification within this window (suppresses status flapping).
+const NOTIF_DEBOUNCE: Duration = Duration::from_secs(30);
+/// Cap on the in-app notification history feed.
+const NOTIF_HISTORY_CAP: usize = 200;
 
 /// Agent kinds offered when creating a lane (cycled with Tab).
 pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "aider"];
@@ -43,12 +52,14 @@ pub enum AgField {
 }
 
 impl Zoom {
-    /// (lookback seconds, bucket seconds, label).
+    /// (lookback seconds, minimum bucket seconds, label). The actual bucket size is derived
+    /// from the terminal width at load time (see `load_timeline`), floored at the minimum so a
+    /// huge terminal doesn't ask for sub-minute buckets nobody can read.
     fn params(self) -> (i64, i64, &'static str) {
         match self {
-            Zoom::Day => (24 * 3600, 3600, "day"),
-            Zoom::Week => (7 * 24 * 3600, 6 * 3600, "week"),
-            Zoom::Month => (30 * 24 * 3600, 24 * 3600, "month"),
+            Zoom::Day => (24 * 3600, 5 * 60, "day"),
+            Zoom::Week => (7 * 24 * 3600, 30 * 60, "week"),
+            Zoom::Month => (30 * 24 * 3600, 2 * 3600, "month"),
         }
     }
 }
@@ -93,6 +104,16 @@ pub struct Settings {
     pub auto_continue: bool,
     pub auto_continue_message: String,
     pub worktree_template: String,
+    pub spawn_prompt: bool,
+    pub notify_enabled: bool,
+    pub notify_needs_you: bool,
+    pub notify_rate_limited: bool,
+    pub notify_resumed: bool,
+    pub notify_idle: bool,
+    pub notify_sound: bool,
+    pub notify_show_why: bool,
+    pub notify_coalesce: bool,
+    pub notify_click_focus: bool,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -101,7 +122,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 5;
+const SETTINGS_COUNT: usize = 15;
 
 pub struct App {
     pub client: DaemonClient,
@@ -164,6 +185,37 @@ pub struct App {
     pub settings_editing: bool,
     /// Screen row of the first settings item (for click hit-testing), set during render.
     pub settings_geom: std::cell::Cell<u16>,
+    /// Last-seen status per real agent session, for notification edge-detection. A session that
+    /// left the snapshot is expressed by key absence (there is no `None` value), which is what
+    /// lets each agent in a shared lane fire its own alerts instead of one rolled-up status.
+    prev_status: HashMap<(LaneId, SessKey), AgentStatus>,
+    /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
+    /// every already-running agent at once).
+    notif_seeded: bool,
+    /// Debounce keyed by (lane, session, kind): the last time each *kind* of alert fired for a
+    /// session. Keying on the kind suppresses a flapping identical alert without swallowing a
+    /// genuinely different transition (e.g. a usage-limit alert right after a needs-you one);
+    /// keying on the session lets two agents in one lane each raise the same kind of alert.
+    notif_debounce: HashMap<(LaneId, SessKey, NotifKind), Instant>,
+    /// In-app notification history (newest last), shown in the Notifications view.
+    pub notifications: VecDeque<NotifEvent>,
+    /// Cursor in the Notifications view: offset into the feed, newest-first (0 = newest).
+    /// The render derives its scroll window from this so the cursor stays visible.
+    pub notif_sel: usize,
+    /// A transient banner shown above the footer after a notification fires; auto-clears.
+    pub notif_banner: Option<(String, Instant)>,
+    /// Spawn-picker state: which agent row is highlighted, the lane to spawn into, and the view
+    /// to return to on cancel.
+    pub spawn_pick_idx: usize,
+    pub spawn_pick_lane: Option<LaneId>,
+    spawn_return: Option<View>,
+    /// Fleet shows only lanes needing attention (waiting / stuck on a limit) when set.
+    pub urgent_only: bool,
+    /// Lane-switcher state: the typed query, the highlighted match, and the view to return to
+    /// on cancel.
+    pub jump_query: String,
+    pub jump_idx: usize,
+    jump_return: Option<View>,
     pub timeline: Option<TimelineData>,
     pub timeline_zoom: Zoom,
     pub sessions: Vec<WorkSession>,
@@ -184,6 +236,9 @@ pub struct App {
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
     pub browse_selected: usize,
+    /// Two-press confirm for unregistering a repo from the browser (`x x`): the repo id armed
+    /// by the first press.
+    repo_remove_pending: Option<i64>,
     /// Agent-manager state: the list, the cursor, and the add/edit form.
     pub agents: Vec<AgentChoice>,
     pub agents_selected: usize,
@@ -197,6 +252,9 @@ pub struct App {
     /// Where `esc` returns from the Agents view (e.g. back to New Lane).
     agents_return: Option<View>,
     last_viewport: Vec<LaneId>,
+    last_viewport_focus: Option<(LaneId, String)>,
+    /// Last terminal title emitted (OSC 2), to skip redundant writes.
+    last_title: String,
     attach_request: Option<LaneId>,
     /// A tmux target (e.g. a terminal window) the loop should attach to next.
     attach_target: Option<String>,
@@ -241,10 +299,37 @@ impl App {
             refresh_pending: false,
             ac_off: HashSet::new(),
             grid_active: 0,
-            settings: Settings::default(),
+            // Notify defaults mirror the daemon config defaults, so alerts behave sensibly even
+            // before the first `config.get` lands (load_settings refreshes them at startup).
+            settings: Settings {
+                spawn_prompt: true,
+                notify_enabled: true,
+                notify_needs_you: true,
+                notify_rate_limited: true,
+                notify_resumed: true,
+                notify_idle: false,
+                notify_sound: true,
+                notify_show_why: true,
+                notify_coalesce: true,
+                notify_click_focus: true,
+                ..Settings::default()
+            },
             settings_idx: 0,
             settings_editing: false,
             settings_geom: std::cell::Cell::new(0),
+            prev_status: HashMap::new(),
+            notif_seeded: false,
+            notif_debounce: HashMap::new(),
+            notifications: VecDeque::new(),
+            notif_sel: 0,
+            notif_banner: None,
+            spawn_pick_idx: 0,
+            spawn_pick_lane: None,
+            spawn_return: None,
+            urgent_only: false,
+            jump_query: String::new(),
+            jump_idx: 0,
+            jump_return: None,
             timeline: None,
             timeline_zoom: Zoom::Day,
             sessions: Vec::new(),
@@ -260,6 +345,7 @@ impl App {
             browse_parent: None,
             browse_entries: Vec::new(),
             browse_selected: 0,
+            repo_remove_pending: None,
             agents: Vec::new(),
             agents_selected: 0,
             ag_editing: false,
@@ -270,6 +356,8 @@ impl App {
             ag_orig: None,
             agents_return: None,
             last_viewport: Vec::new(),
+            last_viewport_focus: None,
+            last_title: String::new(),
             attach_request: None,
             attach_target: None,
             input_suspended: Arc::new(AtomicBool::new(false)),
@@ -298,21 +386,370 @@ impl App {
     /// which arrive as notifications that trigger a full [`refresh`].
     pub async fn refresh_lanes(&mut self) {
         match self.client.call_typed::<Vec<Lane>>("lane.list", None).await {
-            Ok(l) => self.lanes = l,
+            Ok(l) => {
+                // Keep the cursor on the same lane across the attention re-sort below.
+                let keep = self.selected_lane().map(|l| l.id);
+                self.lanes = l;
+                // Run notification edge-detection only on a *successful* fetch. Seeding off a
+                // failed first call (empty lanes) would make the next good refresh treat every
+                // running agent as a fresh transition — the startup storm seeding prevents.
+                self.detect_notifications();
+                self.sort_lanes();
+                if let Some(id) = keep {
+                    if let Some(i) = self.visible_lanes().iter().position(|l| l.id == id) {
+                        self.selected = i;
+                    }
+                }
+            }
             Err(e) => self.status = format!("lane.list failed: {e}"),
         }
         self.clamp_selection();
     }
 
-    pub fn visible_lanes(&self) -> Vec<&Lane> {
-        if self.filter.is_empty() {
-            return self.lanes.iter().collect();
+    /// Order lanes for display: repo groups keep their original (daemon) order, and within each
+    /// group pinned lanes come first, then by attention (waiting > stuck on a limit > running),
+    /// then most recent activity. Stable, so ties keep the daemon's order — the cursor is
+    /// remapped by the caller since this runs on every refresh.
+    fn sort_lanes(&mut self) {
+        let mut repo_order: HashMap<i64, usize> = HashMap::new();
+        for l in &self.lanes {
+            let next = repo_order.len();
+            repo_order.entry(l.repo.id).or_insert(next);
         }
+        let attention: HashMap<LaneId, u8> = self
+            .lanes
+            .iter()
+            .map(|l| (l.id, self.lane_attention(l)))
+            .collect();
+        self.lanes.sort_by_key(|l| {
+            (
+                repo_order[&l.repo.id],
+                !l.pinned,
+                attention[&l.id],
+                std::cmp::Reverse(l.last_activity_at),
+            )
+        });
+    }
+
+    /// How urgently this lane needs the user (lower = more urgent), accounting for whether a
+    /// rate-limited agent will be auto-continued (global toggle minus this lane's opt-out).
+    fn lane_attention(&self, lane: &Lane) -> u8 {
+        let armed = self.settings.auto_continue && !self.ac_off.contains(&lane.id);
+        attention_rank(&lane.agent_sessions, armed)
+    }
+
+    /// Whether this lane is blocked on the user: an agent waiting for input, or rate-limited
+    /// with no auto-continue coming.
+    fn lane_needs_attention(&self, lane: &Lane) -> bool {
+        self.lane_attention(lane) <= 1
+    }
+
+    /// Cycle the selection through the lanes blocked on the user, wrapping past the end. While
+    /// a notification banner is fresh, the first press goes to the lane that just alerted.
+    fn jump_attention(&mut self) {
+        let banner_lane = self
+            .notif_banner
+            .as_ref()
+            .filter(|(_, t)| t.elapsed() < NOTIF_BANNER_TTL)
+            .and_then(|_| self.notifications.back())
+            .map(|e| e.lane_id);
+
+        // Resolve the target under one immutable borrow of the lanes, then mutate.
+        let lanes = self.visible_lanes();
+        let hits: Vec<usize> = lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| self.lane_needs_attention(l))
+            .map(|(i, _)| i)
+            .collect();
+        let banner_idx = banner_lane
+            .and_then(|id| lanes.iter().position(|l| l.id == id))
+            .filter(|&i| i != self.selected);
+        let label = |i: usize| format!("{}/{}", lanes[i].repo.name, lanes[i].worktree.name);
+
+        let (target, msg) = if let Some(i) = banner_idx {
+            (Some(i), format!("→ {} (just alerted)", label(i)))
+        } else if hits.is_empty() {
+            (None, "no agents need you".to_string())
+        } else {
+            let next = hits
+                .iter()
+                .copied()
+                .find(|&i| i > self.selected)
+                .unwrap_or(hits[0]);
+            let pos = hits.iter().position(|&i| i == next).unwrap_or(0);
+            (
+                Some(next),
+                format!("needs you {}/{} — {}", pos + 1, hits.len(), label(next)),
+            )
+        };
+        if let Some(i) = target {
+            self.selected = i;
+        }
+        self.status = msg;
+    }
+
+    /// `G`: jump_attention, then go all the way into the pane — select the session the fresh
+    /// banner identified (if any) and request a tmux attach. Does nothing extra when the jump
+    /// found no lane blocked on you.
+    fn jump_attention_attach(&mut self) {
+        let banner_sess = self
+            .notif_banner
+            .as_ref()
+            .filter(|(_, t)| t.elapsed() < NOTIF_BANNER_TTL)
+            .and_then(|_| self.notifications.back())
+            .map(|e| (e.lane_id, e.session_id.clone()));
+        self.jump_attention();
+        let Some((lane_id, needs)) = self
+            .selected_lane()
+            .map(|l| (l.id, self.lane_needs_attention(l)))
+        else {
+            return;
+        };
+        let from_banner = banner_sess.as_ref().is_some_and(|(id, _)| *id == lane_id);
+        if !needs && !from_banner {
+            return; // the jump didn't land on an alerting lane — stay put, no attach
+        }
+        if let Some((_, sid)) = banner_sess.filter(|(id, _)| *id == lane_id) {
+            self.select_session(lane_id, sid.as_deref());
+        }
+        self.attach_request = Some(lane_id);
+    }
+
+    /// Open the fuzzy lane switcher, remembering where to return on cancel.
+    fn enter_lane_jump(&mut self) {
+        self.jump_query.clear();
+        self.jump_idx = 0;
+        self.jump_return = Some(self.view);
+        self.view = View::LaneJump;
+    }
+
+    /// Lanes matching the switcher query, best first: fuzzy score, then attention, then
+    /// recency. An empty query lists every lane.
+    pub fn lane_jump_matches(&self) -> Vec<&Lane> {
+        let mut hits: Vec<(&Lane, u32)> = self
+            .lanes
+            .iter()
+            .filter_map(|l| {
+                let name = format!("{}/{}", l.repo.name, l.worktree.name);
+                let branch = l.state.branch.as_deref().unwrap_or("");
+                let score = match (
+                    fuzzy_score(&name, &self.jump_query),
+                    fuzzy_score(branch, &self.jump_query),
+                ) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }?;
+                Some((l, score))
+            })
+            .collect();
+        hits.sort_by_key(|(l, score)| {
+            (
+                *score,
+                self.lane_attention(l),
+                std::cmp::Reverse(l.last_activity_at),
+            )
+        });
+        hits.into_iter().map(|(l, _)| l).collect()
+    }
+
+    fn lane_jump_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::BackTab => self.jump_idx = self.jump_idx.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab if self.jump_idx + 1 < self.lane_jump_matches().len() => {
+                self.jump_idx += 1;
+            }
+            KeyCode::Enter => {
+                let id = self.lane_jump_matches().get(self.jump_idx).map(|l| l.id);
+                match id {
+                    Some(id) => self.jump_to_lane(id),
+                    None => self.status = "no lanes match".into(),
+                }
+            }
+            KeyCode::Esc => self.view = self.jump_return.take().unwrap_or(View::Fleet),
+            KeyCode::Backspace => {
+                self.jump_query.pop();
+                self.jump_idx = 0;
+            }
+            KeyCode::Char(c) => {
+                self.jump_query.push(c);
+                self.jump_idx = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Select lane `id` — clearing any filter that hides it — and open it in Focus.
+    fn jump_to_lane(&mut self, id: LaneId) {
+        let find = |me: &Self| me.visible_lanes().iter().position(|l| l.id == id);
+        let mut idx = find(self);
+        if idx.is_none() && (!self.filter.is_empty() || self.urgent_only) {
+            self.filter.clear();
+            self.filtering = false;
+            self.urgent_only = false;
+            idx = find(self);
+        }
+        match idx {
+            Some(i) => {
+                self.selected = i;
+                self.focus_insert = false;
+                self.reset_scroll();
+                self.view = View::Focus;
+            }
+            None => self.status = "that lane no longer exists".into(),
+        }
+    }
+
+    /// Diff the freshly-fetched per-session statuses against the previous snapshot and fire a
+    /// notification on each meaningful transition. The first call only seeds the snapshot.
+    fn detect_notifications(&mut self) {
+        // Snapshot the new statuses, one entry per real agent session.
+        let now: HashMap<(LaneId, SessKey), AgentStatus> = self
+            .lanes
+            .iter()
+            .flat_map(|l| session_statuses(l.id, &l.agent_sessions))
+            .collect();
+
+        if !self.notif_seeded {
+            self.prev_status = now;
+            self.notif_seeded = true;
+            return;
+        }
+
+        let live_lanes: HashSet<LaneId> = self.lanes.iter().map(|l| l.id).collect();
+        // Lanes that currently have a managed real session — used by the diff to suppress the
+        // identity handoff where the no-transcript `Fallback` key vanishes in the same refresh
+        // its `Transcript` key first appears (the agent didn't stop, it became identifiable).
+        let lanes_with_managed: HashSet<LaneId> = self
+            .lanes
+            .iter()
+            .filter(|l| l.agent_sessions.iter().any(|s| !s.external && !s.inferred))
+            .map(|l| l.id)
+            .collect();
+
+        // Decide what to fire first (updating the debounce as we go), then deliver — delivery
+        // composes from `self.lanes` and mutates `self`, so it can't run while we still hold a
+        // borrow into the lanes here.
+        let mut fires: Vec<((LaneId, SessKey), NotifKind)> = Vec::new();
+        for (key, kind) in
+            diff_session_transitions(&self.prev_status, &now, &live_lanes, &lanes_with_managed)
+        {
+            if !self.notif_enabled_for(kind) {
+                continue;
+            }
+            let dkey = (key.0, key.1.clone(), kind);
+            if let Some(t) = self.notif_debounce.get(&dkey) {
+                if t.elapsed() < NOTIF_DEBOUNCE {
+                    continue;
+                }
+            }
+            self.notif_debounce.insert(dkey, Instant::now());
+            fires.push((key, kind));
+        }
+
+        // Replacing the snapshot wholesale prunes dead lanes AND dead sessions in one move. The
+        // debounce keeps entries for sessions still in the snapshot, plus a grace window so the
+        // maps can't grow across a long session of lane/transcript churn.
+        self.prev_status = now;
+        let prev = &self.prev_status;
+        self.notif_debounce.retain(|(lane, sess, _), t| {
+            prev.contains_key(&(*lane, sess.clone())) || t.elapsed() < NOTIF_DEBOUNCE
+        });
+
+        // A burst (≥2 alerts in one tick) coalesces into a single popup + banner so the desktop
+        // isn't spammed; each event still lands individually (and unread) in the history feed.
+        let coalesce = self.settings.notify_coalesce && fires.len() >= 2;
+        if coalesce {
+            let labels: Vec<(String, NotifKind)> = fires
+                .iter()
+                .filter_map(|((id, _), kind)| {
+                    let l = self.lanes.iter().find(|l| l.id == *id)?;
+                    Some((format!("{}/{}", l.repo.name, l.worktree.name), *kind))
+                })
+                .collect();
+            let (title, body) = notify::compose_burst(&labels);
+            notify::send_native(
+                &title,
+                &body,
+                self.settings.notify_sound,
+                self.settings.notify_click_focus,
+            );
+            self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        }
+        for ((lane, key), kind) in fires {
+            self.fire_notification(lane, &key, kind, coalesce);
+        }
+    }
+
+    /// Whether the given notification kind is enabled (master switch ∧ per-kind toggle).
+    fn notif_enabled_for(&self, kind: NotifKind) -> bool {
+        if !self.settings.notify_enabled {
+            return false;
+        }
+        match kind {
+            NotifKind::NeedsYou => self.settings.notify_needs_you,
+            NotifKind::RateLimited => self.settings.notify_rate_limited,
+            NotifKind::Resumed => self.settings.notify_resumed,
+            NotifKind::Idle => self.settings.notify_idle,
+        }
+    }
+
+    /// Compose + deliver a notification about one session: native popup, banner, history entry.
+    /// `quiet` records the event in the feed only — the popup/banner were already covered by a
+    /// coalesced burst summary.
+    fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind, quiet: bool) {
+        // Compose under an immutable borrow that ends before we mutate `self`. The session may
+        // be gone when its disappearance was the trigger — compose degrades to a generic line.
+        let Some((title, body, session_id)) = self.lanes.iter().find(|l| l.id == id).map(|l| {
+            let sess = session_by_key(l, key);
+            // Which of the lane's side-by-side agents this is (1-based in the body when >1).
+            let slot = sess.and_then(|hit| {
+                let real: Vec<&AgentSession> =
+                    l.agent_sessions.iter().filter(|s| !s.inferred).collect();
+                let i = real.iter().position(|s| std::ptr::eq(*s, hit))?;
+                Some((i, real.len()))
+            });
+            let (t, b) = notify::compose(kind, l, sess, slot, self.settings.notify_show_why);
+            (t, b, sess.and_then(|s| s.session_id.clone()))
+        }) else {
+            return;
+        };
+        if !quiet {
+            notify::send_native(
+                &title,
+                &body,
+                self.settings.notify_sound,
+                self.settings.notify_click_focus,
+            );
+            self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        }
+        self.notifications.push_back(NotifEvent {
+            when: chrono::Local::now(),
+            kind,
+            lane_id: id,
+            session_id,
+            read: false,
+            title,
+            body,
+        });
+        while self.notifications.len() > NOTIF_HISTORY_CAP {
+            self.notifications.pop_front();
+        }
+    }
+
+    /// Notifications not yet seen (the feed hasn't been opened since they fired) — the ⚑ badge.
+    pub fn unread_notifs(&self) -> usize {
+        self.notifications.iter().filter(|e| !e.read).count()
+    }
+
+    pub fn visible_lanes(&self) -> Vec<&Lane> {
         let f = self.filter.to_lowercase();
         self.lanes
             .iter()
+            .filter(|l| !self.urgent_only || self.lane_needs_attention(l))
             .filter(|l| {
-                l.repo.name.to_lowercase().contains(&f)
+                f.is_empty()
+                    || l.repo.name.to_lowercase().contains(&f)
                     || l.worktree.name.to_lowercase().contains(&f)
                     || l.state
                         .branch
@@ -328,14 +765,14 @@ impl App {
         self.visible_lanes().into_iter().nth(self.selected)
     }
 
-    /// Lane ids to babysit in the grid: pinned first, then needs-you, then most-active.
+    /// Lane ids to babysit in the grid: pinned first, then by attention, then most-active.
     pub fn grid_lane_ids(&self) -> Vec<LaneId> {
         let mut lanes: Vec<&Lane> = self.visible_lanes();
         lanes.sort_by(|a, b| {
             let key = |l: &Lane| {
                 (
                     !l.pinned,
-                    !l.agent_sessions.iter().any(|s| s.status.needs_you()),
+                    self.lane_attention(l),
                     std::cmp::Reverse(l.last_activity_at),
                 )
             };
@@ -367,19 +804,39 @@ impl App {
             | View::Search
             | View::AddRepo
             | View::Agents
-            | View::Settings => Vec::new(),
+            | View::Settings
+            | View::Notifications
+            | View::SpawnPick
+            | View::LaneJump => Vec::new(),
         }
     }
 
-    /// Tell the daemon which lanes are visible, if that set changed.
+    /// Tell the daemon which lanes are visible — and, in Split/Focus, which agent window the
+    /// selected lane should stream (so Tab between a lane's agents retargets the pane) — if
+    /// either changed.
     pub async fn sync_viewport(&mut self) {
         let live = self.live_lanes();
-        if live != self.last_viewport {
+        let focus = match self.view {
+            View::Split | View::Focus => self
+                .selected_lane()
+                .map(|l| l.id)
+                .zip(self.selected_window()),
+            _ => None,
+        };
+        if live != self.last_viewport || focus != self.last_viewport_focus {
             let _ = self
                 .client
-                .call("viewport.set", Some(json!({ "lane_ids": live })))
+                .call(
+                    "viewport.set",
+                    Some(json!({
+                        "lane_ids": live,
+                        "focus_lane": focus.as_ref().map(|(l, _)| l),
+                        "focus_window": focus.as_ref().map(|(_, w)| w),
+                    })),
+                )
                 .await;
             self.last_viewport = live;
+            self.last_viewport_focus = focus;
         }
     }
 
@@ -403,6 +860,23 @@ impl App {
             {
                 self.recent_commits = c;
             }
+        }
+    }
+
+    /// Keep the terminal window/tab title on the open repo (OSC 2) so several terminals are
+    /// tellable apart at a glance. Re-emitted only when it changes; the shell resets the title
+    /// on exit as usual.
+    fn sync_title(&mut self) {
+        let title = match self.selected_lane() {
+            Some(l) => format!("repomon · {}/{}", l.repo.name, l.worktree.name),
+            None => "repomon".to_string(),
+        };
+        if title != self.last_title {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = write!(out, "\x1b]2;{title}\x07");
+            let _ = out.flush();
+            self.last_title = title;
         }
     }
 
@@ -500,10 +974,44 @@ impl App {
                 self.select_grid_active();
                 self.toggle_pin().await;
             }
-            KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Esc => self.view = View::Fleet,
+            // Hop to the next tile whose agent needs you, wrapping.
+            KeyCode::Char('g') if n > 0 => {
+                let ids = self.grid_lane_ids();
+                let need: Vec<usize> = ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, id)| {
+                        self.lanes
+                            .iter()
+                            .find(|l| l.id == **id)
+                            .is_some_and(|l| self.lane_needs_attention(l))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                match need
+                    .iter()
+                    .copied()
+                    .find(|&i| i > self.grid_active)
+                    .or(need.first().copied())
+                {
+                    Some(i) => self.grid_active = i,
+                    None => self.status = "no agents need you".into(),
+                }
+            }
+            KeyCode::Char('f') => self.enter_lane_jump(),
+            KeyCode::Char(' ') | KeyCode::Esc => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
+    }
+
+    /// The managed tmux window of the session the cursor is on (Tab cycles it) — where keys,
+    /// captures, stops, and attaches are routed. `None` falls back to the lane's first slot
+    /// (external/inferred sessions have no window of their own).
+    fn selected_window(&self) -> Option<String> {
+        self.selected_lane()
+            .and_then(|l| l.agent_sessions.get(self.session_idx))
+            .and_then(|s| s.tmux_window.clone())
     }
 
     /// Move the session cursor among the selected lane's agents.
@@ -546,6 +1054,15 @@ impl App {
     async fn handle_event(&mut self, ev: Event) {
         let key = match ev {
             Event::Key(key) => key,
+            // Views render from the live frame size every draw, so a resize redraws correctly
+            // on its own; the timeline additionally refetches so its bucket count tracks the
+            // new width (the renderer resamples in the meantime).
+            Event::Resize(_, _) => {
+                if self.view == View::Timeline {
+                    self.load_timeline().await;
+                }
+                return;
+            }
             Event::Mouse(me) => {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
                 // Bare movement just updates the hovered lane (highlighted on render).
@@ -605,6 +1122,9 @@ impl App {
             View::AddRepo => self.addrepo_key(key).await,
             View::Agents => self.agents_key(key).await,
             View::Settings => self.settings_key(key).await,
+            View::Notifications => self.notifications_key(key),
+            View::SpawnPick => self.spawn_pick_key(key).await,
+            View::LaneJump => self.lane_jump_key(key),
             _ if self.filtering => self.filter_key(key),
             _ => {
                 if let Some(action) = keybinds::nav(key) {
@@ -677,9 +1197,53 @@ impl App {
             }
             KeyCode::Char('a') => self.add_browsed().await,
             KeyCode::Char('d') => self.discover_here().await,
+            KeyCode::Char('x') => self.remove_browsed().await,
             KeyCode::Esc => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
+        }
+        // Any key other than the confirming second `x` disarms a pending removal.
+        if key.code != KeyCode::Char('x') {
+            self.repo_remove_pending = None;
+        }
+    }
+
+    /// Unregister the selected repo (must already be registered — marked `+`). Two presses of
+    /// `x`: the first arms, the second removes. Only repomon's bookkeeping goes away — the
+    /// project, its worktrees, and any running agents on disk are untouched.
+    async fn remove_browsed(&mut self) {
+        let Some(entry) = self.browse_entries.get(self.browse_selected) else {
+            return;
+        };
+        if !entry.added {
+            self.status = "not a registered repo (only + entries can be removed)".into();
+            self.repo_remove_pending = None;
+            return;
+        }
+        let Some(repo) = self.repos.iter().find(|r| r.path == entry.path) else {
+            self.status = "couldn't match this entry to a registered repo".into();
+            self.repo_remove_pending = None;
+            return;
+        };
+        let (id, name) = (repo.id, repo.name.clone());
+        if self.repo_remove_pending != Some(id) {
+            self.repo_remove_pending = Some(id);
+            self.status = format!("press x again to remove {name} (files on disk stay)");
+            return;
+        }
+        self.repo_remove_pending = None;
+        match self
+            .client
+            .call("repo.remove", Some(json!({ "repo_id": id })))
+            .await
+        {
+            Ok(_) => {
+                self.status = format!("removed {name} — files on disk untouched");
+                self.refresh().await;
+                let here = self.browse_path.clone();
+                self.load_browse(Some(here)).await;
+            }
+            Err(e) => self.status = format!("remove failed: {e}"),
         }
     }
 
@@ -832,6 +1396,37 @@ impl App {
         if let Some(w) = v.get("worktree_template").and_then(|x| x.as_str()) {
             self.settings.worktree_template = w.to_string();
         }
+        let b = |key: &str| v.get(key).and_then(|x| x.as_bool());
+        if let Some(x) = b("spawn_prompt") {
+            self.settings.spawn_prompt = x;
+        }
+        if let Some(x) = b("notify_enabled") {
+            self.settings.notify_enabled = x;
+        }
+        if let Some(x) = b("notify_needs_you") {
+            self.settings.notify_needs_you = x;
+        }
+        if let Some(x) = b("notify_rate_limited") {
+            self.settings.notify_rate_limited = x;
+        }
+        if let Some(x) = b("notify_resumed") {
+            self.settings.notify_resumed = x;
+        }
+        if let Some(x) = b("notify_idle") {
+            self.settings.notify_idle = x;
+        }
+        if let Some(x) = b("notify_sound") {
+            self.settings.notify_sound = x;
+        }
+        if let Some(x) = b("notify_show_why") {
+            self.settings.notify_show_why = x;
+        }
+        if let Some(x) = b("notify_coalesce") {
+            self.settings.notify_coalesce = x;
+        }
+        if let Some(x) = b("notify_click_focus") {
+            self.settings.notify_click_focus = x;
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
@@ -847,6 +1442,16 @@ impl App {
             "auto_continue": self.settings.auto_continue,
             "auto_continue_message": self.settings.auto_continue_message,
             "worktree_template": self.settings.worktree_template,
+            "spawn_prompt": self.settings.spawn_prompt,
+            "notify_enabled": self.settings.notify_enabled,
+            "notify_needs_you": self.settings.notify_needs_you,
+            "notify_rate_limited": self.settings.notify_rate_limited,
+            "notify_resumed": self.settings.notify_resumed,
+            "notify_idle": self.settings.notify_idle,
+            "notify_sound": self.settings.notify_sound,
+            "notify_show_why": self.settings.notify_show_why,
+            "notify_coalesce": self.settings.notify_coalesce,
+            "notify_click_focus": self.settings.notify_click_focus,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -937,15 +1542,128 @@ impl App {
                 self.settings.auto_continue = !self.settings.auto_continue;
                 self.save_settings().await;
             }
+            5 => {
+                self.settings.spawn_prompt = !self.settings.spawn_prompt;
+                self.save_settings().await;
+            }
+            6 => {
+                self.settings.notify_enabled = !self.settings.notify_enabled;
+                self.save_settings().await;
+            }
+            7 => {
+                self.settings.notify_needs_you = !self.settings.notify_needs_you;
+                self.save_settings().await;
+            }
+            8 => {
+                self.settings.notify_rate_limited = !self.settings.notify_rate_limited;
+                self.save_settings().await;
+            }
+            9 => {
+                self.settings.notify_resumed = !self.settings.notify_resumed;
+                self.save_settings().await;
+            }
+            10 => {
+                self.settings.notify_idle = !self.settings.notify_idle;
+                self.save_settings().await;
+            }
+            11 => {
+                self.settings.notify_sound = !self.settings.notify_sound;
+                // Preview the chime immediately so "is sound working?" is answered on the spot.
+                if self.settings.notify_sound {
+                    notify::play_chime();
+                }
+                self.save_settings().await;
+            }
+            12 => {
+                self.settings.notify_show_why = !self.settings.notify_show_why;
+                self.save_settings().await;
+            }
+            13 => {
+                self.settings.notify_coalesce = !self.settings.notify_coalesce;
+                self.save_settings().await;
+            }
+            14 => {
+                self.settings.notify_click_focus = !self.settings.notify_click_focus;
+                self.save_settings().await;
+            }
             _ => {}
         }
     }
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 => self.adjust_setting(true).await,
+            0..=2 | 5..=14 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
+        }
+    }
+
+    /// Key handling for the Notifications history view: move the cursor, open or attach to
+    /// the event's agent, dismiss one, clear all, or leave.
+    fn notifications_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.notif_sel = self.notif_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                // Clamp to the last event so the cursor can't run off the feed.
+                let max = self.notifications.len().saturating_sub(1);
+                self.notif_sel = (self.notif_sel + 1).min(max);
+            }
+            // Dismiss the selected event (the feed is newest-first; the deque is newest-last).
+            KeyCode::Char('d') if !self.notifications.is_empty() => {
+                let idx = self.notifications.len() - 1 - self.notif_sel;
+                self.notifications.remove(idx);
+                let max = self.notifications.len().saturating_sub(1);
+                self.notif_sel = self.notif_sel.min(max);
+            }
+            KeyCode::Char('c') => {
+                self.notifications.clear();
+                self.notif_sel = 0;
+            }
+            KeyCode::Enter | KeyCode::Right => self.open_selected_notif(false),
+            KeyCode::Char('t') => self.open_selected_notif(true),
+            KeyCode::Esc | KeyCode::Left => self.view = View::Fleet,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Open the lane behind the cursor's event in Focus, pointed at the exact session that
+    /// fired (when the event recorded one). `attach` goes all the way into its tmux pane.
+    fn open_selected_notif(&mut self, attach: bool) {
+        let Some((lane_id, sid)) = self
+            .notifications
+            .iter()
+            .rev()
+            .nth(self.notif_sel)
+            .map(|e| (e.lane_id, e.session_id.clone()))
+        else {
+            return;
+        };
+        self.jump_to_lane(lane_id);
+        // jump_to_lane reports a stale lane via status; only proceed if it landed.
+        if self.selected_lane().map(|l| l.id) != Some(lane_id) {
+            return;
+        }
+        self.select_session(lane_id, sid.as_deref());
+        if attach {
+            self.attach_request = Some(lane_id);
+        }
+    }
+
+    /// Point the session cursor at `session_id` on the selected lane (no-op when the session
+    /// is gone or wasn't recorded — the lane's current selection stands).
+    fn select_session(&mut self, lane_id: LaneId, session_id: Option<&str>) {
+        let Some(sid) = session_id else { return };
+        let idx = self.lanes.iter().find(|l| l.id == lane_id).and_then(|l| {
+            l.agent_sessions
+                .iter()
+                .position(|s| s.session_id.as_deref() == Some(sid))
+        });
+        if let Some(i) = idx {
+            self.session_lane = Some(lane_id); // keep sync_session_cursor from resetting it
+            self.session_idx = i;
         }
     }
 
@@ -1147,7 +1865,14 @@ impl App {
     }
 
     async fn load_timeline(&mut self) {
-        let (lookback, bucket, _) = self.timeline_zoom.params();
+        let (lookback, min_bucket, _) = self.timeline_zoom.params();
+        // Size buckets to the terminal so the strip fills the width (the renderer resamples to
+        // cover the gap until a resize refetch lands). 26 ≈ repo-label column + margins.
+        let width = ratatui::crossterm::terminal::size()
+            .map(|(w, _)| w as i64)
+            .unwrap_or(100);
+        let buckets = (width - 26).clamp(24, 240);
+        let bucket = (lookback / buckets).max(min_bucket);
         let to = chrono::Utc::now();
         let from = to - chrono::Duration::seconds(lookback);
         let params = json!({
@@ -1357,7 +2082,12 @@ impl App {
                 .client
                 .call(
                     "agent.key",
-                    Some(json!({ "lane_id": id, "key": spec, "literal": literal })),
+                    Some(json!({
+                        "lane_id": id,
+                        "key": spec,
+                        "literal": literal,
+                        "window": self.selected_window(),
+                    })),
                 )
                 .await;
         }
@@ -1448,6 +2178,13 @@ impl App {
             KeyCode::Char('c') => self.cd_to_lane(),
             KeyCode::Char('v') => self.paste_image().await,
             KeyCode::Char('y') => self.toggle_mouse(),
+            // Triage without leaving Focus: retarget to the next agent needing you, or pull up
+            // the lane switcher.
+            KeyCode::Char('g') => {
+                self.reset_scroll();
+                self.jump_attention();
+            }
+            KeyCode::Char('f') => self.enter_lane_jump(),
             // esc/← stops scrolling first, then leaves to Split.
             KeyCode::Esc | KeyCode::Left if self.scroll > 0 => self.reset_scroll(),
             KeyCode::Esc | KeyCode::Left => self.view = View::Split,
@@ -1499,12 +2236,32 @@ impl App {
         let Some(id) = self.selected_lane().map(|l| l.id) else {
             return;
         };
-        let agent = self.default_agent_name().await;
+        // With the picker on (default), `e` prompts for which agent every time; otherwise it
+        // spawns the configured default immediately.
+        if self.settings.spawn_prompt {
+            self.enter_spawn_pick(id).await;
+        } else {
+            let agent = self.default_agent_name().await;
+            self.do_spawn(id, &agent).await;
+        }
+    }
+
+    /// Open the quick agent picker for `lane`, remembering where to return on cancel.
+    async fn enter_spawn_pick(&mut self, lane: LaneId) {
+        self.load_agents().await; // populates nl_agents (+ marks the default)
+        self.spawn_pick_idx = self.nl_agents.iter().position(|a| a.default).unwrap_or(0);
+        self.spawn_pick_lane = Some(lane);
+        self.spawn_return = Some(self.view);
+        self.view = View::SpawnPick;
+    }
+
+    /// Spawn `agent` into `lane`: on success drop into Focus, ready to drive it.
+    async fn do_spawn(&mut self, id: LaneId, agent: &str) {
         match self
             .client
             .call(
                 "agent.spawn",
-                Some(json!({ "lane_id": id, "agent": &agent })),
+                Some(json!({ "lane_id": id, "agent": agent })),
             )
             .await
         {
@@ -1514,6 +2271,46 @@ impl App {
                 self.focus_insert = false;
             }
             Err(e) => self.status = format!("spawn failed: {e}"),
+        }
+    }
+
+    /// Key handling for the spawn picker: move, jump by number, spawn, or cancel.
+    async fn spawn_pick_key(&mut self, key: KeyEvent) {
+        let n = self.nl_agents.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if n > 0 => {
+                self.spawn_pick_idx = (self.spawn_pick_idx + n - 1) % n;
+            }
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                self.spawn_pick_idx = (self.spawn_pick_idx + 1) % n;
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                let i = (c as usize) - ('1' as usize);
+                if i < n {
+                    self.spawn_pick_idx = i;
+                    self.confirm_spawn_pick().await;
+                }
+            }
+            KeyCode::Enter | KeyCode::Right => self.confirm_spawn_pick().await,
+            KeyCode::Esc | KeyCode::Left => {
+                self.view = self.spawn_return.take().unwrap_or(View::Fleet);
+            }
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Spawn the highlighted agent into the remembered lane.
+    async fn confirm_spawn_pick(&mut self) {
+        let agent = self
+            .nl_agents
+            .get(self.spawn_pick_idx)
+            .map(|a| a.name.clone());
+        let lane = self.spawn_pick_lane.take();
+        self.spawn_return = None;
+        match (agent, lane) {
+            (Some(agent), Some(id)) => self.do_spawn(id, &agent).await,
+            _ => self.view = View::Fleet,
         }
     }
 
@@ -1654,7 +2451,12 @@ impl App {
                     .client
                     .call(
                         "agent.send_input",
-                        Some(json!({ "lane_id": id, "text": format!("{path} "), "enter": false })),
+                        Some(json!({
+                            "lane_id": id,
+                            "text": format!("{path} "),
+                            "enter": false,
+                            "window": self.selected_window(),
+                        })),
                     )
                     .await;
                 self.reset_scroll();
@@ -1689,7 +2491,11 @@ impl App {
                     .client
                     .call(
                         "agent.capture",
-                        Some(json!({ "lane_id": id, "lines": 2000 })),
+                        Some(json!({
+                            "lane_id": id,
+                            "lines": 2000,
+                            "window": self.selected_window(),
+                        })),
                     )
                     .await
                 {
@@ -1783,7 +2589,10 @@ impl App {
         if let Some(id) = self.selected_lane().map(|l| l.id) {
             let _ = self
                 .client
-                .call("agent.stop", Some(json!({ "lane_id": id })))
+                .call(
+                    "agent.stop",
+                    Some(json!({ "lane_id": id, "window": self.selected_window() })),
+                )
                 .await;
             self.status = "stopped agent".into();
             // Don't keep staring at the stopped agent's pane.
@@ -1885,7 +2694,16 @@ impl App {
                     | View::Search
                     | View::AddRepo
                     | View::Agents
-                    | View::Settings => self.view = View::Fleet,
+                    | View::Settings
+                    | View::Notifications
+                    | View::SpawnPick
+                    | View::LaneJump => self.view = View::Fleet,
+                    // Esc in Fleet clears the urgent filter first (like the text filter), then
+                    // quits.
+                    View::Fleet if self.urgent_only => {
+                        self.urgent_only = false;
+                        self.clamp_selection();
+                    }
                     View::Fleet => self.should_quit = true,
                 }
             }
@@ -1906,6 +2724,13 @@ impl App {
                     }
                     View::Agents => self.enter_agents(None).await,
                     View::Settings => self.load_settings().await,
+                    View::Notifications => {
+                        self.notif_sel = 0;
+                        // Opening the feed counts as catching up — clears the ⚑ unread badge.
+                        for ev in self.notifications.iter_mut() {
+                            ev.read = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1952,15 +2777,17 @@ impl App {
                     View::Grid
                 };
             }
-            Action::JumpNeedsYou => {
-                let target = self
-                    .visible_lanes()
-                    .iter()
-                    .position(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()));
-                match target {
-                    Some(i) => self.selected = i,
-                    None => self.status = "no agents need you".into(),
-                }
+            Action::JumpNeedsYou => self.jump_attention(),
+            Action::AttachNeedsYou => self.jump_attention_attach(),
+            Action::FindLane => self.enter_lane_jump(),
+            Action::ToggleUrgent => {
+                self.urgent_only = !self.urgent_only;
+                self.status = if self.urgent_only {
+                    "showing only lanes that need you — ! or esc to clear".into()
+                } else {
+                    "showing all lanes".into()
+                };
+                self.clamp_selection();
             }
             Action::StopAgent => self.stop_agent().await,
             Action::Pin => self.toggle_pin().await,
@@ -1994,6 +2821,9 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     let mut app = App::new(client);
     app.theme = theme;
     app.refresh().await;
+    // Prime the notification toggles (and default-agent picker) from the daemon config so alerts
+    // honor the user's settings even if they never open the Settings view this session.
+    app.load_settings().await;
 
     let mut terminal = ratatui::init();
     if app.mouse_on {
@@ -2029,8 +2859,167 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     let outcome = event_loop(&mut terminal, &mut app, &mut in_rx, &mut events).await;
     disable_mouse();
     ratatui::restore();
+    // Hand the title back to the shell (most shells re-set it at the next prompt anyway).
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b]2;\x07");
+        let _ = out.flush();
+    }
     outcome?;
     Ok(app.cd_target)
+}
+
+/// How urgently a lane's sessions need the user: 0 = waiting on you, 1 = rate-limited with no
+/// auto-continue coming, 2 = working, 3 = nothing actionable. Inferred file-activity
+/// placeholders never rank — they can't be acted on.
+fn attention_rank(sessions: &[AgentSession], auto_continue_armed: bool) -> u8 {
+    use AgentStatus::*;
+    sessions
+        .iter()
+        .filter(|s| !s.inferred)
+        .map(|s| match s.status {
+            Waiting => 0,
+            RateLimited if !auto_continue_armed => 1,
+            Running | RateLimited => 2,
+            Idle | Ended => 3,
+        })
+        .min()
+        .unwrap_or(3)
+}
+
+/// Case-insensitive subsequence match of `needle` in `haystack` for the lane switcher. Lower
+/// scores are better: matches that start earlier and sit closer together rank first. Greedy
+/// leftmost matching; an empty needle matches everything with the best score.
+fn fuzzy_score(haystack: &str, needle: &str) -> Option<u32> {
+    let mut hay = haystack.chars().flat_map(char::to_lowercase).enumerate();
+    let mut score = 0u32;
+    let mut prev: Option<usize> = None;
+    for n in needle.chars().flat_map(char::to_lowercase) {
+        let (i, _) = hay.by_ref().find(|&(_, h)| h == n)?;
+        score += match prev {
+            None => i as u32,              // distance from the start
+            Some(p) => (i - p - 1) as u32, // gap since the previous matched char
+        };
+        prev = Some(i);
+    }
+    Some(score)
+}
+
+/// Identifies one real agent session within a lane across refreshes.
+///
+/// Transcript-backed sessions key on the Claude session id (the transcript filename stem),
+/// which is stable across polls. `claude --resume` may continue the same logical work in a new
+/// transcript; that reads as one session vanishing and another appearing — acceptable noise. A
+/// lane has at most one real session *without* a transcript id per snapshot (the managed
+/// no-transcript placeholder or the generic process monitor — mutually exclusive branches in
+/// the daemon's `overlay_agents`), so a single `Fallback` sentinel covers it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SessKey {
+    Transcript(String),
+    Fallback,
+}
+
+/// Key/status pairs for one lane's *real* agent sessions. Inferred "file activity" placeholders
+/// are dropped so they never drive named alerts. On a (theoretically impossible) duplicate key,
+/// the higher-priority status wins — the same order the old per-lane rollup used.
+fn session_statuses(
+    lane_id: LaneId,
+    sessions: &[AgentSession],
+) -> Vec<((LaneId, SessKey), AgentStatus)> {
+    let mut out: Vec<((LaneId, SessKey), AgentStatus)> = Vec::new();
+    for s in sessions.iter().filter(|s| !s.inferred) {
+        let key = (
+            lane_id,
+            s.session_id
+                .clone()
+                .map(SessKey::Transcript)
+                .unwrap_or(SessKey::Fallback),
+        );
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, st)) if status_priority(s.status) < status_priority(*st) => *st = s.status,
+            Some(_) => {}
+            None => out.push((key, s.status)),
+        }
+    }
+    out
+}
+
+/// Notification priority of a status (lower = more urgent).
+fn status_priority(s: AgentStatus) -> usize {
+    use AgentStatus::*;
+    [RateLimited, Waiting, Running, Idle, Ended]
+        .iter()
+        .position(|&x| x == s)
+        .unwrap_or(usize::MAX)
+}
+
+/// Diff the previous and current per-session status maps into the notifications to fire.
+///
+/// Sessions present in `now` are edge-detected against their previous status. Sessions that
+/// vanished fire as a transition to `None` (→ Idle if they were active), except when their
+/// whole lane is gone (deleting a lane isn't an agent going quiet) or when a lane's `Fallback`
+/// key was handed off to a transcript-backed key (`lanes_with_managed`): the managed
+/// no-transcript placeholder disappears the moment the agent's transcript becomes parseable,
+/// and firing Idle there would alert on every spawn.
+fn diff_session_transitions(
+    prev: &HashMap<(LaneId, SessKey), AgentStatus>,
+    now: &HashMap<(LaneId, SessKey), AgentStatus>,
+    live_lanes: &HashSet<LaneId>,
+    lanes_with_managed: &HashSet<LaneId>,
+) -> Vec<((LaneId, SessKey), NotifKind)> {
+    let mut out = Vec::new();
+    for (key, &status) in now {
+        let was = prev.get(key).copied();
+        if was == Some(status) {
+            continue;
+        }
+        if let Some(kind) = transition_kind(was, Some(status)) {
+            out.push((key.clone(), kind));
+        }
+    }
+    for (key, &was) in prev {
+        if now.contains_key(key) || !live_lanes.contains(&key.0) {
+            continue;
+        }
+        if key.1 == SessKey::Fallback && lanes_with_managed.contains(&key.0) {
+            continue;
+        }
+        if let Some(kind) = transition_kind(Some(was), None) {
+            out.push((key.clone(), kind));
+        }
+    }
+    out
+}
+
+/// Resolve a session key back to the lane's session, for composing the notification text.
+/// `None` when the session vanished (i.e. its disappearance was the trigger).
+fn session_by_key<'a>(lane: &'a Lane, key: &SessKey) -> Option<&'a AgentSession> {
+    lane.agent_sessions
+        .iter()
+        .filter(|s| !s.inferred)
+        .find(|s| match key {
+            SessKey::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
+            SessKey::Fallback => s.session_id.is_none(),
+        })
+}
+
+/// Map a session's status transition to the notification it should fire, if any. `None` means
+/// the session was absent from that snapshot. Priority resolves cases like
+/// `Running → RateLimited` to the limit.
+fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> Option<NotifKind> {
+    use AgentStatus::*;
+    match (prev, now) {
+        // Hit a usage limit.
+        (p, Some(RateLimited)) if p != Some(RateLimited) => Some(NotifKind::RateLimited),
+        // Auto-resumed after a limit.
+        (Some(RateLimited), Some(Running)) => Some(NotifKind::Resumed),
+        // Finished its turn / needs you.
+        (p, Some(Waiting)) if p != Some(Waiting) => Some(NotifKind::NeedsYou),
+        // Was active, now quiet (idle / ended / the session went away).
+        (Some(Running) | Some(Waiting), Some(Idle) | Some(Ended) | None) => Some(NotifKind::Idle),
+        _ => None,
+    }
 }
 
 /// Cycle `current` to the next/previous option (wrapping). Returns `current` if `options` is empty.
@@ -2085,7 +3074,14 @@ async fn event_loop(
         app.sync_recent_commits().await;
         app.sync_terminals().await;
         app.sync_session_cursor();
+        app.sync_title();
         app.check_focus_alive();
+        // Expire a stale notification banner so the footer hints come back.
+        if let Some((_, since)) = &app.notif_banner {
+            if since.elapsed() >= NOTIF_BANNER_TTL {
+                app.notif_banner = None;
+            }
+        }
         if app.view != View::Focus && app.scroll != 0 {
             app.reset_scroll();
         }
@@ -2147,22 +3143,27 @@ async fn event_loop(
                 None => events_alive = false,
             },
             _ = tick.tick() => {
-                // Keep agent state fresh in views that show it, so an agent that exits on its
-                // own (e.g. `/exit`) is noticed promptly and Focus drops back to Split. Only the
-                // lane list needs this cadence; commits/repos refresh on git notifications.
-                if matches!(app.view, View::Focus | View::Split | View::Grid) {
-                    app.refresh_lanes().await;
-                }
+                // Refresh the lane list every second in *all* views: it keeps agent state fresh
+                // (an agent that exits on its own is noticed promptly, Focus drops back to Split)
+                // AND it's what drives notification edge-detection, which must work even when the
+                // user is looking at Fleet or another view. lane.list is cheap (~55ms) at 1Hz and
+                // only runs while the TUI is open; commits/repos still refresh on git events.
+                app.refresh_lanes().await;
             }
         }
     }
 }
 
-/// Suspend the TUI, attach to the lane's tmux window, then re-enter.
+/// Suspend the TUI, attach to the lane's tmux window (the selected agent's, when several run
+/// side by side), then re-enter.
 async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) {
+    let window = app.selected_window();
     let resp = app
         .client
-        .call("agent.target", Some(json!({ "lane_id": lane })))
+        .call(
+            "agent.target",
+            Some(json!({ "lane_id": lane, "window": window })),
+        )
         .await;
     let (target, available) = match resp {
         Ok(v) => (
@@ -2196,6 +3197,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
+    app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
 }
 
@@ -2217,6 +3219,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
+    app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
 }
 
@@ -2383,6 +3386,216 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_transitions() {
+        use AgentStatus::*;
+        // The headline alerts.
+        assert_eq!(
+            transition_kind(Some(Running), Some(Waiting)),
+            Some(NotifKind::NeedsYou)
+        );
+        assert_eq!(
+            transition_kind(None, Some(Waiting)),
+            Some(NotifKind::NeedsYou)
+        );
+        assert_eq!(
+            transition_kind(Some(Running), Some(RateLimited)),
+            Some(NotifKind::RateLimited)
+        );
+        assert_eq!(
+            transition_kind(Some(RateLimited), Some(Running)),
+            Some(NotifKind::Resumed)
+        );
+        // Gave up on the limit and now needs you.
+        assert_eq!(
+            transition_kind(Some(RateLimited), Some(Waiting)),
+            Some(NotifKind::NeedsYou)
+        );
+        // Went quiet (idle / ended / the agent went away).
+        assert_eq!(
+            transition_kind(Some(Running), Some(Idle)),
+            Some(NotifKind::Idle)
+        );
+        assert_eq!(transition_kind(Some(Waiting), None), Some(NotifKind::Idle));
+        // Non-events: you replied, work simply started, or nothing changed.
+        assert_eq!(transition_kind(Some(Waiting), Some(Running)), None);
+        assert_eq!(transition_kind(None, Some(Running)), None);
+        assert_eq!(transition_kind(Some(Idle), Some(Running)), None);
+        assert_eq!(transition_kind(Some(Waiting), Some(Waiting)), None);
+    }
+
+    /// A minimal real-or-inferred session, mirroring the daemon's `overlay_agents` literals.
+    fn sess(session_id: Option<&str>, status: AgentStatus, inferred: bool) -> AgentSession {
+        AgentSession {
+            id: 0,
+            agent: repomon_core::model::AgentKind::ClaudeCode,
+            repo_id: 1,
+            worktree_id: None,
+            started_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+            ended_at: None,
+            manifest_path: PathBuf::new(),
+            tool_call_count: 0,
+            title: None,
+            status,
+            external: false,
+            session_id: session_id.map(str::to_string),
+            resume_at: None,
+            inferred,
+            tmux_window: None,
+            last_message: None,
+        }
+    }
+
+    #[test]
+    fn session_statuses_keys_and_filters() {
+        use AgentStatus::*;
+        let sessions = vec![
+            sess(Some("a"), Waiting, false),
+            sess(Some("b"), RateLimited, false),
+            sess(None, Running, true), // inferred file-activity placeholder — excluded
+            sess(None, Running, false),
+        ];
+        let got = session_statuses(7, &sessions);
+        assert_eq!(got.len(), 3);
+        assert!(got.contains(&((7, SessKey::Transcript("a".into())), Waiting)));
+        assert!(got.contains(&((7, SessKey::Transcript("b".into())), RateLimited)));
+        assert!(got.contains(&((7, SessKey::Fallback), Running)));
+
+        // Defensive: a duplicate key keeps the higher-priority status.
+        let dup = vec![sess(None, Idle, false), sess(None, Waiting, false)];
+        assert_eq!(
+            session_statuses(7, &dup),
+            vec![((7, SessKey::Fallback), Waiting)]
+        );
+    }
+
+    #[test]
+    fn two_sessions_fire_independent_streams() {
+        use AgentStatus::*;
+        let k = |id: &str| (1, SessKey::Transcript(id.into()));
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+
+        // One agent finishes its turn while its lane-mate is still rate-limited. The old
+        // per-lane rollup saw "RateLimited" before and after and fired nothing — the masking
+        // this change exists to fix.
+        let prev: HashMap<_, _> = [(k("a"), Running), (k("b"), RateLimited)].into();
+        let now: HashMap<_, _> = [(k("a"), Waiting), (k("b"), RateLimited)].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![(k("a"), NotifKind::NeedsYou)]
+        );
+
+        // And the rate-limited lane-mate resumes independently.
+        let now2: HashMap<_, _> = [(k("a"), Waiting), (k("b"), Running)].into();
+        assert_eq!(
+            diff_session_transitions(&now, &now2, &live, &managed),
+            vec![(k("b"), NotifKind::Resumed)]
+        );
+    }
+
+    #[test]
+    fn disappearance_fires_idle_only_when_lane_lives() {
+        use AgentStatus::*;
+        let k = (1, SessKey::Transcript("a".into()));
+        let prev: HashMap<_, _> = [(k.clone(), Waiting)].into();
+        let now = HashMap::new();
+        let managed = HashSet::new();
+
+        let live: HashSet<LaneId> = [1].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![(k, NotifKind::Idle)]
+        );
+        // The whole lane went away (deleted): not an agent going quiet.
+        assert!(diff_session_transitions(&prev, &now, &HashSet::new(), &managed).is_empty());
+    }
+
+    #[test]
+    fn fallback_handoff_does_not_fire_idle() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [1].into();
+        let prev: HashMap<_, _> = [((1, SessKey::Fallback), Running)].into();
+        let now: HashMap<_, _> = [((1, SessKey::Transcript("a".into())), Running)].into();
+
+        // The managed spawn's transcript became parseable: Fallback hands off to Transcript
+        // within one refresh. The agent didn't stop, so nothing fires.
+        let managed: HashSet<LaneId> = [1].into();
+        assert!(diff_session_transitions(&prev, &now, &live, &managed).is_empty());
+
+        // But with no managed session left in the lane, a vanished fallback is a real stop.
+        let gone = HashMap::new();
+        assert_eq!(
+            diff_session_transitions(&prev, &gone, &live, &HashSet::new()),
+            vec![((1, SessKey::Fallback), NotifKind::Idle)]
+        );
+    }
+
+    #[test]
+    fn new_session_already_waiting_fires_needs_you() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+        let prev = HashMap::new();
+        let k = (1, SessKey::Transcript("a".into()));
+
+        // A second agent appearing mid-run already waiting (e.g. a parallel session that
+        // finished between refreshes) is exactly the alert the user wants.
+        let waiting: HashMap<_, _> = [(k.clone(), Waiting)].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &waiting, &live, &managed),
+            vec![(k.clone(), NotifKind::NeedsYou)]
+        );
+        // Appearing already-running is just work starting; stay quiet.
+        let running: HashMap<_, _> = [(k, Running)].into();
+        assert!(diff_session_transitions(&prev, &running, &live, &managed).is_empty());
+    }
+
+    #[test]
+    fn attention_rank_orders_urgency() {
+        use AgentStatus::*;
+        // Waiting always tops; a rate-limited agent only needs you when nothing will resume it.
+        assert_eq!(attention_rank(&[sess(Some("a"), Waiting, false)], true), 0);
+        assert_eq!(
+            attention_rank(&[sess(Some("a"), RateLimited, false)], false),
+            1
+        );
+        assert_eq!(
+            attention_rank(&[sess(Some("a"), RateLimited, false)], true),
+            2
+        );
+        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 2);
+        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 3);
+        // The most urgent session wins; inferred placeholders never rank.
+        assert_eq!(
+            attention_rank(
+                &[
+                    sess(Some("a"), Running, false),
+                    sess(Some("b"), Waiting, false)
+                ],
+                true
+            ),
+            0
+        );
+        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 3);
+        assert_eq!(attention_rank(&[], true), 3);
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_early_contiguous() {
+        // Contiguous prefix beats a gappy subsequence; case-insensitive; misses are None.
+        let hay = "repomon/feat-x";
+        assert_eq!(fuzzy_score(hay, ""), Some(0));
+        assert_eq!(fuzzy_score(hay, "repo"), Some(0));
+        assert!(fuzzy_score(hay, "repo") < fuzzy_score(hay, "rmn"));
+        assert!(fuzzy_score(hay, "feat") < fuzzy_score(hay, "ftx"));
+        assert_eq!(fuzzy_score(hay, "REPO"), fuzzy_score(hay, "repo"));
+        assert_eq!(fuzzy_score(hay, "zzz"), None);
+        // Later starts cost more, so "feat" in a later position scores worse than at the front.
+        assert!(fuzzy_score("feat-x", "feat") < fuzzy_score("repomon/feat-x", "feat"));
+    }
 
     #[test]
     fn double_click_needs_same_lane_within_window() {

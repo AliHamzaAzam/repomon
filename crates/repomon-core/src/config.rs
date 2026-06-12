@@ -47,6 +47,31 @@ pub struct Config {
     pub auto_continue: bool,
     /// What to type when auto-continuing a rate-limited agent (sent with Enter).
     pub auto_continue_message: String,
+    /// Prompt (with a quick agent picker) every time you spawn an agent on a lane (`e`). When
+    /// off, `e` spawns the configured default agent immediately.
+    pub spawn_prompt: bool,
+    /// Master switch for desktop/in-app notifications on agent state changes. When off, no
+    /// individual `notify_*` trigger fires.
+    pub notify_enabled: bool,
+    /// Notify when an agent finishes its turn / is waiting on you (`Running` → `Waiting`).
+    pub notify_needs_you: bool,
+    /// Notify when an agent pauses on a usage/rate limit.
+    pub notify_rate_limited: bool,
+    /// Notify when a rate-limited agent is auto-continued and resumes work.
+    pub notify_resumed: bool,
+    /// Notify when an agent goes idle / its session ends (off by default — can be noisy).
+    pub notify_idle: bool,
+    /// Play the system notification sound with each desktop notification.
+    pub notify_sound: bool,
+    /// Include the agent's actual last message (what it said/asked) in notification bodies,
+    /// instead of just the original task title.
+    pub notify_show_why: bool,
+    /// Collapse a burst of simultaneous alerts into one "N agents need attention" popup
+    /// (each event still lands individually in the in-app feed).
+    pub notify_coalesce: bool,
+    /// Make desktop popups click-to-focus the terminal (uses `terminal-notifier` when
+    /// installed; falls back to plain popups otherwise).
+    pub notify_click_focus: bool,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
 }
@@ -63,6 +88,16 @@ impl Default for Config {
             agents: HashMap::new(),
             auto_continue: true,
             auto_continue_message: "continue".to_string(),
+            spawn_prompt: true,
+            notify_enabled: true,
+            notify_needs_you: true,
+            notify_rate_limited: true,
+            notify_resumed: true,
+            notify_idle: false,
+            notify_sound: true,
+            notify_show_why: true,
+            notify_coalesce: true,
+            notify_click_focus: true,
             repos: HashMap::new(),
         }
     }

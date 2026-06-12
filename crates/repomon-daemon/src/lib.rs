@@ -38,6 +38,9 @@ pub struct Ctx {
     pub events: pubsub::EventTx,
     /// Lanes the TUI currently has visible — fast-polled for output (M9).
     pub viewport: Mutex<Vec<LaneId>>,
+    /// Which agent window the focused lane should stream, when the TUI has a specific session
+    /// selected (Tab in Focus/Split). Lanes not named here stream their first slot.
+    pub viewport_focus: Mutex<Option<(LaneId, String)>>,
     /// Cache of how many live `claude` processes have each working dir (ps/lsof, ~2s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
     pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
@@ -82,6 +85,7 @@ impl Ctx {
             db_path,
             events,
             viewport: Mutex::new(Vec::new()),
+            viewport_focus: Mutex::new(None),
             live_cwds: Mutex::new(None),
             rate_limits: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
@@ -108,7 +112,9 @@ impl Ctx {
 /// and push `event.agent.output` deltas. When nothing is visible, this is nearly free.
 pub async fn stream_output(ctx: Arc<Ctx>) {
     use std::collections::HashMap;
-    let mut last: HashMap<LaneId, String> = HashMap::new();
+    // Last pushed (window, content) per lane — a window switch (Tab between a lane's agents)
+    // re-pushes even if the new pane happens to look identical.
+    let mut last: HashMap<LaneId, (String, String)> = HashMap::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         tick.tick().await;
@@ -117,16 +123,27 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             last.clear();
             continue;
         }
+        let focus = ctx.viewport_focus.lock().await.clone();
         last.retain(|k, _| lanes.contains(k));
         for lane in lanes {
-            let tmux = ctx.tmux.clone();
-            let content = match tokio::task::spawn_blocking(move || tmux.capture(lane, None)).await
-            {
-                Ok(Ok(c)) => c,
-                _ => continue,
+            // The focused lane streams its selected agent's window; others their first slot.
+            let window = match &focus {
+                Some((l, w)) if *l == lane => w.clone(),
+                _ => TmuxRuntime::window_name(lane),
             };
-            if last.get(&lane).map(|c| c != &content).unwrap_or(true) {
-                last.insert(lane, content.clone());
+            let tmux = ctx.tmux.clone();
+            let w = window.clone();
+            let content =
+                match tokio::task::spawn_blocking(move || tmux.capture_named(&w, None)).await {
+                    Ok(Ok(c)) => c,
+                    _ => continue,
+                };
+            let fresh = last
+                .get(&lane)
+                .map(|(pw, pc)| pw != &window || pc != &content)
+                .unwrap_or(true);
+            if fresh {
+                last.insert(lane, (window, content.clone()));
                 ctx.broadcast(
                     pubsub::topic::AGENT_OUTPUT,
                     serde_json::json!({ "lane_id": lane, "content": content }),
