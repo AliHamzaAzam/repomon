@@ -127,6 +127,11 @@ async fn main() {
         ctx.clone(),
     ));
 
+    // Daemon-side notification engine for remote clients (event.notification + push). Spawned
+    // unconditionally — it self-gates per tick on `[remote] enabled`, so flipping the config
+    // live (config.set) starts/stops it without a restart.
+    tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));
+
     // Index commit history in the background (timeline / sessions / search).
     {
         let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());

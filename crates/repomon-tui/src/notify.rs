@@ -1,54 +1,19 @@
-//! Desktop + in-app notifications for agent state changes.
+//! Desktop + in-app notification *delivery* for agent state changes.
 //!
 //! The TUI watches each agent session's status across refreshes (see
-//! `App::detect_notifications`) and, on a meaningful transition, composes a notification here:
-//! a native macOS popup (via `osascript`, fired on a short-lived thread so it never blocks the
-//! event loop) plus an in-app banner and a scrollable history feed. Edge detection and the
-//! config toggles live in `app`.
+//! `App::detect_notifications`) and, on a meaningful transition, delivers a notification here:
+//! a native macOS popup (terminal-notifier/`osascript`, fired on a short-lived thread so it
+//! never blocks the event loop) plus an in-app banner and a scrollable history feed. The pure
+//! parts — kinds, edge detection, text composition — live in `repomon_core::notify`, shared
+//! with the daemon's remote engine; the config toggles live in `app`.
 
 use chrono::{DateTime, Local};
 
-use repomon_core::model::{AgentSession, Lane, LaneId};
+use repomon_core::model::LaneId;
 
-/// The kind of agent state-change that fired a notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NotifKind {
-    /// Agent finished its turn / is waiting on you.
-    NeedsYou,
-    /// Agent paused on a usage/rate limit.
-    RateLimited,
-    /// A rate-limited agent was auto-continued and resumed work.
-    Resumed,
-    /// Agent went idle or its session ended.
-    Idle,
-}
-
-impl NotifKind {
-    fn glyph(self) -> &'static str {
-        match self {
-            NotifKind::NeedsYou => "⏸",
-            NotifKind::RateLimited => "⏳",
-            NotifKind::Resumed => "▶",
-            NotifKind::Idle => "○",
-        }
-    }
-    fn verb(self) -> &'static str {
-        match self {
-            NotifKind::NeedsYou => "needs you",
-            NotifKind::RateLimited => "hit a usage limit",
-            NotifKind::Resumed => "resumed",
-            NotifKind::Idle => "went idle",
-        }
-    }
-    fn verb_plural(self) -> &'static str {
-        match self {
-            NotifKind::NeedsYou => "need you",
-            NotifKind::RateLimited => "hit a usage limit",
-            NotifKind::Resumed => "resumed",
-            NotifKind::Idle => "went idle",
-        }
-    }
-}
+// The pure heart (kinds, edge detection, text composition) lives in core, shared with the
+// daemon's remote notification engine; this module keeps the local delivery.
+pub use repomon_core::notify::{compose, compose_burst, NotifKind};
 
 /// A fired notification, kept in the in-app history feed.
 #[derive(Debug, Clone)]
@@ -64,103 +29,6 @@ pub struct NotifEvent {
     pub read: bool,
     pub title: String,
     pub body: String,
-}
-
-/// Build the `(title, body)` for a notification about one of `lane`'s sessions. The body
-/// carries the detail that makes the alert actionable: branch, which of the lane's
-/// side-by-side agents fired (`slot` = (index, count), tagged only when several run), the
-/// *why* — the agent's actual last message when `show_why` is on (falling back to what you
-/// originally asked) — tool count, and any reset time. `sess` is `None` when the session
-/// vanished from the snapshot (its disappearance was the trigger) — the text degrades to a
-/// generic "agent" line rather than borrowing another session's name and title.
-pub fn compose(
-    kind: NotifKind,
-    lane: &Lane,
-    sess: Option<&AgentSession>,
-    slot: Option<(usize, usize)>,
-    show_why: bool,
-) -> (String, String) {
-    let agent = sess
-        .map(|s| s.agent.short().to_string())
-        .unwrap_or_default();
-    let agent = if agent.is_empty() {
-        "agent".into()
-    } else {
-        agent
-    };
-    let title = format!(
-        "{} {} {} — {}",
-        kind.glyph(),
-        agent,
-        kind.verb(),
-        lane.repo.name
-    );
-
-    let mut parts = vec![lane
-        .state
-        .branch
-        .clone()
-        .unwrap_or_else(|| lane.worktree.name.clone())];
-    if let Some((i, n)) = slot {
-        if n > 1 {
-            parts.push(format!("agent {}/{}", i + 1, n));
-        }
-    }
-    let why = show_why
-        .then(|| sess.and_then(|s| s.last_message.as_deref()))
-        .flatten();
-    if let Some(t) = why.or_else(|| sess.and_then(|s| s.title.as_deref())) {
-        let t = t.trim();
-        if !t.is_empty() {
-            parts.push(format!("“{}”", truncate(t, 100)));
-        }
-    }
-    if let Some(s) = sess {
-        if s.tool_call_count > 0 {
-            parts.push(format!("{} tools", s.tool_call_count));
-        }
-    }
-    if kind == NotifKind::RateLimited {
-        if let Some(r) = sess.and_then(|s| s.resume_at) {
-            parts.push(format!(
-                "resets {}",
-                r.with_timezone(&Local).format("%H:%M")
-            ));
-        }
-    }
-    (title, parts.join(" · "))
-}
-
-/// One popup for a burst of simultaneous alerts: the title counts them (with the kind's glyph
-/// and verb when the whole burst is one kind, a generic ⚑ otherwise), the body lists the first
-/// few lanes. `fires` pairs each alert's `repo/worktree` label with its kind.
-pub fn compose_burst(fires: &[(String, NotifKind)]) -> (String, String) {
-    let n = fires.len();
-    let first = fires.first().map(|(_, k)| *k);
-    let uniform = fires.iter().all(|(_, k)| Some(*k) == first);
-    let title = match (uniform, first) {
-        (true, Some(k)) => format!("{} {} agents {}", k.glyph(), n, k.verb_plural()),
-        _ => format!("⚑ {n} agents need attention"),
-    };
-    let mut body = fires
-        .iter()
-        .take(3)
-        .map(|(l, _)| l.as_str())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if n > 3 {
-        body.push_str(&format!(" · +{} more", n - 3));
-    }
-    (title, body)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 /// Play the notification chime once, off-thread — a preview used when the user enables sound in
@@ -286,124 +154,6 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use repomon_core::model::{
-        AgentKind, AgentSession, AgentStatus, Repo, Worktree, WorktreeState,
-    };
-
-    fn lane() -> Lane {
-        let head = gix::ObjectId::null(gix::hash::Kind::Sha1);
-        Lane {
-            id: 7,
-            repo: Repo {
-                id: 1,
-                path: "/code/alpha".into(),
-                name: "alpha".into(),
-                added_at: Utc::now(),
-                worktree_root_template: None,
-            },
-            worktree: Worktree {
-                id: 1,
-                repo_id: 1,
-                path: "/code/alpha".into(),
-                branch: Some("main".into()),
-                head,
-                is_main: true,
-                name: "main".into(),
-            },
-            state: WorktreeState {
-                worktree_id: 1,
-                head,
-                branch: Some("feat/x".into()),
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                dirty: Default::default(),
-                last_commit_at: None,
-                locked: false,
-                prunable: false,
-                last_change_at: None,
-            },
-            agent_sessions: vec![],
-            last_activity_at: Utc::now(),
-            pinned: false,
-        }
-    }
-
-    fn sess() -> AgentSession {
-        AgentSession {
-            id: 0,
-            agent: AgentKind::ClaudeCode,
-            repo_id: 1,
-            worktree_id: Some(1),
-            started_at: Utc::now(),
-            last_activity_at: Utc::now(),
-            ended_at: None,
-            manifest_path: std::path::PathBuf::new(),
-            tool_call_count: 3,
-            title: Some("build the parser".into()),
-            status: AgentStatus::Waiting,
-            external: false,
-            session_id: Some("abc".into()),
-            resume_at: None,
-            inferred: false,
-            tmux_window: None,
-            last_message: Some("Should I also update the integration tests?".into()),
-        }
-    }
-
-    #[test]
-    fn compose_shows_the_why_and_the_slot() {
-        let (title, body) = compose(
-            NotifKind::NeedsYou,
-            &lane(),
-            Some(&sess()),
-            Some((1, 3)),
-            true,
-        );
-        assert!(
-            title.contains("needs you") && title.contains("alpha"),
-            "{title}"
-        );
-        assert!(body.contains("agent 2/3"), "{body}");
-        assert!(body.contains("Should I also update"), "{body}");
-        assert!(
-            !body.contains("build the parser"),
-            "why replaces the ask: {body}"
-        );
-    }
-
-    #[test]
-    fn compose_without_why_falls_back_to_the_ask_and_skips_solo_slot() {
-        let (_, body) = compose(
-            NotifKind::NeedsYou,
-            &lane(),
-            Some(&sess()),
-            Some((0, 1)),
-            false,
-        );
-        assert!(body.contains("build the parser"), "{body}");
-        assert!(!body.contains("agent 1/1"), "{body}");
-    }
-
-    #[test]
-    fn burst_counts_kinds_and_overflow() {
-        let f = |l: &str, k: NotifKind| (l.to_string(), k);
-        let (t, b) = compose_burst(&[
-            f("alpha/main", NotifKind::NeedsYou),
-            f("beta/x", NotifKind::NeedsYou),
-        ]);
-        assert_eq!(t, "⏸ 2 agents need you");
-        assert_eq!(b, "alpha/main · beta/x");
-        let (t, b) = compose_burst(&[
-            f("a/1", NotifKind::NeedsYou),
-            f("b/2", NotifKind::Idle),
-            f("c/3", NotifKind::NeedsYou),
-            f("d/4", NotifKind::NeedsYou),
-        ]);
-        assert_eq!(t, "⚑ 4 agents need attention");
-        assert!(b.ends_with("+1 more"), "{b}");
-    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -419,15 +169,6 @@ mod tests {
         // tmux masks the real terminal; unknowns get no -activate.
         assert_eq!(terminal_bundle_id("tmux"), None);
         assert_eq!(terminal_bundle_id(""), None);
-    }
-
-    #[test]
-    fn truncate_adds_ellipsis_only_when_over() {
-        assert_eq!(truncate("short", 60), "short");
-        let t = truncate("0123456789", 5);
-        assert_eq!(t.chars().count(), 5);
-        assert!(t.ends_with('…'));
-        assert_eq!(t, "0123…");
     }
 
     #[cfg(target_os = "macos")]

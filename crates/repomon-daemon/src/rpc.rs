@@ -315,11 +315,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
 
         // ---- lanes ----
-        "lane.list" => {
-            let mut lanes = ctx.lanes.list().await.map_err(internal)?;
-            overlay_agents(ctx, &mut lanes).await;
-            to_value(lanes)
-        }
+        "lane.list" => to_value(lanes_with_agents(ctx).await?),
         "lane.get" => {
             let p: LaneId = parse(params)?;
             let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
@@ -970,6 +966,14 @@ const MAX_SESSIONS_PER_LANE: usize = 8;
 /// agent in it — the fallback that surfaces Claude Code worktree-isolated subagents, which leave
 /// no transcript or process of their own. Short, so the indicator tracks actual work.
 const ACTIVITY_WINDOW_SECS: i64 = 90;
+
+/// The full lane list with live agent sessions overlaid — the composite `lane.list` serves.
+/// Shared with the daemon-side notification watcher (`notify_watch`), which diffs it.
+pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
+    let mut lanes = ctx.lanes.list().await.map_err(internal)?;
+    overlay_agents(ctx, &mut lanes).await;
+    Ok(lanes)
+}
 
 async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();

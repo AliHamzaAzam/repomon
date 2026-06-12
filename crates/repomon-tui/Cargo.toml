@@ -30,6 +30,3 @@ ansi-to-tui = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# Only for building Lane/Worktree fixtures (ObjectId) in unit tests; already compiled anyway
-# via repomon-core.
-gix = { workspace = true }

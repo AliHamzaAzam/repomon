@@ -2391,7 +2391,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "gix",
  "ratatui",
  "repomon-core",
  "repomon-daemon",

@@ -5,6 +5,7 @@
 //! wrapper around [`serve`]; the integration tests drive [`Ctx`] + [`serve`] directly.
 
 pub mod auto_continue;
+pub mod notify_watch;
 pub mod pubsub;
 pub mod remote;
 pub mod rpc;
