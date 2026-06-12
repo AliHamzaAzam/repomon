@@ -923,6 +923,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
 
         // ---- subscription is handled in the socket layer ----
         "subscribe" => Ok(Value::Null),
+        // Liveness probe for remote clients (the WS bridge) and a cheap connectivity check.
+        "ping" => Ok(json!("pong")),
         "viewport.set" => {
             let p: ViewportSet = parse(params)?;
             *ctx.viewport.lock().await = p.lane_ids;

@@ -99,6 +99,29 @@ async fn main() {
     // Stream visible agents' output to subscribed TUIs.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
+    // Remote-access bridge (companion apps over Tailscale) — only when explicitly enabled
+    // and a token exists; without both, no network listener is ever opened.
+    {
+        let remote = ctx.config.read().await.remote.clone();
+        if remote.enabled {
+            match (remote.bind, remote.token) {
+                (Some(bind), Some(token)) if !token.is_empty() => {
+                    let ctx_r = ctx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            repomon_daemon::remote::serve_remote(ctx_r, &bind, token).await
+                        {
+                            tracing::error!("remote bridge failed: {e}");
+                        }
+                    });
+                }
+                _ => tracing::warn!(
+                    "[remote] enabled but bind/token missing — run `repomon remote enable`"
+                ),
+            }
+        }
+    }
+
     // Auto-continue agents paused on a usage limit (resume at the reset time).
     tokio::spawn(repomon_daemon::auto_continue::auto_continue_watcher(
         ctx.clone(),

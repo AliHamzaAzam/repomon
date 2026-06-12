@@ -74,6 +74,9 @@ pub struct Config {
     pub notify_click_focus: bool,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
+    /// Remote access: the WebSocket JSON-RPC bridge that companion apps (iOS) connect
+    /// through. Off by default; `repomon remote enable` fills it in.
+    pub remote: RemoteConfig,
 }
 
 impl Default for Config {
@@ -99,6 +102,7 @@ impl Default for Config {
             notify_coalesce: true,
             notify_click_focus: true,
             repos: HashMap::new(),
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -108,6 +112,20 @@ impl Default for Config {
 #[serde(default)]
 pub struct RepoConfig {
     pub worktree_template: Option<String>,
+}
+
+/// Remote-access (companion app) settings: a WebSocket listener speaking the same JSON-RPC
+/// protocol as the Unix socket, gated by a bearer token. Bind it to a private address —
+/// typically the machine's Tailscale IP — never the open internet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    /// Serve the WebSocket bridge.
+    pub enabled: bool,
+    /// Bind address, e.g. the tailnet IP: `"100.101.102.103:7878"`.
+    pub bind: Option<String>,
+    /// The bearer token clients must present at the WebSocket handshake.
+    pub token: Option<String>,
 }
 
 impl Config {
