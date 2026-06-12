@@ -17,15 +17,15 @@ use crate::notify::NotifKind;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · f find · ! urgent · g needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
-    "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g next · f find  ·  ←/esc back";
+    "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str =
-    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g next · f find  ·  spc/esc fleet · q quit";
+    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g/G next · f find  ·  spc/esc fleet · q quit";
 const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
@@ -188,7 +188,7 @@ fn render_settings(f: &mut Frame, app: &App) {
         s.default_agent.clone()
     };
     let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-    let items: [(&str, String, &str); 12] = [
+    let items: [(&str, String, &str); 15] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
         ("auto-continue", onoff(s.auto_continue), "space toggles"),
@@ -218,6 +218,21 @@ fn render_settings(f: &mut Frame, app: &App) {
         ("  · auto-resumed", onoff(s.notify_resumed), "space toggles"),
         ("  · went idle", onoff(s.notify_idle), "space toggles"),
         ("  · sound", onoff(s.notify_sound), "space toggles"),
+        (
+            "  · show agent's question",
+            onoff(s.notify_show_why),
+            "body = its last message",
+        ),
+        (
+            "  · coalesce bursts",
+            onoff(s.notify_coalesce),
+            "one popup for N alerts",
+        ),
+        (
+            "  · click focuses terminal",
+            onoff(s.notify_click_focus),
+            "needs terminal-notifier",
+        ),
     ];
     // Size the columns to the content so values and hints line up no matter how long a label is:
     // the name column fits the widest label (+gap), the value column fits the default worktree
@@ -522,16 +537,24 @@ fn notif_style(app: &App, kind: NotifKind) -> Style {
 }
 
 fn render_notifications(f: &mut Frame, app: &App) {
+    use ratatui::style::Modifier;
     let area = f.area();
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let unread = app.unread_notifs();
+    let counts = if unread > 0 {
+        format!(
+            "{} event(s) · {} new · newest first",
+            app.notifications.len(),
+            unread
+        )
+    } else {
+        format!("{} event(s) · newest first", app.notifications.len())
+    };
     let mut lines = vec![
         header_line(area.width, "REPOMON · NOTIFICATIONS", &fmt_clock(), app),
         rule(area.width, true, app),
         Line::raw(""),
-        Line::from(Span::styled(
-            format!("{} event(s) · newest first", app.notifications.len()),
-            app.theme.dim(),
-        )),
+        Line::from(Span::styled(counts, app.theme.dim())),
         Line::raw(""),
     ];
     if app.notifications.is_empty() {
@@ -540,32 +563,45 @@ fn render_notifications(f: &mut Frame, app: &App) {
         ));
     }
     // Two lines per event (title + detail); reserve room for the header block already pushed.
-    let budget = (rows[0].height as usize).saturating_sub(lines.len()) / 2;
+    let budget = ((rows[0].height as usize).saturating_sub(lines.len()) / 2).max(1);
+    // Scroll the window just enough to keep the cursor (▸) on screen.
+    let skip = app.notif_sel.saturating_sub(budget.saturating_sub(1));
     for (i, ev) in app
         .notifications
         .iter()
         .rev()
-        .skip(app.notif_scroll)
-        .take(budget)
         .enumerate()
+        .skip(skip)
+        .take(budget)
     {
-        // The top row is the one ↵ opens (see `App::notifications_key`).
-        let mark = if i == 0 { "▸ " } else { "  " };
+        let mark = if i == app.notif_sel { "▸ " } else { "  " };
+        // Unseen events keep a ● until the feed visit ends (they arrived while it was open).
+        let (dot, dot_style) = if ev.read {
+            ("  ", app.theme.muted())
+        } else {
+            ("● ", app.theme.needs_you())
+        };
+        let title_style = if ev.read {
+            notif_style(app, ev.kind)
+        } else {
+            notif_style(app, ev.kind).add_modifier(Modifier::BOLD)
+        };
         lines.push(Line::from(vec![
             Span::styled(mark, app.theme.accented()),
+            Span::styled(dot, dot_style),
             Span::styled(ev.when.format("%H:%M:%S").to_string(), app.theme.muted()),
             Span::raw("  "),
-            Span::styled(ev.title.clone(), notif_style(app, ev.kind)),
+            Span::styled(ev.title.clone(), title_style),
         ]));
         lines.push(Line::from(vec![
-            Span::raw("            "),
+            Span::raw("              "),
             Span::styled(ev.body.clone(), app.theme.dim()),
         ]));
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
     f.render_widget(
         footer(
-            "↑↓ scroll · ↵ open lane · c clear  ·  1 fleet · ←/esc back · q quit",
+            "↑↓ move · ↵ open · t attach · d dismiss · c clear  ·  1 fleet · ←/esc back · q quit",
             app,
         ),
         rows[1],
@@ -1596,12 +1632,20 @@ fn footer(keys: &str, app: &App) -> Paragraph<'static> {
 }
 
 fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
-    // The view title is the accent; the clock on the right is muted.
-    let used = left.chars().count() + right.chars().count();
+    // The view title is the accent; the clock on the right is muted. Unseen notifications get
+    // a ⚑ badge beside the clock, visible from every view (`5` opens the feed and clears it).
+    let unread = app.unread_notifs();
+    let badge = if unread > 0 {
+        format!("⚑ {unread} · ")
+    } else {
+        String::new()
+    };
+    let used = left.chars().count() + badge.chars().count() + right.chars().count();
     let pad = (width as usize).saturating_sub(used);
     Line::from(vec![
         Span::styled(left.to_string(), app.theme.header_style()),
         Span::raw(" ".repeat(pad)),
+        Span::styled(badge, app.theme.needs_you()),
         Span::styled(right.to_string(), app.theme.muted()),
     ])
 }

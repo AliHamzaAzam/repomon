@@ -173,6 +173,48 @@ async fn renders_fleet_with_a_registered_repo() {
         "strip not stretched to width:\n{tl}"
     );
 
+    // Notifications: the unread ⚑ badge shows in every view's header; the feed renders a
+    // cursor (▸) on the selected row, an unread dot, the new-count, and the action footer.
+    use repomon_tui::notify::{NotifEvent, NotifKind};
+    app.notifications.push_back(NotifEvent {
+        when: chrono::Local::now(),
+        kind: NotifKind::NeedsYou,
+        lane_id: app.lanes[0].id,
+        session_id: None,
+        read: true,
+        title: "⏸ claude needs you — alpha".into(),
+        body: "main · “want me to continue?”".into(),
+    });
+    app.notifications.push_back(NotifEvent {
+        when: chrono::Local::now(),
+        kind: NotifKind::RateLimited,
+        lane_id: app.lanes[0].id,
+        session_id: None,
+        read: false,
+        title: "⏳ claude hit a usage limit — beta".into(),
+        body: "main · resets 06:00".into(),
+    });
+    app.view = View::Fleet;
+    let fl = render_to_string(&app, 100, 40).unwrap();
+    assert!(fl.contains("⚑ 1"), "unread badge missing:\n{fl}");
+    app.view = View::Notifications;
+    app.notif_sel = 1; // cursor on the older (read) event, not the top row
+    let nf = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        nf.contains("2 event(s) · 1 new"),
+        "new count missing:\n{nf}"
+    );
+    assert!(nf.contains("● "), "unread dot missing:\n{nf}");
+    assert!(nf.contains("t attach"), "action footer missing:\n{nf}");
+    let cursor_row = nf
+        .lines()
+        .find(|l| l.trim_start().starts_with('▸'))
+        .expect("cursor row missing");
+    assert!(
+        cursor_row.contains("needs you — alpha"),
+        "cursor not on the selected (older) event:\n{nf}"
+    );
+
     // Settings: columns line up even with the longest label and value present.
     app.settings.accent = "amber".into();
     app.settings.default_agent = "claude-work".into();

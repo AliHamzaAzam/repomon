@@ -59,6 +59,9 @@ pub enum Action {
     AttachTerminal,
     ToggleMouse,
     ToggleAutoContinue,
+    /// Like [`Action::JumpNeedsYou`], but goes all the way: jump to the alerting lane, select
+    /// the session that fired, and attach into its tmux pane.
+    AttachNeedsYou,
     /// Open the fuzzy lane switcher.
     FindLane,
     /// Show only lanes needing attention (waiting / stuck on a limit).
@@ -80,6 +83,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('c') => Some(Action::CdToLane),
         KeyCode::Char('g') => Some(Action::JumpNeedsYou),
+        KeyCode::Char('G') => Some(Action::AttachNeedsYou),
         KeyCode::Char('a') => Some(Action::Goto(View::AddRepo)),
         KeyCode::Char('A') => Some(Action::Goto(View::Agents)),
         KeyCode::Char(',') => Some(Action::Goto(View::Settings)),

@@ -111,6 +111,9 @@ pub struct Settings {
     pub notify_resumed: bool,
     pub notify_idle: bool,
     pub notify_sound: bool,
+    pub notify_show_why: bool,
+    pub notify_coalesce: bool,
+    pub notify_click_focus: bool,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -119,7 +122,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 12;
+const SETTINGS_COUNT: usize = 15;
 
 pub struct App {
     pub client: DaemonClient,
@@ -196,8 +199,9 @@ pub struct App {
     notif_debounce: HashMap<(LaneId, SessKey, NotifKind), Instant>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
-    /// Scroll offset (rows from the top) in the Notifications view.
-    pub notif_scroll: usize,
+    /// Cursor in the Notifications view: offset into the feed, newest-first (0 = newest).
+    /// The render derives its scroll window from this so the cursor stays visible.
+    pub notif_sel: usize,
     /// A transient banner shown above the footer after a notification fires; auto-clears.
     pub notif_banner: Option<(String, Instant)>,
     /// Spawn-picker state: which agent row is highlighted, the lane to spawn into, and the view
@@ -305,6 +309,9 @@ impl App {
                 notify_resumed: true,
                 notify_idle: false,
                 notify_sound: true,
+                notify_show_why: true,
+                notify_coalesce: true,
+                notify_click_focus: true,
                 ..Settings::default()
             },
             settings_idx: 0,
@@ -314,7 +321,7 @@ impl App {
             notif_seeded: false,
             notif_debounce: HashMap::new(),
             notifications: VecDeque::new(),
-            notif_scroll: 0,
+            notif_sel: 0,
             notif_banner: None,
             spawn_pick_idx: 0,
             spawn_pick_lane: None,
@@ -482,6 +489,33 @@ impl App {
         self.status = msg;
     }
 
+    /// `G`: jump_attention, then go all the way into the pane — select the session the fresh
+    /// banner identified (if any) and request a tmux attach. Does nothing extra when the jump
+    /// found no lane blocked on you.
+    fn jump_attention_attach(&mut self) {
+        let banner_sess = self
+            .notif_banner
+            .as_ref()
+            .filter(|(_, t)| t.elapsed() < NOTIF_BANNER_TTL)
+            .and_then(|_| self.notifications.back())
+            .map(|e| (e.lane_id, e.session_id.clone()));
+        self.jump_attention();
+        let Some((lane_id, needs)) = self
+            .selected_lane()
+            .map(|l| (l.id, self.lane_needs_attention(l)))
+        else {
+            return;
+        };
+        let from_banner = banner_sess.as_ref().is_some_and(|(id, _)| *id == lane_id);
+        if !needs && !from_banner {
+            return; // the jump didn't land on an alerting lane — stay put, no attach
+        }
+        if let Some((_, sid)) = banner_sess.filter(|(id, _)| *id == lane_id) {
+            self.select_session(lane_id, sid.as_deref());
+        }
+        self.attach_request = Some(lane_id);
+    }
+
     /// Open the fuzzy lane switcher, remembering where to return on cancel.
     fn enter_lane_jump(&mut self) {
         self.jump_query.clear();
@@ -622,8 +656,28 @@ impl App {
             prev.contains_key(&(*lane, sess.clone())) || t.elapsed() < NOTIF_DEBOUNCE
         });
 
+        // A burst (≥2 alerts in one tick) coalesces into a single popup + banner so the desktop
+        // isn't spammed; each event still lands individually (and unread) in the history feed.
+        let coalesce = self.settings.notify_coalesce && fires.len() >= 2;
+        if coalesce {
+            let labels: Vec<(String, NotifKind)> = fires
+                .iter()
+                .filter_map(|((id, _), kind)| {
+                    let l = self.lanes.iter().find(|l| l.id == *id)?;
+                    Some((format!("{}/{}", l.repo.name, l.worktree.name), *kind))
+                })
+                .collect();
+            let (title, body) = notify::compose_burst(&labels);
+            notify::send_native(
+                &title,
+                &body,
+                self.settings.notify_sound,
+                self.settings.notify_click_focus,
+            );
+            self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        }
         for ((lane, key), kind) in fires {
-            self.fire_notification(lane, &key, kind);
+            self.fire_notification(lane, &key, kind, coalesce);
         }
     }
 
@@ -641,29 +695,51 @@ impl App {
     }
 
     /// Compose + deliver a notification about one session: native popup, banner, history entry.
-    fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind) {
+    /// `quiet` records the event in the feed only — the popup/banner were already covered by a
+    /// coalesced burst summary.
+    fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind, quiet: bool) {
         // Compose under an immutable borrow that ends before we mutate `self`. The session may
         // be gone when its disappearance was the trigger — compose degrades to a generic line.
-        let Some((title, body)) = self
-            .lanes
-            .iter()
-            .find(|l| l.id == id)
-            .map(|l| notify::compose(kind, l, session_by_key(l, key)))
-        else {
+        let Some((title, body, session_id)) = self.lanes.iter().find(|l| l.id == id).map(|l| {
+            let sess = session_by_key(l, key);
+            // Which of the lane's side-by-side agents this is (1-based in the body when >1).
+            let slot = sess.and_then(|hit| {
+                let real: Vec<&AgentSession> =
+                    l.agent_sessions.iter().filter(|s| !s.inferred).collect();
+                let i = real.iter().position(|s| std::ptr::eq(*s, hit))?;
+                Some((i, real.len()))
+            });
+            let (t, b) = notify::compose(kind, l, sess, slot, self.settings.notify_show_why);
+            (t, b, sess.and_then(|s| s.session_id.clone()))
+        }) else {
             return;
         };
-        notify::send_native(&title, &body, self.settings.notify_sound);
-        self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        if !quiet {
+            notify::send_native(
+                &title,
+                &body,
+                self.settings.notify_sound,
+                self.settings.notify_click_focus,
+            );
+            self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        }
         self.notifications.push_back(NotifEvent {
             when: chrono::Local::now(),
             kind,
             lane_id: id,
+            session_id,
+            read: false,
             title,
             body,
         });
         while self.notifications.len() > NOTIF_HISTORY_CAP {
             self.notifications.pop_front();
         }
+    }
+
+    /// Notifications not yet seen (the feed hasn't been opened since they fired) — the ⚑ badge.
+    pub fn unread_notifs(&self) -> usize {
+        self.notifications.iter().filter(|e| !e.read).count()
     }
 
     pub fn visible_lanes(&self) -> Vec<&Lane> {
@@ -1342,6 +1418,15 @@ impl App {
         if let Some(x) = b("notify_sound") {
             self.settings.notify_sound = x;
         }
+        if let Some(x) = b("notify_show_why") {
+            self.settings.notify_show_why = x;
+        }
+        if let Some(x) = b("notify_coalesce") {
+            self.settings.notify_coalesce = x;
+        }
+        if let Some(x) = b("notify_click_focus") {
+            self.settings.notify_click_focus = x;
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
@@ -1364,6 +1449,9 @@ impl App {
             "notify_resumed": self.settings.notify_resumed,
             "notify_idle": self.settings.notify_idle,
             "notify_sound": self.settings.notify_sound,
+            "notify_show_why": self.settings.notify_show_why,
+            "notify_coalesce": self.settings.notify_coalesce,
+            "notify_click_focus": self.settings.notify_click_focus,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -1486,49 +1574,96 @@ impl App {
                 }
                 self.save_settings().await;
             }
+            12 => {
+                self.settings.notify_show_why = !self.settings.notify_show_why;
+                self.save_settings().await;
+            }
+            13 => {
+                self.settings.notify_coalesce = !self.settings.notify_coalesce;
+                self.save_settings().await;
+            }
+            14 => {
+                self.settings.notify_click_focus = !self.settings.notify_click_focus;
+                self.save_settings().await;
+            }
             _ => {}
         }
     }
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=11 => self.adjust_setting(true).await,
+            0..=2 | 5..=14 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
     }
 
-    /// Key handling for the Notifications history view: scroll, clear, or leave.
+    /// Key handling for the Notifications history view: move the cursor, open or attach to
+    /// the event's agent, dismiss one, clear all, or leave.
     fn notifications_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.notif_scroll = self.notif_scroll.saturating_sub(1);
+                self.notif_sel = self.notif_sel.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                // Clamp to the last event so scrolling past the end can't blank the feed.
+                // Clamp to the last event so the cursor can't run off the feed.
                 let max = self.notifications.len().saturating_sub(1);
-                self.notif_scroll = (self.notif_scroll + 1).min(max);
+                self.notif_sel = (self.notif_sel + 1).min(max);
+            }
+            // Dismiss the selected event (the feed is newest-first; the deque is newest-last).
+            KeyCode::Char('d') if !self.notifications.is_empty() => {
+                let idx = self.notifications.len() - 1 - self.notif_sel;
+                self.notifications.remove(idx);
+                let max = self.notifications.len().saturating_sub(1);
+                self.notif_sel = self.notif_sel.min(max);
             }
             KeyCode::Char('c') => {
                 self.notifications.clear();
-                self.notif_scroll = 0;
+                self.notif_sel = 0;
             }
-            // The feed renders newest-first with `notif_scroll` as the top row; ↵ opens the
-            // lane behind that top event (marked ▸).
-            KeyCode::Enter | KeyCode::Right => {
-                if let Some(id) = self
-                    .notifications
-                    .iter()
-                    .rev()
-                    .nth(self.notif_scroll)
-                    .map(|e| e.lane_id)
-                {
-                    self.jump_to_lane(id);
-                }
-            }
+            KeyCode::Enter | KeyCode::Right => self.open_selected_notif(false),
+            KeyCode::Char('t') => self.open_selected_notif(true),
             KeyCode::Esc | KeyCode::Left => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
+        }
+    }
+
+    /// Open the lane behind the cursor's event in Focus, pointed at the exact session that
+    /// fired (when the event recorded one). `attach` goes all the way into its tmux pane.
+    fn open_selected_notif(&mut self, attach: bool) {
+        let Some((lane_id, sid)) = self
+            .notifications
+            .iter()
+            .rev()
+            .nth(self.notif_sel)
+            .map(|e| (e.lane_id, e.session_id.clone()))
+        else {
+            return;
+        };
+        self.jump_to_lane(lane_id);
+        // jump_to_lane reports a stale lane via status; only proceed if it landed.
+        if self.selected_lane().map(|l| l.id) != Some(lane_id) {
+            return;
+        }
+        self.select_session(lane_id, sid.as_deref());
+        if attach {
+            self.attach_request = Some(lane_id);
+        }
+    }
+
+    /// Point the session cursor at `session_id` on the selected lane (no-op when the session
+    /// is gone or wasn't recorded — the lane's current selection stands).
+    fn select_session(&mut self, lane_id: LaneId, session_id: Option<&str>) {
+        let Some(sid) = session_id else { return };
+        let idx = self.lanes.iter().find(|l| l.id == lane_id).and_then(|l| {
+            l.agent_sessions
+                .iter()
+                .position(|s| s.session_id.as_deref() == Some(sid))
+        });
+        if let Some(i) = idx {
+            self.session_lane = Some(lane_id); // keep sync_session_cursor from resetting it
+            self.session_idx = i;
         }
     }
 
@@ -2589,7 +2724,13 @@ impl App {
                     }
                     View::Agents => self.enter_agents(None).await,
                     View::Settings => self.load_settings().await,
-                    View::Notifications => self.notif_scroll = 0,
+                    View::Notifications => {
+                        self.notif_sel = 0;
+                        // Opening the feed counts as catching up — clears the ⚑ unread badge.
+                        for ev in self.notifications.iter_mut() {
+                            ev.read = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2637,6 +2778,7 @@ impl App {
                 };
             }
             Action::JumpNeedsYou => self.jump_attention(),
+            Action::AttachNeedsYou => self.jump_attention_attach(),
             Action::FindLane => self.enter_lane_jump(),
             Action::ToggleUrgent => {
                 self.urgent_only = !self.urgent_only;
@@ -3302,6 +3444,7 @@ mod tests {
             resume_at: None,
             inferred,
             tmux_window: None,
+            last_message: None,
         }
     }
 

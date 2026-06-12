@@ -255,6 +255,10 @@ pub struct AgentSession {
     /// this window. `None` for external and inferred sessions.
     #[serde(default)]
     pub tmux_window: Option<String>,
+    /// The agent's most recent message text (truncated) — what it said or asked when it last
+    /// ended a turn. Gives needs-you notifications their "why".
+    #[serde(default)]
+    pub last_message: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

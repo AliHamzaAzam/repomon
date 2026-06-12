@@ -45,6 +45,9 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_resumed": cfg.notify_resumed,
         "notify_idle": cfg.notify_idle,
         "notify_sound": cfg.notify_sound,
+        "notify_show_why": cfg.notify_show_why,
+        "notify_coalesce": cfg.notify_coalesce,
+        "notify_click_focus": cfg.notify_click_focus,
     })
 }
 
@@ -186,6 +189,12 @@ struct ConfigSet {
     notify_idle: Option<bool>,
     #[serde(default)]
     notify_sound: Option<bool>,
+    #[serde(default)]
+    notify_show_why: Option<bool>,
+    #[serde(default)]
+    notify_coalesce: Option<bool>,
+    #[serde(default)]
+    notify_click_focus: Option<bool>,
 }
 #[derive(Deserialize)]
 struct AgentAdopt {
@@ -600,6 +609,15 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 }
                 if let Some(b) = p.notify_sound {
                     cfg.notify_sound = b;
+                }
+                if let Some(b) = p.notify_show_why {
+                    cfg.notify_show_why = b;
+                }
+                if let Some(b) = p.notify_coalesce {
+                    cfg.notify_coalesce = b;
+                }
+                if let Some(b) = p.notify_click_focus {
+                    cfg.notify_click_focus = b;
                 }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
@@ -1045,6 +1063,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 resume_at: None,
                 inferred: false,
                 tmux_window: lane_windows.first().cloned(),
+                last_message: None,
             });
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
@@ -1074,6 +1093,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     resume_at: None,
                     inferred: true,
                     tmux_window: None,
+                    last_message: None,
                 });
             }
         }

@@ -33,6 +33,9 @@ pub struct TranscriptSummary {
     pub tool_call_count: u32,
     pub status: AgentStatus,
     pub title: Option<String>,
+    /// The agent's most recent message text — what it said (or asked) when it last ended a
+    /// turn. This is the "why" behind a needs-you notification.
+    pub last_message: Option<String>,
     /// The Claude config dir this session belongs to, when it isn't the default `~/.claude`
     /// (e.g. a work account run with `CLAUDE_CONFIG_DIR=~/.claude-work`). Drives adopt.
     pub config_dir: Option<PathBuf>,
@@ -55,6 +58,7 @@ impl TranscriptSummary {
             manifest_path: self.manifest_path,
             tool_call_count: self.tool_call_count,
             title: self.title,
+            last_message: self.last_message,
             status: self.status,
             external: false, // overlay flips this based on tmux ownership
             session_id: self.session_id,
@@ -248,6 +252,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
     let mut last_type: Option<&str> = None;
     let mut last_assistant_has_tool = false;
     let mut title: Option<String> = None;
+    let mut last_message: Option<String> = None;
     let mut cwd: Option<PathBuf> = None;
 
     for line in text.lines() {
@@ -269,9 +274,20 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
                     .and_then(Value::as_array)
                 {
                     for block in arr {
-                        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                            tool_call_count += 1;
-                            has_tool = true;
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("tool_use") => {
+                                tool_call_count += 1;
+                                has_tool = true;
+                            }
+                            Some("text") => {
+                                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                    let t = t.trim();
+                                    if !t.is_empty() {
+                                        last_message = Some(truncate(t, 200));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -310,6 +326,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
         tool_call_count,
         status,
         title,
+        last_message,
         config_dir: None, // set by the caller based on which config dir it came from
         session_id: path
             .file_stem()
@@ -619,6 +636,28 @@ mod tests {
         assert!(s.status.needs_you());
         assert_eq!(s.cwd.as_deref(), Some(Path::new(cwd)));
         assert_eq!(s.title.as_deref(), Some("add tests"));
+        // The "why" behind a needs-you alert: the agent's final message text.
+        assert_eq!(s.last_message.as_deref(), Some("Done — want me to also..."));
+    }
+
+    #[test]
+    fn last_message_is_truncated_and_survives_tool_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "x".repeat(300);
+        let lines = [
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
+            ),
+            // A later tool-only turn must not erase the question text.
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#
+                .to_string(),
+        ];
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let path = write_transcript(dir.path(), "s.jsonl", &refs);
+        let s = parse_transcript(&path).unwrap();
+        let msg = s.last_message.unwrap();
+        assert_eq!(msg.chars().count(), 201); // 200 kept + ellipsis
+        assert!(msg.starts_with("xxx") && msg.ends_with('…'));
     }
 
     #[test]

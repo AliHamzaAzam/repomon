@@ -63,6 +63,15 @@ pub struct Config {
     pub notify_idle: bool,
     /// Play the system notification sound with each desktop notification.
     pub notify_sound: bool,
+    /// Include the agent's actual last message (what it said/asked) in notification bodies,
+    /// instead of just the original task title.
+    pub notify_show_why: bool,
+    /// Collapse a burst of simultaneous alerts into one "N agents need attention" popup
+    /// (each event still lands individually in the in-app feed).
+    pub notify_coalesce: bool,
+    /// Make desktop popups click-to-focus the terminal (uses `terminal-notifier` when
+    /// installed; falls back to plain popups otherwise).
+    pub notify_click_focus: bool,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
 }
@@ -86,6 +95,9 @@ impl Default for Config {
             notify_resumed: true,
             notify_idle: false,
             notify_sound: true,
+            notify_show_why: true,
+            notify_coalesce: true,
+            notify_click_focus: true,
             repos: HashMap::new(),
         }
     }
