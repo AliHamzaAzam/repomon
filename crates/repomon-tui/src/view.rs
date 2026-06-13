@@ -1460,10 +1460,12 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         let glyph = status_glyph(lane);
         let counts = dirty_str(&lane.state.dirty);
         let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
+        let count = agent_count_badge(lane);
         let _ = now;
         let mut line = if i == app.selected {
+            let badge = count.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
             Line::from(Span::styled(
-                format!(" {glyph}{rest}"),
+                format!(" {glyph}{rest}{badge}"),
                 app.theme.selected(),
             ))
         } else {
@@ -1472,11 +1474,15 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
             } else {
                 app.theme.accented()
             };
-            Line::from(vec![
+            let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(glyph.to_string(), glyph_style),
                 Span::raw(rest),
-            ])
+            ];
+            if let Some(c) = &count {
+                spans.push(Span::styled(format!(" {c}"), app.theme.accented()));
+            }
+            Line::from(spans)
         };
         if i != app.selected && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
@@ -1701,6 +1707,13 @@ fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
     ])
 }
 
+/// `Some("×N")` when several agents share one lane — the compact multi-agent marker shown in the
+/// Fleet list and the Split sidebar (mirrors the Grid badge's `×N`). `None` for 0 or 1 agent.
+fn agent_count_badge(lane: &Lane) -> Option<String> {
+    let n = lane.agent_sessions.len();
+    (n > 1).then(|| format!("×{n}"))
+}
+
 fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<'static> {
     use ratatui::style::Modifier;
     use repomon_core::model::AgentStatus;
@@ -1733,34 +1746,49 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
     } else {
         app.theme.accented()
     };
-    let agent = lane
+    let agent_name = lane
         .agent_sessions
         .first()
-        .map(|s| s.agent.short().to_string())
+        .map(|s| trunc(s.agent.short(), 7))
         .unwrap_or_default();
-    let mid = format!(
-        "{:<12} {:<36} {:<11} {:<7} {:<7} ",
+    // "claude" or "claude ×2"; the count gets its own accent span so a multi-agent lane stands
+    // out. The cell is padded to a fixed width so the time column stays aligned either way.
+    let count = agent_count_badge(lane);
+    const AGENT_W: usize = 10;
+    let agent_cell = match &count {
+        Some(c) => format!("{agent_name} {c}"),
+        None => agent_name.clone(),
+    };
+    let agent_pad = " ".repeat(AGENT_W.saturating_sub(agent_cell.chars().count()));
+    let left = format!(
+        "{:<12} {:<36} {:<11} {:<7} ",
         trunc(&lane_name(lane), 12),
         trunc(&lane_branch(lane), 36),
         dirty_str(&lane.state.dirty),
         ahead_behind_str(lane.state.ahead, lane.state.behind),
-        trunc(&agent, 7),
     );
     let time = rel_time(lane.last_activity_at, now);
     if selected {
         // A clean reverse-video bar for the selection (per-cell colors would muddy it).
-        let text = format!("  {glyph} {active} {mid}{time}");
+        let text = format!("  {glyph} {active} {left}{agent_cell}{agent_pad} {time}");
         return Line::from(Span::styled(text, app.theme.selected()));
     }
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(glyph.to_string(), glyph_style),
         Span::raw(" "),
         Span::styled(active.to_string(), active_style),
         Span::raw(" "),
-        Span::raw(mid),
-        Span::styled(time, app.theme.muted()),
-    ])
+        Span::raw(left),
+        Span::raw(agent_name),
+    ];
+    if let Some(c) = &count {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(c.clone(), app.theme.accented()));
+    }
+    spans.push(Span::raw(format!("{agent_pad} ")));
+    spans.push(Span::styled(time, app.theme.muted()));
+    Line::from(spans)
 }
 
 fn commit_line(c: &Commit, app: &App) -> Line<'static> {
