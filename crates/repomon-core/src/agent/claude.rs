@@ -59,6 +59,7 @@ impl TranscriptSummary {
             tool_call_count: self.tool_call_count,
             title: self.title,
             last_message: self.last_message,
+            pending_prompt: None, // set by the overlay's pane sniffer
             status: self.status,
             external: false, // overlay flips this based on tmux ownership
             session_id: self.session_id,
@@ -506,6 +507,147 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// How much of a transcript's tail to read for the chat view — bounds the cost of polling a
+/// long session (this file can be many MB).
+const TAIL_BYTES: u64 = 512 * 1024;
+/// Cap per-item text so payloads stay bounded (full messages, not titles).
+const ITEM_TEXT_MAX: usize = 4000;
+
+/// The last `max_items` conversation items from a transcript: user/assistant messages with
+/// their full unwrapped text, tool calls between messages aggregated into one "tools" item
+/// ("Bash ×2 · Edit"). The mobile client renders these natively instead of a desktop-width
+/// pane capture. Only the file tail is read.
+pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::TranscriptItem> {
+    use crate::model::TranscriptItem;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(TAIL_BYTES);
+    if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if f.read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // the seek likely landed mid-line — drop the partial one
+    }
+
+    let mut items: Vec<TranscriptItem> = Vec::new();
+    // Tool calls accumulated since the last message, in first-use order.
+    let mut tools: Vec<(String, u32)> = Vec::new();
+    let mut tools_at: Option<DateTime<Utc>> = None;
+
+    fn flush_tools(
+        items: &mut Vec<crate::model::TranscriptItem>,
+        tools: &mut Vec<(String, u32)>,
+        at: &mut Option<DateTime<Utc>>,
+    ) {
+        if tools.is_empty() {
+            return;
+        }
+        let text = tools
+            .iter()
+            .map(|(name, n)| {
+                if *n > 1 {
+                    format!("{name} ×{n}")
+                } else {
+                    name.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        items.push(crate::model::TranscriptItem {
+            role: "tools".into(),
+            text,
+            at: at.take(),
+        });
+        tools.clear();
+    }
+
+    for line in lines {
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let at = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc));
+        match v.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                let Some(arr) = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                // Blocks in order: a text block flushes pending tools first (they happened
+                // before it), tool_use blocks accumulate.
+                for block in arr {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                let t = t.trim();
+                                if !t.is_empty() {
+                                    flush_tools(&mut items, &mut tools, &mut tools_at);
+                                    items.push(TranscriptItem {
+                                        role: "assistant".into(),
+                                        text: truncate(t, ITEM_TEXT_MAX),
+                                        at,
+                                    });
+                                }
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_string();
+                            match tools.iter_mut().find(|(n, _)| *n == name) {
+                                Some((_, n)) => *n += 1,
+                                None => tools.push((name, 1)),
+                            }
+                            tools_at = at;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("user") => {
+                // Real user text only — tool_result carriers return None here.
+                if let Some(t) = user_text(&v) {
+                    let t = t.trim().to_string();
+                    if !t.is_empty() {
+                        flush_tools(&mut items, &mut tools, &mut tools_at);
+                        items.push(TranscriptItem {
+                            role: "user".into(),
+                            text: truncate(&t, ITEM_TEXT_MAX),
+                            at,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_tools(&mut items, &mut tools, &mut tools_at);
+
+    if items.len() > max_items {
+        items.drain(..items.len() - max_items);
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,6 +780,48 @@ mod tests {
         assert_eq!(s.title.as_deref(), Some("add tests"));
         // The "why" behind a needs-you alert: the agent's final message text.
         assert_eq!(s.last_message.as_deref(), Some("Done — want me to also..."));
+    }
+
+    #[test]
+    fn transcript_tail_builds_chat_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-06-12T10:00:00Z","message":{"content":"add tests"}}"#,
+            // Text before tools within one entry keeps its position.
+            r#"{"type":"assistant","timestamp":"2026-06-12T10:00:05Z","message":{"content":[{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash"}]}}"#,
+            // Tool-result carrier — not a user message.
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-06-12T10:00:10Z","message":{"content":[{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Edit"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-06-12T10:01:00Z","message":{"content":[{"type":"text","text":"Done — tests pass."}]}}"#,
+        ];
+        let path = write_transcript(dir.path(), "s.jsonl", &lines);
+        let items = transcript_tail(&path, 50);
+        let view: Vec<(&str, &str)> = items
+            .iter()
+            .map(|i| (i.role.as_str(), i.text.as_str()))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("user", "add tests"),
+                ("assistant", "On it."),
+                ("tools", "Bash ×2 · Edit"),
+                ("assistant", "Done — tests pass."),
+            ]
+        );
+        assert!(items[0].at.is_some());
+        assert!(
+            items[2].at.is_some(),
+            "tools item carries the last tool's timestamp"
+        );
+
+        // The limit keeps the newest items.
+        let last_two = transcript_tail(&path, 2);
+        assert_eq!(last_two.len(), 2);
+        assert_eq!(last_two[1].text, "Done — tests pass.");
+
+        // Missing file → empty, not an error.
+        assert!(transcript_tail(&dir.path().join("nope.jsonl"), 10).is_empty());
     }
 
     #[test]

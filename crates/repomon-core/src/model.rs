@@ -259,6 +259,11 @@ pub struct AgentSession {
     /// ended a turn. Gives needs-you notifications their "why".
     #[serde(default)]
     pub last_message: Option<String>,
+    /// Set only when the pane is sitting on an interactive dialog (permission prompt, plan
+    /// approval, option question): the dialog's summary. Clients show approve/menu controls
+    /// exactly when this is present — a plain end-of-turn `Waiting` has none.
+    #[serde(default)]
+    pub pending_prompt: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.
@@ -367,6 +372,19 @@ pub struct TimelineData {
     pub bucket_secs: i64,
     pub rows: Vec<TimelineRow>,
     pub correlations: Vec<Correlation>,
+}
+
+/// One conversation item from an agent transcript, rendered for clients that lay text out
+/// themselves (the mobile chat view): a user or assistant message with the full *unwrapped*
+/// text, or an aggregated run of tool calls between messages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptItem {
+    /// "user" | "assistant" | "tools".
+    pub role: String,
+    /// Message text, or for "tools" a compact summary ("Bash ×2 · Edit").
+    pub text: String,
+    /// The entry's timestamp, when the transcript records one.
+    pub at: Option<DateTime<Utc>>,
 }
 
 /// A spawnable agent choice: a built-in kind (detected on PATH) or a configured custom one.

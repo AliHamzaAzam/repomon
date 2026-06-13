@@ -27,9 +27,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
 ansi-to-tui = { workspace = true }
+qrcode = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# Only for building Lane/Worktree fixtures (ObjectId) in unit tests; already compiled anyway
-# via repomon-core.
-gix = { workspace = true }

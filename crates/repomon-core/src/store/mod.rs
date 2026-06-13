@@ -20,6 +20,7 @@ use crate::model::*;
 const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0001_init.sql"),
     include_str!("../../migrations/0002_agent_kind.sql"),
+    include_str!("../../migrations/0003_devices.sql"),
 ];
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
@@ -301,6 +302,41 @@ impl Store {
                 params![lane_id, window],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Register (or refresh) a push-notification device token.
+    pub async fn register_device(&self, token: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "INSERT INTO devices (device_token, registered_at) VALUES (?1, ?2)
+                 ON CONFLICT(device_token) DO UPDATE SET registered_at = ?2",
+                params![token, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Drop a device token (user unregistered, or APNs reported it dead).
+    pub async fn unregister_device(&self, token: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "DELETE FROM devices WHERE device_token = ?1",
+                params![token],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// All registered push device tokens.
+    pub async fn list_devices(&self) -> Result<Vec<String>> {
+        self.call(|c| {
+            let mut stmt = c.prepare("SELECT device_token FROM devices")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            collect(rows)
         })
         .await
     }
@@ -609,6 +645,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
         inferred: false,
         tmux_window: None,
         last_message: None,
+        pending_prompt: None,
     })
 }
 
@@ -835,6 +872,7 @@ mod tests {
             inferred: false,
             tmux_window: None,
             last_message: None,
+            pending_prompt: None,
         };
         let id = s.upsert_session(sess.clone()).await.unwrap();
         // Upsert again (same manifest) updates rather than duplicates.

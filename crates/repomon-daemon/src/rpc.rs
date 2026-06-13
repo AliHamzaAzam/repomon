@@ -197,6 +197,22 @@ struct ConfigSet {
     notify_click_focus: Option<bool>,
 }
 #[derive(Deserialize)]
+struct PushDevice {
+    device_token: String,
+}
+#[derive(Deserialize)]
+struct AgentTranscript {
+    lane_id: repomon_core::model::LaneId,
+    /// Which session's transcript; `None` = the lane's most recent.
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default = "default_transcript_limit")]
+    limit: usize,
+}
+fn default_transcript_limit() -> usize {
+    50
+}
+#[derive(Deserialize)]
 struct AgentAdopt {
     lane_id: repomon_core::model::LaneId,
     /// Resume this exact session (`claude --resume <id>`); `None` resumes the most recent.
@@ -315,11 +331,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
 
         // ---- lanes ----
-        "lane.list" => {
-            let mut lanes = ctx.lanes.list().await.map_err(internal)?;
-            overlay_agents(ctx, &mut lanes).await;
-            to_value(lanes)
-        }
+        "lane.list" => to_value(lanes_with_agents(ctx).await?),
         "lane.get" => {
             let p: LaneId = parse(params)?;
             let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
@@ -923,6 +935,48 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
 
         // ---- subscription is handled in the socket layer ----
         "subscribe" => Ok(Value::Null),
+        // Liveness probe for remote clients (the WS bridge) and a cheap connectivity check.
+        "ping" => Ok(json!("pong")),
+        // The conversation itself, for clients that render text natively (the mobile chat
+        // view) instead of a desktop-width pane capture.
+        "agent.transcript" => {
+            let p: AgentTranscript = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let items = tokio::task::spawn_blocking(move || {
+                let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
+                let summaries = agent::claude::summaries_for(&path, within, MAX_SESSIONS_PER_LANE);
+                let manifest = match &p.session_id {
+                    Some(id) => summaries
+                        .iter()
+                        .find(|s| s.session_id.as_deref() == Some(id.as_str()))
+                        .map(|s| s.manifest_path.clone()),
+                    None => summaries.first().map(|s| s.manifest_path.clone()),
+                };
+                manifest
+                    .map(|m| agent::claude::transcript_tail(&m, p.limit))
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            to_value(items)
+        }
+        // Push-notification device registration (the iOS companion).
+        "push.register" => {
+            let p: PushDevice = parse(params)?;
+            ctx.store
+                .register_device(p.device_token)
+                .await
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
+        "push.unregister" => {
+            let p: PushDevice = parse(params)?;
+            ctx.store
+                .unregister_device(p.device_token)
+                .await
+                .map_err(internal)?;
+            Ok(Value::Null)
+        }
         "viewport.set" => {
             let p: ViewportSet = parse(params)?;
             *ctx.viewport.lock().await = p.lane_ids;
@@ -968,6 +1022,14 @@ const MAX_SESSIONS_PER_LANE: usize = 8;
 /// agent in it — the fallback that surfaces Claude Code worktree-isolated subagents, which leave
 /// no transcript or process of their own. Short, so the indicator tracks actual work.
 const ACTIVITY_WINDOW_SECS: i64 = 90;
+
+/// The full lane list with live agent sessions overlaid — the composite `lane.list` serves.
+/// Shared with the daemon-side notification watcher (`notify_watch`), which diffs it.
+pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
+    let mut lanes = ctx.lanes.list().await.map_err(internal)?;
+    overlay_agents(ctx, &mut lanes).await;
+    Ok(lanes)
+}
 
 async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let paths: Vec<std::path::PathBuf> = lanes.iter().map(|l| l.worktree.path.clone()).collect();
@@ -1064,6 +1126,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 inferred: false,
                 tmux_window: lane_windows.first().cloned(),
                 last_message: None,
+                pending_prompt: None,
             });
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
@@ -1094,6 +1157,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     inferred: true,
                     tmux_window: None,
                     last_message: None,
+                    pending_prompt: None,
                 });
             }
         }
@@ -1110,10 +1174,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         }
     }
 
-    // Permission prompts: a transcript that ends in a tool call reads **Running**, but the
-    // pane may be sitting on an interactive "Do you want…?" dialog — blocked on the user with
-    // nothing in the JSONL to say so. Sniff the panes of managed Running sessions and flip
-    // those to Waiting, carrying the dialog summary as the notification-ready "why".
+    // Interactive dialogs: a transcript that ends in a tool call reads **Running**, but the
+    // pane may be sitting on a permission "Do you want…?" dialog; a turn ending in text reads
+    // **Waiting**, but the pane may be showing an option menu (plan approval, a question with
+    // choices). Neither is in the JSONL. Sniff the panes of managed Running/Waiting sessions:
+    // a detected dialog sets `pending_prompt` (clients gate approve/menu controls on it),
+    // becomes the notification-ready "why", and flips Running → Waiting.
     let candidates: Vec<(usize, usize, String)> = lanes
         .iter()
         .enumerate()
@@ -1122,7 +1188,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 .iter()
                 .enumerate()
                 .filter_map(move |(si, s)| {
-                    (!s.external && !s.inferred && s.status == AgentStatus::Running)
+                    let sniffable = !s.external
+                        && !s.inferred
+                        && matches!(s.status, AgentStatus::Running | AgentStatus::Waiting);
+                    sniffable
                         .then(|| s.tmux_window.clone().map(|w| (li, si, w)))
                         .flatten()
                 })
@@ -1147,7 +1216,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             if let Some(summary) = found {
                 let s = &mut lanes[li].agent_sessions[si];
                 s.status = AgentStatus::Waiting;
-                s.last_message = Some(summary);
+                s.last_message = Some(summary.clone());
+                s.pending_prompt = Some(summary);
             }
         }
     }
