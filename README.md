@@ -44,6 +44,14 @@ parallel, exportable to Markdown), and global commit **search**.
 Agents: Claude Code is first-class (rich status from its transcript); Codex and Aider also
 run, with a tmux-alive fallback for any kind. See [docs/agents.md](docs/agents.md).
 
+**Remote access**: an optional token-gated WebSocket bridge serves the same JSON-RPC API to
+companion apps over a private network (Tailscale). The daemon detects per-session state
+changes — including interactive permission dialogs read from the pane — broadcasts them as
+`event.notification`, and can push them to Apple devices via APNs directly (no relay).
+`repomon remote enable` turns it on; `repomon remote pair` shows a QR for the (private)
+iOS companion app, which renders the fleet, the agents' conversations, and an Approve
+button for pending dialogs.
+
 ## Architecture
 
 A background daemon (`repomond`) owns SQLite, file watchers, the git layer, and the
@@ -107,9 +115,12 @@ repomon() {
 ## Status
 
 The Observatory (fleet/lanes/today), the agent multiplexer (spawn, live output, input,
-attach, babysit grid), and the history dashboard (timeline/sessions/search) are all in.
-Deferred follow-ups: a SwiftUI menu-bar companion, an embedded PTY renderer (vs the tmux
-pivot), a web dashboard, and Windows support.
+attach, babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/search),
+per-session notifications (with pane-sniffed permission-dialog detection), and the remote
+access layer (WebSocket bridge + APNs + pairing) are all in; an iOS companion app lives in
+a separate private repo. Deferred follow-ups: a SwiftUI menu-bar companion (much of it now
+exists as the iOS app's shared RepomonKit), an embedded PTY renderer (vs the tmux pivot),
+a web dashboard, and Windows support.
 
 ## License
 
