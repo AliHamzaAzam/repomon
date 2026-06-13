@@ -232,6 +232,11 @@ pub struct App {
     /// concurrent agents can run in one worktree; this cursor picks among them.
     pub session_idx: usize,
     session_lane: Option<LaneId>,
+    /// After spawning an agent, the (lane, tmux window) to move the session cursor onto once it
+    /// shows up in `lane.list` — so a fresh spawn lands you on the *new* agent, not the old one.
+    /// Cleared when matched (or after a few refreshes if the window never appears).
+    pending_focus_window: Option<(LaneId, String)>,
+    pending_focus_ticks: u8,
     /// Plain shell terminals open for the selected lane (tmux window names).
     pub terminals: Vec<String>,
     terminals_lane: Option<LaneId>,
@@ -342,6 +347,8 @@ impl App {
             recent_commits_lane: None,
             session_idx: 0,
             session_lane: None,
+            pending_focus_window: None,
+            pending_focus_ticks: 0,
             terminals: Vec::new(),
             terminals_lane: None,
             browse_path: String::new(),
@@ -886,6 +893,37 @@ impl App {
             self.session_lane = sel;
             self.session_idx = 0;
             self.reset_scroll(); // scrollback buffer belonged to the previous lane
+        }
+        // After a spawn, jump the cursor onto the new agent's window the moment it shows up in
+        // the lane list (the daemon surfaces it as a placeholder right away), so you land on the
+        // agent you just started — not the lane's existing one. Give up after a few refreshes so
+        // a window that never appears can't pin the cursor.
+        if let Some((lane, window)) = self.pending_focus_window.clone() {
+            if sel == Some(lane) {
+                let hit = self.selected_lane().and_then(|l| {
+                    l.agent_sessions
+                        .iter()
+                        .position(|s| s.tmux_window.as_deref() == Some(window.as_str()))
+                });
+                match hit {
+                    Some(i) => {
+                        self.session_idx = i;
+                        self.pending_focus_window = None;
+                        self.pending_focus_ticks = 0;
+                    }
+                    None => {
+                        self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
+                        if self.pending_focus_ticks > 5 {
+                            self.pending_focus_window = None;
+                            self.pending_focus_ticks = 0;
+                        }
+                    }
+                }
+            } else {
+                // Selection moved off the spawn lane before the agent appeared — drop the intent.
+                self.pending_focus_window = None;
+                self.pending_focus_ticks = 0;
+            }
         }
         let n = self
             .selected_lane()
@@ -2253,7 +2291,10 @@ impl App {
         self.view = View::SpawnPick;
     }
 
-    /// Spawn `agent` into `lane`: on success drop into Focus, ready to drive it.
+    /// Spawn `agent` into `lane`: on success drop into Focus on the *new* agent, ready to drive
+    /// it. The daemon surfaces the new window right away (a window-only placeholder until its
+    /// transcript lands), so an immediate refresh plus the pending-focus intent put the cursor on
+    /// it instead of leaving you on the lane's existing agent.
     async fn do_spawn(&mut self, id: LaneId, agent: &str) {
         match self
             .client
@@ -2263,10 +2304,15 @@ impl App {
             )
             .await
         {
-            Ok(_) => {
+            Ok(v) => {
                 self.status = format!("spawned {agent}");
                 self.view = View::Focus;
                 self.focus_insert = false;
+                if let Some(window) = v.get("window").and_then(|w| w.as_str()) {
+                    self.pending_focus_window = Some((id, window.to_string()));
+                    self.pending_focus_ticks = 0;
+                }
+                self.refresh_lanes().await;
             }
             Err(e) => self.status = format!("spawn failed: {e}"),
         }
