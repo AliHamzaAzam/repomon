@@ -4,8 +4,11 @@
 //! every repo, computes live state, and assembles lanes (agent sessions are overlaid later,
 //! in Phase 2). `create` runs `git worktree add`; `delete` runs `git worktree remove`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -30,16 +33,51 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// How long a *clean* (not-since-invalidated) cached worktree state stays valid before a safety
+/// refresh — for changes the file watcher doesn't cover (e.g. linked worktrees outside a watched
+/// repo root). A worktree the watcher flags as changed re-walks on the next list regardless, so
+/// this can be generous; the refresh is also capped per list so it never re-walks all at once.
+const STATE_TTL: Duration = Duration::from_secs(180);
+/// How long a repo's cached `git worktree list` stays valid. Worktrees change only on lane
+/// create/delete (which clear the cache) or external `git worktree` ops; this TTL bounds the
+/// latter while sparing a git subprocess per repo on every overlay.
+const WORKTREES_TTL: Duration = Duration::from_secs(10);
+
+/// A cached worktree git-state: when it was last walked, whether the watcher has flagged it dirty
+/// since, and the state itself.
+struct StateEntry {
+    walked_at: Instant,
+    dirty: bool,
+    state: WorktreeState,
+}
+
+/// Per-repo cache of `git worktree list` results, keyed by repo path.
+type WorktreeCache = Arc<Mutex<HashMap<PathBuf, (Instant, Vec<worktree::WorktreeEntry>)>>>;
+
 /// Manages lanes across all registered repos.
 #[derive(Clone)]
 pub struct Lanes {
     store: Store,
     config: Config,
+    /// Per-worktree git state cache (keyed by worktree path). The gix status walk is the dominant
+    /// cost of `list`; we reuse a recent result and only re-walk a worktree the file watcher
+    /// flagged as changed (see [`Lanes::invalidate_state`]) or after [`STATE_TTL`]. Shared across
+    /// clones via `Arc` so a watcher invalidation reaches every handler.
+    state_cache: Arc<Mutex<HashMap<PathBuf, StateEntry>>>,
+    /// Per-repo `git worktree list` cache (keyed by repo path), so a repo's worktrees aren't
+    /// re-enumerated with a git subprocess on every overlay. Cleared by create/delete; otherwise
+    /// bounded by [`WORKTREES_TTL`]. Shared across clones via `Arc`.
+    worktrees_cache: WorktreeCache,
 }
 
 impl Lanes {
     pub fn new(store: Store, config: Config) -> Self {
-        Self { store, config }
+        Self {
+            store,
+            config,
+            state_cache: Arc::new(Mutex::new(HashMap::new())),
+            worktrees_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Enumerate every lane across all repos, with live worktree state.
@@ -47,20 +85,41 @@ impl Lanes {
         let repos = self.store.list_repos().await?;
         let metas = self.store.list_lane_meta().await?;
 
-        // Phase 1a — list each repo's worktrees in parallel (`git worktree list` is a subprocess
-        // per repo; running them concurrently turns N×~10ms into ~one list's wall time).
-        let repo_handles: Vec<_> = repos
+        // Phase 1a — each repo's worktrees, reusing a recent `git worktree list` instead of forking
+        // git per repo on every overlay (worktrees change only on create/delete or external git
+        // ops). Cache misses run in parallel.
+        let mut repo_entries: Vec<(Repo, Vec<worktree::WorktreeEntry>)> = Vec::new();
+        let mut wt_misses: Vec<Repo> = Vec::new();
+        {
+            let cache = self.worktrees_cache.lock().unwrap();
+            for repo in repos {
+                match cache.get(&repo.path) {
+                    Some((t, entries)) if t.elapsed() < WORKTREES_TTL => {
+                        repo_entries.push((repo, entries.clone()));
+                    }
+                    _ => wt_misses.push(repo),
+                }
+            }
+        }
+        let wt_handles: Vec<_> = wt_misses
             .iter()
             .map(|repo| {
                 let rp = repo.path.clone();
                 tokio::task::spawn_blocking(move || worktree::list(&rp))
             })
             .collect();
-        let mut repo_entries = Vec::new();
-        for (repo, h) in repos.into_iter().zip(repo_handles) {
-            // A repo that's gone missing on disk shouldn't sink the whole fleet view.
-            if let Ok(entries) = h.await.map_err(join_err)? {
-                repo_entries.push((repo, entries));
+        let mut wt_fresh = Vec::with_capacity(wt_handles.len());
+        for h in wt_handles {
+            wt_fresh.push(h.await.map_err(join_err)?);
+        }
+        {
+            let mut cache = self.worktrees_cache.lock().unwrap();
+            for (repo, entries_res) in wt_misses.into_iter().zip(wt_fresh) {
+                // A repo that's gone missing on disk shouldn't sink the whole fleet view.
+                if let Ok(entries) = entries_res {
+                    cache.insert(repo.path.clone(), (Instant::now(), entries.clone()));
+                    repo_entries.push((repo, entries));
+                }
             }
         }
 
@@ -105,20 +164,68 @@ impl Lanes {
             self.store.prune_worktrees(repo.id, keep).await?;
         }
 
-        // Phase 2 — read each worktree's live git state IN PARALLEL. `read_state` (gix status) is
-        // the dominant cost of `lane.list`; spawning them concurrently turns N×~10ms sequential
-        // into roughly one read's wall time.
-        let handles: Vec<_> = pending
+        // Phase 2 — each worktree's live git state. `read_state` (gix status) is a full directory
+        // walk and the dominant cost of `lane.list`, so we cache it per worktree: reuse a recent
+        // state and only re-walk worktrees the watcher flagged as changed (`dirty`) or that are
+        // first-seen. The clean-but-TTL-expired refresh is capped per call (oldest first) so a
+        // synchronized expiry never re-walks every worktree at once — that spiked CPU; the rest
+        // keep their slightly-stale state and refresh on a later list. Walks run in parallel.
+        // (Agent transcript writes touch no worktree, so they never invalidate a cached state.)
+        const WALK_CAP: usize = 2;
+        let mut states: Vec<Option<Result<WorktreeState>>> =
+            std::iter::repeat_with(|| None).take(pending.len()).collect();
+        let mut must_walk: Vec<usize> = Vec::new(); // first-seen or watcher-invalidated
+        let mut stale: Vec<(usize, Instant)> = Vec::new(); // clean but past the TTL (reusable)
+        {
+            let cache = self.state_cache.lock().unwrap();
+            for (i, (_, entry, _, _, _)) in pending.iter().enumerate() {
+                match cache.get(&entry.path) {
+                    None => must_walk.push(i),
+                    Some(e) if e.dirty => must_walk.push(i),
+                    Some(e) if e.walked_at.elapsed() < STATE_TTL => {
+                        states[i] = Some(Ok(e.state.clone()));
+                    }
+                    Some(e) => {
+                        states[i] = Some(Ok(e.state.clone())); // reuse for now…
+                        stale.push((i, e.walked_at)); // …but eligible to refresh (oldest first)
+                    }
+                }
+            }
+        }
+        stale.sort_by_key(|(_, t)| *t);
+        let walk: Vec<usize> = must_walk
             .iter()
-            .map(|(_, entry, wt, _, _)| {
+            .copied()
+            .chain(stale.iter().take(WALK_CAP).map(|(i, _)| *i))
+            .collect();
+        let handles: Vec<_> = walk
+            .iter()
+            .map(|&i| {
+                let (_, entry, wt, _, _) = &pending[i];
                 let p = entry.path.clone();
                 let wid = wt.id;
                 tokio::task::spawn_blocking(move || reader::read_state(&p, wid))
             })
             .collect();
-        let mut states = Vec::with_capacity(handles.len());
+        let mut fresh = Vec::with_capacity(handles.len());
         for h in handles {
-            states.push(h.await.map_err(join_err)?);
+            fresh.push(h.await.map_err(join_err)?);
+        }
+        {
+            let mut cache = self.state_cache.lock().unwrap();
+            for (&i, st) in walk.iter().zip(fresh) {
+                if let Ok(s) = &st {
+                    cache.insert(
+                        pending[i].1.path.clone(),
+                        StateEntry {
+                            walked_at: Instant::now(),
+                            dirty: false,
+                            state: s.clone(),
+                        },
+                    );
+                }
+                states[i] = Some(st);
+            }
         }
 
         // Phase 3 — assemble the lanes.
@@ -126,8 +233,8 @@ impl Lanes {
         for ((repo, entry, wt, lane_id, head), st) in pending.into_iter().zip(states) {
             // Fall back to a prunable placeholder if the worktree dir is gone.
             let mut state = match st {
-                Ok(s) => s,
-                Err(_) => WorktreeState {
+                Some(Ok(s)) => s,
+                _ => WorktreeState {
                     worktree_id: wt.id,
                     head,
                     branch: entry.branch.clone(),
@@ -166,6 +273,20 @@ impl Lanes {
 
         sort_lanes(&mut lanes);
         Ok(lanes)
+    }
+
+    /// Drop cached git state for any worktree at or under `root` (or whose path the root sits
+    /// under) so the next `list` re-walks it. The file watcher calls this the moment a worktree's
+    /// files change, keeping the fleet's dirty state fresh without re-walking every worktree on
+    /// every poll.
+    pub fn invalidate_state(&self, root: &Path) {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let mut cache = self.state_cache.lock().unwrap();
+        for (p, e) in cache.iter_mut() {
+            if p.starts_with(&root) || root.starts_with(p) {
+                e.dirty = true;
+            }
+        }
     }
 
     pub async fn get(&self, id: LaneId) -> Result<Lane> {
@@ -216,6 +337,9 @@ impl Lanes {
             .get_or_create_lane(repo.id, path.to_string_lossy().into_owned())
             .await?;
 
+        // A worktree was added — drop the cached enumeration so list() picks it up at once.
+        self.worktrees_cache.lock().unwrap().clear();
+
         // Re-list and return the freshly created lane.
         self.list()
             .await?
@@ -262,6 +386,9 @@ impl Lanes {
                 .await
                 .map_err(join_err)??;
         }
+        // A worktree was removed — drop the cached enumeration and its stale state entry.
+        self.worktrees_cache.lock().unwrap().clear();
+        self.state_cache.lock().unwrap().remove(&wt_path);
         Ok(())
     }
 
@@ -547,6 +674,9 @@ mod tests {
         // Writing an untracked file makes the worktree show recent activity (the "file activity"
         // signal the daemon uses to surface agents that leave no transcript).
         std::fs::write(dir.path().join("scratch.txt"), "work\n").unwrap();
+        // The file watcher flags the worktree on this write; do so explicitly so the cached clean
+        // state is re-walked (back-to-back list calls otherwise reuse the per-worktree cache).
+        lanes.invalidate_state(dir.path());
         let after = lanes.list().await.unwrap();
         let changed = after[0]
             .state

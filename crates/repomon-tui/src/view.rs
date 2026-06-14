@@ -284,7 +284,7 @@ fn render_settings(f: &mut Frame, app: &App) {
 }
 
 const ADDREPO_KEYS: &str =
-    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here · x x remove (+ only)  ·  esc back";
+    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d d discover · x x remove (+ only)  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -796,7 +796,36 @@ fn analytics_char(level: u8) -> &'static str {
 fn render_fleet(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
-    f.render_widget(Paragraph::new(fleet_lines(app, rows[0])), rows[0]);
+    let content = rows[0];
+    let (lines, selected_line, lane_rows) = fleet_lines(app, content);
+    // Scroll so the selected lane stays on screen (roughly centered), clamped to the list bounds —
+    // this is what lets the fleet grow past one screenful and still be navigable with ↑/↓.
+    let h = content.height as usize;
+    let max_scroll = lines.len().saturating_sub(h);
+    let scroll = selected_line
+        .map(|sl| sl.saturating_sub(h / 2))
+        .unwrap_or(0)
+        .min(max_scroll);
+    // Click-to-select: register each *visible* lane row at its on-screen position (scroll-adjusted).
+    for (li, lane_id) in &lane_rows {
+        if *li >= scroll && *li < scroll + h {
+            click_zone(
+                app,
+                Rect {
+                    x: content.x,
+                    y: content.y + (*li - scroll) as u16,
+                    width: content.width,
+                    height: 1,
+                },
+                *lane_id,
+                false,
+            );
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).scroll((scroll as u16, 0)),
+        content,
+    );
     f.render_widget(footer(FLEET_KEYS, app), rows[1]);
 }
 
@@ -1345,10 +1374,17 @@ fn render_new_lane(f: &mut Frame, app: &App) {
 
 // ---- shared line builders ----------------------------------------------------
 
-fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
+fn fleet_lines(
+    app: &App,
+    content: Rect,
+) -> (Vec<Line<'static>>, Option<usize>, Vec<(usize, LaneId)>) {
     let width = content.width;
     let now = Utc::now();
     let mut lines = Vec::new();
+    // The selected lane's line index (so the caller can scroll to keep it visible) and every lane
+    // row's line index (so a click maps back to its lane through the scroll offset).
+    let mut selected_line: Option<usize> = None;
+    let mut lane_rows: Vec<(usize, LaneId)> = Vec::new();
     lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
     lines.push(rule(width, true, app));
     lines.push(Line::raw(""));
@@ -1405,21 +1441,10 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         if !selected && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
         }
-        // Record this row's on-screen rect so a click selects the lane (no live pane here, so a
-        // single click only selects; double-click opens the real terminal).
-        let li = lines.len() as u16;
-        if li < content.height {
-            click_zone(
-                app,
-                Rect {
-                    x: content.x,
-                    y: content.y + li,
-                    width: content.width,
-                    height: 1,
-                },
-                lane.id,
-                false,
-            );
+        let li = lines.len();
+        lane_rows.push((li, lane.id));
+        if selected {
+            selected_line = Some(li);
         }
         lines.push(line);
     }
@@ -1435,7 +1460,7 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         lines.push(Line::raw(""));
         lines.push(Line::raw(format!("  {}", app.status)));
     }
-    lines
+    (lines, selected_line, lane_rows)
 }
 
 fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {

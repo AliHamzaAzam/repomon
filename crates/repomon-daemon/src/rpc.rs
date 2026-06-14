@@ -343,6 +343,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let p: CreateLaneParams = parse(params)?;
             let lane = ctx.lanes.create(p).await.map_err(internal)?;
             ctx.broadcast(crate::pubsub::topic::LANE_CREATED, json!({ "lane": lane }));
+            ctx.invalidate_overlay().await;
             to_value(lane)
         }
         "lane.delete" => {
@@ -355,6 +356,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::LANE_DELETED,
                 json!({ "lane_id": p.lane_id }),
             );
+            ctx.invalidate_overlay().await;
             Ok(Value::Null)
         }
         "lane.focus" => {
@@ -678,6 +680,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
+            ctx.invalidate_overlay().await;
             Ok(json!({ "lane_id": p.lane_id, "window": window, "agent": p.agent }))
         }
         "agent.adopt" => {
@@ -729,6 +732,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
+            ctx.invalidate_overlay().await;
             Ok(json!({ "lane_id": p.lane_id, "window": window }))
         }
         "agent.capture" => {
@@ -811,6 +815,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "ended" }),
             );
+            ctx.invalidate_overlay().await;
             Ok(Value::Null)
         }
         "agent.pin" => {
@@ -1023,11 +1028,34 @@ const MAX_SESSIONS_PER_LANE: usize = 8;
 /// no transcript or process of their own. Short, so the indicator tracks actual work.
 const ACTIVITY_WINDOW_SECS: i64 = 90;
 
-/// The full lane list with live agent sessions overlaid — the composite `lane.list` serves.
-/// Shared with the daemon-side notification watcher (`notify_watch`), which diffs it.
+/// TTL for the cached lane overlay. Short enough that a freshly-spawned agent's window placeholder
+/// (and exited-agent / rate-limit transitions) still surface within a refresh or two; long enough
+/// that several clients polling ~1s apart share a single tmux/lsof/transcript scan.
+const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// The full lane list with live agent sessions overlaid — what `lane.list` serves — from a
+/// short-TTL cache so a stream of per-second client polls collapses into ~1 scan per TTL. Stale
+/// concurrent callers may each recompute (bounded, rare); we accept that over single-flight to
+/// avoid a leader-failure deadlock. Structural changes call [`Ctx::invalidate_overlay`].
 pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
+    {
+        let cache = ctx.overlay_cache.lock().await;
+        if let Some((t, lanes)) = &*cache {
+            if t.elapsed() < OVERLAY_TTL {
+                return Ok(lanes.clone());
+            }
+        }
+    }
+    lanes_with_agents_fresh(ctx).await
+}
+
+/// Recompute the overlay from scratch and refresh the cache. Used by callers that must never read a
+/// stale snapshot — notably `notify_watch`, whose edge detection would miss a transition if two
+/// ticks reused the same cached list.
+pub(crate) async fn lanes_with_agents_fresh(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
     let mut lanes = ctx.lanes.list().await.map_err(internal)?;
     overlay_agents(ctx, &mut lanes).await;
+    *ctx.overlay_cache.lock().await = Some((std::time::Instant::now(), lanes.clone()));
     Ok(lanes)
 }
 
@@ -1192,20 +1220,45 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         })
         .collect();
     if !candidates.is_empty() {
-        let tmux = ctx.tmux.clone();
-        let windows: Vec<String> = candidates.iter().map(|(_, _, w)| w.clone()).collect();
-        let prompts = tokio::task::spawn_blocking(move || {
-            windows
-                .iter()
-                .map(|w| {
-                    tmux.capture_named(w, Some(45))
-                        .ok()
-                        .and_then(|p| agent::prompt::detect_pending_prompt(&p))
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap_or_default();
+        // The sniff is a `capture-pane` per Running/Waiting session — the bulk of the overlay's
+        // subprocess cost. Reuse a recent result per window and only re-capture stale ones, so
+        // rapid overlays (notify_watch + client polls) share one sniff per window per TTL.
+        const SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+        let mut prompts: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+        let mut misses: Vec<usize> = Vec::new();
+        {
+            let cache = ctx.prompt_cache.lock().await;
+            for (idx, (_, _, w)) in candidates.iter().enumerate() {
+                match cache.get(w) {
+                    Some((t, p)) if t.elapsed() < SNIFF_TTL => prompts.push(p.clone()),
+                    _ => {
+                        prompts.push(None);
+                        misses.push(idx);
+                    }
+                }
+            }
+        }
+        if !misses.is_empty() {
+            let tmux = ctx.tmux.clone();
+            let windows: Vec<String> = misses.iter().map(|&i| candidates[i].2.clone()).collect();
+            let fresh = tokio::task::spawn_blocking(move || {
+                windows
+                    .iter()
+                    .map(|w| {
+                        tmux.capture_named(w, Some(45))
+                            .ok()
+                            .and_then(|p| agent::prompt::detect_pending_prompt(&p))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            let mut cache = ctx.prompt_cache.lock().await;
+            for (&i, p) in misses.iter().zip(fresh) {
+                cache.insert(candidates[i].2.clone(), (std::time::Instant::now(), p.clone()));
+                prompts[i] = p;
+            }
+        }
         for ((li, si, _), found) in candidates.into_iter().zip(prompts) {
             if let Some(summary) = found {
                 let s = &mut lanes[li].agent_sessions[si];

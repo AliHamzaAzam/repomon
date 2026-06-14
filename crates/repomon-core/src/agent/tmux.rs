@@ -113,6 +113,35 @@ impl TmuxRuntime {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
+    /// Like [`run`], but a *benign absence* — the window/session/pane is gone, or no tmux server
+    /// is running — is reported as empty output instead of an error. Lets `capture`/`list-windows`
+    /// skip a `has-session`/`has_named` preflight fork (the single biggest CPU win): a vanished
+    /// target means "nothing to show", while a *real* tmux fault still propagates as `Err`.
+    fn run_allow_absent(&self, args: &[&str]) -> Result<String> {
+        let out = Command::new("tmux")
+            .args(self.full_args(args))
+            .output()
+            .map_err(Error::Io)?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // tmux: "can't find window/session/pane: …", "no server running on …",
+        // "error connecting to …" — the target simply isn't there.
+        let absent = stderr.contains("can't find ")
+            || stderr.contains("no server running")
+            || stderr.contains("error connecting");
+        if absent {
+            Ok(String::new())
+        } else {
+            Err(Error::Agent(format!(
+                "tmux {} failed: {}",
+                args.join(" "),
+                stderr.trim()
+            )))
+        }
+    }
+
     fn ok(&self, args: &[&str]) -> bool {
         Command::new("tmux")
             .args(self.full_args(args))
@@ -132,10 +161,10 @@ impl TmuxRuntime {
 
     /// Window names currently in the session.
     pub fn list_windows(&self) -> Result<Vec<String>> {
-        if !self.session_exists() {
-            return Ok(Vec::new());
-        }
-        let out = self.run(&["list-windows", "-t", &self.session, "-F", "#{window_name}"])?;
+        // No `has-session` preflight — `run_allow_absent` turns "no server / can't find session"
+        // into an empty list, saving a fork on every call (overlay_agents, auto_continue, …).
+        let out =
+            self.run_allow_absent(&["list-windows", "-t", &self.session, "-F", "#{window_name}"])?;
         Ok(out.lines().map(str::to_string).collect())
     }
 
@@ -195,9 +224,9 @@ impl TmuxRuntime {
 
     /// Capture a specific agent window's pane text.
     pub fn capture_named(&self, window: &str, lines: Option<u32>) -> Result<String> {
-        if !self.has_named(window) {
-            return Ok(String::new());
-        }
+        // No `has_named` preflight (which itself forked `has-session` + `list-windows`): capture
+        // directly and let `run_allow_absent` map a vanished window to empty output. Each capture
+        // is now ONE fork instead of three — the dominant streamer hot path.
         let target = self.exact_target(window);
         let start = lines.map(|n| format!("-{n}")).unwrap_or_default();
         let mut args = vec!["capture-pane", "-e", "-p", "-t", &target];
@@ -205,7 +234,7 @@ impl TmuxRuntime {
             args.push("-S");
             args.push(&start);
         }
-        self.run(&args)
+        self.run_allow_absent(&args)
     }
 
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.

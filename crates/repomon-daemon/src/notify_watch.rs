@@ -22,9 +22,10 @@ use serde_json::json;
 
 use crate::{push, rpc, Ctx};
 
-/// How often the watcher re-reads the fleet. Matches the TUI's refresh order of magnitude;
-/// the heavy parts underneath (transcript parses, process probes) are cached.
-const TICK: Duration = Duration::from_secs(4);
+/// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
+/// the overlay (transcript parses, pane sniffs, process probes), so this trades notification
+/// latency for idle CPU — a phone alert a few seconds later is fine, a daemon pegging a core isn't.
+const TICK: Duration = Duration::from_secs(8);
 /// Don't re-fire the same session's notification within this window (status flapping).
 const DEBOUNCE: Duration = Duration::from_secs(30);
 
@@ -47,7 +48,9 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             continue;
         }
 
-        let Ok(lanes) = rpc::lanes_with_agents(&ctx).await else {
+        // Always recompute (bypass the lane.list cache): edge detection must never reuse a stale
+        // snapshot, and in a headless setup nothing else populates the cache.
+        let Ok(lanes) = rpc::lanes_with_agents_fresh(&ctx).await else {
             continue;
         };
         let now: HashMap<(LaneId, SessKey), AgentStatus> = lanes
