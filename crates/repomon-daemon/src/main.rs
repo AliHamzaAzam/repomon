@@ -74,6 +74,9 @@ async fn main() {
             }
             let mut rx = watcher.subscribe();
             while let Ok(change) = rx.recv().await {
+                // Drop this worktree's cached git state so it re-walks (rate-limited) on the next
+                // list — the only thing that should trigger a fresh gix status walk.
+                ctx_w.lanes.invalidate_state(&change.path);
                 ctx_w.broadcast(
                     "event.repo.changed",
                     json!({ "path": change.path.to_string_lossy(), "kind": format!("{:?}", change.kind) }),

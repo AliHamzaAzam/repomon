@@ -821,8 +821,10 @@ impl App {
     /// either changed.
     pub async fn sync_viewport(&mut self) {
         let live = self.live_lanes();
+        // Name the lane the user is actively watching (Split/Focus, or the highlighted Grid tile)
+        // so the daemon streams it at the fast cadence and lets the other viewport panes back off.
         let focus = match self.view {
-            View::Split | View::Focus => self
+            View::Split | View::Focus | View::Grid => self
                 .selected_lane()
                 .map(|l| l.id)
                 .zip(self.selected_window()),
