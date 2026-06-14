@@ -298,6 +298,11 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .add(std::path::Path::new(&p.path))
                 .await
                 .map_err(internal)?;
+            // Start watching the new repo's tree at runtime (the watcher otherwise only knows the
+            // repos present at startup).
+            if let Some(w) = ctx.watcher.lock().await.as_mut() {
+                let _ = w.watch_path(&repo.path);
+            }
             ctx.broadcast(crate::pubsub::topic::REPO_ADDED, json!({ "repo": repo }));
             // Index the new repo's history in the background.
             let indexer = Indexer::new(ctx.store.clone(), ctx.registry.clone());
@@ -309,6 +314,13 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
         "repo.remove" => {
             let p: RepoRemove = parse(params)?;
+            // Stop watching the repo's tree before dropping it, so the file watcher isn't left
+            // churning fsevents over a repo that's no longer registered.
+            if let Ok(repo) = ctx.store.get_repo(p.repo_id).await {
+                if let Some(w) = ctx.watcher.lock().await.as_mut() {
+                    let _ = w.unwatch_path(&repo.path);
+                }
+            }
             ctx.registry.remove(p.repo_id).await.map_err(internal)?;
             ctx.broadcast(
                 crate::pubsub::topic::REPO_REMOVED,

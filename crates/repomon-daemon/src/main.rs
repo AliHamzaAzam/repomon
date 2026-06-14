@@ -73,6 +73,10 @@ async fn main() {
                 let _ = watcher.watch_path(&projects);
             }
             let mut rx = watcher.subscribe();
+            // Hand the watcher to the shared context so repo.add / repo.remove can watch / unwatch
+            // a tree at runtime — otherwise the watch set only reflects startup, and a removed repo
+            // keeps churning fsevents until the next restart.
+            *ctx_w.watcher.lock().await = Some(watcher);
             while let Ok(change) = rx.recv().await {
                 // Drop this worktree's cached git state so it re-walks (rate-limited) on the next
                 // list — the only thing that should trigger a fresh gix status walk.
@@ -82,7 +86,6 @@ async fn main() {
                     json!({ "path": change.path.to_string_lossy(), "kind": format!("{:?}", change.kind) }),
                 );
             }
-            drop(watcher); // hold the watcher for the daemon's lifetime
         });
     }
 
