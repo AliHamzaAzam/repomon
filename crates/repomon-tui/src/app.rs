@@ -247,6 +247,9 @@ pub struct App {
     /// Two-press confirm for unregistering a repo from the browser (`x x`): the repo id armed
     /// by the first press.
     repo_remove_pending: Option<i64>,
+    /// Pending bulk repo-discover (root, found paths): armed by a first `d`, committed by a second
+    /// — so a recursive scan of a deep folder can't flood the fleet on a single keypress.
+    discover_pending: Option<(String, Vec<String>)>,
     /// Agent-manager state: the list, the cursor, and the add/edit form.
     pub agents: Vec<AgentChoice>,
     pub agents_selected: usize,
@@ -356,6 +359,7 @@ impl App {
             browse_entries: Vec::new(),
             browse_selected: 0,
             repo_remove_pending: None,
+            discover_pending: None,
             agents: Vec::new(),
             agents_selected: 0,
             ag_editing: false,
@@ -1240,9 +1244,12 @@ impl App {
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
-        // Any key other than the confirming second `x` disarms a pending removal.
+        // Any key other than the confirming second `x` / `d` disarms a pending removal / discover.
         if key.code != KeyCode::Char('x') {
             self.repo_remove_pending = None;
+        }
+        if key.code != KeyCode::Char('d') {
+            self.discover_pending = None;
         }
     }
 
@@ -1331,7 +1338,30 @@ impl App {
         }
     }
 
+    /// Discover git repos under the browsed folder and register them — behind a confirming second
+    /// press (like repo removal), since a recursive scan of a deep folder can register dozens of
+    /// repos at once. First `d` scans and reports the count; second `d` commits the add.
     async fn discover_here(&mut self) {
+        // Second press: commit the pending add.
+        if let Some((root, found)) = self.discover_pending.take() {
+            let mut added = 0;
+            for path in &found {
+                if self
+                    .client
+                    .call("repo.add", Some(json!({ "path": path })))
+                    .await
+                    .is_ok()
+                {
+                    added += 1;
+                }
+            }
+            self.status = format!("added {added} repo(s) under {root}");
+            self.refresh().await;
+            let here = self.browse_path.clone();
+            self.load_browse(Some(here)).await;
+            return;
+        }
+        // First press: scan and arm (no repos added yet).
         let root = self.browse_path.clone();
         let found: Vec<String> = self
             .client
@@ -1341,21 +1371,15 @@ impl App {
             )
             .await
             .unwrap_or_default();
-        let mut added = 0;
-        for path in &found {
-            if self
-                .client
-                .call("repo.add", Some(json!({ "path": path })))
-                .await
-                .is_ok()
-            {
-                added += 1;
-            }
+        if found.is_empty() {
+            self.status = format!("no unregistered git repos under {root}");
+            return;
         }
-        self.status = format!("discovered {} repo(s), added {added}", found.len());
-        self.refresh().await;
-        let here = self.browse_path.clone();
-        self.load_browse(Some(here)).await;
+        self.status = format!(
+            "found {} repo(s) under {root} — press d again to add all, any other key to cancel",
+            found.len()
+        );
+        self.discover_pending = Some((root, found));
     }
 
     /// Fetch the spawnable agents (built-ins + configured customs) for the New Lane picker,

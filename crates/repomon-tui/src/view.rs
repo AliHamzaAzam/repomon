@@ -284,7 +284,7 @@ fn render_settings(f: &mut Frame, app: &App) {
 }
 
 const ADDREPO_KEYS: &str =
-    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here · x x remove (+ only)  ·  esc back";
+    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d d discover · x x remove (+ only)  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
