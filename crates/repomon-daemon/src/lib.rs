@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
-use repomon_core::{config, Config, Lanes, Registry, Store, TmuxRuntime};
+use repomon_core::{config, Config, Lanes, Registry, Store, TmuxRuntime, Watcher};
 use serde_json::Value;
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 
@@ -60,6 +60,10 @@ pub struct Ctx {
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
+    /// The filesystem watcher (set once the background task brings it up). Held here so `repo.add`
+    /// / `repo.remove` can watch / unwatch a tree at runtime — otherwise the watcher only ever
+    /// reflects the repos present at startup, and a removed repo keeps churning fsevents.
+    pub watcher: Mutex<Option<Watcher>>,
     pub shutdown: Notify,
 }
 
@@ -102,6 +106,7 @@ impl Ctx {
             prompt_cache: Mutex::new(HashMap::new()),
             rate_limits: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
+            watcher: Mutex::new(None),
             shutdown: Notify::new(),
         })
     }
