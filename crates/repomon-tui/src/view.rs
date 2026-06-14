@@ -284,7 +284,7 @@ fn render_settings(f: &mut Frame, app: &App) {
 }
 
 const ADDREPO_KEYS: &str =
-    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d discover here · x x remove (+ only)  ·  esc back";
+    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d d discover · x x remove (+ only)  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -796,7 +796,36 @@ fn analytics_char(level: u8) -> &'static str {
 fn render_fleet(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
-    f.render_widget(Paragraph::new(fleet_lines(app, rows[0])), rows[0]);
+    let content = rows[0];
+    let (lines, selected_line, lane_rows) = fleet_lines(app, content);
+    // Scroll so the selected lane stays on screen (roughly centered), clamped to the list bounds —
+    // this is what lets the fleet grow past one screenful and still be navigable with ↑/↓.
+    let h = content.height as usize;
+    let max_scroll = lines.len().saturating_sub(h);
+    let scroll = selected_line
+        .map(|sl| sl.saturating_sub(h / 2))
+        .unwrap_or(0)
+        .min(max_scroll);
+    // Click-to-select: register each *visible* lane row at its on-screen position (scroll-adjusted).
+    for (li, lane_id) in &lane_rows {
+        if *li >= scroll && *li < scroll + h {
+            click_zone(
+                app,
+                Rect {
+                    x: content.x,
+                    y: content.y + (*li - scroll) as u16,
+                    width: content.width,
+                    height: 1,
+                },
+                *lane_id,
+                false,
+            );
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).scroll((scroll as u16, 0)),
+        content,
+    );
     f.render_widget(footer(FLEET_KEYS, app), rows[1]);
 }
 
@@ -1345,10 +1374,17 @@ fn render_new_lane(f: &mut Frame, app: &App) {
 
 // ---- shared line builders ----------------------------------------------------
 
-fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
+fn fleet_lines(
+    app: &App,
+    content: Rect,
+) -> (Vec<Line<'static>>, Option<usize>, Vec<(usize, LaneId)>) {
     let width = content.width;
     let now = Utc::now();
     let mut lines = Vec::new();
+    // The selected lane's line index (so the caller can scroll to keep it visible) and every lane
+    // row's line index (so a click maps back to its lane through the scroll offset).
+    let mut selected_line: Option<usize> = None;
+    let mut lane_rows: Vec<(usize, LaneId)> = Vec::new();
     lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
     lines.push(rule(width, true, app));
     lines.push(Line::raw(""));
@@ -1405,21 +1441,10 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         if !selected && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
         }
-        // Record this row's on-screen rect so a click selects the lane (no live pane here, so a
-        // single click only selects; double-click opens the real terminal).
-        let li = lines.len() as u16;
-        if li < content.height {
-            click_zone(
-                app,
-                Rect {
-                    x: content.x,
-                    y: content.y + li,
-                    width: content.width,
-                    height: 1,
-                },
-                lane.id,
-                false,
-            );
+        let li = lines.len();
+        lane_rows.push((li, lane.id));
+        if selected {
+            selected_line = Some(li);
         }
         lines.push(line);
     }
@@ -1435,7 +1460,7 @@ fn fleet_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         lines.push(Line::raw(""));
         lines.push(Line::raw(format!("  {}", app.status)));
     }
-    lines
+    (lines, selected_line, lane_rows)
 }
 
 fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
@@ -1460,10 +1485,12 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         let glyph = status_glyph(lane);
         let counts = dirty_str(&lane.state.dirty);
         let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
+        let count = agent_count_badge(lane);
         let _ = now;
         let mut line = if i == app.selected {
+            let badge = count.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
             Line::from(Span::styled(
-                format!(" {glyph}{rest}"),
+                format!(" {glyph}{rest}{badge}"),
                 app.theme.selected(),
             ))
         } else {
@@ -1472,11 +1499,15 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
             } else {
                 app.theme.accented()
             };
-            Line::from(vec![
+            let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(glyph.to_string(), glyph_style),
                 Span::raw(rest),
-            ])
+            ];
+            if let Some(c) = &count {
+                spans.push(Span::styled(format!(" {c}"), app.theme.accented()));
+            }
+            Line::from(spans)
         };
         if i != app.selected && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
@@ -1701,6 +1732,13 @@ fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
     ])
 }
 
+/// `Some("×N")` when several agents share one lane — the compact multi-agent marker shown in the
+/// Fleet list and the Split sidebar (mirrors the Grid badge's `×N`). `None` for 0 or 1 agent.
+fn agent_count_badge(lane: &Lane) -> Option<String> {
+    let n = lane.agent_sessions.len();
+    (n > 1).then(|| format!("×{n}"))
+}
+
 fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<'static> {
     use ratatui::style::Modifier;
     use repomon_core::model::AgentStatus;
@@ -1733,34 +1771,49 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
     } else {
         app.theme.accented()
     };
-    let agent = lane
+    let agent_name = lane
         .agent_sessions
         .first()
-        .map(|s| s.agent.short().to_string())
+        .map(|s| trunc(s.agent.short(), 7))
         .unwrap_or_default();
-    let mid = format!(
-        "{:<12} {:<36} {:<11} {:<7} {:<7} ",
+    // "claude" or "claude ×2"; the count gets its own accent span so a multi-agent lane stands
+    // out. The cell is padded to a fixed width so the time column stays aligned either way.
+    let count = agent_count_badge(lane);
+    const AGENT_W: usize = 10;
+    let agent_cell = match &count {
+        Some(c) => format!("{agent_name} {c}"),
+        None => agent_name.clone(),
+    };
+    let agent_pad = " ".repeat(AGENT_W.saturating_sub(agent_cell.chars().count()));
+    let left = format!(
+        "{:<12} {:<36} {:<11} {:<7} ",
         trunc(&lane_name(lane), 12),
         trunc(&lane_branch(lane), 36),
         dirty_str(&lane.state.dirty),
         ahead_behind_str(lane.state.ahead, lane.state.behind),
-        trunc(&agent, 7),
     );
     let time = rel_time(lane.last_activity_at, now);
     if selected {
         // A clean reverse-video bar for the selection (per-cell colors would muddy it).
-        let text = format!("  {glyph} {active} {mid}{time}");
+        let text = format!("  {glyph} {active} {left}{agent_cell}{agent_pad} {time}");
         return Line::from(Span::styled(text, app.theme.selected()));
     }
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(glyph.to_string(), glyph_style),
         Span::raw(" "),
         Span::styled(active.to_string(), active_style),
         Span::raw(" "),
-        Span::raw(mid),
-        Span::styled(time, app.theme.muted()),
-    ])
+        Span::raw(left),
+        Span::raw(agent_name),
+    ];
+    if let Some(c) = &count {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(c.clone(), app.theme.accented()));
+    }
+    spans.push(Span::raw(format!("{agent_pad} ")));
+    spans.push(Span::styled(time, app.theme.muted()));
+    Line::from(spans)
 }
 
 fn commit_line(c: &Commit, app: &App) -> Line<'static> {

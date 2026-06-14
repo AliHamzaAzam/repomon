@@ -111,6 +111,23 @@ fn classify(roots: &[PathBuf], path: &Path) -> Option<(PathBuf, ChangeKind)> {
     if s.contains("/.git/objects/") {
         return None;
     }
+    // Build / dependency / tooling output churns constantly and is gitignored, so it never moves
+    // the tracked git status we surface — don't wake a re-sync (and a gix status walk) for it.
+    const NOISE: &[&str] = &[
+        "/target/",
+        "/node_modules/",
+        "/.next/",
+        "/.nuxt/",
+        "/.turbo/",
+        "/.venv/",
+        "/__pycache__/",
+        "/.shopify/",
+        "/.pnpm-store/",
+        "/.gradle/",
+    ];
+    if NOISE.iter().any(|n| s.contains(n)) {
+        return None;
+    }
     let in_git = s.contains("/.git/") || s.ends_with("/.git");
     let kind = if !in_git {
         ChangeKind::Worktree

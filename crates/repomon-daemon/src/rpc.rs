@@ -343,6 +343,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let p: CreateLaneParams = parse(params)?;
             let lane = ctx.lanes.create(p).await.map_err(internal)?;
             ctx.broadcast(crate::pubsub::topic::LANE_CREATED, json!({ "lane": lane }));
+            ctx.invalidate_overlay().await;
             to_value(lane)
         }
         "lane.delete" => {
@@ -355,6 +356,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::LANE_DELETED,
                 json!({ "lane_id": p.lane_id }),
             );
+            ctx.invalidate_overlay().await;
             Ok(Value::Null)
         }
         "lane.focus" => {
@@ -678,6 +680,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
+            ctx.invalidate_overlay().await;
             Ok(json!({ "lane_id": p.lane_id, "window": window, "agent": p.agent }))
         }
         "agent.adopt" => {
@@ -729,6 +732,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
+            ctx.invalidate_overlay().await;
             Ok(json!({ "lane_id": p.lane_id, "window": window }))
         }
         "agent.capture" => {
@@ -811,6 +815,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "ended" }),
             );
+            ctx.invalidate_overlay().await;
             Ok(Value::Null)
         }
         "agent.pin" => {
@@ -1023,11 +1028,34 @@ const MAX_SESSIONS_PER_LANE: usize = 8;
 /// no transcript or process of their own. Short, so the indicator tracks actual work.
 const ACTIVITY_WINDOW_SECS: i64 = 90;
 
-/// The full lane list with live agent sessions overlaid — the composite `lane.list` serves.
-/// Shared with the daemon-side notification watcher (`notify_watch`), which diffs it.
+/// TTL for the cached lane overlay. Short enough that a freshly-spawned agent's window placeholder
+/// (and exited-agent / rate-limit transitions) still surface within a refresh or two; long enough
+/// that several clients polling ~1s apart share a single tmux/lsof/transcript scan.
+const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// The full lane list with live agent sessions overlaid — what `lane.list` serves — from a
+/// short-TTL cache so a stream of per-second client polls collapses into ~1 scan per TTL. Stale
+/// concurrent callers may each recompute (bounded, rare); we accept that over single-flight to
+/// avoid a leader-failure deadlock. Structural changes call [`Ctx::invalidate_overlay`].
 pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
+    {
+        let cache = ctx.overlay_cache.lock().await;
+        if let Some((t, lanes)) = &*cache {
+            if t.elapsed() < OVERLAY_TTL {
+                return Ok(lanes.clone());
+            }
+        }
+    }
+    lanes_with_agents_fresh(ctx).await
+}
+
+/// Recompute the overlay from scratch and refresh the cache. Used by callers that must never read a
+/// stale snapshot — notably `notify_watch`, whose edge detection would miss a transition if two
+/// ticks reused the same cached list.
+pub(crate) async fn lanes_with_agents_fresh(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
     let mut lanes = ctx.lanes.list().await.map_err(internal)?;
     overlay_agents(ctx, &mut lanes).await;
+    *ctx.overlay_cache.lock().await = Some((std::time::Instant::now(), lanes.clone()));
     Ok(lanes)
 }
 
@@ -1070,22 +1098,29 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let global_auto = ctx.config.read().await.auto_continue;
 
     for (lane, mut summaries) in lanes.iter_mut().zip(per_lane) {
-        if let Some(live) = &live {
+        // The lane's managed agent windows, in slot order (= spawn order). A window only exists
+        // while its agent's process lives (tmux closes it on exit), so it doubles as proof of
+        // liveness and as the routing target for keys/captures.
+        let lane_windows = TmuxRuntime::lane_windows_in(&windows, lane.id);
+        let managed_n = lane_windows.len();
+        // Live `claude` processes whose cwd is this worktree bound how many of its sessions are
+        // running (a `/exit`ed one leaves a recent transcript but no process). But never drop a
+        // transcript that pairs to a live managed window — keep at least one per window — so a
+        // freshly-spawned second agent isn't hidden for up to ~10s by the cached process count.
+        if let Some(alive) = live.as_ref().map(|m| {
             let key = lane
                 .worktree
                 .path
                 .canonicalize()
                 .unwrap_or_else(|_| lane.worktree.path.clone());
-            let alive = live.get(&key).copied().unwrap_or(0);
-            summaries.truncate(alive); // sorted newest-first; 0 → none
+            m.get(&key).copied().unwrap_or(0)
+        }) {
+            summaries.truncate(alive.max(managed_n)); // sorted newest-first
         }
-        // The lane's managed agent windows, in slot order (= spawn order). Several agents can
-        // run side by side; pair the newest `k` transcripts with the `k` windows, oldest with
-        // oldest (slot order tracks spawn order, transcripts arrive newest-first). A heuristic,
-        // but it routes keys/captures to the right pane in practice.
-        let lane_windows = TmuxRuntime::lane_windows_in(&windows, lane.id);
-        let managed_n = lane_windows.len();
         if !summaries.is_empty() {
+            // Pair the newest `k` transcripts with the `k` windows, oldest with oldest (slot order
+            // tracks spawn order, transcripts arrive newest-first). A heuristic, but it routes
+            // keys/captures to the right pane in practice.
             let paired = summaries.len().min(managed_n);
             for (idx, s) in summaries.into_iter().enumerate() {
                 if s.last_activity > lane.last_activity_at {
@@ -1100,34 +1135,21 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
                 lane.agent_sessions.push(session);
             }
+            // A second agent spawned into this worktree gets its own window but hasn't written a
+            // transcript yet (claude creates the .jsonl a beat after launch). Surface it right
+            // away as a window-only placeholder so it isn't invisible until then. At most one
+            // (the `SessKey::Fallback` model allows a single no-transcript session per lane): the
+            // newest unpaired window, which is the slot the latest spawn took.
+            if let Some(w) = placeholder_window_index(paired, managed_n) {
+                let kind = lane_meta_kind(&metas, lane.id);
+                lane.agent_sessions
+                    .push(window_placeholder_session(lane, kind, lane_windows[w].clone()));
+            }
         } else if managed_n > 0 {
             // No parseable transcript: surface a repomon-spawned agent if its window is alive.
-            let kind = metas
-                .iter()
-                .find(|m| m.id == lane.id)
-                .and_then(|m| m.agent_kind.clone())
-                .map(|k| AgentKind::from_kind_str(&k))
-                .unwrap_or(AgentKind::ClaudeCode);
-            lane.agent_sessions.push(AgentSession {
-                id: 0,
-                agent: kind,
-                repo_id: lane.repo.id,
-                worktree_id: Some(lane.worktree.id),
-                started_at: lane.last_activity_at,
-                last_activity_at: lane.last_activity_at,
-                ended_at: None,
-                manifest_path: std::path::PathBuf::new(),
-                tool_call_count: 0,
-                title: None,
-                status: AgentStatus::Running,
-                external: false,
-                session_id: None,
-                resume_at: None,
-                inferred: false,
-                tmux_window: lane_windows.first().cloned(),
-                last_message: None,
-                pending_prompt: None,
-            });
+            let kind = lane_meta_kind(&metas, lane.id);
+            lane.agent_sessions
+                .push(window_placeholder_session(lane, kind, lane_windows[0].clone()));
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
             // an active agent we can't name (e.g. a Claude Code worktree-isolated subagent, which
@@ -1198,20 +1220,45 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         })
         .collect();
     if !candidates.is_empty() {
-        let tmux = ctx.tmux.clone();
-        let windows: Vec<String> = candidates.iter().map(|(_, _, w)| w.clone()).collect();
-        let prompts = tokio::task::spawn_blocking(move || {
-            windows
-                .iter()
-                .map(|w| {
-                    tmux.capture_named(w, Some(45))
-                        .ok()
-                        .and_then(|p| agent::prompt::detect_pending_prompt(&p))
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap_or_default();
+        // The sniff is a `capture-pane` per Running/Waiting session — the bulk of the overlay's
+        // subprocess cost. Reuse a recent result per window and only re-capture stale ones, so
+        // rapid overlays (notify_watch + client polls) share one sniff per window per TTL.
+        const SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+        let mut prompts: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+        let mut misses: Vec<usize> = Vec::new();
+        {
+            let cache = ctx.prompt_cache.lock().await;
+            for (idx, (_, _, w)) in candidates.iter().enumerate() {
+                match cache.get(w) {
+                    Some((t, p)) if t.elapsed() < SNIFF_TTL => prompts.push(p.clone()),
+                    _ => {
+                        prompts.push(None);
+                        misses.push(idx);
+                    }
+                }
+            }
+        }
+        if !misses.is_empty() {
+            let tmux = ctx.tmux.clone();
+            let windows: Vec<String> = misses.iter().map(|&i| candidates[i].2.clone()).collect();
+            let fresh = tokio::task::spawn_blocking(move || {
+                windows
+                    .iter()
+                    .map(|w| {
+                        tmux.capture_named(w, Some(45))
+                            .ok()
+                            .and_then(|p| agent::prompt::detect_pending_prompt(&p))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            let mut cache = ctx.prompt_cache.lock().await;
+            for (&i, p) in misses.iter().zip(fresh) {
+                cache.insert(candidates[i].2.clone(), (std::time::Instant::now(), p.clone()));
+                prompts[i] = p;
+            }
+        }
         for ((li, si, _), found) in candidates.into_iter().zip(prompts) {
             if let Some(summary) = found {
                 let s = &mut lanes[li].agent_sessions[si];
@@ -1341,6 +1388,57 @@ fn is_env_assignment(tok: &str) -> bool {
 /// `CLAUDE_CONFIG_DIR=~/.claude-work claude` resolve to `claude`.
 fn program_of(command: &str) -> Option<&str> {
     command.split_whitespace().find(|t| !is_env_assignment(t))
+}
+
+/// The agent kind repomon last spawned in a lane (from its persisted meta), defaulting to Claude
+/// when nothing was recorded — used to label a window-only placeholder session.
+fn lane_meta_kind(
+    metas: &[repomon_core::model::LaneMeta],
+    lane_id: repomon_core::model::LaneId,
+) -> AgentKind {
+    metas
+        .iter()
+        .find(|m| m.id == lane_id)
+        .and_then(|m| m.agent_kind.clone())
+        .map(|k| AgentKind::from_kind_str(&k))
+        .unwrap_or(AgentKind::ClaudeCode)
+}
+
+/// A window-only placeholder agent: a repomon-spawned session whose tmux window is alive but
+/// whose transcript hasn't appeared yet (just launched), so it shows immediately instead of
+/// staying invisible until the `.jsonl` lands. Managed (`external: false`), no transcript id,
+/// and not `inferred` (it's a real spawn, not a guess from file activity).
+fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> AgentSession {
+    AgentSession {
+        id: 0,
+        agent: kind,
+        repo_id: lane.repo.id,
+        worktree_id: Some(lane.worktree.id),
+        started_at: lane.last_activity_at,
+        last_activity_at: lane.last_activity_at,
+        ended_at: None,
+        manifest_path: std::path::PathBuf::new(),
+        tool_call_count: 0,
+        title: None,
+        status: AgentStatus::Running,
+        external: false,
+        session_id: None,
+        resume_at: None,
+        inferred: false,
+        tmux_window: Some(window),
+        last_message: None,
+        pending_prompt: None,
+    }
+}
+
+/// Whether a lane needs a window-only placeholder for a just-spawned agent whose transcript
+/// hasn't appeared yet, and which managed-window index it maps to. `shown` = transcript-backed
+/// sessions already emitted; `managed_n` = live managed windows. A managed window exists only
+/// while its agent's process lives (tmux closes it on exit), so an unpaired window is a real
+/// agent that simply hasn't written its `.jsonl` yet. Returns the newest unpaired window's index
+/// (at most one, per the `SessKey::Fallback` single-no-transcript-session model), or `None`.
+fn placeholder_window_index(shown: usize, managed_n: usize) -> Option<usize> {
+    (managed_n > shown).then(|| managed_n - 1)
 }
 
 /// How many live `claude` CLI processes have each working directory. claude doesn't hold its
@@ -1476,6 +1574,21 @@ async fn commits_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_for_the_newest_unpaired_window() {
+        // One existing agent (transcript) + a freshly-spawned second window: surface the new
+        // window immediately, mapped to the newest slot, so it isn't invisible until its
+        // transcript lands.
+        assert_eq!(placeholder_window_index(1, 2), Some(1));
+        // Every managed window already transcript-backed → no placeholder.
+        assert_eq!(placeholder_window_index(2, 2), None);
+        assert_eq!(placeholder_window_index(1, 1), None);
+        assert_eq!(placeholder_window_index(0, 0), None);
+        // Three windows, one transcript: still a single placeholder (the Fallback invariant),
+        // mapped to the newest window.
+        assert_eq!(placeholder_window_index(1, 3), Some(2));
+    }
 
     #[test]
     fn program_of_skips_env_assignments() {
