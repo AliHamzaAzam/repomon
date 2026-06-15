@@ -3,8 +3,10 @@
 //! Both the TUI (local popups) and the daemon (remote `event.notification` broadcasts + push)
 //! watch per-session agent statuses across refreshes and alert on meaningful transitions.
 //! Everything shared lives here: session keying, the status diff, transition classification,
-//! and the `(title, body)` text composition. Delivery (osascript, APNs, banners) stays with
-//! each client.
+//! and the `(title, body)` text composition, plus the local desktop delivery
+//! ([`send_native`]) shared by the TUI and the daemon — the daemon fires it as a fallback when
+//! the local TUI is parked (attached to a pane) or closed. Remote delivery (APNs) and the TUI's
+//! in-app banner stay with their clients.
 
 use std::collections::{HashMap, HashSet};
 
@@ -276,6 +278,123 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+// ---- local desktop delivery (shared by the TUI and the daemon) ----
+
+/// Play the notification chime once, off-thread — a preview used when enabling sound in Settings.
+pub fn play_chime() {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        let _ = std::process::Command::new("afplay")
+            .arg(NOTIFY_SOUND_FILE)
+            .output();
+    });
+}
+
+/// Fire a native desktop notification, best-effort and without blocking the caller (the actual
+/// `osascript`/`notify-send` invocation runs on a detached thread). `click_focus` makes the popup
+/// click-to-focus the terminal when `terminal-notifier` is installed (plain popup otherwise).
+pub fn send_native(title: &str, body: &str, sound: bool, click_focus: bool) {
+    let (title, body) = (title.to_string(), body.to_string());
+    std::thread::spawn(move || {
+        run_native(&title, &body, sound, click_focus);
+    });
+}
+
+/// A system sound file played for an audible notification (see [`run_native`]).
+#[cfg(target_os = "macos")]
+const NOTIFY_SOUND_FILE: &str = "/System/Library/Sounds/Glass.aiff";
+
+#[cfg(target_os = "macos")]
+fn run_native(title: &str, body: &str, sound: bool, click_focus: bool) {
+    // Prefer the clickable popup; fall back to osascript when terminal-notifier isn't installed
+    // (or click-to-focus is off). We deliberately do NOT use osascript's own `sound name`: on
+    // recent macOS the notification is attributed to "Script Editor", whose notification sound is
+    // usually off, so the chime is silently dropped. Play it with `afplay` instead.
+    let clickable = click_focus && notify_clickable(title, body);
+    if !clickable {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            escape(body),
+            escape(title),
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+    }
+    if sound {
+        let _ = std::process::Command::new("afplay")
+            .arg(NOTIFY_SOUND_FILE)
+            .output();
+    }
+}
+
+/// Post a click-to-focus popup via `terminal-notifier`. Returns false when it isn't installed, so
+/// the caller can fall back to a plain popup.
+#[cfg(target_os = "macos")]
+fn notify_clickable(title: &str, body: &str) -> bool {
+    let Some(bin) = terminal_notifier() else {
+        return false;
+    };
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(["-title", title, "-message", body]);
+    if let Some(bundle) = std::env::var("TERM_PROGRAM")
+        .ok()
+        .as_deref()
+        .and_then(terminal_bundle_id)
+    {
+        cmd.args(["-activate", bundle]);
+    }
+    cmd.output().is_ok()
+}
+
+/// The installed `terminal-notifier` binary, located once per process. `None` = not installed.
+#[cfg(target_os = "macos")]
+fn terminal_notifier() -> Option<&'static str> {
+    fn locate() -> Option<String> {
+        let out = std::process::Command::new("which")
+            .arg("terminal-notifier")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!p.is_empty()).then_some(p)
+    }
+    static FOUND: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(locate).as_deref()
+}
+
+/// The macOS bundle id behind a `$TERM_PROGRAM` value — what a clicked notification focuses.
+/// Unknown terminals (including `tmux`, which masks the real one) get no `-activate`.
+#[cfg(target_os = "macos")]
+fn terminal_bundle_id(term_program: &str) -> Option<&'static str> {
+    match term_program {
+        "iTerm.app" => Some("com.googlecode.iterm2"),
+        "Apple_Terminal" => Some("com.apple.Terminal"),
+        "WezTerm" => Some("com.github.wez.wezterm"),
+        "ghostty" => Some("com.mitchellh.ghostty"),
+        "vscode" => Some("com.microsoft.VSCode"),
+        "kitty" => Some("net.kovidgoyal.kitty"),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_native(title: &str, body: &str, _sound: bool, _click_focus: bool) {
+    let _ = std::process::Command::new("notify-send")
+        .arg(title)
+        .arg(body)
+        .output();
+}
+
+/// Escape a string for embedding in an AppleScript double-quoted literal.
+#[cfg(target_os = "macos")]
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -573,5 +692,27 @@ mod tests {
             serde_json::to_string(&NotifKind::RateLimited).unwrap(),
             "\"rate_limited\""
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_ids_cover_known_terminals_only() {
+        assert_eq!(
+            terminal_bundle_id("iTerm.app"),
+            Some("com.googlecode.iterm2")
+        );
+        assert_eq!(
+            terminal_bundle_id("Apple_Terminal"),
+            Some("com.apple.Terminal")
+        );
+        // tmux masks the real terminal; unknowns get no -activate.
+        assert_eq!(terminal_bundle_id("tmux"), None);
+        assert_eq!(terminal_bundle_id(""), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn escape_neutralizes_applescript_quotes() {
+        assert_eq!(escape(r#"say "hi" \ now"#), r#"say \"hi\" \\ now"#);
     }
 }

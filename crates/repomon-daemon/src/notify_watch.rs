@@ -28,6 +28,10 @@ use crate::{push, rpc, Ctx};
 const TICK: Duration = Duration::from_secs(8);
 /// Don't re-fire the same session's notification within this window (status flapping).
 const DEBOUNCE: Duration = Duration::from_secs(30);
+/// How long since the local TUI's last request before we treat it as parked (attached) or closed
+/// and let the daemon fire desktop popups itself. The TUI refreshes ~1s, so a few seconds of
+/// silence means it isn't watching.
+const LOCAL_TTL: Duration = Duration::from_secs(3);
 
 pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
@@ -40,13 +44,18 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     loop {
         tick.tick().await;
         let cfg = ctx.config.read().await.clone();
-        if !cfg.remote.enabled || !cfg.notify_enabled {
+        if !cfg.notify_enabled {
             // Drop state while disabled so re-enabling re-seeds instead of firing a backlog.
             prev.clear();
             seeded = false;
             debounce.clear();
             continue;
         }
+        // The TUI fires its own desktop popups while it's actively watching; the daemon takes over
+        // local desktop delivery only when the TUI has parked in an attach or closed — i.e. its
+        // ~1s lane.list heartbeat has gone stale. Remote delivery is gated separately below.
+        let tui_active =
+            (*ctx.local_watcher_seen.lock().await).is_some_and(|t| t.elapsed() < LOCAL_TTL);
 
         // Always recompute (bypass the lane.list cache): edge detection must never reuse a stale
         // snapshot, and in a headless setup nothing else populates the cache.
@@ -114,18 +123,32 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 "body": body,
                 "prompt": prompt,
             });
-            ctx.broadcast("event.notification", payload.clone());
+            // Remote clients (the iOS companion): event.notification + APNs — only when the bridge
+            // is enabled.
+            if cfg.remote.enabled {
+                ctx.broadcast("event.notification", payload.clone());
+                // Lock-screen push: a NeedsYou with a pending question gets the actionable
+                // category (Approve / Open); everything else is a plain alert. Approve-from-lock
+                // only when an actual dialog is up — a plain "finished its turn" Enter would be a
+                // no-op (or worse, submit an empty reply).
+                let category = if kind == NotifKind::NeedsYou && dialog.is_some() {
+                    push::CATEGORY_PROMPT
+                } else {
+                    push::CATEGORY_ALERT
+                };
+                push::send_all(&ctx, &title, &body, category, &payload).await;
+            }
 
-            // Lock-screen push: a NeedsYou with a pending question gets the actionable
-            // category (Approve / Open); everything else is a plain alert.
-            // Approve-from-lock-screen only when an actual dialog is up — a plain "finished
-            // its turn" Enter would be a no-op (or worse, submit an empty reply).
-            let category = if kind == NotifKind::NeedsYou && dialog.is_some() {
-                push::CATEGORY_PROMPT
-            } else {
-                push::CATEGORY_ALERT
-            };
-            push::send_all(&ctx, &title, &body, category, &payload).await;
+            // Local desktop popup — fired by the daemon only when the TUI isn't already covering it
+            // (it's parked in an attach or closed), so we never double-notify with the TUI's own.
+            if !tui_active {
+                repomon_core::notify::send_native(
+                    &title,
+                    &body,
+                    cfg.notify_sound,
+                    cfg.notify_click_focus,
+                );
+            }
         }
     }
 }
