@@ -77,6 +77,10 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
                         continue;
                     }
                 };
+                // A local request means the TUI is actively watching; its 1s lane.list refresh
+                // keeps this fresh and stops the instant the TUI parks in an attach or closes —
+                // which is how the notification engine knows to take over desktop popups.
+                *ctx.local_watcher_seen.lock().await = Some(std::time::Instant::now());
                 if req.method == "subscribe" {
                     forwarding = true;
                 }

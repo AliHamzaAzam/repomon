@@ -64,6 +64,11 @@ pub struct Ctx {
     /// / `repo.remove` can watch / unwatch a tree at runtime — otherwise the watcher only ever
     /// reflects the repos present at startup, and a removed repo keeps churning fsevents.
     pub watcher: Mutex<Option<Watcher>>,
+    /// When a *local* client (the TUI) was last seen making a request — its 1s `lane.list` refresh
+    /// is a built-in heartbeat that stops the moment the TUI parks in an attach or closes. The
+    /// notification engine fires desktop popups itself once this goes stale, so an alert still
+    /// reaches you when you're heads-down full-screen in an agent.
+    pub local_watcher_seen: Mutex<Option<Instant>>,
     pub shutdown: Notify,
 }
 
@@ -107,6 +112,7 @@ impl Ctx {
             rate_limits: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
+            local_watcher_seen: Mutex::new(None),
             shutdown: Notify::new(),
         })
     }
