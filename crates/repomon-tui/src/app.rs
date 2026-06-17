@@ -232,6 +232,10 @@ pub struct App {
     /// concurrent agents can run in one worktree; this cursor picks among them.
     pub session_idx: usize,
     session_lane: Option<LaneId>,
+    /// The agent each lane had selected when you last left it, so returning to a multi-agent
+    /// lane restores your pick instead of snapping back to the first slot. Keyed by a stable
+    /// identity (tmux window / transcript id), so it survives the session list reordering.
+    session_memory: HashMap<LaneId, SessionRef>,
     /// After spawning an agent, the (lane, tmux window) to move the session cursor onto once it
     /// shows up in `lane.list` — so a fresh spawn lands you on the *new* agent, not the old one.
     /// Cleared when matched (or after a few refreshes if the window never appears).
@@ -350,6 +354,7 @@ impl App {
             recent_commits_lane: None,
             session_idx: 0,
             session_lane: None,
+            session_memory: HashMap::new(),
             pending_focus_window: None,
             pending_focus_ticks: 0,
             terminals: Vec::new(),
@@ -404,6 +409,9 @@ impl App {
                 // Keep the cursor on the same lane across the attention re-sort below.
                 let keep = self.selected_lane().map(|l| l.id);
                 self.lanes = l;
+                // Forget remembered agent selections for lanes that no longer exist.
+                self.session_memory
+                    .retain(|id, _| self.lanes.iter().any(|l| l.id == *id));
                 // Run notification edge-detection only on a *successful* fetch. Seeding off a
                 // failed first call (empty lanes) would make the next good refresh treat every
                 // running agent as a fresh transition — the startup storm seeding prevents.
@@ -896,8 +904,30 @@ impl App {
     fn sync_session_cursor(&mut self) {
         let sel = self.selected_lane().map(|l| l.id);
         if sel != self.session_lane {
+            // Remember the agent the outgoing lane had selected, then restore the one we last
+            // had on the lane we're arriving at — so returning to a multi-agent project keeps
+            // your pick instead of snapping to the first slot. Identity-keyed, so it survives
+            // the session list reordering; falls back to the first agent when the remembered
+            // one is gone (or this lane was never visited).
+            if let Some(old) = self.session_lane {
+                if let Some(r) = self
+                    .lanes
+                    .iter()
+                    .find(|l| l.id == old)
+                    .and_then(|l| l.agent_sessions.get(self.session_idx))
+                    .and_then(agent_session_ref)
+                {
+                    self.session_memory.insert(old, r);
+                }
+            }
             self.session_lane = sel;
-            self.session_idx = 0;
+            self.session_idx = sel
+                .and_then(|id| self.session_memory.get(&id))
+                .and_then(|r| {
+                    self.selected_lane()
+                        .and_then(|l| session_index_for_ref(&l.agent_sessions, r))
+                })
+                .unwrap_or(0);
             self.reset_scroll(); // scrollback buffer belonged to the previous lane
         }
         // After a spawn, jump the cursor onto the new agent's window the moment it shows up in
@@ -2958,6 +2988,33 @@ fn attention_rank(sessions: &[AgentSession], auto_continue_armed: bool) -> u8 {
         .unwrap_or(3)
 }
 
+/// A stable identity for one agent session within a lane, used to remember which agent a lane
+/// had selected across a switch away and back. The persistent `id` is `0` for daemon-overlaid
+/// placeholders so it can't be used; the managed tmux window (preferred) and the Claude
+/// transcript id are the durable handles the rest of the app already keys on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionRef {
+    Window(String),
+    Transcript(String),
+}
+
+/// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
+fn agent_session_ref(s: &AgentSession) -> Option<SessionRef> {
+    if let Some(w) = &s.tmux_window {
+        Some(SessionRef::Window(w.clone()))
+    } else {
+        s.session_id.clone().map(SessionRef::Transcript)
+    }
+}
+
+/// Index of the session matching `r` within `sessions`, or `None` if it's no longer present.
+fn session_index_for_ref(sessions: &[AgentSession], r: &SessionRef) -> Option<usize> {
+    sessions.iter().position(|s| match r {
+        SessionRef::Window(w) => s.tmux_window.as_deref() == Some(w.as_str()),
+        SessionRef::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
+    })
+}
+
 /// Case-insensitive subsequence match of `needle` in `haystack` for the lane switcher. Lower
 /// scores are better: matches that start earlier and sit closer together rank first. Greedy
 /// leftmost matching; an empty needle matches everything with the best score.
@@ -3363,6 +3420,53 @@ mod tests {
             last_message: None,
             pending_prompt: None,
         }
+    }
+
+    /// A managed session in a tmux window, optionally transcript-backed.
+    fn managed(window: &str, session_id: Option<&str>) -> AgentSession {
+        let mut s = sess(session_id, AgentStatus::Running, false);
+        s.tmux_window = Some(window.to_string());
+        s
+    }
+
+    #[test]
+    fn agent_session_ref_prefers_window_then_transcript() {
+        // A managed agent keys on its window even when it also has a transcript id.
+        assert_eq!(
+            agent_session_ref(&managed("lane-7-2", Some("uuid-1"))),
+            Some(SessionRef::Window("lane-7-2".into()))
+        );
+        // An external/transcript-only session keys on the transcript id.
+        assert_eq!(
+            agent_session_ref(&sess(Some("uuid-2"), AgentStatus::Waiting, false)),
+            Some(SessionRef::Transcript("uuid-2".into()))
+        );
+        // An inferred file-activity placeholder (no window, no id) has no stable handle.
+        assert_eq!(agent_session_ref(&sess(None, AgentStatus::Idle, true)), None);
+    }
+
+    #[test]
+    fn session_index_for_ref_finds_by_window_and_transcript_else_none() {
+        // Two managed agents side by side, plus an external transcript-only one.
+        let sessions = [
+            managed("lane-7", Some("uuid-a")),
+            managed("lane-7-2", Some("uuid-b")),
+            sess(Some("uuid-ext"), AgentStatus::Waiting, false),
+        ];
+        // The window identity lands on the right slot regardless of position.
+        assert_eq!(
+            session_index_for_ref(&sessions, &SessionRef::Window("lane-7-2".into())),
+            Some(1)
+        );
+        assert_eq!(
+            session_index_for_ref(&sessions, &SessionRef::Transcript("uuid-ext".into())),
+            Some(2)
+        );
+        // A remembered agent that has since exited matches nothing → caller falls back to slot 0.
+        assert_eq!(
+            session_index_for_ref(&sessions, &SessionRef::Window("lane-7-3".into())),
+            None
+        );
     }
 
     #[test]
