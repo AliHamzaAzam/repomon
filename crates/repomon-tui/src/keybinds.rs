@@ -45,6 +45,9 @@ pub enum Action {
     Quit,
     NewLane,
     DeleteLane,
+    /// Unregister the selected lane's whole repo from repomon (two-press confirm). Worktree
+    /// files and running agents are left untouched — re-add with `repomon add`.
+    RemoveRepo,
     StartFilter,
     Refresh,
     CdToLane,
@@ -79,6 +82,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char('n') => Some(Action::NewLane),
         KeyCode::Char('d') | KeyCode::Char('x') => Some(Action::DeleteLane),
+        KeyCode::Char('X') => Some(Action::RemoveRepo),
         KeyCode::Char('/') => Some(Action::StartFilter),
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('c') => Some(Action::CdToLane),
@@ -105,5 +109,25 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('4') => Some(Action::Goto(View::Search)),
         KeyCode::Char('5') => Some(Action::Goto(View::Notifications)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn k(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn capital_x_removes_repo_while_lowercase_deletes_a_lane() {
+        // Capital X is the repo-level scope (unregister the whole project, two-press confirm);
+        // lowercase d/x stay lane-level deletes. Keeping them distinct prevents a fat-fingered
+        // lane delete from nuking a repo.
+        assert_eq!(nav(k('X')), Some(Action::RemoveRepo));
+        assert_eq!(nav(k('d')), Some(Action::DeleteLane));
+        assert_eq!(nav(k('x')), Some(Action::DeleteLane));
     }
 }

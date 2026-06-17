@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use ratatui::DefaultTerminal;
 use repomon_core::model::{
     AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
-    TimelineData, WorkSession,
+    RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
     diff_session_transitions, session_by_key, session_statuses, slot_by_key, SessKey,
@@ -254,6 +254,9 @@ pub struct App {
     /// Pending bulk repo-discover (root, found paths): armed by a first `d`, committed by a second
     /// — so a recursive scan of a deep folder can't flood the fleet on a single keypress.
     discover_pending: Option<(String, Vec<String>)>,
+    /// Two-press confirm for unregistering a whole repo from the Fleet (`X`): the repo id armed
+    /// by the first press. Cleared by any other action, so navigating away cancels it.
+    repo_remove_armed: Option<RepoId>,
     /// Agent-manager state: the list, the cursor, and the add/edit form.
     pub agents: Vec<AgentChoice>,
     pub agents_selected: usize,
@@ -365,6 +368,7 @@ impl App {
             browse_selected: 0,
             repo_remove_pending: None,
             discover_pending: None,
+            repo_remove_armed: None,
             agents: Vec::new(),
             agents_selected: 0,
             ag_editing: false,
@@ -2765,6 +2769,11 @@ impl App {
     }
 
     async fn apply(&mut self, action: Action) {
+        // Any action other than a second `X` cancels a pending repo-removal confirm, so moving
+        // the cursor (or any other key) safely backs out of it.
+        if !matches!(action, Action::RemoveRepo) {
+            self.repo_remove_armed = None;
+        }
         match action {
             Action::MoveUp => self.selected = self.selected.saturating_sub(1),
             Action::MoveDown => {
@@ -2858,6 +2867,40 @@ impl App {
                         }
                         Err(e) => self.status = format!("delete failed: {e}"),
                     }
+                }
+            }
+            Action::RemoveRepo => {
+                // Unregister the selected lane's whole repo (all its lanes), with a two-press
+                // confirm. Unregister only: the daemon drops the registry row and stops watching
+                // the tree, but worktree files and running agents are left untouched.
+                let Some((repo_id, name)) =
+                    self.selected_lane().map(|l| (l.repo.id, l.repo.name.clone()))
+                else {
+                    return;
+                };
+                let n = self.lanes.iter().filter(|l| l.repo.id == repo_id).count();
+                if self.repo_remove_armed != Some(repo_id) {
+                    self.repo_remove_armed = Some(repo_id);
+                    self.status = format!(
+                        "remove repo {name} ({n} lanes) from repomon? \
+                         files & agents left untouched — press X again to confirm"
+                    );
+                    return;
+                }
+                self.repo_remove_armed = None;
+                match self
+                    .client
+                    .call("repo.remove", Some(json!({ "repo_id": repo_id })))
+                    .await
+                {
+                    Ok(_) => {
+                        self.refresh().await;
+                        self.status = format!(
+                            "removed repo {name} — worktrees & agents left running; \
+                             re-add with `repomon add`"
+                        );
+                    }
+                    Err(e) => self.status = format!("remove failed: {e}"),
                 }
             }
             Action::StartFilter => {
