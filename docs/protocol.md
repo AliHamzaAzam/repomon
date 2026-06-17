@@ -69,20 +69,20 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.remove` | `{ name }` | `null` (drop a custom agent; clears it as default; rejects built-ins) |
 | `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |
 | `agent.spawn` | `{ lane_id, agent, task? }` | `{ lane_id, window, agent }` |
-| `agent.capture` | `{ lane_id, lines? }` | `{ content }` (ANSI-colored) |
+| `agent.capture` | `{ lane_id, lines?, window? }` | `{ content }` (ANSI-colored; `window` captures one agent in a multi-agent lane) |
 | `agent.transcript` | `{ lane_id, session_id?, limit=50 }` | `[TranscriptItem]` — `{ role, text, at? }` with role `user`/`assistant`/`tools`; full unwrapped message text for clients that lay text out themselves (the mobile chat view). Claude sessions only (empty otherwise). |
-| `agent.send_input` | `{ lane_id, text }` | `null` (types text + Enter) |
-| `agent.key` | `{ lane_id, key, literal=false }` | `null` (one keystroke: literal char or key name) |
-| `agent.signal` | `{ lane_id, key }` | `null` |
-| `agent.stop` | `{ lane_id }` | `null` |
+| `agent.send_input` | `{ lane_id, text, enter=true, window? }` | `null` (types text, then Enter unless `enter=false`; `window` targets one agent in a multi-agent lane) |
+| `agent.key` | `{ lane_id, key, literal=false, window? }` | `null` (one keystroke: literal char or key name; `window` targets one agent in a multi-agent lane) |
+| `agent.signal` | `{ lane_id, key, window? }` | `null` |
+| `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
-| `agent.target` | `{ lane_id }` | `{ target, available }` |
+| `agent.target` | `{ lane_id, window? }` | `{ target, available }` |
 | `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
 | `terminal.close` | `{ id }` | `null` |
 | `terminal.target` | `{ id }` | `{ target, available }` |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
-| `viewport.set` | `{ lane_ids }` | `null` |
+| `viewport.set` | `{ lane_ids, focus_lane?, focus_window? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot) |
 | `subscribe` | `{ topics? }` | `null` |
 | `ping` | — | `"pong"` (remote keep-alive / connectivity probe) |
 | `push.register` | `{ device_token }` | `null` (register an APNs device for push; idempotent) |
