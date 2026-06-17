@@ -157,6 +157,8 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
         content: String,
         backoff: Duration,
         last_cap: Instant,
+        /// The focused pane's last-seen cursor `(col, row)`, so a cursor-only move still re-pushes.
+        cursor: Option<(u16, u16)>,
     }
     // Activity-driven cadence: a lane is captured at its FLOOR while its pane keeps changing, and
     // its interval doubles toward a CAP once the pane goes quiet (reset to FLOOR on any change).
@@ -267,19 +269,43 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                     Ok(Ok(c)) => c,
                     _ => continue,
                 };
-            let changed = state
+            // Only the focused pane carries a cursor (the TUI renders it where you're typing) — one
+            // extra tmux fork on a single pane, never on background/Grid tiles.
+            let cursor = if is_focused {
+                let tmux = ctx.tmux.clone();
+                let cw = window.clone();
+                tokio::task::spawn_blocking(move || tmux.cursor_named(&cw))
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let content_changed = state
                 .get(&lane)
                 .map(|s| s.window != window || s.content != content)
                 .unwrap_or(true);
+            // The focused pane also re-pushes on a cursor-only move (arrowing within the input box)
+            // so the rendered cursor tracks even when the text itself is unchanged.
+            let cursor_changed =
+                is_focused && state.get(&lane).map(|s| s.cursor != cursor).unwrap_or(true);
+            let changed = content_changed || cursor_changed;
             // Reset to the floor on any change; otherwise double the (clamped) interval toward cap.
             let backoff = if changed { floor } else { (interval * 2).min(cap) };
             if changed {
                 ctx.broadcast(
                     pubsub::topic::AGENT_OUTPUT,
-                    serde_json::json!({ "lane_id": lane, "content": content.clone() }),
+                    serde_json::json!({
+                        "lane_id": lane,
+                        "content": content.clone(),
+                        "cursor": cursor.map(|(x, y)| [x, y]),
+                    }),
                 );
             }
-            state.insert(lane, St { window, content, backoff, last_cap: now });
+            state.insert(
+                lane,
+                St { window, content, backoff, last_cap: now, cursor },
+            );
         }
     }
 }
