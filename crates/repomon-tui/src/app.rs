@@ -73,6 +73,10 @@ impl Zoom {
 pub struct Pane {
     pub raw: String,
     pub lines: Vec<Line<'static>>,
+    /// The agent pane's cursor `(col, row)` (0-based, from the top-left of the captured pane),
+    /// when the daemon reported one for this (focused) lane. The render places the terminal cursor
+    /// here while you're typing into the agent. `None` for background panes / hidden cursors.
+    pub cursor: Option<(u16, u16)>,
 }
 
 /// A clickable lane region recorded during render (in `view.rs`) and hit-tested by the mouse
@@ -1115,7 +1119,13 @@ impl App {
                 // Parse the ANSI once, here, instead of on every render of this pane.
                 let raw = content.to_string();
                 let lines = view::parse_pane(&raw);
-                self.output.insert(id, Pane { raw, lines });
+                // The daemon attaches the agent pane's cursor for the focused lane (`[col, row]`).
+                let cursor = note
+                    .params
+                    .get("cursor")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
+                self.output.insert(id, Pane { raw, lines, cursor });
             }
         } else {
             // Don't refresh inline — the event loop coalesces a burst of notifications into a

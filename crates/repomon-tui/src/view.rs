@@ -873,6 +873,17 @@ fn render_split(f: &mut Frame, app: &App) {
     if let Some(id) = id {
         click_zone(app, body[2], id, true);
     }
+    // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
+    if app.focus_insert && app.scroll == 0 && has_output {
+        if let Some(p) = id.and_then(|i| app.output.get(&i)) {
+            if let Some((cx, cy)) = p.cursor {
+                let h = (body[2].height as usize).max(1);
+                let start = p.lines.len().saturating_sub(h);
+                let count = p.lines.len() - start;
+                place_pane_cursor(f, body[2], start, count, (cx, cy));
+            }
+        }
+    }
 
     // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
     let mode = if app.focus_insert {
@@ -930,6 +941,15 @@ fn render_focus(f: &mut Frame, app: &App) {
     let avail = (rows[1].height as usize).saturating_sub(body.len());
     body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
     f.render_widget(Paragraph::new(body), rows[1]);
+
+    // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
+    if app.focus_insert && app.scroll == 0 {
+        if let Some((cx, cy)) = lane.and_then(|l| app.output.get(&l.id)).and_then(|p| p.cursor) {
+            let (cur_y0, start, count) = app.focus_geom.get();
+            let pane = Rect { x: rows[1].x, y: cur_y0, width: rows[1].width, height: count as u16 };
+            place_pane_cursor(f, pane, start, count, (cx, cy));
+        }
+    }
 
     // Mode indicator: SCROLL while paging back, else reverse-video INSERT vs dim COMMAND.
     let mode = if app.scroll > 0 {
@@ -1241,6 +1261,23 @@ fn output_window(total: usize, height: usize, scroll: usize) -> (usize, usize) {
     let s = scroll.min(total - h);
     let end = total - s;
     (end - h, end)
+}
+
+/// Place the real terminal cursor at the agent pane's cursor, when it falls inside the visible
+/// window of the rendered pane. `area` is the pane's screen rect; `start` is the index of the first
+/// visible captured line and `count` how many are shown; `(cx, cy)` is the agent cursor in
+/// captured-pane coordinates (col, row). No-op when the cursor row is scrolled out of view or the
+/// column runs past the pane width.
+fn place_pane_cursor(f: &mut Frame, area: Rect, start: usize, count: usize, (cx, cy): (u16, u16)) {
+    let cy = cy as usize;
+    if cy < start || cy >= start + count {
+        return;
+    }
+    let row = (cy - start) as u16;
+    if row >= area.height || cx >= area.width {
+        return;
+    }
+    f.set_cursor_position((area.x + cx, area.y + row));
 }
 
 /// The Focus pane's visible lines: the live tail (or the scrollback window), ANSI-colored,

@@ -102,7 +102,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `event.lane.created` | `{ lane }` |
 | `event.lane.deleted` | `{ lane_id }` |
 | `event.agent.status` | `{ lane_id, status }` |
-| `event.agent.output` | `{ lane_id, content }` |
+| `event.agent.output` | `{ lane_id, content, cursor? }` (`cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused lane when its cursor is visible; `null`/absent otherwise) |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`; `prompt` is the agent's pending question verbatim). Emitted only while `[remote]` is enabled; the same alert goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
 

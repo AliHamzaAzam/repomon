@@ -237,6 +237,28 @@ impl TmuxRuntime {
         self.run_allow_absent(&args)
     }
 
+    /// The agent pane's cursor position `(col, row)`, 0-based from the top-left of the visible
+    /// pane, when the app is actually showing a cursor (`cursor_flag`). `None` if the window is
+    /// gone or the cursor is hidden. Used to draw the cursor in the mediated focus/insert view.
+    pub fn cursor_named(&self, window: &str) -> Option<(u16, u16)> {
+        let target = self.exact_target(window);
+        let out = self
+            .run_allow_absent(&[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "-F",
+                "#{cursor_x} #{cursor_y} #{cursor_flag}",
+            ])
+            .ok()?;
+        let mut it = out.split_whitespace();
+        let x: u16 = it.next()?.parse().ok()?;
+        let y: u16 = it.next()?.parse().ok()?;
+        let visible = it.next() == Some("1");
+        visible.then_some((x, y))
+    }
+
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
     pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
         self.send_literal_named(&Self::window_name(lane), text)
