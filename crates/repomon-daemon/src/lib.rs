@@ -69,6 +69,10 @@ pub struct Ctx {
     /// notification engine fires desktop popups itself once this goes stale, so an alert still
     /// reaches you when you're heads-down full-screen in an agent.
     pub local_watcher_seen: Mutex<Option<Instant>>,
+    /// When a key/text/signal was last sent to each lane's agent. The output streamer reads this
+    /// to capture an actively-typed pane at frame-rate (so keystroke echo feels instant), then
+    /// relaxes back to the normal cadence once typing stops.
+    pub input_seen: Mutex<HashMap<LaneId, Instant>>,
     pub shutdown: Notify,
 }
 
@@ -113,6 +117,7 @@ impl Ctx {
             auto_continue_off: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
             local_watcher_seen: Mutex::new(None),
+            input_seen: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
     }
@@ -146,12 +151,12 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     use std::time::{Duration, Instant};
 
     /// Per-lane streaming state: the last pushed window+content, the current poll interval, and
-    /// when this lane is next due for a capture.
+    /// when this lane was last captured.
     struct St {
         window: String,
         content: String,
         backoff: Duration,
-        next_due: Instant,
+        last_cap: Instant,
     }
     // Activity-driven cadence: a lane is captured at its FLOOR while its pane keeps changing, and
     // its interval doubles toward a CAP once the pane goes quiet (reset to FLOOR on any change).
@@ -162,6 +167,12 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     const FOCUS_CAP: Duration = Duration::from_millis(600);
     const BG_FLOOR: Duration = Duration::from_millis(700);
     const BG_CAP: Duration = Duration::from_millis(3000);
+    // While a pane is being actively typed into, capture it at ~frame-rate so keystroke echo
+    // feels instant. This regime applies for TYPING_WINDOW after the last key, then relaxes back
+    // to the focused/background cadence above — a brief single-pane burst, only while typing.
+    const TYPING_FLOOR: Duration = Duration::from_millis(30);
+    const TYPING_CAP: Duration = Duration::from_millis(60);
+    const TYPING_WINDOW: Duration = Duration::from_millis(400);
     // Hard ceiling on captures per tick so entering a busy Grid (every pane "fresh" at once) can't
     // burst the whole viewport in one tick — the focused lane always goes first, the rest are
     // serviced round-robin across ticks.
@@ -169,7 +180,11 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
 
     let mut state: HashMap<LaneId, St> = HashMap::new();
     let mut rr: usize = 0; // round-robin offset so background lanes share the per-tick budget fairly
-    let mut tick = tokio::time::interval(FOCUS_FLOOR);
+    // The base tick must be at least as fast as the tightest regime (TYPING_FLOOR); per-lane
+    // gating below keeps non-typing lanes at their slower cadence, so these extra wakeups are
+    // cheap no-ops (no captures) when nothing is being typed.
+    let mut tick = tokio::time::interval(TYPING_FLOOR);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
         let lanes: Vec<LaneId> = ctx.viewport.lock().await.clone();
@@ -181,6 +196,12 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
         let focus_lane = focus.as_ref().map(|(l, _)| *l);
         state.retain(|k, _| lanes.contains(k));
         let now = Instant::now();
+        // Snapshot (and prune) which lanes were typed into recently — they capture at frame-rate.
+        let typing_lanes: HashMap<LaneId, Instant> = {
+            let mut m = ctx.input_seen.lock().await;
+            m.retain(|_, t| now.saturating_duration_since(*t) < TYPING_WINDOW);
+            m.clone()
+        };
 
         // Service the focused lane first (so the per-tick cap never starves what the user is
         // watching), then the rest from a rotating offset so every background pane gets a turn.
@@ -207,11 +228,30 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 Some((l, w)) if *l == lane => w.clone(),
                 _ => TmuxRuntime::window_name(lane),
             };
+            // Cadence regime: a lane typed into within TYPING_WINDOW captures at frame-rate;
+            // otherwise the focused lane is fast and background/Grid tiles slow.
+            let typing = typing_lanes
+                .get(&lane)
+                .is_some_and(|t| now.saturating_duration_since(*t) < TYPING_WINDOW);
+            let (floor, cap) = if typing {
+                (TYPING_FLOOR, TYPING_CAP)
+            } else if is_focused {
+                (FOCUS_FLOOR, FOCUS_CAP)
+            } else {
+                (BG_FLOOR, BG_CAP)
+            };
+            // The poll interval, re-clamped to the current regime each tick — so the moment a lane
+            // starts being typed into, a stale 150ms wait shrinks to <=60ms and it captures on the
+            // next tick (prompt first-keystroke echo without coupling to the input handler).
+            let interval = state
+                .get(&lane)
+                .map(|s| s.backoff.clamp(floor, cap))
+                .unwrap_or(floor);
             // Not due yet (and window unchanged) → leave it for a later tick; costs nothing. A
             // lane absent from the map (freshly spawned / first frame) or whose window switched
             // (Tab) is always due, so fresh output shows immediately.
             if let Some(s) = state.get(&lane) {
-                if s.window == window && now < s.next_due {
+                if s.window == window && now < s.last_cap + interval {
                     continue;
                 }
             }
@@ -231,30 +271,15 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 .get(&lane)
                 .map(|s| s.window != window || s.content != content)
                 .unwrap_or(true);
-            let (floor, cap) = if is_focused {
-                (FOCUS_FLOOR, FOCUS_CAP)
-            } else {
-                (BG_FLOOR, BG_CAP)
-            };
-            // Reset to the floor on any change; otherwise double the interval toward the cap.
-            let backoff = if changed {
-                floor
-            } else {
-                state
-                    .get(&lane)
-                    .map(|s| (s.backoff * 2).min(cap))
-                    .unwrap_or(floor)
-            };
+            // Reset to the floor on any change; otherwise double the (clamped) interval toward cap.
+            let backoff = if changed { floor } else { (interval * 2).min(cap) };
             if changed {
                 ctx.broadcast(
                     pubsub::topic::AGENT_OUTPUT,
                     serde_json::json!({ "lane_id": lane, "content": content.clone() }),
                 );
             }
-            state.insert(
-                lane,
-                St { window, content, backoff, next_due: now + backoff },
-            );
+            state.insert(lane, St { window, content, backoff, last_cap: now });
         }
     }
 }
