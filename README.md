@@ -116,9 +116,10 @@ repomon() {
 
 The Observatory (fleet/lanes/today), the agent multiplexer (spawn, live output, input,
 attach, babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/search),
-per-session notifications (with pane-sniffed permission-dialog detection), and the remote
-access layer (WebSocket bridge + APNs + pairing) are all in; an iOS companion app lives in
-a separate private repo. Deferred follow-ups: a SwiftUI menu-bar companion (much of it now
+per-session notifications (pane-sniffed permission-dialog detection, fired as desktop popups
+even when the TUI is closed or parked full-screen in an agent), and the remote access layer
+(WebSocket bridge + APNs + pairing) are all in; an iOS companion app lives in a separate
+private repo. Deferred follow-ups: a SwiftUI menu-bar companion (much of it now
 exists as the iOS app's shared RepomonKit), an embedded PTY renderer (vs the tmux pivot),
 a web dashboard, and Windows support.
 

@@ -1,6 +1,6 @@
 # Agents
 
-repomon runs every agent the same way — in a durable tmux window per lane — but it learns
+repomon runs every agent the same way — each in its own durable tmux window — but it learns
 each agent's *status* differently, because each CLI stores its session state differently.
 
 ## How agents run
@@ -15,6 +15,12 @@ tmux new-window -t repomon -n lane-7 -c <worktree> '<agent-binary> [task]'
 The daemon reads output with `capture-pane`, sends input with `send-keys`, and `attach`
 gives you the raw session. Because tmux owns the process, the agent survives the daemon and
 the TUI. The spawned kind is recorded on the lane so repomon can identify it later.
+
+Several agents can run in the **same** worktree at once: a second spawn (or adopting an
+external session into an occupied lane) takes the next slot — `lane-<id>-2`, `lane-<id>-3`,
+… — and they run side by side. Fleet and the sidebar mark such a lane with an `×N` badge,
+and `Tab`/`⇧Tab` cycle the cursor between a lane's agents in Split/Focus; input and attach
+route to the cursored one.
 
 ## Choosing an agent
 
@@ -150,8 +156,10 @@ repomon can't type into a plain terminal process, so to drive an external sessio
 **`o` to adopt** the highlighted one (Fleet/Split/Focus): repomon resumes *that exact* session
 with `claude --resume <id>` (or `--continue` for the most recent) in a managed tmux lane,
 after which it's fully interactive here. The original terminal window is left as-is — close it
-once you've adopted. repomon manages one session per worktree at a time (a single tmux
-window), but you can observe them all and choose which to adopt.
+once you've adopted. repomon can manage several agents in the same worktree, each in its own
+tmux window (`lane-<id>`, `lane-<id>-2`, …), so adopting an external session adds a managed
+agent alongside any already running — and you can observe every external session in the lane
+detail and choose which to adopt.
 
 ## How status is detected
 
