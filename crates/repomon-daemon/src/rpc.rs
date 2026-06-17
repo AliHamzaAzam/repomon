@@ -775,28 +775,26 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            ctx.input_seen.lock().await.insert(lane, std::time::Instant::now());
             Ok(Value::Null)
         }
         "agent.signal" => {
             let p: AgentSignal = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let key = p.key;
-            let window = p
-                .window
-                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            let (lane, key) = (p.lane_id, p.key);
+            let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             tokio::task::spawn_blocking(move || tmux.send_key_named(&window, &key))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
+            ctx.input_seen.lock().await.insert(lane, std::time::Instant::now());
             Ok(Value::Null)
         }
         "agent.key" => {
             let p: AgentKey = parse(params)?;
             let tmux = ctx.tmux.clone();
-            let (key, literal) = (p.key, p.literal);
-            let window = p
-                .window
-                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            let (lane, key, literal) = (p.lane_id, p.key, p.literal);
+            let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             tokio::task::spawn_blocking(move || {
                 if literal {
                     tmux.send_literal_named(&window, &key)
@@ -807,6 +805,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            ctx.input_seen.lock().await.insert(lane, std::time::Instant::now());
             Ok(Value::Null)
         }
         "agent.stop" => {
