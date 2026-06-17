@@ -106,6 +106,29 @@ repomon() {
 }
 ```
 
+## Remote access (iOS companion over Tailscale)
+
+The daemon can serve the same JSON-RPC API to the iOS companion over a token-gated WebSocket
+bridge. Bind it to your **private tailnet** address — never a public interface; anyone holding
+the token can read your panes and type into your agents.
+
+1. **Install [Tailscale](https://tailscale.com)** on the Mac *and* the phone, signed into the
+   same tailnet, so the phone can reach the Mac at its `100.x.y.z` address.
+2. **Enable the bridge**, then restart the daemon to apply:
+   ```sh
+   repomon remote enable     # detects the Tailscale IPv4, binds ws://<ip>:7878, mints a token
+   repomon daemon restart
+   ```
+   No Tailscale detected? Pass the address yourself: `repomon remote enable --bind <ip:port>`.
+3. **Pair the phone:** `repomon remote pair` prints a QR (and a `repomon://<host:port>#<token>`
+   link). Scan it in the app — or with the Camera app, which opens it directly.
+
+Manage it with `repomon remote status` (shows the bind and a masked token),
+`repomon remote enable --rotate-token` (mint a new token, then re-pair), and
+`repomon remote disable` (stops serving; keeps the token). Each change needs a
+`repomon daemon restart` to take effect. Lock-screen push (APNs) is configured on the app
+side — see the companion app's README.
+
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — how the daemon, TUI, and core fit together.
