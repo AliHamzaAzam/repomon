@@ -1097,6 +1097,22 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let windows = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
         .await
         .unwrap_or_default();
+    // If a managed (`lane-…`) window vanished since the last overlay — an agent `/exit`ed or was
+    // stopped — the cached live-process count is now stale-high and would keep the dead session in
+    // the lane's `×N` count for up to the cache TTL. Drop the cache so `live_cwds_cached` recomputes
+    // fresh on the very next line, and the gone agent disappears within one refresh.
+    let managed_now: std::collections::HashSet<String> = windows
+        .iter()
+        .filter(|w| w.starts_with("lane-"))
+        .cloned()
+        .collect();
+    {
+        let mut prev = ctx.last_managed_windows.lock().await;
+        if prev.difference(&managed_now).next().is_some() {
+            *ctx.live_cwds.lock().await = None;
+        }
+        *prev = managed_now;
+    }
     // A `/exit`ed session leaves a recently-modified transcript behind but is no longer
     // running. claude's cwd is the worktree, so the number of live claude processes there
     // bounds how many sessions are actually running — keep that many of the most recent.

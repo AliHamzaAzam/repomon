@@ -73,6 +73,11 @@ pub struct Ctx {
     /// to capture an actively-typed pane at frame-rate (so keystroke echo feels instant), then
     /// relaxes back to the normal cadence once typing stops.
     pub input_seen: Mutex<HashMap<LaneId, Instant>>,
+    /// The set of managed (`lane-…`) tmux windows seen on the previous overlay. When one
+    /// disappears (an agent `/exit`ed or was stopped), the overlay refreshes the live-process
+    /// count immediately so the vanished agent drops from the `×N` count without waiting out the
+    /// `live_cwds` cache TTL.
+    pub last_managed_windows: Mutex<HashSet<String>>,
     pub shutdown: Notify,
 }
 
@@ -118,6 +123,7 @@ impl Ctx {
             watcher: Mutex::new(None),
             local_watcher_seen: Mutex::new(None),
             input_seen: Mutex::new(HashMap::new()),
+            last_managed_windows: Mutex::new(HashSet::new()),
             shutdown: Notify::new(),
         })
     }
