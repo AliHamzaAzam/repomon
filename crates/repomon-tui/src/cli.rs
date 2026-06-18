@@ -48,6 +48,13 @@ pub enum Command {
         /// Shell to generate completions for.
         shell: clap_complete::Shell,
     },
+    /// Print shell integration (cd-on-exit) for `eval "$(repomon shell-init zsh)"`.
+    ShellInit {
+        /// Shell: zsh, bash, or fish.
+        shell: clap_complete::Shell,
+    },
+    /// Write a roff man page to stdout (used by the Homebrew formula).
+    Man,
 }
 
 #[derive(Subcommand)]
@@ -166,6 +173,11 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
             clap_complete::generate(shell, &mut cmd, "repomon", &mut std::io::stdout());
+        }
+        Command::ShellInit { shell } => print!("{}", shell_init(shell)?),
+        Command::Man => {
+            use clap::CommandFactory;
+            clap_mangen::Man::new(crate::Cli::command()).render(&mut std::io::stdout())?;
         }
     }
     Ok(())
@@ -430,6 +442,38 @@ async fn resolve_repo(client: &DaemonClient, key: &str) -> Result<Repo> {
         .ok_or_else(|| anyhow!("no repo matching '{key}'"))
 }
 
+const POSIX_CD_WRAPPER: &str = r#"# repomon shell integration: cd into a lane's worktree on exit.
+repomon() {
+  local tmp; tmp=$(mktemp)
+  REPOMON_CD_FD=3 command repomon "$@" 3>"$tmp"
+  local dir; dir=$(cat "$tmp"); rm -f "$tmp"
+  [ -n "$dir" ] && [ -d "$dir" ] && cd "$dir"
+}
+"#;
+
+const FISH_CD_WRAPPER: &str = r#"# repomon shell integration: cd into a lane's worktree on exit.
+function repomon
+    set -l tmp (mktemp)
+    REPOMON_CD_FD=3 command repomon $argv 3>"$tmp"
+    set -l dir (cat "$tmp"); rm -f "$tmp"
+    test -n "$dir"; and test -d "$dir"; and cd "$dir"
+end
+"#;
+
+/// Shell integration snippet (cd-on-exit) for `eval "$(repomon shell-init <shell>)"`.
+pub fn shell_init(shell: clap_complete::Shell) -> Result<String> {
+    let snippet = match shell {
+        clap_complete::Shell::Zsh | clap_complete::Shell::Bash => POSIX_CD_WRAPPER,
+        clap_complete::Shell::Fish => FISH_CD_WRAPPER,
+        other => {
+            return Err(anyhow!(
+                "shell-init: unsupported shell '{other}'; use zsh, bash, or fish"
+            ))
+        }
+    };
+    Ok(snippet.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -440,5 +484,34 @@ mod tests {
         clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "repomon", &mut buf);
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("repomon"), "completion script should mention repomon");
+    }
+
+    #[test]
+    fn shell_init_posix_defines_wrapper() {
+        let out = super::shell_init(clap_complete::Shell::Zsh).unwrap();
+        assert!(out.contains("repomon()"));
+        assert!(out.contains("REPOMON_CD_FD=3"));
+    }
+
+    #[test]
+    fn shell_init_fish_defines_wrapper() {
+        let out = super::shell_init(clap_complete::Shell::Fish).unwrap();
+        assert!(out.contains("function repomon"));
+        assert!(out.contains("REPOMON_CD_FD=3"));
+    }
+
+    #[test]
+    fn shell_init_rejects_unsupported_shell() {
+        assert!(super::shell_init(clap_complete::Shell::PowerShell).is_err());
+    }
+
+    #[test]
+    fn man_render_contains_binary_name() {
+        use clap::CommandFactory;
+        let man = clap_mangen::Man::new(crate::Cli::command());
+        let mut buf = Vec::new();
+        man.render(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("repomon"));
     }
 }

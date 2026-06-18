@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+clap_mangen = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
 ansi-to-tui = { workspace = true }
