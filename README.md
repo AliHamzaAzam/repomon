@@ -85,7 +85,6 @@ on your `PATH`.
 
 ```sh
 cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
-# once published to crates.io:  cargo install repomon repomon-daemon
 ```
 
 repomon needs `tmux` (agents run in tmux) and `git` at runtime. Then enable cd-on-exit by adding to
