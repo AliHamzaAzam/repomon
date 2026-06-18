@@ -8,7 +8,8 @@
 //! summary (dialog header + question) to use as the notification's "why". The daemon flips
 //! such sessions to `Waiting` during `lane.list`.
 
-use super::limit::{parse_option_line, strip_ansi};
+use super::limit::parse_option_line;
+use super::text::strip_ansi;
 
 /// How far above the option menu the question line may sit.
 const QUESTION_REACH: usize = 5;

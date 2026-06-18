@@ -66,6 +66,7 @@ impl TranscriptSummary {
             tmux_window: None, // overlay pairs managed sessions with their windows
             resume_at: None,
             inferred: false,
+            config_dir: self.config_dir,
         }
     }
 }
@@ -167,6 +168,34 @@ pub fn agent_variants() -> Vec<(String, String)> {
             }
         })
         .collect()
+}
+
+/// A stable key for a Claude account, identifying it by its config dir. The default account
+/// (`~/.claude`, carried as `config_dir: None`) is `"default"`; a variant is its dir path. The
+/// usage probe stores per-account usage under this key and a client matches the focused agent's
+/// `AgentSession::config_dir` to it.
+pub fn account_key(config_dir: Option<&Path>) -> String {
+    config_dir
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+/// A short human label for a Claude account: `"main"` for the default `~/.claude`, otherwise the
+/// dir's distinguishing suffix (`~/.claude-work` → `"work"`).
+pub fn account_label(config_dir: Option<&Path>) -> String {
+    match config_dir {
+        None => "main".to_string(),
+        Some(p) => p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| {
+                n.trim_start_matches('.')
+                    .trim_start_matches("claude-")
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "claude".to_string()),
+    }
 }
 
 /// Encode a working directory to Claude Code's project directory name.

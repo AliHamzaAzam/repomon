@@ -91,8 +91,15 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
+| `usage.get` | — | `[AccountUsage]` (per Claude account, scraped from `/usage`; empty unless `usage_probe` is enabled and a TUI is attached) |
 
 `CreateLaneParams`: `{ repo_id, branch, source_branch?, path?, copy_files? }`.
+
+`AccountUsage`: `{ key, label, report: UsageReport, age_secs }` — `key` matches a session's
+`config_dir` (the account; `"default"` for `~/.claude`) so a client attributes usage to the
+focused agent's account. `UsageReport`: `{ session_pct?, session_reset_at?, week_pct?,
+week_reset_at?, week_model_pct? }` — percentages of the 5-hour and weekly windows; every field
+optional (a partial `/usage` parse still returns what was readable).
 
 ## Events
 

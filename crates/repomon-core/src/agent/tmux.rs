@@ -416,6 +416,44 @@ impl TmuxRuntime {
         Ok(self.target_named(name))
     }
 
+    /// Launch `command` in `cwd` as an arbitrary named window — like [`spawn`](Self::spawn) but
+    /// with a caller-chosen window name instead of a lane slot. Used for the hidden `/usage`
+    /// probe (`usage-probe-…`), whose non-`lane-` name keeps it out of the lane-window scans.
+    /// Returns the window's exact target.
+    pub fn spawn_named(&self, name: &str, cwd: &Path, command: &str) -> Result<String> {
+        let cwd = cwd.to_string_lossy();
+        if self.session_exists() {
+            self.run(&[
+                "new-window",
+                "-t",
+                &self.session,
+                "-n",
+                name,
+                "-c",
+                &cwd,
+                command,
+            ])?;
+        } else {
+            self.run(&[
+                "new-session",
+                "-d",
+                "-x",
+                "220",
+                "-y",
+                "50",
+                "-s",
+                &self.session,
+                "-n",
+                name,
+                "-c",
+                &cwd,
+                command,
+            ])?;
+        }
+        self.configure();
+        Ok(self.exact_target(name))
+    }
+
     /// Terminate a named window (an agent slot or a terminal). Exact-match target, so killing
     /// `lane-1` can't take out `lane-1-2`.
     pub fn kill_named(&self, name: &str) -> Result<()> {

@@ -11,6 +11,7 @@ pub mod push;
 pub mod remote;
 pub mod rpc;
 pub mod socket;
+pub mod usage_watch;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -58,6 +59,9 @@ pub struct Ctx {
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
+    /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
+    /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a TUI is attached.
+    pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
     /// The filesystem watcher (set once the background task brings it up). Held here so `repo.add`
@@ -119,6 +123,7 @@ impl Ctx {
             overlay_cache: Mutex::new(None),
             prompt_cache: Mutex::new(HashMap::new()),
             rate_limits: Mutex::new(HashMap::new()),
+            usage: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
             local_watcher_seen: Mutex::new(None),

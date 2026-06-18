@@ -48,6 +48,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_show_why": cfg.notify_show_why,
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
+        "usage_probe": cfg.usage_probe,
     })
 }
 
@@ -215,6 +216,8 @@ struct ConfigSet {
     notify_coalesce: Option<bool>,
     #[serde(default)]
     notify_click_focus: Option<bool>,
+    #[serde(default)]
+    usage_probe: Option<bool>,
 }
 #[derive(Deserialize)]
 struct PushDevice {
@@ -665,6 +668,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 if let Some(b) = p.notify_click_focus {
                     cfg.notify_click_focus = b;
                 }
+                if let Some(b) = p.usage_probe {
+                    cfg.usage_probe = b;
+                }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
                     return Err(internal(e));
@@ -1093,6 +1099,24 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(Value::Null)
         }
 
+        // ---- usage ----
+        // Per-account Claude usage scraped from `/usage` (empty unless [usage_probe] is on and a
+        // TUI is attached). The TUI matches an entry's `key` to the focused agent's `config_dir`.
+        "usage.get" => {
+            let usage = ctx.usage.lock().await;
+            let mut out: Vec<agent::AccountUsage> = usage
+                .iter()
+                .map(|(key, e)| agent::AccountUsage {
+                    key: key.clone(),
+                    label: e.label.clone(),
+                    report: e.report.clone(),
+                    age_secs: e.fetched_at.elapsed().as_secs(),
+                })
+                .collect();
+            out.sort_by(|a, b| a.key.cmp(&b.key));
+            to_value(out)
+        }
+
         other => Err(RpcError::method_not_found(other)),
     }
 }
@@ -1277,6 +1301,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     tmux_window: None,
                     last_message: None,
                     pending_prompt: None,
+                    config_dir: None,
                 });
             }
         }
@@ -1525,6 +1550,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         tmux_window: Some(window),
         last_message: None,
         pending_prompt: None,
+        config_dir: None,
     }
 }
 

@@ -264,6 +264,11 @@ pub struct AgentSession {
     /// exactly when this is present — a plain end-of-turn `Waiting` has none.
     #[serde(default)]
     pub pending_prompt: Option<String>,
+    /// The Claude account (config dir) this agent runs under, overlaid at list time from the
+    /// transcript. `None` = the default `~/.claude`; `Some` = a variant (`~/.claude-work`). Lets a
+    /// client attribute account-level usage (the `/usage` probe) to the focused agent. Not persisted.
+    #[serde(default)]
+    pub config_dir: Option<PathBuf>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.
