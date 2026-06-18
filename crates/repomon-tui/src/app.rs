@@ -164,6 +164,10 @@ pub struct App {
     /// holds a deep capture taken when you start scrolling.
     pub scroll: usize,
     pub scroll_buf: Option<String>,
+    /// Net pane-scroll ticks accumulated from a wheel/PgUp burst (+ up, − down). The event loop
+    /// flushes the net into a single `agent.scroll` per frame, so a fast trackpad flick is one
+    /// forwarded scroll instead of dozens of blocking RPCs (which overshot and froze the UI).
+    pending_scroll: isize,
     /// The scrollback snapshot's pre-parsed styled lines (parsed once when `scroll_buf` is set).
     pub scroll_lines: Option<Vec<Line<'static>>>,
     /// Focus drag-selection (buffer line indices). On release the range is copied to the
@@ -328,6 +332,7 @@ impl App {
             mouse_on: true,
             scroll: 0,
             scroll_buf: None,
+            pending_scroll: 0,
             scroll_lines: None,
             sel_anchor: None,
             sel_head: None,
@@ -1253,8 +1258,8 @@ impl App {
                 // to the clipboard on release); elsewhere the wheel moves the cursor.
                 match self.view {
                     View::Focus => match me.kind {
-                        MouseEventKind::ScrollUp => self.pane_scroll(true, 1).await,
-                        MouseEventKind::ScrollDown => self.pane_scroll(false, 1).await,
+                        MouseEventKind::ScrollUp => self.pane_scroll(true, 1),
+                        MouseEventKind::ScrollDown => self.pane_scroll(false, 1),
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.sel_anchor = self.focus_line_at(me.row);
                             self.sel_head = self.sel_anchor;
@@ -1281,9 +1286,9 @@ impl App {
                         let col = if me.column > 0 { me.column } else { self.last_mouse_col };
                         let over_pane = col > 26;
                         match me.kind {
-                            MouseEventKind::ScrollUp if over_pane => self.pane_scroll(true, 1).await,
+                            MouseEventKind::ScrollUp if over_pane => self.pane_scroll(true, 1),
                             MouseEventKind::ScrollDown if over_pane => {
-                                self.pane_scroll(false, 1).await
+                                self.pane_scroll(false, 1)
                             }
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                                 self.handle_mouse(me)
@@ -2333,8 +2338,8 @@ impl App {
             // PgUp/PgDn scroll the captured output even while typing (always reach repomon); any
             // other key returns to the live tail and goes to the agent.
             match key.code {
-                KeyCode::PageUp => return self.pane_scroll(true, 8).await,
-                KeyCode::PageDown => return self.pane_scroll(false, 8).await,
+                KeyCode::PageUp => return self.pane_scroll(true, 8),
+                KeyCode::PageDown => return self.pane_scroll(false, 8),
                 _ => {}
             }
             if self.scroll > 0 {
@@ -2368,8 +2373,8 @@ impl App {
             KeyCode::Tab => return self.cycle_session(true),
             KeyCode::BackTab => return self.cycle_session(false),
             // PgUp/PgDn scroll the pane; arrows still navigate the fleet.
-            KeyCode::PageUp => return self.pane_scroll(true, 8).await,
-            KeyCode::PageDown => return self.pane_scroll(false, 8).await,
+            KeyCode::PageUp => return self.pane_scroll(true, 8),
+            KeyCode::PageDown => return self.pane_scroll(false, 8),
             _ => {}
         }
         if let Some(action) = keybinds::nav(key) {
@@ -2388,8 +2393,8 @@ impl App {
             // tmux/terminals; these keys always reach repomon). Other keys go to the agent, and
             // typing returns to the live tail.
             match key.code {
-                KeyCode::PageUp => return self.pane_scroll(true, 8).await,
-                KeyCode::PageDown => return self.pane_scroll(false, 8).await,
+                KeyCode::PageUp => return self.pane_scroll(true, 8),
+                KeyCode::PageDown => return self.pane_scroll(false, 8),
                 _ => {}
             }
             if self.scroll > 0 {
@@ -2412,8 +2417,8 @@ impl App {
                 self.focus_insert = true;
             }
             // Scroll back through the agent's output (e.g. to read a long plan).
-            KeyCode::PageUp | KeyCode::Up => self.pane_scroll(true, 8).await,
-            KeyCode::PageDown | KeyCode::Down => self.pane_scroll(false, 8).await,
+            KeyCode::PageUp | KeyCode::Up => self.pane_scroll(true, 8),
+            KeyCode::PageDown | KeyCode::Down => self.pane_scroll(false, 8),
             KeyCode::Tab => self.cycle_session(true),
             KeyCode::BackTab => self.cycle_session(false),
             KeyCode::Char('e') => self.spawn_agent().await,
@@ -2743,7 +2748,22 @@ impl App {
     /// and keep their own scrollback that tmux's capture can't reach, so forward the wheel to the
     /// agent and let it scroll itself (the streamer mirrors the result). Plain-shell agents have
     /// real tmux scrollback, so fall back to the local capture-based scroll.
-    async fn pane_scroll(&mut self, up: bool, ticks: usize) {
+    /// Queue a pane-scroll request (+ up / − down). Cheap and non-blocking: the event loop drains
+    /// a whole wheel/PgUp burst into `pending_scroll` and then [`flush_pane_scroll`] sends a single
+    /// `agent.scroll`, so a fast flick can't pile up dozens of RPCs and overshoot.
+    fn pane_scroll(&mut self, up: bool, ticks: usize) {
+        let d = ticks as isize;
+        self.pending_scroll += if up { d } else { -d };
+    }
+
+    /// Flush the accumulated pane-scroll as one `agent.scroll` — forwarded to a full-screen agent so
+    /// it scrolls its own history, or the local capture scroll when it isn't on the alternate screen.
+    async fn flush_pane_scroll(&mut self) {
+        let net = std::mem::take(&mut self.pending_scroll);
+        if net == 0 {
+            return;
+        }
+        let (up, ticks) = (net > 0, net.unsigned_abs());
         let Some(lane) = self.selected_lane().map(|l| l.id) else {
             return;
         };
@@ -3367,6 +3387,8 @@ async fn event_loop(
                             Err(_) => break,
                         }
                     }
+                    // Send the whole drained wheel/PgUp burst as one scroll, not one per event.
+                    app.flush_pane_scroll().await;
                 }
                 None => return Ok(()),
             },
