@@ -148,4 +148,4 @@ a web dashboard, and Windows support.
 
 ## License
 
-MIT © Ali Hamza Azam
+Apache-2.0 © Ali Hamza Azam
