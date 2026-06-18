@@ -142,27 +142,32 @@ resumed on their own.
   type into. The detection/parse and the state machine are pure and unit-tested
   (`agent/limit.rs`, `auto_continue.rs`).
 
-## Usage corner (`/usage` probe)
+## Usage corner (usage probe)
 
-With `usage_probe = true` (a Settings toggle, **off by default**), the TUI shows Claude's account
-usage in the **bottom-right corner** — `5h 38% · wk 12% · 3:00 PM` (5-hour window %, weekly %, and
-the 5-hour reset time) — for the **account the focused agent runs under** (e.g. `~/.claude` vs
-`~/.claude-work`); switch focus to an agent on another account and the corner follows.
+With `usage_probe = true` (a Settings toggle, **off by default**), the TUI shows agent usage in the
+**bottom-right corner** — e.g. `5h 38% · wk 12% · 3:00 PM` (limit windows + the soonest reset) —
+for the **account the focused agent runs under**. It's provider-aware and per-account: a Claude
+agent shows its account's `/usage` (`~/.claude` vs `~/.claude-work`), a Codex agent shows its
+`/status`; switch focus and the corner follows.
 
-Subscription usage has no CLI flag, file, or supported endpoint — the only source is the
-interactive `/usage` command. So a daemon watcher (`usage_watch.rs`), **only while a TUI is
-attached**, spawns a hidden throwaway `claude` window per account every ~5 minutes, sends `/usage`,
-captures and parses the pane (`agent/usage.rs`, fixture-tested), then dismisses (`Esc`) and kills
-the window. It never sends a model prompt. Caveats, by design:
+Subscription usage has no CLI flag, file, or supported endpoint — the only source is an interactive
+command (Claude `/usage`, Codex `/status`). So a daemon watcher (`usage_watch.rs`), **only while a
+TUI is attached**, spawns a hidden throwaway session per account every ~5 minutes, sends the usage
+command, captures and parses the pane (`agent/usage.rs`, fixture-tested), then dismisses (`Esc`) and
+kills the window. It never sends a model prompt. Numbers are normalized to **% used** across agents
+(Codex reports "% left"); windows shown are whatever the tool reports — Claude's 5-hour + weekly,
+Codex's 5-hour/weekly or (Free plan) monthly. Caveats, by design:
 
-- It **spawns a background `claude` process** briefly per probe (hence opt-in). The probe window is
+- It **spawns a background agent process** briefly per probe (hence opt-in). The probe window is
   named `usage-probe-…` (not `lane-…`) and runs in your home dir, so it never inflates a lane's
   `×N` agent count. The first run accepts the one-time folder-trust prompt for that dir; each probe
-  leaves a tiny (promptless) transcript behind.
-- The `/usage` layout is undocumented and changes between Claude versions. The parser anchors on
-  labels (not positions) and returns nothing rather than wrong numbers; when it can't read usage,
-  the corner **falls back** to the focused lane's rate-limit countdown (`⏳ resume 3:00 PM`), or
-  shows nothing. If Claude restyles `/usage`, recapture the fixture and adjust the parser.
+  leaves a tiny (promptless) transcript/session behind. Codex is probed only when it's installed
+  (`~/.codex` exists).
+- The `/usage` and `/status` layouts are undocumented and change between versions. The parsers
+  anchor on labels (not positions) and return nothing rather than wrong numbers; when usage can't
+  be read, the corner **falls back** to the focused lane's rate-limit countdown (`⏳ resume 3:00
+  PM`), or shows nothing. If a tool restyles its screen, recapture the fixture
+  (`crates/repomon-core/src/agent/fixtures/`) and adjust the parser.
 
 ## External sessions (running in another terminal)
 

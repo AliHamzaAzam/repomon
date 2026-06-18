@@ -87,14 +87,15 @@ const MONTHS: [&str; 12] = [
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
 ];
 
-/// Parse a `"<month> <day> … <time>"` reset, e.g. `"resets jun 21 at 7:59pm"`. Returns `None`
-/// when no month name is present (the bare-time path handles that).
+/// Parse a dated reset with the day on either side of the month name — Claude's `"jun 21 at
+/// 7:59pm"` (month-day) and Codex's `"04:00 on 19 jul"` (day-month). Returns `None` when no month
+/// name is present (the bare-time path handles that).
 fn parse_dated(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     for (mi, m) in MONTHS.iter().enumerate() {
         let Some(pos) = lower.find(m) else { continue };
-        let after = &lower[pos + m.len()..];
-        let day = first_int(after)?;
-        let time = find_reset_time(after)?;
+        // The day may follow the month ("jun 21") or precede it ("19 jul").
+        let day = first_int(&lower[pos + m.len()..]).or_else(|| last_int(&lower[..pos]))?;
+        let time = find_reset_time(lower)?;
         let month = mi as u32 + 1;
         let mut dt = build_local(now.year(), month, day, time)?;
         // A date well in the past means the printed month/day is next year's occurrence.
@@ -130,6 +131,32 @@ fn first_int(s: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// The *last* standalone day-of-month integer in `s` — for the day-before-month order
+/// (`"... on 19 jul"`). Same rules as [`first_int`] but keeps the final match.
+fn last_int(s: &str) -> Option<u32> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut last = None;
+    while i < b.len() {
+        if b[i].is_ascii_digit() && (i == 0 || !b[i - 1].is_ascii_digit()) {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if b.get(i) != Some(&b':') {
+                if let Ok(n) = s[start..i].parse::<u32>() {
+                    if (1..=31).contains(&n) {
+                        last = Some(n);
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    last
 }
 
 fn build_local(year: i32, month: u32, day: u32, time: NaiveTime) -> Option<DateTime<Local>> {
@@ -271,6 +298,17 @@ mod tests {
             .with_timezone(&Local);
         assert_eq!((dt.month(), dt.day()), (6, 21));
         assert_eq!((dt.hour(), dt.minute()), (19, 59));
+    }
+
+    #[test]
+    fn dated_reset_day_before_month() {
+        // Codex order: "resets 04:00 on 19 jul".
+        let now = Local.with_ymd_and_hms(2026, 6, 19, 12, 0, 0).unwrap();
+        let dt = parse_reset_datetime("resets 04:00 on 19 jul", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!((dt.month(), dt.day()), (7, 19));
+        assert_eq!((dt.hour(), dt.minute()), (4, 0));
     }
 
     #[test]

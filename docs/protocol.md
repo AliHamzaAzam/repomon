@@ -91,15 +91,16 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
-| `usage.get` | — | `[AccountUsage]` (per Claude account, scraped from `/usage`; empty unless `usage_probe` is enabled and a TUI is attached) |
+| `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
 
 `CreateLaneParams`: `{ repo_id, branch, source_branch?, path?, copy_files? }`.
 
-`AccountUsage`: `{ key, label, report: UsageReport, age_secs }` — `key` matches a session's
-`config_dir` (the account; `"default"` for `~/.claude`) so a client attributes usage to the
-focused agent's account. `UsageReport`: `{ session_pct?, session_reset_at?, week_pct?,
-week_reset_at?, week_model_pct? }` — percentages of the 5-hour and weekly windows; every field
-optional (a partial `/usage` parse still returns what was readable).
+`AccountUsage`: `{ key, label, report: UsageReport, age_secs }` — `key` is how a client attributes
+usage to the focused agent: a Claude agent's config dir (`"default"` for `~/.claude`), or `"codex"`.
+`UsageReport`: `{ windows: [UsageWindow] }`. `UsageWindow`: `{ label, pct_used, reset_at? }` — one
+limit window, normalized to **% used** across agents (Codex's "% left" is converted). `label` is a
+short tag (`5h`, `wk`, `mo`, or a model name); windows are ordered shortest-first and only present
+when readable (a partial parse still returns what it could).
 
 ## Events
 

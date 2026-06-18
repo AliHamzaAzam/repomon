@@ -1230,10 +1230,10 @@ fn fmt_resume(resume_at: Option<DateTime<Utc>>) -> String {
     }
 }
 
-/// The bottom-right corner: Claude usage for the focused agent's account — `5h NN% · wk NN% ·
-/// <reset>`, drawn over the free right end of the last row of *every* view. Falls back to the
-/// focused lane's rate-limit countdown when there's no scraped usage for that account, and draws
-/// nothing when there's nothing to show (probe off and no limit hit) — never fabricated numbers.
+/// The bottom-right corner: usage for the focused agent's account (Claude `/usage` or Codex
+/// `/status`) — `5h NN% · wk NN% · <reset>`, drawn over the free right end of the last row of
+/// *every* view. Falls back to the focused lane's rate-limit countdown when there's no scraped
+/// usage for that account, and draws nothing when there's nothing to show — never fake numbers.
 fn corner(f: &mut Frame, app: &App) {
     let Some((text, style)) = corner_text(app) else {
         return;
@@ -1252,50 +1252,57 @@ fn corner(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), rect);
 }
 
-/// What the corner should show, if anything: scraped usage for the focused agent's account, else
-/// that lane's rate-limit countdown, else nothing.
+/// What the corner should show, if anything: scraped usage for the focused agent's account
+/// (matched by key, so a Codex agent never shows Claude's numbers), else that lane's rate-limit
+/// countdown, else nothing.
 fn corner_text(app: &App) -> Option<(String, Style)> {
-    if !app.usage.is_empty() {
-        let acct = app.focused_account_key();
-        let entry = acct
-            .as_ref()
-            .and_then(|k| app.usage.iter().find(|u| &u.key == k))
-            // When the focused agent can't be attributed but there's a single account, use it.
-            .or_else(|| (app.usage.len() == 1).then(|| &app.usage[0]));
-        if let Some(found) = entry.and_then(|u| format_usage(app, u)) {
-            return Some(found);
+    if let Some(key) = app.focused_account_key() {
+        if let Some(u) = app.usage.iter().find(|u| u.key == key) {
+            if let Some(found) = format_usage(app, u) {
+                return Some(found);
+            }
         }
     }
     corner_fallback(app)
 }
 
-/// Format one account's usage as `[label · ]5h NN% · wk NN% · <reset>`. The label is shown only
-/// when more than one account is in play. `None` when there's no usable percentage to show.
+/// Format one account's usage as `[label · ]<win> NN% · <win> NN% · <reset>` from its limit
+/// windows (the first two — usually 5h + weekly), plus the soonest reset. The account label shows
+/// only when more than one account is in play. `None` when there are no windows.
 fn format_usage(app: &App, u: &repomon_core::agent::AccountUsage) -> Option<(String, Style)> {
-    let r = &u.report;
-    if r.session_pct.is_none() && r.week_pct.is_none() {
+    let windows = &u.report.windows;
+    if windows.is_empty() {
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
     if app.usage.len() > 1 {
         parts.push(u.label.clone());
     }
-    if let Some(p) = r.session_pct {
-        parts.push(format!("5h {p}%"));
+    for w in windows.iter().take(2) {
+        parts.push(format!("{} {}%", w.label, w.pct_used));
     }
-    if let Some(p) = r.week_pct {
-        parts.push(format!("wk {p}%"));
+    if let Some(t) = windows.iter().find_map(|w| w.reset_at) {
+        parts.push(fmt_reset_short(t));
     }
-    if let Some(t) = r.session_reset_at {
-        parts.push(t.with_timezone(&Local).format("%-I:%M %p").to_string());
-    }
-    // Cyan warning once the 5-hour window is getting tight; muted otherwise.
-    let style = if r.session_pct.is_some_and(|p| p >= 80) {
+    // Cyan warning once the tightest window is getting full; muted otherwise.
+    let tight = windows.first().is_some_and(|w| w.pct_used >= 80);
+    let style = if tight {
         app.theme.rate_limited()
     } else {
         app.theme.muted()
     };
     Some((parts.join(" · "), style))
+}
+
+/// A reset time for the corner: a clock time when it's within a day, else a short date (Codex's
+/// monthly reset can be weeks out).
+fn fmt_reset_short(t: DateTime<Utc>) -> String {
+    let local = t.with_timezone(&Local);
+    if (t - Utc::now()).num_hours().abs() < 24 {
+        local.format("%-I:%M %p").to_string()
+    } else {
+        local.format("%b %-d").to_string()
+    }
 }
 
 /// The focused lane's rate-limit countdown, when usage numbers aren't available — so the corner

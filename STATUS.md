@@ -43,10 +43,11 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 - **Plain terminals** per worktree (`t`), multiple allowed.
 - Revamped **Grid** (real navigation, Instagram-style position dots, clean exit).
 - repomon's tmux runs on a **dedicated socket**, isolated from the user's own tmux.
-- **Account-usage corner** (opt-in `usage_probe`) — Claude's `/usage` 5h + weekly % and reset,
-  shown bottom-right for the focused agent's account; scraped via a hidden throwaway `claude`
-  session per account (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a rate-limit
-  countdown fallback. See `docs/agents.md`.
+- **Account-usage corner** (opt-in `usage_probe`) — limit windows (% used) + reset shown
+  bottom-right for the focused agent's account, **provider-aware**: Claude `/usage` (5h + weekly,
+  per `~/.claude*` account) and Codex `/status` (5h/weekly or Free monthly). Scraped via a hidden
+  throwaway session per account (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a
+  rate-limit countdown fallback. See `docs/agents.md`.
 
 ## Deferred (explicitly out of scope in the plan)
 

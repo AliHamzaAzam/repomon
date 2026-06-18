@@ -1175,18 +1175,23 @@ impl App {
             .and_then(|s| s.tmux_window.clone())
     }
 
-    /// The Claude account (config-dir key) of the agent the user is looking at — the selected
-    /// lane's selected session — for attributing the usage corner. `None` when no agent is in
-    /// focus. The key matches `AccountUsage::key` from the daemon's `/usage` probe.
+    /// The usage account key of the agent the user is looking at — the selected lane's selected
+    /// session — for attributing the usage corner. Claude agents key on their config dir; Codex
+    /// keys on `"codex"`; other kinds have no usage probe (`None`). Matches `AccountUsage::key`.
     pub fn focused_account_key(&self) -> Option<String> {
+        use repomon_core::model::AgentKind;
         let lane = self.selected_lane()?;
         let sess = lane
             .agent_sessions
             .get(self.session_idx)
             .or_else(|| lane.agent_sessions.first())?;
-        Some(repomon_core::agent::claude::account_key(
-            sess.config_dir.as_deref(),
-        ))
+        match &sess.agent {
+            AgentKind::Codex => Some("codex".to_string()),
+            AgentKind::ClaudeCode => Some(repomon_core::agent::claude::account_key(
+                sess.config_dir.as_deref(),
+            )),
+            _ => None,
+        }
     }
 
     /// Move the session cursor among the selected lane's agents.
