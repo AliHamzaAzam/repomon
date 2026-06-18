@@ -22,6 +22,7 @@ use repomon_core::{config, Config};
 #[derive(Parser)]
 #[command(
     name = "repomon",
+    version,
     about = "Terminal mission control for parallel coding agents"
 )]
 struct Cli {

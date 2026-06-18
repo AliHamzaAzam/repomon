@@ -13,7 +13,7 @@ use tokio::time::{interval, Duration};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "repomond", about = "The repomon background daemon")]
+#[command(name = "repomond", version, about = "The repomon background daemon")]
 struct Args {
     /// Override the socket path.
     #[arg(long)]
