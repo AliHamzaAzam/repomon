@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
+use notify::{Config, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, NoCache};
 use tokio::sync::broadcast;
 
 use crate::error::{Error, Result};
@@ -35,7 +35,11 @@ pub struct RepoChange {
 
 /// A filesystem watcher over a set of worktree roots.
 pub struct Watcher {
-    debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    // `NoCache`, not the default `RecommendedCache` (`FileIdMap` on macOS): the file-id cache
+    // `stat`s + `readdir`s the tree on every event to track renames, which pegs a core when a
+    // watched worktree churns (a dev server / build). repomon only needs "this root changed", not
+    // rename correlation, so the cache is pure overhead.
+    debouncer: Debouncer<RecommendedWatcher, NoCache>,
     tx: broadcast::Sender<RepoChange>,
     roots: Arc<Mutex<Vec<PathBuf>>>,
 }
@@ -48,7 +52,7 @@ impl Watcher {
 
         let tx_cb = tx.clone();
         let roots_cb = roots.clone();
-        let debouncer = new_debouncer(
+        let debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
             Duration::from_millis(250),
             None,
             move |res: DebounceEventResult| {
@@ -65,6 +69,8 @@ impl Watcher {
                     }
                 }
             },
+            NoCache::new(),
+            Config::default(),
         )
         .map_err(|e| Error::Other(format!("watcher init: {e}")))?;
 
