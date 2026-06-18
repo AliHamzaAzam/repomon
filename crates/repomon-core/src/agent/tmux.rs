@@ -259,6 +259,24 @@ impl TmuxRuntime {
         visible.then_some((x, y))
     }
 
+    /// Resize a window to `cols × rows` so the mediated view's pane reflows to exactly the visible
+    /// width (no right-edge clipping). `resize-window` sets the window's `window-size` to `manual`;
+    /// [`follow_client_named`](Self::follow_client_named) restores client-follow before an attach.
+    pub fn resize_named(&self, window: &str, cols: u16, rows: u16) -> Result<()> {
+        let target = self.exact_target(window);
+        let (cols, rows) = (cols.to_string(), rows.to_string());
+        self.run_allow_absent(&["resize-window", "-t", &target, "-x", &cols, "-y", &rows])?;
+        Ok(())
+    }
+
+    /// Let `window` follow the attaching client's size again (undoing `resize_named`'s manual
+    /// size), so `tmux attach` renders the agent at the real terminal's full size.
+    pub fn follow_client_named(&self, window: &str) -> Result<()> {
+        let target = self.exact_target(window);
+        self.run_allow_absent(&["set-window-option", "-t", &target, "window-size", "latest"])?;
+        Ok(())
+    }
+
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
     pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
         self.send_literal_named(&Self::window_name(lane), text)

@@ -144,6 +144,14 @@ struct AgentTarget {
     window: Option<String>,
 }
 #[derive(Deserialize)]
+struct AgentResize {
+    lane_id: repomon_core::model::LaneId,
+    cols: u16,
+    rows: u16,
+    #[serde(default)]
+    window: Option<String>,
+}
+#[derive(Deserialize)]
 struct AgentAutoContinue {
     lane_id: repomon_core::model::LaneId,
     enabled: bool,
@@ -843,12 +851,33 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            // This is the pre-attach hook (the TUI calls it right before `tmux attach`). The
+            // mediated view sizes the window to its pane with `agent.resize` (which sets
+            // window-size manual); restore client-follow so the attaching real terminal renders the
+            // agent at full size. The TUI re-fits it on return.
             let w = window.clone();
-            let available = tokio::task::spawn_blocking(move || tmux.has_named(&w))
-                .await
-                .map_err(internal)?;
+            let available = tokio::task::spawn_blocking(move || {
+                let _ = tmux.follow_client_named(&w);
+                tmux.has_named(&w)
+            })
+            .await
+            .map_err(internal)?;
             let target = format!("{}:={}", ctx.tmux.session(), window);
             Ok(json!({ "target": target, "available": available }))
+        }
+        "agent.resize" => {
+            let p: AgentResize = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            // Clamp to a sane floor so a momentary tiny layout can't shrink the agent to nothing.
+            let (cols, rows) = (p.cols.max(20), p.rows.max(4));
+            tokio::task::spawn_blocking(move || tmux.resize_named(&window, cols, rows))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            Ok(Value::Null)
         }
         // Arm/disarm auto-continue (resume on usage limit) for one lane, this session.
         "agent.auto_continue" => {

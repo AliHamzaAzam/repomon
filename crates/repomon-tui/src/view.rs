@@ -19,8 +19,9 @@ use crate::theme;
 const FLEET_KEYS: &str =
     "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane · tab session  ·  click focus · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
-const SPLIT_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
+    "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
+const SPLIT_INSERT_KEYS: &str =
+    "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
     "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
@@ -857,14 +858,27 @@ fn render_split(f: &mut Frame, app: &App) {
         .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
         .collect();
     f.render_widget(Paragraph::new(divider), body[1]);
-    // Live agent output if there is any, otherwise the lane's git detail.
+    // Record the pane size so the event loop resizes the agent's tmux window to match (reflow to
+    // the visible width — no right-edge clipping).
+    app.focus_pane_dims
+        .set(Some((body[2].width, body[2].height)));
+    // Live agent output if there is any, otherwise the lane's git detail. Shows the scrollback
+    // window when scrolled (`scroll > 0`), else the live tail — both via `output_window`.
     let id = app.selected_lane().map(|l| l.id);
     let has_output = id
         .and_then(|i| app.output.get(&i))
         .map(|p| !p.raw.trim().is_empty())
         .unwrap_or(false);
     let right = if has_output {
-        output_tail(app, id, body[2].height as usize)
+        let h = (body[2].height as usize).max(1);
+        let lines: &[Line<'static>] = if app.scroll > 0 {
+            app.scroll_lines.as_deref().unwrap_or(&[])
+        } else {
+            id.and_then(|i| app.output.get(&i))
+                .map_or(&[][..], |p| p.lines.as_slice())
+        };
+        let (start, end) = output_window(lines.len(), h, app.scroll);
+        lines[start..end].to_vec()
     } else {
         detail_lines(app)
     };
@@ -939,6 +953,9 @@ fn render_focus(f: &mut Frame, app: &App) {
     }
     let out_y0 = rows[1].y + body.len() as u16;
     let avail = (rows[1].height as usize).saturating_sub(body.len());
+    // Record the pane size so the event loop fits the agent's tmux window to the full-screen view.
+    app.focus_pane_dims
+        .set(Some((rows[1].width, avail as u16)));
     body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
     f.render_widget(Paragraph::new(body), rows[1]);
 
