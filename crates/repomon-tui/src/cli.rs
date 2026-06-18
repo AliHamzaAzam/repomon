@@ -43,6 +43,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
+    /// Print a shell completion script to stdout (for eval or install).
+    Completions {
+        /// Shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -157,6 +162,11 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
         Command::Remote { cmd } => handle_remote(cmd)?,
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = crate::Cli::command();
+            clap_complete::generate(shell, &mut cmd, "repomon", &mut std::io::stdout());
+        }
     }
     Ok(())
 }
@@ -418,4 +428,17 @@ async fn resolve_repo(client: &DaemonClient, key: &str) -> Result<Repo> {
         .into_iter()
         .find(|r| r.name == key || r.id.to_string() == key)
         .ok_or_else(|| anyhow!("no repo matching '{key}'"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn completions_render_contains_binary_name() {
+        use clap::CommandFactory;
+        let mut cmd = crate::Cli::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "repomon", &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("repomon"), "completion script should mention repomon");
+    }
 }
