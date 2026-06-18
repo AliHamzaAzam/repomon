@@ -185,6 +185,10 @@ pub struct App {
     last_click: Option<(std::time::Instant, LaneId)>,
     /// The lane the mouse is currently hovering (highlighted on render). `None` = not over a lane.
     pub hover_lane: Option<LaneId>,
+    /// The last column a *positioned* mouse event reported (move/click/drag). Wheel events report
+    /// column 0 on many terminals, so this is used to tell whether the wheel is over the sidebar
+    /// (navigate lanes) or the agent pane (scroll it).
+    last_mouse_col: u16,
     /// Set by `on_notification` for non-output events; the event loop coalesces a notification
     /// burst into a single `refresh()`.
     refresh_pending: bool,
@@ -327,6 +331,7 @@ impl App {
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
             hover_lane: None,
+            last_mouse_col: 0,
             refresh_pending: false,
             ac_off: HashSet::new(),
             grid_active: 0,
@@ -1194,6 +1199,11 @@ impl App {
             }
             Event::Mouse(me) => {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+                // Remember the real pointer column from positioned events — wheel events report
+                // column 0 on many terminals, so this is how we know which pane the wheel is over.
+                if !matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    self.last_mouse_col = me.column;
+                }
                 // Bare movement just updates the hovered lane (highlighted on render).
                 if matches!(me.kind, MouseEventKind::Moved) {
                     self.update_hover(me.column, me.row);
@@ -1223,19 +1233,25 @@ impl App {
                             self.settings_click(me.row).await;
                         }
                     }
-                    // Split: the wheel scrolls the focused agent pane, smoothly, line by line. No
-                    // column gate — terminals often report wheel events with column 0 / the last
-                    // position, so gating on "is the pointer over the pane" silently breaks it. Use
-                    // the arrow keys to move the lane cursor. A left-click focuses the clicked lane
-                    // (double-click → real terminal).
-                    View::Split => match me.kind {
-                        MouseEventKind::ScrollUp => self.scroll_up(1).await,
-                        MouseEventKind::ScrollDown => self.scroll_down(1),
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            self.handle_click(me.column, me.row).await
+                    // Split: route the wheel by which side the pointer is over — the agent pane
+                    // (right of the 26-col sidebar + 1-col divider) scrolls its output; the sidebar
+                    // navigates lanes. Wheel events report column 0 on many terminals, so fall back
+                    // to the last positioned pointer column. A left-click focuses the clicked lane.
+                    View::Split => {
+                        let col = if me.column > 0 { me.column } else { self.last_mouse_col };
+                        let over_pane = col > 26;
+                        match me.kind {
+                            MouseEventKind::ScrollUp if over_pane => self.scroll_up(1).await,
+                            MouseEventKind::ScrollDown if over_pane => self.scroll_down(1),
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                self.handle_mouse(me)
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                self.handle_click(me.column, me.row).await
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    },
+                    }
                     // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
                     // terminal, a click on empty space blurs); the wheel still navigates.
                     _ => match me.kind {
