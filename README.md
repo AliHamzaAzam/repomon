@@ -62,6 +62,19 @@ is a thin client. Three crates:
 - `repomon-daemon` — `repomond`: the socket server and background services.
 - `repomon-tui` — `repomon`: the terminal UI.
 
+## Install
+
+```sh
+brew install AliHamzaAzam/tap/repomon      # or: brew tap AliHamzaAzam/tap && brew install repomon
+brew services start repomon                # optional: run the daemon at login
+```
+
+After install, enable cd-on-exit by adding to your `~/.zshrc` (or `~/.bashrc`):
+
+```sh
+eval "$(repomon shell-init zsh)"
+```
+
 ## Usage
 
 ```sh
@@ -94,16 +107,11 @@ Testing it: `cargo build` (so both binaries exist), then `./target/debug/repomon
 ## Shell integration (cd-on-exit)
 
 Pressing `c` on a lane exits repomon and changes your shell into that worktree. repomon
-writes the path to the file descriptor in `$REPOMON_CD_FD`; add this wrapper to your
+writes the path to the file descriptor in `$REPOMON_CD_FD`; add the wrapper to your
 `~/.zshrc` / `~/.bashrc` so the shell acts on it:
 
 ```sh
-repomon() {
-  local tmp; tmp=$(mktemp)
-  REPOMON_CD_FD=3 command repomon "$@" 3>"$tmp"
-  local dir; dir=$(cat "$tmp"); rm -f "$tmp"
-  [ -n "$dir" ] && [ -d "$dir" ] && cd "$dir"
-}
+eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repomon shell-init fish
 ```
 
 ## Remote access (iOS companion over Tailscale)
