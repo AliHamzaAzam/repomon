@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon -> aarch64-apple-darwin
+            target: aarch64-apple-darwin
+          - runner: macos-13   # Intel -> x86_64-apple-darwin
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the version; rustup installs it. Native build for the
+      # runner's arch (no cross-compile), so the produced binary matches matrix.target.
+      - run: rustup show
+      - name: Verify host matches target
+        run: |
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$HOST" = "${{ matrix.target }}" || { echo "host $HOST != ${{ matrix.target }}"; exit 1; }
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIST="repomon-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$DIST"
+          cp target/release/repomon target/release/repomond "$DIST/"
+          tar -czf "${DIST}.tar.gz" -C "$DIST" repomon repomond
+          shasum -a 256 "${DIST}.tar.gz" | awk '{print $1}' > "${DIST}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            repomon-*.tar.gz
+            repomon-*.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+      - name: Bump tap formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARM_SHA="$(cat dist/repomon-${VERSION}-aarch64-apple-darwin.tar.gz.sha256)"
+          X86_SHA="$(cat dist/repomon-${VERSION}-x86_64-apple-darwin.tar.gz.sha256)"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/AliHamzaAzam/homebrew-tap.git" tap
+          cd tap
+          sed -i -E "s/^  version \".*\"/  version \"${VERSION}\"/" Formula/repomon.rb
+          sed -i -E "s/  sha256 \"[0-9a-f]*\" # aarch64/  sha256 \"${ARM_SHA}\" # aarch64/" Formula/repomon.rb
+          sed -i -E "s/  sha256 \"[0-9a-f]*\" # x86_64/  sha256 \"${X86_SHA}\" # x86_64/" Formula/repomon.rb
+          git config user.name "repomon-release-bot"
+          git config user.email "repomon-release-bot@users.noreply.github.com"
+          git commit -am "repomon ${VERSION}"
+          git push
