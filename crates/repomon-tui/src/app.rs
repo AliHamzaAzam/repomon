@@ -168,6 +168,10 @@ pub struct App {
     /// flushes the net into a single `agent.scroll` per frame, so a fast trackpad flick is one
     /// forwarded scroll instead of dozens of blocking RPCs (which overshot and froze the UI).
     pending_scroll: isize,
+    /// Printable characters typed/pasted to the agent, buffered so a paste of N chars becomes one
+    /// `send_input` instead of N blocking `send-keys` RPCs (which froze the UI). Flushed by the
+    /// event loop after each input burst, and before any control key so ordering is preserved.
+    pending_input: String,
     /// The scrollback snapshot's pre-parsed styled lines (parsed once when `scroll_buf` is set).
     pub scroll_lines: Option<Vec<Line<'static>>>,
     /// Focus drag-selection (buffer line indices). On release the range is copied to the
@@ -333,6 +337,7 @@ impl App {
             scroll: 0,
             scroll_buf: None,
             pending_scroll: 0,
+            pending_input: String::new(),
             scroll_lines: None,
             sel_anchor: None,
             sel_head: None,
@@ -2308,22 +2313,54 @@ impl App {
     /// Forward one keystroke live to the selected lane's agent (insert-mode passthrough),
     /// so its own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
     async fn send_agent_key(&mut self, key: KeyEvent) {
-        if let (Some(id), Some((spec, literal))) =
+        let (Some(id), Some((spec, literal))) =
             (self.selected_lane().map(|l| l.id), translate_key(&key))
-        {
-            let _ = self
-                .client
-                .call(
-                    "agent.key",
-                    Some(json!({
-                        "lane_id": id,
-                        "key": spec,
-                        "literal": literal,
-                        "window": self.selected_window(),
-                    })),
-                )
-                .await;
+        else {
+            return;
+        };
+        if literal {
+            // A printable character — buffer it. A whole paste accumulates here and the event loop
+            // flushes it as a single send_input, instead of one blocking send-keys per character.
+            self.pending_input.push_str(&spec);
+            return;
         }
+        // A control key (Enter, arrow, ^C, Esc, …): send any buffered text first so order holds.
+        self.flush_pending_input().await;
+        let _ = self
+            .client
+            .call(
+                "agent.key",
+                Some(json!({
+                    "lane_id": id,
+                    "key": spec,
+                    "literal": false,
+                    "window": self.selected_window(),
+                })),
+            )
+            .await;
+    }
+
+    /// Send the buffered keystrokes/paste to the agent as one `send_input` (literal, no Enter).
+    async fn flush_pending_input(&mut self) {
+        if self.pending_input.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.pending_input);
+        let Some(id) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        let _ = self
+            .client
+            .call(
+                "agent.send_input",
+                Some(json!({
+                    "lane_id": id,
+                    "text": text,
+                    "enter": false,
+                    "window": self.selected_window(),
+                })),
+            )
+            .await;
     }
 
     /// Key handling in the Split view: fleet sidebar + the selected lane's live output. Like
@@ -3387,8 +3424,10 @@ async fn event_loop(
                             Err(_) => break,
                         }
                     }
-                    // Send the whole drained wheel/PgUp burst as one scroll, not one per event.
+                    // Send the whole drained burst at once: one scroll, and one send_input for a
+                    // pasted/typed run of characters — not one blocking RPC per event.
                     app.flush_pane_scroll().await;
+                    app.flush_pending_input().await;
                 }
                 None => return Ok(()),
             },
