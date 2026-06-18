@@ -64,12 +64,32 @@ is a thin client. Three crates:
 
 ## Install
 
+**Homebrew** (macOS):
+
 ```sh
 brew install AliHamzaAzam/tap/repomon      # or: brew tap AliHamzaAzam/tap && brew install repomon
 brew services start repomon                # optional: run the daemon at login
 ```
 
-After install, enable cd-on-exit by adding to your `~/.zshrc` (or `~/.bashrc`):
+**Without Homebrew** — prebuilt binaries, no Rust or Xcode needed:
+
+```sh
+curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
+```
+
+Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest) —
+per-arch (`aarch64`/`x86_64`) or the `universal` build — extract, and put `repomon` and `repomond`
+on your `PATH`.
+
+**From source** (Rust toolchain):
+
+```sh
+cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
+# once published to crates.io:  cargo install repomon repomon-daemon
+```
+
+repomon needs `tmux` (agents run in tmux) and `git` at runtime. Then enable cd-on-exit by adding to
+your `~/.zshrc` (or `~/.bashrc`):
 
 ```sh
 eval "$(repomon shell-init zsh)"

@@ -36,12 +36,41 @@ jobs:
             repomon-*.tar.gz
             repomon-*.tar.gz.sha256
 
-  release:
+  universal:
+    # Merge the two thin binaries into one fat (arm64+x86_64) archive for a
+    # one-download-fits-all manual install. lipo is macOS-only, so this runs on macOS.
     needs: build
+    runs-on: macos-14
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: lipo universal binary
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p arm intel uni
+          tar -xzf "dist/repomon-${VERSION}-aarch64-apple-darwin.tar.gz" -C arm
+          tar -xzf "dist/repomon-${VERSION}-x86_64-apple-darwin.tar.gz" -C intel
+          lipo -create -output uni/repomon  arm/repomon  intel/repomon
+          lipo -create -output uni/repomond arm/repomond intel/repomond
+          DIST="repomon-${VERSION}-universal-apple-darwin"
+          tar -czf "${DIST}.tar.gz" -C uni repomon repomond
+          shasum -a 256 "${DIST}.tar.gz" | awk '{print $1}' > "${DIST}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: universal-apple-darwin
+          path: |
+            repomon-*-universal-apple-darwin.tar.gz
+            repomon-*-universal-apple-darwin.tar.gz.sha256
+
+  release:
+    needs: [build, universal]
     runs-on: ubuntu-latest
     env:
       HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
+      - uses: actions/checkout@v4        # for install.sh
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -50,7 +79,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz install.sh \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
       - name: Bump tap formula
         if: env.HAS_TAP_TOKEN == 'true'
