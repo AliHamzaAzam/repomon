@@ -9,30 +9,24 @@ permissions:
 
 jobs:
   build:
+    # Both macOS arches build on the arm64 runner via cross-compilation (macOS clang is a
+    # universal toolchain). Avoids depending on the scarce/slow macos-13 Intel runners.
     strategy:
       matrix:
-        include:
-          - runner: macos-14   # Apple Silicon -> aarch64-apple-darwin
-            target: aarch64-apple-darwin
-          - runner: macos-13   # Intel -> x86_64-apple-darwin
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.runner }}
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml pins the version; rustup installs it. Native build for the
-      # runner's arch (no cross-compile), so the produced binary matches matrix.target.
-      - run: rustup show
-      - name: Verify host matches target
-        run: |
-          HOST="$(rustc -vV | sed -n 's/^host: //p')"
-          test "$HOST" = "${{ matrix.target }}" || { echo "host $HOST != ${{ matrix.target }}"; exit 1; }
-      - run: cargo build --release --locked
+      - run: rustup show                              # installs the rust-toolchain.toml version
+      - run: rustup target add ${{ matrix.target }}  # add the cross std for this toolchain
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           DIST="repomon-${VERSION}-${{ matrix.target }}"
           mkdir -p "$DIST"
-          cp target/release/repomon target/release/repomond "$DIST/"
+          cp "target/${{ matrix.target }}/release/repomon" \
+             "target/${{ matrix.target }}/release/repomond" "$DIST/"
           tar -czf "${DIST}.tar.gz" -C "$DIST" repomon repomond
           shasum -a 256 "${DIST}.tar.gz" | awk '{print $1}' > "${DIST}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
