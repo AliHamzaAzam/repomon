@@ -45,6 +45,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -57,6 +59,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
       - name: Bump tap formula
+        if: env.HAS_TAP_TOKEN == 'true'
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
