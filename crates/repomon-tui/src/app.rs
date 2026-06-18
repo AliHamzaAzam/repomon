@@ -1148,6 +1148,9 @@ impl App {
         } else {
             (self.session_idx + n - 1) % n
         };
+        // The scrollback snapshot belonged to the previous agent's window — drop it so the new
+        // agent shows its own live tail instead of stale lines.
+        self.reset_scroll();
     }
 
     async fn on_notification(&mut self, note: Notification) {
@@ -1220,16 +1223,18 @@ impl App {
                             self.settings_click(me.row).await;
                         }
                     }
-                    // Split: the wheel over the agent pane (past the 26-col sidebar + 1-col divider)
-                    // scrolls its output smoothly, line by line; over the sidebar it still moves the
-                    // lane cursor. A left-click focuses the clicked lane (double-click → terminal).
+                    // Split: the wheel scrolls the focused agent pane, smoothly, line by line. No
+                    // column gate — terminals often report wheel events with column 0 / the last
+                    // position, so gating on "is the pointer over the pane" silently breaks it. Use
+                    // the arrow keys to move the lane cursor. A left-click focuses the clicked lane
+                    // (double-click → real terminal).
                     View::Split => match me.kind {
-                        MouseEventKind::ScrollUp if me.column > 26 => self.scroll_up(1).await,
-                        MouseEventKind::ScrollDown if me.column > 26 => self.scroll_down(1),
+                        MouseEventKind::ScrollUp => self.scroll_up(1).await,
+                        MouseEventKind::ScrollDown => self.scroll_down(1),
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.handle_click(me.column, me.row).await
                         }
-                        _ => self.handle_mouse(me),
+                        _ => {}
                     },
                     // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
                     // terminal, a click on empty space blurs); the wheel still navigates.
