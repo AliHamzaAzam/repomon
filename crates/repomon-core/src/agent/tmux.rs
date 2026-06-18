@@ -277,6 +277,29 @@ impl TmuxRuntime {
         Ok(())
     }
 
+    /// Whether `window`'s app is on the *alternate screen* — i.e. a full-screen TUI (Claude, vim, …)
+    /// that owns its own scrollback. `false` for a plain shell (whose scrollback lives in tmux).
+    pub fn alternate_on_named(&self, window: &str) -> bool {
+        let target = self.exact_target(window);
+        self.run_allow_absent(&["display-message", "-p", "-t", &target, "-F", "#{alternate_on}"])
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
+    }
+
+    /// Forward `ticks` mouse-wheel scroll events to `window`'s app, so a full-screen agent scrolls
+    /// its own history (the mediated pane can't otherwise — alternate-screen apps keep no tmux
+    /// scrollback). Sends SGR wheel sequences (button 64 = up, 65 = down) at the pane's top-left.
+    pub fn scroll_wheel_named(&self, window: &str, up: bool, ticks: u32) -> Result<()> {
+        if ticks == 0 {
+            return Ok(());
+        }
+        let button = if up { 64 } else { 65 };
+        let seq = format!("\x1b[<{button};1;1M").repeat(ticks as usize);
+        let target = self.exact_target(window);
+        self.run_allow_absent(&["send-keys", "-t", &target, "-l", &seq])?;
+        Ok(())
+    }
+
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
     pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
         self.send_literal_named(&Self::window_name(lane), text)
