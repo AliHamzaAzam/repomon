@@ -76,7 +76,8 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.signal` | `{ lane_id, key, window? }` | `null` |
 | `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
-| `agent.target` | `{ lane_id, window? }` | `{ target, available }` |
+| `agent.target` | `{ lane_id, window? }` | `{ target, available }` (also resets the window to follow the attaching client's size) |
+| `agent.resize` | `{ lane_id, cols, rows, window? }` | `null` (resize the agent's pane so the mediated view reflows to fit; clamped to a floor) |
 | `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
 | `terminal.close` | `{ id }` | `null` |

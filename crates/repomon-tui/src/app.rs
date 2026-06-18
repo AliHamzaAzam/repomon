@@ -171,6 +171,13 @@ pub struct App {
     pub sel_anchor: Option<usize>,
     pub sel_head: Option<usize>,
     pub focus_geom: std::cell::Cell<(u16, usize, usize)>,
+    /// The focused agent pane's content size `(cols, rows)`, recorded during render of the Split /
+    /// Focus view. The event loop resizes the agent's tmux window to match so it reflows to the
+    /// visible width (no right-edge clipping) instead of staying at a stale `attach` width.
+    pub focus_pane_dims: std::cell::Cell<Option<(u16, u16)>>,
+    /// The `(lane, window, cols, rows)` of the last `agent.resize` sent, so it fires only on a real
+    /// size/focus change rather than every tick.
+    last_resize: Option<(LaneId, String, u16, u16)>,
     /// Clickable lane regions for the current frame, recorded during render and read by the mouse
     /// handler. Cleared and repopulated every render.
     pub click_zones: RefCell<Vec<ClickZone>>,
@@ -315,6 +322,8 @@ impl App {
             sel_anchor: None,
             sel_head: None,
             focus_geom: std::cell::Cell::new((0, 0, 0)),
+            focus_pane_dims: std::cell::Cell::new(None),
+            last_resize: None,
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
             hover_lane: None,
@@ -867,6 +876,37 @@ impl App {
         }
     }
 
+    /// Resize the focused agent's tmux window to match the mediated view's pane, so it reflows to
+    /// the visible width (no right-edge clipping). Only fires on a real size/focus change — view
+    /// switch, terminal resize, or return-from-attach — not every tick.
+    async fn sync_pane_size(&mut self) {
+        if !matches!(self.view, View::Split | View::Focus) {
+            return;
+        }
+        let (Some((cols, rows)), Some(lane), Some(window)) = (
+            self.focus_pane_dims.get(),
+            self.selected_lane().map(|l| l.id),
+            self.selected_window(), // a managed window; `None` for external/no-window sessions
+        ) else {
+            return;
+        };
+        if cols < 4 || rows < 2 {
+            return;
+        }
+        let key = (lane, window.clone(), cols, rows);
+        if self.last_resize.as_ref() == Some(&key) {
+            return;
+        }
+        let _ = self
+            .client
+            .call(
+                "agent.resize",
+                Some(json!({ "lane_id": lane, "cols": cols, "rows": rows, "window": window })),
+            )
+            .await;
+        self.last_resize = Some(key);
+    }
+
     /// Load the selected lane's recent commits (its branch history) when the selection
     /// changes. `recent_commits_lane == None` forces a refetch (e.g. after a repo event).
     pub async fn sync_recent_commits(&mut self) {
@@ -1180,8 +1220,19 @@ impl App {
                             self.settings_click(me.row).await;
                         }
                     }
-                    // Grid/Fleet/Split: a left-click focuses the clicked lane (double-click opens
-                    // its real terminal, a click on empty space blurs); the wheel still navigates.
+                    // Split: the wheel over the agent pane (past the 26-col sidebar + 1-col divider)
+                    // scrolls its output smoothly, line by line; over the sidebar it still moves the
+                    // lane cursor. A left-click focuses the clicked lane (double-click → terminal).
+                    View::Split => match me.kind {
+                        MouseEventKind::ScrollUp if me.column > 26 => self.scroll_up(1).await,
+                        MouseEventKind::ScrollDown if me.column > 26 => self.scroll_down(1),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.handle_click(me.column, me.row).await
+                        }
+                        _ => self.handle_mouse(me),
+                    },
+                    // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
+                    // terminal, a click on empty space blurs); the wheel still navigates.
                     _ => match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.handle_click(me.column, me.row).await
@@ -2208,6 +2259,16 @@ impl App {
                 self.focus_insert = false;
                 return;
             }
+            // PgUp/PgDn scroll the captured output even while typing (always reach repomon); any
+            // other key returns to the live tail and goes to the agent.
+            match key.code {
+                KeyCode::PageUp => return self.scroll_up(10).await,
+                KeyCode::PageDown => return self.scroll_down(10),
+                _ => {}
+            }
+            if self.scroll > 0 {
+                self.reset_scroll();
+            }
             self.send_agent_key(key).await;
             return;
         }
@@ -2215,19 +2276,29 @@ impl App {
             self.filter_key(key);
             return;
         }
+        // esc returns to the live tail before it would zoom out.
+        if key.code == KeyCode::Esc && self.scroll > 0 {
+            self.reset_scroll();
+            return;
+        }
         // ↵ opens the selected agent in its real tmux pane (a native terminal); → zooms to the
         // Focus monitor; `i` is a quick mediated type without leaving repomon.
         if key.code == KeyCode::Enter {
+            self.reset_scroll();
             self.attach_request = self.selected_lane().map(|l| l.id);
             return;
         }
         if key.code == KeyCode::Char('i') {
+            self.reset_scroll();
             self.focus_insert = true;
             return;
         }
         match key.code {
             KeyCode::Tab => return self.cycle_session(true),
             KeyCode::BackTab => return self.cycle_session(false),
+            // PgUp/PgDn scroll the pane; arrows still navigate the fleet.
+            KeyCode::PageUp => return self.scroll_up(10).await,
+            KeyCode::PageDown => return self.scroll_down(10),
             _ => {}
         }
         if let Some(action) = keybinds::nav(key) {
@@ -3135,6 +3206,7 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         app.sync_viewport().await;
+        app.sync_pane_size().await;
         app.sync_recent_commits().await;
         app.sync_terminals().await;
         app.sync_session_cursor();
