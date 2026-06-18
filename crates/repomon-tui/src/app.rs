@@ -1213,8 +1213,8 @@ impl App {
                 // to the clipboard on release); elsewhere the wheel moves the cursor.
                 match self.view {
                     View::Focus => match me.kind {
-                        MouseEventKind::ScrollUp => self.scroll_up(3).await,
-                        MouseEventKind::ScrollDown => self.scroll_down(3),
+                        MouseEventKind::ScrollUp => self.pane_scroll(true, 1).await,
+                        MouseEventKind::ScrollDown => self.pane_scroll(false, 1).await,
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.sel_anchor = self.focus_line_at(me.row);
                             self.sel_head = self.sel_anchor;
@@ -1241,8 +1241,10 @@ impl App {
                         let col = if me.column > 0 { me.column } else { self.last_mouse_col };
                         let over_pane = col > 26;
                         match me.kind {
-                            MouseEventKind::ScrollUp if over_pane => self.scroll_up(1).await,
-                            MouseEventKind::ScrollDown if over_pane => self.scroll_down(1),
+                            MouseEventKind::ScrollUp if over_pane => self.pane_scroll(true, 1).await,
+                            MouseEventKind::ScrollDown if over_pane => {
+                                self.pane_scroll(false, 1).await
+                            }
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                                 self.handle_mouse(me)
                             }
@@ -2283,8 +2285,8 @@ impl App {
             // PgUp/PgDn scroll the captured output even while typing (always reach repomon); any
             // other key returns to the live tail and goes to the agent.
             match key.code {
-                KeyCode::PageUp => return self.scroll_up(10).await,
-                KeyCode::PageDown => return self.scroll_down(10),
+                KeyCode::PageUp => return self.pane_scroll(true, 8).await,
+                KeyCode::PageDown => return self.pane_scroll(false, 8).await,
                 _ => {}
             }
             if self.scroll > 0 {
@@ -2318,8 +2320,8 @@ impl App {
             KeyCode::Tab => return self.cycle_session(true),
             KeyCode::BackTab => return self.cycle_session(false),
             // PgUp/PgDn scroll the pane; arrows still navigate the fleet.
-            KeyCode::PageUp => return self.scroll_up(10).await,
-            KeyCode::PageDown => return self.scroll_down(10),
+            KeyCode::PageUp => return self.pane_scroll(true, 8).await,
+            KeyCode::PageDown => return self.pane_scroll(false, 8).await,
             _ => {}
         }
         if let Some(action) = keybinds::nav(key) {
@@ -2338,8 +2340,8 @@ impl App {
             // tmux/terminals; these keys always reach repomon). Other keys go to the agent, and
             // typing returns to the live tail.
             match key.code {
-                KeyCode::PageUp => return self.scroll_up(10).await,
-                KeyCode::PageDown => return self.scroll_down(10),
+                KeyCode::PageUp => return self.pane_scroll(true, 8).await,
+                KeyCode::PageDown => return self.pane_scroll(false, 8).await,
                 _ => {}
             }
             if self.scroll > 0 {
@@ -2362,8 +2364,8 @@ impl App {
                 self.focus_insert = true;
             }
             // Scroll back through the agent's output (e.g. to read a long plan).
-            KeyCode::PageUp | KeyCode::Up => self.scroll_up(10).await,
-            KeyCode::PageDown | KeyCode::Down => self.scroll_down(10),
+            KeyCode::PageUp | KeyCode::Up => self.pane_scroll(true, 8).await,
+            KeyCode::PageDown | KeyCode::Down => self.pane_scroll(false, 8).await,
             KeyCode::Tab => self.cycle_session(true),
             KeyCode::BackTab => self.cycle_session(false),
             KeyCode::Char('e') => self.spawn_agent().await,
@@ -2686,6 +2688,34 @@ impl App {
         } else {
             disable_mouse();
             self.status = "mouse released — drag to select & copy · y for wheel-scroll".into();
+        }
+    }
+
+    /// Scroll the focused agent's pane. Full-screen agents (Claude, …) run on the alternate screen
+    /// and keep their own scrollback that tmux's capture can't reach, so forward the wheel to the
+    /// agent and let it scroll itself (the streamer mirrors the result). Plain-shell agents have
+    /// real tmux scrollback, so fall back to the local capture-based scroll.
+    async fn pane_scroll(&mut self, up: bool, ticks: usize) {
+        let Some(lane) = self.selected_lane().map(|l| l.id) else {
+            return;
+        };
+        let window = self.selected_window();
+        let forwarded = self
+            .client
+            .call(
+                "agent.scroll",
+                Some(json!({ "lane_id": lane, "up": up, "ticks": ticks, "window": window })),
+            )
+            .await
+            .ok()
+            .and_then(|v| v.get("forwarded").and_then(|f| f.as_bool()))
+            .unwrap_or(false);
+        if !forwarded {
+            if up {
+                self.scroll_up(ticks).await;
+            } else {
+                self.scroll_down(ticks);
+            }
         }
     }
 
@@ -3071,6 +3101,23 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     app.load_settings().await;
 
     let mut terminal = ratatui::init();
+    // Log panics to a file before the terminal is restored (which would otherwise scroll the
+    // message off-screen, leaving a crash undiagnosable). Chains to ratatui's restore hook.
+    {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_default();
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = std::fs::write(
+                "/tmp/repomon-panic.log",
+                format!("repomon panic at {loc}\n{info}\n\nbacktrace:\n{bt}\n"),
+            );
+            prev(info);
+        }));
+    }
     if app.mouse_on {
         enable_mouse();
     }

@@ -152,6 +152,18 @@ struct AgentResize {
     window: Option<String>,
 }
 #[derive(Deserialize)]
+struct AgentScroll {
+    lane_id: repomon_core::model::LaneId,
+    up: bool,
+    #[serde(default = "default_scroll_ticks")]
+    ticks: u32,
+    #[serde(default)]
+    window: Option<String>,
+}
+fn default_scroll_ticks() -> u32 {
+    1
+}
+#[derive(Deserialize)]
 struct AgentAutoContinue {
     lane_id: repomon_core::model::LaneId,
     enabled: bool,
@@ -878,6 +890,35 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .map_err(internal)?
                 .map_err(internal)?;
             Ok(Value::Null)
+        }
+        "agent.scroll" => {
+            let p: AgentScroll = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let lane = p.lane_id;
+            let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            let (up, ticks) = (p.up, p.ticks.min(40));
+            // Only forward to a full-screen agent (alternate screen) — it owns its scrollback, so
+            // it can scroll itself. A plain shell would just get junk on its command line; the
+            // caller falls back to the capture-based scroll when `forwarded` is false.
+            let forwarded = tokio::task::spawn_blocking(move || {
+                if tmux.alternate_on_named(&window) {
+                    let _ = tmux.scroll_wheel_named(&window, up, ticks);
+                    true
+                } else {
+                    false
+                }
+            })
+            .await
+            .map_err(internal)?;
+            if forwarded {
+                // Fast-poll the pane so the scrolled view shows immediately (reuses the typing
+                // cadence path).
+                ctx.input_seen
+                    .lock()
+                    .await
+                    .insert(lane, std::time::Instant::now());
+            }
+            Ok(json!({ "forwarded": forwarded }))
         }
         // Arm/disarm auto-continue (resume on usage limit) for one lane, this session.
         "agent.auto_continue" => {
