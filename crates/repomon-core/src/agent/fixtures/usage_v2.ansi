@@ -1,0 +1,50 @@
+
+[91m╭───[39m [91mClaude Code[39m [37mv2.1.181[39m [91m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+[94m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m   [1m[94mSettings[0m  Status   Config  [1m[30m[104m Usage [0m  Stats
+
+   [1mSession[0m
+
+   [37mTotal cost:            $0.0000[39m
+   [37mTotal duration (API):  0s[39m
+   [37mTotal duration (wall): 2m 8s[39m
+   [37mTotal code changes:    0 lines added, 0 lines removed[39m
+   [37mUsage:                 0 input, 0 output, 0 cache read, 0 cache write[39m
+
+   [1mCurrent session[0m
+   [33m[47m███████▌                                          [39m[49m 15% used
+   [37mResets 11:59pm (Asia/Karachi)[39m
+
+   [1mCurrent week (all models)[0m
+   [33m[47m████████████████████▌                             [39m[49m 41% used
+   [37mResets Jun 21 at 7:59pm (Asia/Karachi)[39m
+
+   [1mCurrent week (Sonnet only)[0m
+   [33m[47m                                                  [39m[49m 0% used
+
+   [1mWhat's contributing to your limits usage?[0m
+   [37mApproximate, based on local sessions on this machine — does not include other devices or claude.ai[39m
+
+   [37mLast 24h · these are independent characteristics of your usage, not a breakdown[39m
+
+   78% of your usage came from sessions active for 8+ hours
+    [37mThese are often background/loop sessions. Continuous usage can add up quickly [39m
+    [37mso make sure it is intentional.[39m
+
+   76% of your usage was at >150k context
+    [37mLonger sessions are more expensive even when cached. /compact mid-task, /clear [39m
+    [37mwhen switching to new tasks.[39m
+
+   63% of your usage came from subagent-heavy sessions
+    [37mEach subagent runs its own requests. Be deliberate about spawning them — and [39m
+    [37mconsider configuring a cheaper model for simpler subagents.[39m
+
+   13% of your usage was while 4+ sessions ran in parallel
+    [37mAll sessions share one limit. If you don't need them all at once, queueing uses[39m
+    [37mit more evenly.[39m
+
+   Skills                  [37m% of usage[39m
+   [37m/superpowers:brainstorming[39m      [37m1%[39m
+   [37m/superpowers:using-git-work…[39m    [37m1%[39m
+   [37m/superpowers:writing-plans[39m      [37m1%[39m
+                                                                                                                                                                                                      [37m↓[39m

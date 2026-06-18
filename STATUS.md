@@ -15,7 +15,7 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 | **3 — Dashboard / history** | M11 history indexer · timeline · jaccard correlations · session detection · markdown export · commit search | ✅ |
 | **4 — Polish (Rust-only)** | M12 accent-color slot + mouse · M13 docs + perf | ✅ |
 
-10 views, 5 CLI subcommands, 38 RPC methods wired.
+10 views, 5 CLI subcommands, 39 RPC methods wired.
 
 ## Quality bar (verified)
 
@@ -43,6 +43,10 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 - **Plain terminals** per worktree (`t`), multiple allowed.
 - Revamped **Grid** (real navigation, Instagram-style position dots, clean exit).
 - repomon's tmux runs on a **dedicated socket**, isolated from the user's own tmux.
+- **Account-usage corner** (opt-in `usage_probe`) — Claude's `/usage` 5h + weekly % and reset,
+  shown bottom-right for the focused agent's account; scraped via a hidden throwaway `claude`
+  session per account (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a rate-limit
+  countdown fallback. See `docs/agents.md`.
 
 ## Deferred (explicitly out of scope in the plan)
 

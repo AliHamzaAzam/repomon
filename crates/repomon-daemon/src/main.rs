@@ -138,6 +138,10 @@ async fn main() {
     // live (config.set) starts/stops it without a restart.
     tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));
 
+    // Probe Claude's `/usage` for the TUI's account-usage corner. Self-gates per tick on
+    // `[usage_probe]` and a TUI being attached, so it costs nothing until enabled and watched.
+    tokio::spawn(repomon_daemon::usage_watch::usage_watcher(ctx.clone()));
+
     // Index commit history in the background (timeline / sessions / search).
     {
         let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());

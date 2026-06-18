@@ -121,6 +121,7 @@ pub struct Settings {
     pub notify_show_why: bool,
     pub notify_coalesce: bool,
     pub notify_click_focus: bool,
+    pub usage_probe: bool,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -129,7 +130,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 15;
+const SETTINGS_COUNT: usize = 16;
 
 pub struct App {
     pub client: DaemonClient,
@@ -293,6 +294,11 @@ pub struct App {
     attach_target: Option<String>,
     /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
     input_suspended: Arc<AtomicBool>,
+    /// Per-account Claude usage (from the daemon's `/usage` probe), shown in the bottom-right
+    /// corner for the focused agent's account. Empty unless `usage_probe` is enabled.
+    pub usage: Vec<repomon_core::agent::AccountUsage>,
+    /// When `usage.get` was last fetched, to throttle the refresh well below the 1s tick.
+    last_usage_fetch: Option<std::time::Instant>,
 }
 
 impl App {
@@ -402,6 +408,8 @@ impl App {
             attach_request: None,
             attach_target: None,
             input_suspended: Arc::new(AtomicBool::new(false)),
+            usage: Vec::new(),
+            last_usage_fetch: None,
         }
     }
 
@@ -419,6 +427,24 @@ impl App {
         }
         if let Ok(r) = self.client.call_typed::<Vec<Repo>>("repo.list", None).await {
             self.repos = r;
+        }
+    }
+
+    /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick — usage moves
+    /// slowly and the daemon only re-probes every few minutes. Leaves the previous value on error
+    /// (and stays empty when `usage_probe` is off, so the corner falls back / hides).
+    async fn sync_usage(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+        if self.last_usage_fetch.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.last_usage_fetch = Some(std::time::Instant::now());
+        if let Ok(u) = self
+            .client
+            .call_typed::<Vec<repomon_core::agent::AccountUsage>>("usage.get", None)
+            .await
+        {
+            self.usage = u;
         }
     }
 
@@ -1139,6 +1165,20 @@ impl App {
             .and_then(|s| s.tmux_window.clone())
     }
 
+    /// The Claude account (config-dir key) of the agent the user is looking at — the selected
+    /// lane's selected session — for attributing the usage corner. `None` when no agent is in
+    /// focus. The key matches `AccountUsage::key` from the daemon's `/usage` probe.
+    pub fn focused_account_key(&self) -> Option<String> {
+        let lane = self.selected_lane()?;
+        let sess = lane
+            .agent_sessions
+            .get(self.session_idx)
+            .or_else(|| lane.agent_sessions.first())?;
+        Some(repomon_core::agent::claude::account_key(
+            sess.config_dir.as_deref(),
+        ))
+    }
+
     /// Move the session cursor among the selected lane's agents.
     fn cycle_session(&mut self, forward: bool) {
         let n = self
@@ -1607,6 +1647,9 @@ impl App {
         if let Some(x) = b("notify_click_focus") {
             self.settings.notify_click_focus = x;
         }
+        if let Some(x) = b("usage_probe") {
+            self.settings.usage_probe = x;
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
@@ -1632,6 +1675,7 @@ impl App {
             "notify_show_why": self.settings.notify_show_why,
             "notify_coalesce": self.settings.notify_coalesce,
             "notify_click_focus": self.settings.notify_click_focus,
+            "usage_probe": self.settings.usage_probe,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -1766,13 +1810,17 @@ impl App {
                 self.settings.notify_click_focus = !self.settings.notify_click_focus;
                 self.save_settings().await;
             }
+            15 => {
+                self.settings.usage_probe = !self.settings.usage_probe;
+                self.save_settings().await;
+            }
             _ => {}
         }
     }
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=14 => self.adjust_setting(true).await,
+            0..=2 | 5..=15 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
@@ -3353,6 +3401,8 @@ async fn event_loop(
                 // user is looking at Fleet or another view. lane.list is cheap (~55ms) at 1Hz and
                 // only runs while the TUI is open; commits/repos still refresh on git events.
                 app.refresh_lanes().await;
+                // Account-usage corner: a slow, self-throttled poll (no-op most ticks).
+                app.sync_usage().await;
             }
         }
     }
@@ -3612,6 +3662,7 @@ mod tests {
             tmux_window: None,
             last_message: None,
             pending_prompt: None,
+            config_dir: None,
         }
     }
 

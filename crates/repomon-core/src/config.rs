@@ -79,6 +79,11 @@ pub struct Config {
     pub remote: RemoteConfig,
     /// APNs push for the iOS companion: alerts reach the phone even with the app closed.
     pub push: PushConfig,
+    /// Show Claude account usage (the `/usage` 5-hour + weekly windows) in the TUI's bottom-right
+    /// corner. Off by default: subscription usage has no CLI/file/endpoint, so this works by
+    /// running `/usage` in a hidden throwaway `claude` session per account every few minutes —
+    /// which spawns a background process and writes a tiny transcript. See `docs/agents.md`.
+    pub usage_probe: bool,
 }
 
 impl Default for Config {
@@ -106,6 +111,7 @@ impl Default for Config {
             repos: HashMap::new(),
             remote: RemoteConfig::default(),
             push: PushConfig::default(),
+            usage_probe: false,
         }
     }
 }

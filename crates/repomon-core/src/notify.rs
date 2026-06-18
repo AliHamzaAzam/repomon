@@ -425,6 +425,7 @@ mod tests {
             tmux_window: None,
             last_message: None,
             pending_prompt: None,
+            config_dir: None,
         }
     }
 

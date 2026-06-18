@@ -60,6 +60,8 @@ pub fn render(f: &mut Frame, app: &App) {
         View::SpawnPick => render_spawn_pick(f, app),
         View::LaneJump => render_lane_jump(f, app),
     }
+    // Drawn last, over the free right end of the bottom row, so it overlays every view.
+    corner(f, app);
 }
 
 const AGENTS_KEYS: &str = "↑↓ select  ·  n new · e edit · d delete · * default  ·  esc back";
@@ -189,7 +191,7 @@ fn render_settings(f: &mut Frame, app: &App) {
         s.default_agent.clone()
     };
     let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-    let items: [(&str, String, &str); 15] = [
+    let items: [(&str, String, &str); 16] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
         ("auto-continue", onoff(s.auto_continue), "space toggles"),
@@ -233,6 +235,11 @@ fn render_settings(f: &mut Frame, app: &App) {
             "  · click focuses terminal",
             onoff(s.notify_click_focus),
             "needs terminal-notifier",
+        ),
+        (
+            "usage corner (spawns claude)",
+            onoff(s.usage_probe),
+            "/usage probe · space toggles",
         ),
     ];
     // Size the columns to the content so values and hints line up no matter how long a label is:
@@ -1221,6 +1228,89 @@ fn fmt_resume(resume_at: Option<DateTime<Utc>>) -> String {
         Some(t) => format!("resume {}", t.with_timezone(&Local).format("%-I:%M %p")),
         None => "retrying".to_string(),
     }
+}
+
+/// The bottom-right corner: Claude usage for the focused agent's account — `5h NN% · wk NN% ·
+/// <reset>`, drawn over the free right end of the last row of *every* view. Falls back to the
+/// focused lane's rate-limit countdown when there's no scraped usage for that account, and draws
+/// nothing when there's nothing to show (probe off and no limit hit) — never fabricated numbers.
+fn corner(f: &mut Frame, app: &App) {
+    let Some((text, style)) = corner_text(app) else {
+        return;
+    };
+    let area = f.area();
+    if area.height == 0 || area.width == 0 || text.is_empty() {
+        return;
+    }
+    let w = (text.chars().count() as u16).min(area.width);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(w),
+        y: area.y + area.height - 1,
+        width: w,
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), rect);
+}
+
+/// What the corner should show, if anything: scraped usage for the focused agent's account, else
+/// that lane's rate-limit countdown, else nothing.
+fn corner_text(app: &App) -> Option<(String, Style)> {
+    if !app.usage.is_empty() {
+        let acct = app.focused_account_key();
+        let entry = acct
+            .as_ref()
+            .and_then(|k| app.usage.iter().find(|u| &u.key == k))
+            // When the focused agent can't be attributed but there's a single account, use it.
+            .or_else(|| (app.usage.len() == 1).then(|| &app.usage[0]));
+        if let Some(found) = entry.and_then(|u| format_usage(app, u)) {
+            return Some(found);
+        }
+    }
+    corner_fallback(app)
+}
+
+/// Format one account's usage as `[label · ]5h NN% · wk NN% · <reset>`. The label is shown only
+/// when more than one account is in play. `None` when there's no usable percentage to show.
+fn format_usage(app: &App, u: &repomon_core::agent::AccountUsage) -> Option<(String, Style)> {
+    let r = &u.report;
+    if r.session_pct.is_none() && r.week_pct.is_none() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if app.usage.len() > 1 {
+        parts.push(u.label.clone());
+    }
+    if let Some(p) = r.session_pct {
+        parts.push(format!("5h {p}%"));
+    }
+    if let Some(p) = r.week_pct {
+        parts.push(format!("wk {p}%"));
+    }
+    if let Some(t) = r.session_reset_at {
+        parts.push(t.with_timezone(&Local).format("%-I:%M %p").to_string());
+    }
+    // Cyan warning once the 5-hour window is getting tight; muted otherwise.
+    let style = if r.session_pct.is_some_and(|p| p >= 80) {
+        app.theme.rate_limited()
+    } else {
+        app.theme.muted()
+    };
+    Some((parts.join(" · "), style))
+}
+
+/// The focused lane's rate-limit countdown, when usage numbers aren't available — so the corner
+/// stays useful even if the probe is off or failed.
+fn corner_fallback(app: &App) -> Option<(String, Style)> {
+    use repomon_core::model::AgentStatus;
+    let lane = app.selected_lane()?;
+    let rl = lane
+        .agent_sessions
+        .iter()
+        .find(|s| s.status == AgentStatus::RateLimited)?;
+    Some((
+        format!("⏳ {}", fmt_resume(rl.resume_at)),
+        app.theme.rate_limited(),
+    ))
 }
 
 /// A compact "time since" label for a session's last activity.
