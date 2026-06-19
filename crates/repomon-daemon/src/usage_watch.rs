@@ -32,6 +32,11 @@ const REFRESH: Duration = Duration::from_secs(300);
 /// How long since the local TUI's last request before we treat it as gone and stop probing (we
 /// keep the last reading so reopening shows it instantly).
 const LOCAL_TTL: Duration = Duration::from_secs(60);
+/// Hard ceiling on a single probe. One normally finishes in well under 35s; if a `tmux` call ever
+/// hangs (a wedged tmux server, an agent that never reaches its prompt), abandon the probe rather
+/// than let it `await` forever — otherwise one stuck probe freezes the whole watcher and every
+/// account's usage goes stale (the bug this guards against).
+const PROBE_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// One account's last usage reading, with its display label and when it was captured.
 #[derive(Debug, Clone)]
@@ -70,11 +75,18 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
             let window = probe_window(&acct.label);
             let cwd = probe_cwd();
             let spec = acct.spec;
-            let report =
-                tokio::task::spawn_blocking(move || probe_once(&tmux, &window, &cwd, &spec))
-                    .await
-                    .ok()
-                    .flatten();
+            let probe = tokio::task::spawn_blocking(move || probe_once(&tmux, &window, &cwd, &spec));
+            let report = match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+                Ok(join) => join.ok().flatten(),
+                Err(_) => {
+                    // Probe hung (a tmux call that never returned). Abandon it — keep this
+                    // account's last reading and carry on, so one stuck probe can't wedge the
+                    // watcher and freeze every account. (The orphaned blocking thread is left to
+                    // finish on its own; the next round's probe_once kills any leftover window.)
+                    tracing::warn!("usage probe for {} timed out; skipping this round", acct.key);
+                    None
+                }
+            };
             if let Some(report) = report {
                 ctx.usage.lock().await.insert(
                     acct.key,
