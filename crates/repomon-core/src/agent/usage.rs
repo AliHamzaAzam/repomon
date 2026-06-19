@@ -13,7 +13,7 @@
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::text::{parse_pct, parse_reset_datetime, strip_ansi};
+use super::text::{parse_pct, parse_relative_reset, parse_reset_datetime, strip_ansi};
 
 /// One usage limit window, normalized across agents. `pct_used` is how much of the window is
 /// consumed (0–100); `label` is a short tag for display (`5h`, `wk`, `mo`, or a model name).
@@ -103,6 +103,33 @@ pub fn parse_codex_status(pane: &str) -> Option<UsageReport> {
         windows.push(window(&codex_label(&low[..lpos]), pct_used, reset));
     }
 
+    (!windows.is_empty()).then_some(UsageReport { windows })
+}
+
+/// Parse Gemini CLI's `/stats` (alias `/usage`) quota line. For OAuth Code-Assist accounts it
+/// renders `"{N}% used (Limit resets in {dur})"`, or `"Limit reached, resets in {dur}"` when
+/// exhausted, with `"Usage limit: {limit}"` / `"… reset daily"` detail rows. The window is the
+/// daily request quota; the reset is a relative duration. (API-key/Vertex accounts show no quota,
+/// so this yields `None` — the corner then falls back.) Normalized to % used (Gemini already is).
+pub fn parse_gemini_status(pane: &str) -> Option<UsageReport> {
+    let now = Local::now();
+    let mut windows = Vec::new();
+    for line in pane.lines() {
+        let clean = strip_ansi(line);
+        let low = clean.to_lowercase();
+        if low.contains("limit reached") && low.contains("resets in") {
+            windows.push(window("day", 100, parse_relative_reset(&low, now)));
+        } else if low.contains("% used") && (low.contains("resets in") || low.contains("limit")) {
+            if let Some(pct) = parse_pct(&clean) {
+                let reset = if low.contains("resets in") {
+                    parse_relative_reset(&low, now)
+                } else {
+                    None
+                };
+                windows.push(window("day", pct, reset));
+            }
+        }
+    }
     (!windows.is_empty()).then_some(UsageReport { windows })
 }
 
@@ -212,10 +239,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_gemini_quota_line() {
+        // Gemini /stats renders this for OAuth Code-Assist accounts. The exact strings are from
+        // gemini-cli's QuotaStatsInfo source; a live capture isn't possible here (a probe-spawned
+        // gemini can't authenticate unattended), so this asserts the documented format.
+        let pane = "Auth Method: oauth-personal\n  37% used (Limit resets in 3h 24m)\n  \
+                    Usage limit: 1000\n  Usage limits span all sessions and reset daily.";
+        let r = parse_gemini_status(pane).expect("gemini quota");
+        let day = win(&r, "day");
+        assert_eq!(day.pct_used, 37);
+        assert!(day.reset_at.is_some());
+    }
+
+    #[test]
+    fn parses_gemini_limit_reached() {
+        let r = parse_gemini_status("Limit reached, resets in 45m").expect("exhausted");
+        assert_eq!(win(&r, "day").pct_used, 100);
+    }
+
+    #[test]
     fn trust_prompt_yields_none() {
         let pane = include_str!("fixtures/trust_prompt.txt");
         assert!(parse_usage(pane).is_none());
         assert!(parse_codex_status(pane).is_none());
+        assert!(parse_gemini_status(pane).is_none());
     }
 
     #[test]
@@ -223,6 +270,8 @@ mod tests {
         assert!(parse_usage("").is_none());
         assert!(parse_usage("running 24 tests\ntest result: ok").is_none());
         assert!(parse_codex_status("just some\noutput lines").is_none());
+        // Gemini's per-session token stats (no account quota) must not parse as usage.
+        assert!(parse_gemini_status("Session Stats\nTokens: 1234 input, 567 output").is_none());
     }
 
     #[test]

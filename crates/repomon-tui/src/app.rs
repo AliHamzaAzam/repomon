@@ -37,7 +37,7 @@ const NOTIF_DEBOUNCE: Duration = Duration::from_secs(30);
 const NOTIF_HISTORY_CAP: usize = 200;
 
 /// Agent kinds offered when creating a lane (cycled with Tab).
-pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "aider"];
+pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "gemini", "aider"];
 
 /// Timeline zoom levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1187,6 +1187,7 @@ impl App {
             .or_else(|| lane.agent_sessions.first())?;
         match &sess.agent {
             AgentKind::Codex => Some("codex".to_string()),
+            AgentKind::Gemini => Some("gemini".to_string()),
             AgentKind::ClaudeCode => Some(repomon_core::agent::claude::account_key(
                 sess.config_dir.as_deref(),
             )),

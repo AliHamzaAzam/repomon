@@ -506,7 +506,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     custom: false,
                 });
             }
-            for kind in [AgentKind::Codex, AgentKind::Aider] {
+            for kind in [AgentKind::Codex, AgentKind::Gemini, AgentKind::Aider] {
                 let command = kind.command().to_string();
                 let name = kind.as_str().into_owned();
                 choices.push(AgentChoice {

@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use repomon_core::agent::{self, parse_codex_status, parse_usage, UsageReport};
+use repomon_core::agent::{
+    self, parse_codex_status, parse_gemini_status, parse_usage, UsageReport,
+};
 use repomon_core::TmuxRuntime;
 
 use crate::Ctx;
@@ -100,13 +102,15 @@ struct Account {
 }
 
 /// How to probe one agent: the launch command, the usage slash-command, the parser, and the pane
-/// markers that say the REPL is ready or sitting on a folder-trust prompt.
+/// markers that say the REPL is ready, sitting on a folder-trust prompt, or hard-blocked (so the
+/// probe gives up fast instead of waiting out the whole ready timeout).
 struct ProbeSpec {
     command: String,
     slash: &'static str,
     parse: fn(&str) -> Option<UsageReport>,
     ready: &'static [&'static str],
     trust: &'static [&'static str],
+    blocked: &'static [&'static str],
 }
 
 fn claude_spec(command: String) -> ProbeSpec {
@@ -125,6 +129,7 @@ fn claude_spec(command: String) -> ProbeSpec {
             "do you trust",
             "project you created or one you trust",
         ],
+        blocked: &[],
     }
 }
 
@@ -137,6 +142,26 @@ fn codex_spec() -> ProbeSpec {
         trust: &[
             "do you trust the contents",
             "trust the contents of this directory",
+        ],
+        blocked: &[],
+    }
+}
+
+/// Best-effort: Gemini's quota appears only in the interactive `/stats` (alias `/usage`) for OAuth
+/// Code-Assist accounts. A probe-spawned `gemini` often can't authenticate unattended (it wants
+/// browser consent) — that's detected as `blocked` so the probe bails fast and the corner falls
+/// back. Where gemini *does* reach its prompt with cached creds, `/stats` is scraped like the rest.
+fn gemini_spec() -> ProbeSpec {
+    ProbeSpec {
+        command: "gemini".to_string(),
+        slash: "/stats",
+        parse: parse_gemini_status,
+        ready: &["type your message", "/help for", "gemini-2", "gemini-3"],
+        trust: &["do you trust", "trust the files in this folder"],
+        blocked: &[
+            "how would you like to authenticate",
+            "authentication consent could not",
+            "opening authentication page",
         ],
     }
 }
@@ -167,6 +192,13 @@ fn accounts() -> Vec<Account> {
             key: "codex".to_string(),
             label: "codex".to_string(),
             spec: codex_spec(),
+        });
+    }
+    if probe_cwd().join(".gemini").is_dir() {
+        out.push(Account {
+            key: "gemini".to_string(),
+            label: "gemini".to_string(),
+            spec: gemini_spec(),
         });
     }
     out
@@ -212,6 +244,7 @@ fn probe_once(tmux: &TmuxRuntime, window: &str, cwd: &Path, spec: &ProbeSpec) ->
             ProbeState::Trust => {
                 let _ = tmux.send_key_named(window, "Enter"); // accept "trust this folder/contents"
             }
+            ProbeState::Blocked => break, // e.g. needs interactive auth — give up this round
             ProbeState::NotYet => {}
         }
     }
@@ -243,16 +276,21 @@ fn probe_once(tmux: &TmuxRuntime, window: &str, cwd: &Path, spec: &ProbeSpec) ->
     report
 }
 
-/// What the probe pane is showing, so the driver knows whether to wait, accept trust, or proceed.
+/// What the probe pane is showing, so the driver knows whether to wait, accept trust, proceed, or
+/// give up (a hard block like an unattended-auth demand).
 #[derive(Debug, PartialEq, Eq)]
 enum ProbeState {
     Ready,
     Trust,
+    Blocked,
     NotYet,
 }
 
 fn probe_state(pane: &str, spec: &ProbeSpec) -> ProbeState {
     let low = pane.to_lowercase();
+    if spec.blocked.iter().any(|m| low.contains(m)) {
+        return ProbeState::Blocked;
+    }
     if spec.trust.iter().any(|m| low.contains(m)) {
         return ProbeState::Trust;
     }
@@ -294,6 +332,17 @@ mod tests {
         );
         assert_eq!(
             probe_state(">_ OpenAI Codex (v0.141.0)", &codex),
+            ProbeState::Ready
+        );
+
+        let gemini = gemini_spec();
+        // An unattended-auth demand is a hard block (bail fast, don't wait out the timeout).
+        assert_eq!(
+            probe_state("How would you like to authenticate for this project?", &gemini),
+            ProbeState::Blocked
+        );
+        assert_eq!(
+            probe_state("Type your message or @path/to/file", &gemini),
             ProbeState::Ready
         );
     }

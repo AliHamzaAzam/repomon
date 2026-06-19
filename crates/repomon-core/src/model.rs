@@ -117,6 +117,7 @@ pub enum AgentKind {
     Cursor,
     Aider,
     Codex,
+    Gemini,
     Other(String),
 }
 
@@ -128,6 +129,7 @@ impl AgentKind {
             AgentKind::Cursor => Cow::Borrowed("cursor"),
             AgentKind::Aider => Cow::Borrowed("aider"),
             AgentKind::Codex => Cow::Borrowed("codex"),
+            AgentKind::Gemini => Cow::Borrowed("gemini"),
             AgentKind::Other(s) => Cow::Owned(s.clone()),
         }
     }
@@ -139,6 +141,7 @@ impl AgentKind {
             AgentKind::Cursor => "cursor",
             AgentKind::Aider => "aider",
             AgentKind::Codex => "codex",
+            AgentKind::Gemini => "gemini",
             AgentKind::Other(s) => s,
         }
     }
@@ -148,6 +151,7 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Gemini => "gemini",
             AgentKind::Aider => "aider",
             AgentKind::Cursor => "cursor-agent",
             AgentKind::Other(s) => s,
@@ -159,6 +163,7 @@ impl AgentKind {
         match s {
             "claude-code" | "claude" => AgentKind::ClaudeCode,
             "codex" => AgentKind::Codex,
+            "gemini" => AgentKind::Gemini,
             "aider" => AgentKind::Aider,
             "cursor" => AgentKind::Cursor,
             other => AgentKind::Other(other.to_string()),
@@ -434,6 +439,7 @@ mod tests {
         for k in [
             AgentKind::ClaudeCode,
             AgentKind::Codex,
+            AgentKind::Gemini,
             AgentKind::Aider,
             AgentKind::Cursor,
             AgentKind::Other("amp".into()),

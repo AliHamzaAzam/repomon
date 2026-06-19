@@ -45,9 +45,14 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 - repomon's tmux runs on a **dedicated socket**, isolated from the user's own tmux.
 - **Account-usage corner** (opt-in `usage_probe`) — limit windows (% used) + reset shown
   bottom-right for the focused agent's account, **provider-aware**: Claude `/usage` (5h + weekly,
-  per `~/.claude*` account) and Codex `/status` (5h/weekly or Free monthly). Scraped via a hidden
-  throwaway session per account (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a
-  rate-limit countdown fallback. See `docs/agents.md`.
+  per `~/.claude*` account), Codex `/status` (5h/weekly or Free monthly), and Gemini `/stats`
+  (daily quota, best-effort — see caveat). Scraped via a hidden throwaway session per account
+  (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a rate-limit countdown fallback.
+  See `docs/agents.md`.
+- **Gemini** is a first-class spawnable agent (`AgentKind::Gemini`, `gemini` on PATH). Its usage
+  corner is best-effort: Gemini only exposes quota in interactive `/stats` (OAuth Code-Assist) and
+  a probe-spawned `gemini` often can't auth unattended, so usage shows only where it reaches its
+  prompt with cached creds; otherwise the corner falls back.
 
 ## Deferred (explicitly out of scope in the plan)
 

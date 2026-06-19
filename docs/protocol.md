@@ -91,7 +91,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
-| `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
+| `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage`, Codex `/status`, Gemini `/stats`; empty unless `usage_probe` is enabled and a TUI is attached) |
 
 `CreateLaneParams`: `{ repo_id, branch, source_branch?, path?, copy_files? }`.
 

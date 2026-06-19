@@ -83,6 +83,59 @@ pub(crate) fn parse_reset_datetime(lower: &str, now: DateTime<Local>) -> Option<
     parse_dated(lower, now).or_else(|| parse_reset_at(lower, now))
 }
 
+/// Resolve a *relative* reset like `"resets in 3h 24m"` / `"in about 2 hours"` to an absolute time
+/// (`now` + the parsed duration). Sums any `<n><unit>` tokens (d/h/m/s, long or short). `None`
+/// when no duration token is present. Input should be lowercased.
+pub(crate) fn parse_relative_reset(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
+    let dur = parse_duration_tokens(lower)?;
+    Some((now + dur).with_timezone(&Utc))
+}
+
+fn parse_duration_tokens(s: &str) -> Option<Duration> {
+    let b = s.as_bytes();
+    let mut total = Duration::zero();
+    let mut found = false;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() && (i == 0 || !b[i - 1].is_ascii_digit()) {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            let Ok(n) = s[start..i].parse::<i64>() else {
+                continue;
+            };
+            // Optional spaces, then the unit word.
+            let mut k = i;
+            while k < b.len() && b[k] == b' ' {
+                k += 1;
+            }
+            let u0 = k;
+            while k < b.len() && b[k].is_ascii_alphabetic() {
+                k += 1;
+            }
+            if let Some(d) = unit_to_duration(n, &s[u0..k]) {
+                total += d;
+                found = true;
+                i = k;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    found.then_some(total)
+}
+
+fn unit_to_duration(n: i64, unit: &str) -> Option<Duration> {
+    match unit.trim_end_matches('s') {
+        "d" | "day" => Some(Duration::days(n)),
+        "h" | "hr" | "hour" => Some(Duration::hours(n)),
+        "m" | "min" | "minute" => Some(Duration::minutes(n)),
+        "sec" | "second" => Some(Duration::seconds(n)),
+        _ => None,
+    }
+}
+
 const MONTHS: [&str; 12] = [
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
 ];
@@ -309,6 +362,21 @@ mod tests {
             .with_timezone(&Local);
         assert_eq!((dt.month(), dt.day()), (7, 19));
         assert_eq!((dt.hour(), dt.minute()), (4, 0));
+    }
+
+    #[test]
+    fn relative_reset_sums_tokens() {
+        let now = Local.with_ymd_and_hms(2026, 6, 19, 10, 0, 0).unwrap();
+        let t = parse_relative_reset("limit resets in 3h 24m", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!((t.hour(), t.minute()), (13, 24));
+        // Long unit names and a leading filler word.
+        let t2 = parse_relative_reset("resets in about 2 hours", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(t2.hour(), 12);
+        assert!(parse_relative_reset("no duration here", now).is_none());
     }
 
     #[test]

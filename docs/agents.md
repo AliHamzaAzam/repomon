@@ -151,12 +151,20 @@ agent shows its account's `/usage` (`~/.claude` vs `~/.claude-work`), a Codex ag
 `/status`; switch focus and the corner follows.
 
 Subscription usage has no CLI flag, file, or supported endpoint — the only source is an interactive
-command (Claude `/usage`, Codex `/status`). So a daemon watcher (`usage_watch.rs`), **only while a
-TUI is attached**, spawns a hidden throwaway session per account every ~5 minutes, sends the usage
-command, captures and parses the pane (`agent/usage.rs`, fixture-tested), then dismisses (`Esc`) and
-kills the window. It never sends a model prompt. Numbers are normalized to **% used** across agents
-(Codex reports "% left"); windows shown are whatever the tool reports — Claude's 5-hour + weekly,
-Codex's 5-hour/weekly or (Free plan) monthly. Caveats, by design:
+command (Claude `/usage`, Codex `/status`, Gemini `/stats`). So a daemon watcher (`usage_watch.rs`),
+**only while a TUI is attached**, spawns a hidden throwaway session per account every ~5 minutes,
+sends the usage command, captures and parses the pane (`agent/usage.rs`, fixture-tested), then
+dismisses (`Esc`) and kills the window. It never sends a model prompt. Numbers are normalized to
+**% used** across agents (Codex reports "% left"); windows shown are whatever the tool reports —
+Claude's 5-hour + weekly, Codex's 5-hour/weekly or (Free) monthly, Gemini's daily request quota.
+Caveats, by design:
+
+- **Gemini is best-effort.** Its quota appears only in the interactive `/stats` and only for OAuth
+  Code-Assist accounts; there is no local file or headless command. A probe-spawned `gemini` often
+  can't authenticate unattended (it demands browser consent), in which case the probe detects the
+  auth screen, gives up fast, and the corner falls back — so Gemini usage shows only where `gemini`
+  reaches its prompt with cached credentials. The parser is unit-tested against Gemini's documented
+  `/stats` format. (Gemini is still a first-class spawnable agent regardless of usage.)
 
 - It **spawns a background agent process** briefly per probe (hence opt-in). The probe window is
   named `usage-probe-…` (not `lane-…`) and runs in your home dir, so it never inflates a lane's
