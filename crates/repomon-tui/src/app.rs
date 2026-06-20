@@ -859,10 +859,26 @@ impl App {
     /// agents expands into a header row plus one row per agent when `expand_agents` is on. `selected`
     /// indexes this list. Render and navigation BOTH go through here so they never drift.
     pub fn fleet_rows(&self) -> Vec<FleetRow> {
-        build_fleet_rows(
-            self.visible_lanes().iter().map(|l| l.agent_sessions.len()),
-            self.settings.expand_agents,
-        )
+        let lanes = self.visible_lanes();
+        let mut rows = Vec::new();
+        for (i, lane) in lanes.iter().enumerate() {
+            rows.push(FleetRow {
+                lane_idx: i,
+                session: None,
+            });
+            if self.settings.expand_agents && lane.agent_sessions.len() > 1 {
+                // Emit sub-rows in a STABLE order (by durable session identity), not the daemon's
+                // newest-active-first order — otherwise renamed rows jump around as agents take
+                // turns. `session` keeps the real index so selection still targets the right agent.
+                for s in stable_session_order(&lane.agent_sessions) {
+                    rows.push(FleetRow {
+                        lane_idx: i,
+                        session: Some(s),
+                    });
+                }
+            }
+        }
+        rows
     }
 
     fn selected_row(&self) -> Option<FleetRow> {
@@ -2638,6 +2654,11 @@ impl App {
             self.focus_insert = true;
             return;
         }
+        // `R` renames the selected agent sub-row (the editor shows in the sidebar tree).
+        if key.code == KeyCode::Char('R') {
+            self.start_rename();
+            return;
+        }
         match key.code {
             KeyCode::Tab => return self.cycle_session(true),
             KeyCode::BackTab => return self.cycle_session(false),
@@ -3527,25 +3548,20 @@ enum SessionRef {
     Transcript(String),
 }
 
-/// Build the fleet sidebar's rows from each visible lane's agent count. A lane is always one
-/// header row; when `expand` is on and the lane runs >1 agent, its agents follow as sub-rows.
-fn build_fleet_rows(session_counts: impl Iterator<Item = usize>, expand: bool) -> Vec<FleetRow> {
-    let mut rows = Vec::new();
-    for (i, n) in session_counts.enumerate() {
-        rows.push(FleetRow {
-            lane_idx: i,
-            session: None,
-        });
-        if expand && n > 1 {
-            for s in 0..n {
-                rows.push(FleetRow {
-                    lane_idx: i,
-                    session: Some(s),
-                });
-            }
-        }
-    }
-    rows
+/// Indices into `sessions` in a STABLE display order — by durable identity (`session_id`, then
+/// transcript path / window) — so expanded sub-rows (and their user labels) keep their position
+/// instead of reshuffling when the daemon re-sorts sessions by recent activity.
+fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..sessions.len()).collect();
+    let key = |s: &AgentSession| {
+        (
+            s.session_id.clone(),
+            s.manifest_path.clone(),
+            s.tmux_window.clone(),
+        )
+    };
+    idx.sort_by(|&a, &b| key(&sessions[a]).cmp(&key(&sessions[b])));
+    idx
 }
 
 /// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
@@ -4059,34 +4075,26 @@ mod tests {
     }
 
     #[test]
-    fn fleet_rows_collapsed_is_one_per_lane() {
-        // Toggle off: always one row per lane, regardless of agent count.
-        let rows = build_fleet_rows([0usize, 1, 3].into_iter(), false);
-        assert_eq!(
-            rows,
-            vec![
-                FleetRow { lane_idx: 0, session: None },
-                FleetRow { lane_idx: 1, session: None },
-                FleetRow { lane_idx: 2, session: None },
-            ]
-        );
-    }
-
-    #[test]
-    fn fleet_rows_expands_only_multi_agent_lanes() {
-        // Toggle on: a 3-agent lane becomes a header + 3 sub-rows; 0/1-agent lanes stay single.
-        let rows = build_fleet_rows([1usize, 3, 0].into_iter(), true);
-        assert_eq!(
-            rows,
-            vec![
-                FleetRow { lane_idx: 0, session: None }, // 1 agent → just the lane
-                FleetRow { lane_idx: 1, session: None }, // header
-                FleetRow { lane_idx: 1, session: Some(0) },
-                FleetRow { lane_idx: 1, session: Some(1) },
-                FleetRow { lane_idx: 1, session: Some(2) },
-                FleetRow { lane_idx: 2, session: None }, // 0 agents → just the lane
-            ]
-        );
+    fn stable_session_order_sorts_by_durable_id() {
+        // Order follows session_id (stable), NOT the input order (which the daemon churns by
+        // activity), so renamed sub-rows hold their position. Input ids c, a, b → indices 1,2,0.
+        let sessions = [
+            sess(Some("ccc"), AgentStatus::Running, false),
+            sess(Some("aaa"), AgentStatus::Running, false),
+            sess(Some("bbb"), AgentStatus::Running, false),
+        ];
+        assert_eq!(stable_session_order(&sessions), vec![1, 2, 0]);
+        // Reversing the input yields the SAME display order (stability under reshuffle).
+        let rev = [
+            sess(Some("bbb"), AgentStatus::Running, false),
+            sess(Some("aaa"), AgentStatus::Running, false),
+            sess(Some("ccc"), AgentStatus::Running, false),
+        ];
+        let ordered: Vec<&str> = stable_session_order(&rev)
+            .into_iter()
+            .map(|i| rev[i].session_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ordered, vec!["aaa", "bbb", "ccc"]);
     }
 
     #[test]
