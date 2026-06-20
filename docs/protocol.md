@@ -76,6 +76,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.signal` | `{ lane_id, key, window? }` | `null` |
 | `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
+| `session.rename` | `{ session_id, label? }` | `null` (set/clear a user label for a session, keyed by its durable transcript id; empty/absent `label` clears it; overlaid onto `AgentSession.custom_label`) |
 | `agent.target` | `{ lane_id, window? }` | `{ target, available }` (also resets the window to follow the attaching client's size) |
 | `agent.resize` | `{ lane_id, cols, rows, window? }` | `null` (resize the agent's pane so the mediated view reflows to fit; clamped to a floor) |
 | `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen — the client then scrolls the captured buffer itself) |

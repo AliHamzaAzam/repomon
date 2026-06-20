@@ -21,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0001_init.sql"),
     include_str!("../../migrations/0002_agent_kind.sql"),
     include_str!("../../migrations/0003_devices.sql"),
+    include_str!("../../migrations/0004_session_labels.sql"),
 ];
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
@@ -363,6 +364,45 @@ impl Store {
         .await
     }
 
+    // ---- session labels ------------------------------------------------------
+
+    /// Set (or clear, when `label` is `None`) a user-defined label for a session, keyed by its
+    /// durable transcript `session_id`. Survives daemon restarts; overlaid onto `AgentSession`.
+    pub async fn set_session_label(&self, session_id: String, label: Option<String>) -> Result<()> {
+        self.call(move |c| {
+            match label {
+                Some(l) => c.execute(
+                    "INSERT INTO session_labels(session_id, label, updated_at) VALUES(?1, ?2, ?3)
+                     ON CONFLICT(session_id) DO UPDATE SET label = ?2, updated_at = ?3",
+                    params![session_id, l, to_iso(&Utc::now())],
+                )?,
+                None => c.execute(
+                    "DELETE FROM session_labels WHERE session_id = ?1",
+                    params![session_id],
+                )?,
+            };
+            Ok(())
+        })
+        .await
+    }
+
+    /// All session labels, as `session_id -> label`.
+    pub async fn list_session_labels(&self) -> Result<std::collections::HashMap<String, String>> {
+        self.call(|c| {
+            let mut stmt = c.prepare("SELECT session_id, label FROM session_labels")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut out = std::collections::HashMap::new();
+            for row in rows {
+                let (k, v) = row?;
+                out.insert(k, v);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     // ---- commits -------------------------------------------------------------
 
     /// Insert commits, ignoring ones already present. Returns the number newly added.
@@ -647,6 +687,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
         last_message: None,
         pending_prompt: None,
         config_dir: None,
+        custom_label: None,
     })
 }
 
@@ -875,6 +916,7 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             config_dir: None,
+            custom_label: None,
         };
         let id = s.upsert_session(sess.clone()).await.unwrap();
         // Upsert again (same manifest) updates rather than duplicates.

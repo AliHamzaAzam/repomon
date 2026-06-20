@@ -426,6 +426,7 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             config_dir: None,
+            custom_label: None,
         }
     }
 

@@ -49,6 +49,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
         "usage_probe": cfg.usage_probe,
+        "expand_agents": cfg.expand_agents,
     })
 }
 
@@ -218,10 +219,20 @@ struct ConfigSet {
     notify_click_focus: Option<bool>,
     #[serde(default)]
     usage_probe: Option<bool>,
+    #[serde(default)]
+    expand_agents: Option<bool>,
 }
 #[derive(Deserialize)]
 struct PushDevice {
     device_token: String,
+}
+#[derive(Deserialize)]
+struct SessionRename {
+    /// The transcript session id to label (durable across restarts).
+    session_id: String,
+    /// The new label; `None`/absent or empty clears it.
+    #[serde(default)]
+    label: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentTranscript {
@@ -671,6 +682,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 if let Some(b) = p.usage_probe {
                     cfg.usage_probe = b;
                 }
+                if let Some(b) = p.expand_agents {
+                    cfg.expand_agents = b;
+                }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
                     return Err(internal(e));
@@ -1117,6 +1131,19 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             to_value(out)
         }
 
+        // Set/clear a user label for a session (keyed by transcript session_id; persisted).
+        "session.rename" => {
+            let p: SessionRename = parse(params)?;
+            let label = p.label.map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+            ctx.store
+                .set_session_label(p.session_id, label)
+                .await
+                .map_err(internal)?;
+            ctx.invalidate_overlay().await;
+            ctx.broadcast(crate::pubsub::topic::AGENT_STATUS, json!({ "renamed": true }));
+            Ok(Value::Null)
+        }
+
         other => Err(RpcError::method_not_found(other)),
     }
 }
@@ -1187,6 +1214,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     .unwrap_or_default();
 
     let metas = ctx.store.list_lane_meta().await.unwrap_or_default();
+    // User-set session labels (keyed by transcript session_id), overlaid below.
+    let labels = ctx.store.list_session_labels().await.unwrap_or_default();
     let tmux = ctx.tmux.clone();
     let windows = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
         .await
@@ -1248,6 +1277,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     lane.last_activity_at = s.last_activity;
                 }
                 let mut session = s.into_session(lane.repo.id, lane.worktree.id);
+                session.custom_label = session
+                    .session_id
+                    .as_ref()
+                    .and_then(|id| labels.get(id).cloned());
                 if idx < paired {
                     session.external = false;
                     session.tmux_window = Some(lane_windows[paired - 1 - idx].clone());
@@ -1302,6 +1335,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     last_message: None,
                     pending_prompt: None,
                     config_dir: None,
+                    custom_label: None,
                 });
             }
         }
@@ -1551,6 +1585,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         last_message: None,
         pending_prompt: None,
         config_dir: None,
+        custom_label: None,
     }
 }
 

@@ -67,6 +67,7 @@ impl TranscriptSummary {
             resume_at: None,
             inferred: false,
             config_dir: self.config_dir,
+            custom_label: None, // overlay sets this from the session_labels store
         }
     }
 }

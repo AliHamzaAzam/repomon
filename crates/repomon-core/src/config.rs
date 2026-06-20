@@ -84,6 +84,9 @@ pub struct Config {
     /// running `/usage` in a hidden throwaway `claude` session per account every few minutes —
     /// which spawns a background process and writes a tiny transcript. See `docs/agents.md`.
     pub usage_probe: bool,
+    /// In the sidebars, expand a lane running several agents into one row per agent (a tree under
+    /// the lane) instead of a single row with an `×N` badge. Off by default.
+    pub expand_agents: bool,
 }
 
 impl Default for Config {
@@ -112,6 +115,7 @@ impl Default for Config {
             remote: RemoteConfig::default(),
             push: PushConfig::default(),
             usage_probe: false,
+            expand_agents: false,
         }
     }
 }
