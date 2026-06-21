@@ -524,12 +524,16 @@ impl App {
             .iter()
             .map(|l| (l.id, self.lane_attention(l)))
             .collect();
+        // Within a repo + pin + attention bucket, order by lane id (creation order) — a STABLE
+        // key. Sorting by recent activity here made lanes bubble around on every agent output
+        // (visible jumbling, worse with the expanded agent tree). Needs-you still floats up via
+        // the `attention` bucket; only the within-bucket churn is removed.
         self.lanes.sort_by_key(|l| {
             (
                 repo_order[&l.repo.id],
                 !l.pinned,
                 attention[&l.id],
-                std::cmp::Reverse(l.last_activity_at),
+                l.id,
             )
         });
     }
