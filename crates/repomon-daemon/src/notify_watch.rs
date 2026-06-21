@@ -23,9 +23,12 @@ use serde_json::json;
 use crate::{push, rpc, Ctx};
 
 /// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
-/// the overlay (transcript parses, pane sniffs, process probes), so this trades notification
-/// latency for idle CPU — a phone alert a few seconds later is fine, a daemon pegging a core isn't.
-const TICK: Duration = Duration::from_secs(8);
+/// the overlay, but the overlay's own caches absorb most of the cost: the composite snapshot is
+/// reused for `OVERLAY_TTL` (~750ms), the `lsof`/`pgrep` process probe for ~10s, and each pane
+/// sniff for ~20s. So a tick that only re-reads warm caches is cheap, and a 2s cadence cuts the
+/// old 8s worst-case alert latency to ~2s (the daemon owns *all* remote delivery and the local
+/// desktop popup whenever the TUI is parked/closed) without pegging a core.
+const TICK: Duration = Duration::from_secs(2);
 /// Don't re-fire the same session's notification within this window (status flapping).
 const DEBOUNCE: Duration = Duration::from_secs(30);
 /// How long since the local TUI's last request before we treat it as parked (attached) or closed
@@ -40,6 +43,10 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut prev: HashMap<(LaneId, SessKey), AgentStatus> = HashMap::new();
     let mut seeded = false;
     let mut debounce: HashMap<(LaneId, SessKey, NotifKind), Instant> = HashMap::new();
+    // The subagent-inclusion setting the current `prev` snapshot was built with. When it flips,
+    // the set of tracked keys changes wholesale (inferred sessions appear/vanish), so we re-seed
+    // rather than diff — otherwise toggling it off would fire a spurious Idle for every subagent.
+    let mut prev_subagents = false;
 
     loop {
         tick.tick().await;
@@ -62,13 +69,15 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
         let Ok(lanes) = rpc::lanes_with_agents_fresh(&ctx).await else {
             continue;
         };
+        let subagents = cfg.notify_subagents;
         let now: HashMap<(LaneId, SessKey), AgentStatus> = lanes
             .iter()
-            .flat_map(|l| session_statuses(l.id, &l.agent_sessions))
+            .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
             .collect();
-        if !seeded {
+        if !seeded || subagents != prev_subagents {
             prev = now;
             seeded = true;
+            prev_subagents = subagents;
             continue;
         }
 
@@ -101,12 +110,12 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             let Some(lane) = lanes.iter().find(|l| l.id == lane_id) else {
                 continue;
             };
-            let sess = session_by_key(lane, &key);
+            let sess = session_by_key(lane, &key, subagents);
             let (title, body) = compose(
                 kind,
                 lane,
                 sess,
-                slot_by_key(lane, &key),
+                slot_by_key(lane, &key, subagents),
                 cfg.notify_show_why,
             );
             // The actual on-screen dialog, when there is one — what a push's Approve acts on.

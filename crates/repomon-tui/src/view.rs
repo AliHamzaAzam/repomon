@@ -193,7 +193,7 @@ fn render_settings(f: &mut Frame, app: &App) {
         s.default_agent.clone()
     };
     let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-    let items: [(&str, String, &str); 17] = [
+    let items: [(&str, String, &str); 18] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
         ("auto-continue", onoff(s.auto_continue), "space toggles"),
@@ -237,6 +237,11 @@ fn render_settings(f: &mut Frame, app: &App) {
             "  · click focuses terminal",
             onoff(s.notify_click_focus),
             "needs terminal-notifier",
+        ),
+        (
+            "  · subagents finishing",
+            onoff(s.notify_subagents),
+            "off = only the main agent",
         ),
         (
             "usage corner (spawns claude)",

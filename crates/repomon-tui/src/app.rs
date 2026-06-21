@@ -134,6 +134,7 @@ pub struct Settings {
     pub notify_show_why: bool,
     pub notify_coalesce: bool,
     pub notify_click_focus: bool,
+    pub notify_subagents: bool,
     pub usage_probe: bool,
     pub expand_agents: bool,
 }
@@ -144,7 +145,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 17;
+const SETTINGS_COUNT: usize = 18;
 
 pub struct App {
     pub client: DaemonClient,
@@ -239,6 +240,13 @@ pub struct App {
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
     notif_seeded: bool,
+    /// Set when the TUI returns from a full-screen attach: forces the next `detect_notifications`
+    /// to re-seed instead of diffing. The daemon owned desktop popups while the TUI was parked
+    /// (its heartbeat went stale), so replaying the gap's transitions would double-fire them.
+    notif_reseed: bool,
+    /// Whether `prev_status` was built including subagents (the `notify_subagents` toggle). When it
+    /// flips, the tracked key set changes wholesale, so `detect_notifications` re-seeds.
+    notif_subagents: bool,
     /// Debounce keyed by (lane, session, kind): the last time each *kind* of alert fired for a
     /// session. Keying on the kind suppresses a flapping identical alert without swallowing a
     /// genuinely different transition (e.g. a usage-limit alert right after a needs-you one);
@@ -394,6 +402,8 @@ impl App {
             settings_geom: std::cell::Cell::new(0),
             prev_status: HashMap::new(),
             notif_seeded: false,
+            notif_reseed: false,
+            notif_subagents: false,
             notif_debounce: HashMap::new(),
             notifications: VecDeque::new(),
             notif_sel: 0,
@@ -706,16 +716,25 @@ impl App {
     /// Diff the freshly-fetched per-session statuses against the previous snapshot and fire a
     /// notification on each meaningful transition. The first call only seeds the snapshot.
     fn detect_notifications(&mut self) {
-        // Snapshot the new statuses, one entry per real agent session.
+        // Snapshot the new statuses, one entry per real agent session. Inferred file-activity
+        // sessions (worktree-isolated subagents) only count when the user opted in.
+        let subagents = self.settings.notify_subagents;
         let now: HashMap<(LaneId, SessKey), AgentStatus> = self
             .lanes
             .iter()
-            .flat_map(|l| session_statuses(l.id, &l.agent_sessions))
+            .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
             .collect();
 
-        if !self.notif_seeded {
+        // Re-seed (don't diff) on the first list, or after returning from a full-screen attach.
+        // While the TUI was parked the daemon owned desktop popups (its `local_watcher_seen`
+        // heartbeat went stale), so replaying the transitions that happened in the gap would
+        // double-fire what the daemon already delivered. The subagent toggle flipping likewise
+        // changes the tracked key set wholesale, so re-seed there too.
+        if !self.notif_seeded || self.notif_reseed || subagents != self.notif_subagents {
             self.prev_status = now;
             self.notif_seeded = true;
+            self.notif_reseed = false;
+            self.notif_subagents = subagents;
             return;
         }
 
@@ -803,10 +822,11 @@ impl App {
     fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind, quiet: bool) {
         // Compose under an immutable borrow that ends before we mutate `self`. The session may
         // be gone when its disappearance was the trigger — compose degrades to a generic line.
+        let subagents = self.settings.notify_subagents;
         let Some((title, body, session_id)) = self.lanes.iter().find(|l| l.id == id).map(|l| {
-            let sess = session_by_key(l, key);
+            let sess = session_by_key(l, key, subagents);
             // Which of the lane's side-by-side agents this is (1-based in the body when >1).
-            let slot = slot_by_key(l, key);
+            let slot = slot_by_key(l, key, subagents);
             let (t, b) = notify::compose(kind, l, sess, slot, self.settings.notify_show_why);
             (t, b, sess.and_then(|s| s.session_id.clone()))
         }) else {
@@ -1875,6 +1895,9 @@ impl App {
         if let Some(x) = b("notify_click_focus") {
             self.settings.notify_click_focus = x;
         }
+        if let Some(x) = b("notify_subagents") {
+            self.settings.notify_subagents = x;
+        }
         if let Some(x) = b("usage_probe") {
             self.settings.usage_probe = x;
         }
@@ -1906,6 +1929,7 @@ impl App {
             "notify_show_why": self.settings.notify_show_why,
             "notify_coalesce": self.settings.notify_coalesce,
             "notify_click_focus": self.settings.notify_click_focus,
+            "notify_subagents": self.settings.notify_subagents,
             "usage_probe": self.settings.usage_probe,
             "expand_agents": self.settings.expand_agents,
         });
@@ -2043,10 +2067,14 @@ impl App {
                 self.save_settings().await;
             }
             15 => {
-                self.settings.usage_probe = !self.settings.usage_probe;
+                self.settings.notify_subagents = !self.settings.notify_subagents;
                 self.save_settings().await;
             }
             16 => {
+                self.settings.usage_probe = !self.settings.usage_probe;
+                self.save_settings().await;
+            }
+            17 => {
                 // Toggling changes the fleet row count, so re-anchor the cursor to the same
                 // lane/agent afterward (else `selected` drifts to a different — or out-of-range — row).
                 let keep = self.selected_lane().map(|l| l.id);
@@ -2064,7 +2092,7 @@ impl App {
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=16 => self.adjust_setting(true).await,
+            0..=2 | 5..=17 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
@@ -3786,6 +3814,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
+    // The daemon fired desktop popups while we were parked (our heartbeat went stale); re-seed
+    // notification edge-detection so the next refresh doesn't replay — and double-fire — them.
+    app.notif_reseed = true;
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
 }
 
@@ -3809,6 +3840,8 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.last_viewport.clear();
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
+    // Re-seed notification edge-detection — the daemon owned popups while we were parked.
+    app.notif_reseed = true;
 }
 
 /// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is

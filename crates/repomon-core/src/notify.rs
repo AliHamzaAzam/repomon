@@ -70,15 +70,21 @@ pub enum SessKey {
     Fallback,
 }
 
-/// Key/status pairs for one lane's *real* agent sessions. Inferred "file activity" placeholders
-/// are dropped so they never drive named alerts. On a (theoretically impossible) duplicate key,
-/// the higher-priority status wins — the same order the old per-lane rollup used.
+/// Key/status pairs for one lane's *real* agent sessions, used to drive notifications.
+///
+/// `inferred` "file-activity" sessions are worktree-isolated subagents (a Claude Code subagent
+/// runs inside its parent's process and leaves no transcript or process of its own). They are
+/// dropped unless `include_subagents` is set — the `notify_subagents` toggle, off by default, so
+/// the user is alerted only when the *main* agent finishes, not each subagent it spawns. On a
+/// (theoretically impossible) duplicate key, the higher-priority status wins — the same order the
+/// old per-lane rollup used.
 pub fn session_statuses(
     lane_id: LaneId,
     sessions: &[AgentSession],
+    include_subagents: bool,
 ) -> Vec<((LaneId, SessKey), AgentStatus)> {
     let mut out: Vec<((LaneId, SessKey), AgentStatus)> = Vec::new();
-    for s in sessions.iter().filter(|s| !s.inferred) {
+    for s in sessions.iter().filter(|s| include_subagents || !s.inferred) {
         let key = (
             lane_id,
             s.session_id
@@ -143,11 +149,16 @@ pub fn diff_session_transitions(
 }
 
 /// Resolve a session key back to the lane's session, for composing the notification text.
-/// `None` when the session vanished (i.e. its disappearance was the trigger).
-pub fn session_by_key<'a>(lane: &'a Lane, key: &SessKey) -> Option<&'a AgentSession> {
+/// `None` when the session vanished (i.e. its disappearance was the trigger). `include_subagents`
+/// must match the value passed to [`session_statuses`] so an inferred-subagent key resolves.
+pub fn session_by_key<'a>(
+    lane: &'a Lane,
+    key: &SessKey,
+    include_subagents: bool,
+) -> Option<&'a AgentSession> {
     lane.agent_sessions
         .iter()
-        .filter(|s| !s.inferred)
+        .filter(|s| include_subagents || !s.inferred)
         .find(|s| match key {
             SessKey::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
             SessKey::Fallback => s.session_id.is_none(),
@@ -155,9 +166,14 @@ pub fn session_by_key<'a>(lane: &'a Lane, key: &SessKey) -> Option<&'a AgentSess
 }
 
 /// Which of the lane's real sessions `key` resolves to: `(index, count)`, for the
-/// "agent 2/3" tag in multi-agent lanes. `None` when the session vanished.
-pub fn slot_by_key(lane: &Lane, key: &SessKey) -> Option<(usize, usize)> {
-    let real: Vec<&AgentSession> = lane.agent_sessions.iter().filter(|s| !s.inferred).collect();
+/// "agent 2/3" tag in multi-agent lanes. `None` when the session vanished. `include_subagents`
+/// must match the value passed to [`session_statuses`].
+pub fn slot_by_key(lane: &Lane, key: &SessKey, include_subagents: bool) -> Option<(usize, usize)> {
+    let real: Vec<&AgentSession> = lane
+        .agent_sessions
+        .iter()
+        .filter(|s| include_subagents || !s.inferred)
+        .collect();
     let i = real.iter().position(|s| match key {
         SessKey::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
         SessKey::Fallback => s.session_id.is_none(),
@@ -516,7 +532,7 @@ mod tests {
             sess(None, Running, true), // inferred file-activity placeholder — excluded
             sess(None, Running, false),
         ];
-        let got = session_statuses(7, &sessions);
+        let got = session_statuses(7, &sessions, false);
         assert_eq!(got.len(), 3);
         assert!(got.contains(&((7, SessKey::Transcript("a".into())), Waiting)));
         assert!(got.contains(&((7, SessKey::Transcript("b".into())), RateLimited)));
@@ -525,9 +541,34 @@ mod tests {
         // Defensive: a duplicate key keeps the higher-priority status.
         let dup = vec![sess(None, Idle, false), sess(None, Waiting, false)];
         assert_eq!(
-            session_statuses(7, &dup),
+            session_statuses(7, &dup, false),
             vec![((7, SessKey::Fallback), Waiting)]
         );
+    }
+
+    #[test]
+    fn subagents_excluded_by_default_included_when_opted_in() {
+        use AgentStatus::*;
+        // A lane with only an inferred worktree-isolated subagent (no transcript/process), the
+        // shape `overlay_agents` produces for a Claude Code subagent.
+        let sessions = vec![sess(None, Running, true)];
+
+        // Default: subagents never drive notifications — the inferred session is dropped, so it
+        // can't fire an Idle when it finishes.
+        assert!(session_statuses(7, &sessions, false).is_empty());
+
+        // Opted in (`notify_subagents = true`): the subagent surfaces as a Fallback session so
+        // its finish (→ disappearance) can alert.
+        assert_eq!(
+            session_statuses(7, &sessions, true),
+            vec![((7, SessKey::Fallback), Running)]
+        );
+
+        // A main (transcript-backed) agent alongside a subagent: the main always counts; the
+        // subagent only when opted in.
+        let mixed = vec![sess(Some("main"), Waiting, false), sess(None, Running, true)];
+        assert_eq!(session_statuses(7, &mixed, false).len(), 1);
+        assert_eq!(session_statuses(7, &mixed, true).len(), 2);
     }
 
     #[test]
@@ -613,6 +654,45 @@ mod tests {
     }
 
     #[test]
+    fn subagent_finishing_fires_idle_only_when_included() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [7].into();
+        let managed = HashSet::new();
+
+        // A lane whose only agent is an inferred worktree-isolated subagent, running then gone.
+        let running = vec![sess(None, Running, true)];
+        let gone: Vec<AgentSession> = vec![];
+
+        // Default (subagents excluded): the subagent never enters the tracked set, so its finish
+        // is invisible — no Idle.
+        let prev: HashMap<_, _> = session_statuses(7, &running, false).into_iter().collect();
+        let now: HashMap<_, _> = session_statuses(7, &gone, false).into_iter().collect();
+        assert!(prev.is_empty());
+        assert!(diff_session_transitions(&prev, &now, &live, &managed).is_empty());
+
+        // Opted in: the subagent is tracked, so its disappearance fires Idle (it was active).
+        let prev: HashMap<_, _> = session_statuses(7, &running, true).into_iter().collect();
+        let now: HashMap<_, _> = session_statuses(7, &gone, true).into_iter().collect();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![((7, SessKey::Fallback), NotifKind::Idle)]
+        );
+    }
+
+    #[test]
+    fn reseed_snapshot_fires_nothing() {
+        use AgentStatus::*;
+        // Re-seeding (what the TUI does on attach-return / toggle flip, and the daemon on
+        // re-enable) sets prev = now; diffing an unchanged snapshot must produce no alerts, which
+        // is what stops the daemon-covered backlog from double-firing.
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+        let k = |id: &str| (1, SessKey::Transcript(id.into()));
+        let snap: HashMap<_, _> = [(k("a"), Waiting), (k("b"), RateLimited)].into();
+        assert!(diff_session_transitions(&snap, &snap, &live, &managed).is_empty());
+    }
+
+    #[test]
     fn compose_shows_the_why_and_the_slot() {
         let mut s = sess(Some("abc"), AgentStatus::Waiting, false);
         s.title = Some("build the parser".into());
@@ -650,10 +730,15 @@ mod tests {
             sess(Some("b"), AgentStatus::Waiting, false),
         ];
         assert_eq!(
-            slot_by_key(&l, &SessKey::Transcript("b".into())),
+            slot_by_key(&l, &SessKey::Transcript("b".into()), false),
             Some((1, 2))
         );
-        assert_eq!(slot_by_key(&l, &SessKey::Transcript("zz".into())), None);
+        assert_eq!(slot_by_key(&l, &SessKey::Transcript("zz".into()), false), None);
+        // With subagents included, the inferred session occupies a slot too (now 3 real).
+        assert_eq!(
+            slot_by_key(&l, &SessKey::Transcript("b".into()), true),
+            Some((2, 3))
+        );
     }
 
     #[test]

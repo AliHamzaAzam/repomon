@@ -48,6 +48,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_show_why": cfg.notify_show_why,
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
+        "notify_subagents": cfg.notify_subagents,
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
     })
@@ -217,6 +218,8 @@ struct ConfigSet {
     notify_coalesce: Option<bool>,
     #[serde(default)]
     notify_click_focus: Option<bool>,
+    #[serde(default)]
+    notify_subagents: Option<bool>,
     #[serde(default)]
     usage_probe: Option<bool>,
     #[serde(default)]
@@ -678,6 +681,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 }
                 if let Some(b) = p.notify_click_focus {
                     cfg.notify_click_focus = b;
+                }
+                if let Some(b) = p.notify_subagents {
+                    cfg.notify_subagents = b;
                 }
                 if let Some(b) = p.usage_probe {
                     cfg.usage_probe = b;
