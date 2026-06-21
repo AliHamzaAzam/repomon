@@ -43,6 +43,10 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 - **Plain terminals** per worktree (`t`), multiple allowed.
 - Revamped **Grid** (real navigation, Instagram-style position dots, clean exit).
 - repomon's tmux runs on a **dedicated socket**, isolated from the user's own tmux.
+- **Notifications hardened** — desktop popups land faster (daemon edge-detector tick 8s→2s),
+  attach-return no longer replays a duplicate backlog (re-seed instead of re-diff), and a new
+  `notify_subagents` toggle (default off) suppresses alerts when worktree-isolated *subagents*
+  finish — you're alerted only when the *main* agent finishes.
 - **Expand agent rows** (opt-in `expand_agents`) — a lane running several agents can render as a
   tree in the sidebar (header + one row per agent, each with a 1-4 word summary + status) instead
   of an `×N` badge; sub-rows are individually selectable. Press `R` to rename an agent; the label
