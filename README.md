@@ -93,7 +93,7 @@ is a thin client. Three crates:
 
 ## Install
 
-**One line, no deps** (macOS — prebuilt binaries, no Rust or Xcode):
+**One line, no deps** (macOS & Linux x86_64, incl. WSL2 — prebuilt binaries, no Rust or Xcode):
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -110,14 +110,15 @@ Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repo
 per-arch (`aarch64`/`x86_64`) or the `universal` build — extract, and put `repomon` and `repomond`
 on your `PATH`.
 
-**From source** — Linux or macOS (needs the Rust toolchain). This is the Linux install path
-(prebuilt binaries are macOS-only for now):
+**From source** — any platform with the Rust toolchain (e.g. ARM Linux, or anywhere without a
+prebuilt binary):
 
 ```sh
 cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
 ```
 
-repomon needs `tmux` (agents run in tmux) and `git` at runtime. Then enable cd-on-exit by adding to
+repomon needs `tmux` (agents run in tmux) and `git` at runtime. Windows isn't supported natively
+yet — use **WSL2** (the Linux build runs there). Then enable cd-on-exit by adding to
 your `~/.zshrc` (or `~/.bashrc`):
 
 ```sh

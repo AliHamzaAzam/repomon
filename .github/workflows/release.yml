@@ -36,6 +36,30 @@ jobs:
             repomon-*.tar.gz
             repomon-*.tar.gz.sha256
 
+  build-linux:
+    # x86_64 Linux, built natively on the ubuntu runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add x86_64-unknown-linux-gnu
+      - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIST="repomon-${VERSION}-x86_64-unknown-linux-gnu"
+          mkdir -p "$DIST"
+          cp "target/x86_64-unknown-linux-gnu/release/repomon" \
+             "target/x86_64-unknown-linux-gnu/release/repomond" "$DIST/"
+          tar -czf "${DIST}.tar.gz" -C "$DIST" repomon repomond
+          sha256sum "${DIST}.tar.gz" | awk '{print $1}' > "${DIST}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: |
+            repomon-*.tar.gz
+            repomon-*.tar.gz.sha256
+
   universal:
     # Merge the two thin binaries into one fat (arm64+x86_64) archive for a
     # one-download-fits-all manual install. lipo is macOS-only, so this runs on macOS.
@@ -65,7 +89,7 @@ jobs:
             repomon-*-universal-apple-darwin.tar.gz.sha256
 
   release:
-    needs: [build, universal]
+    needs: [build, universal, build-linux]
     runs-on: ubuntu-latest
     env:
       HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}

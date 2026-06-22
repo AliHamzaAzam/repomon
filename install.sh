@@ -13,15 +13,24 @@ REPO="AliHamzaAzam/repomon"
 DEST="${REPOMON_INSTALL_DIR:-$HOME/.local/bin}"
 
 os="$(uname -s)"
-if [ "$os" != "Darwin" ]; then
-  echo "repomon currently supports macOS only (detected: $os)." >&2
-  exit 1
-fi
-
-case "$(uname -m)" in
-  arm64 | aarch64) target="aarch64-apple-darwin" ;;
-  x86_64) target="x86_64-apple-darwin" ;;
-  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+arch="$(uname -m)"
+case "$os" in
+  Darwin)
+    case "$arch" in
+      arm64 | aarch64) target="aarch64-apple-darwin" ;;
+      x86_64) target="x86_64-apple-darwin" ;;
+      *) echo "unsupported macOS architecture: $arch" >&2; exit 1 ;;
+    esac ;;
+  Linux)
+    case "$arch" in
+      x86_64) target="x86_64-unknown-linux-gnu" ;;
+      *) echo "no prebuilt binary for Linux $arch — install from source:" >&2
+         echo "  cargo install --git https://github.com/$REPO repomon-tui repomon-daemon" >&2
+         exit 1 ;;
+    esac ;;
+  *)
+    echo "unsupported OS: $os — see the README for the from-source install." >&2
+    exit 1 ;;
 esac
 
 if [ "${REPOMON_VERSION:-latest}" = "latest" ]; then
