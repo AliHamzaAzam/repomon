@@ -59,13 +59,13 @@ parallel, exportable to Markdown), and global commit **search**.
 Agents: Claude Code is first-class (rich status from its transcript); Codex and Aider also
 run, with a tmux-alive fallback for any kind. See [docs/agents.md](docs/agents.md).
 
-**Remote access**: an optional token-gated WebSocket bridge serves the same JSON-RPC API to
-companion apps over a private network (Tailscale). The daemon detects per-session state
-changes — including interactive permission dialogs read from the pane — broadcasts them as
-`event.notification`, and can push them to Apple devices via APNs directly (no relay).
-`repomon remote enable` turns it on; `repomon remote pair` shows a QR for the (private)
-iOS companion app, which renders the fleet, the agents' conversations, and an Approve
-button for pending dialogs.
+**Remote access**: an optional token-gated WebSocket bridge serves the same JSON-RPC API
+over a private network (Tailscale). The daemon detects per-session state changes — including
+interactive permission dialogs read from the pane — broadcasts them as `event.notification`,
+and can push them to Apple devices via APNs directly (no relay). The bridge and protocol are
+**open**, so any client can drive it today (see [docs/protocol.md](docs/protocol.md)). A
+polished **iOS companion app** — fleet view, live conversations, and an Approve button for
+pending dialogs — is built and ships once an Apple Developer account is in place.
 
 ## How it compares
 
@@ -75,7 +75,7 @@ button for pending dialogs.
 | **Runtime** | durable tmux — survives close, reattach | tmux | app process | inside the CLI |
 | **Triage** | needs-you float to top, `g` to jump | flat list | varies | grouped by state |
 | **Usage limits** | live usage corner + auto-continue | — | — | — |
-| **Remote** | approve from your phone (iOS over Tailscale) | — | — | — |
+| **Remote** | open WebSocket bridge + APNs over Tailscale (iOS app soon) | — | — | — |
 | **Lives in the terminal** | ✅ (4-zoom TUI) | ✅ | ❌ (GUI) | ✅ |
 
 Honest take: if you work in **one** repo, Claude Squad/ccmanager or a GUI may be simpler.
@@ -162,28 +162,30 @@ writes the path to the file descriptor in `$REPOMON_CD_FD`; add the wrapper to y
 eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repomon shell-init fish
 ```
 
-## Remote access (iOS companion over Tailscale)
+## Remote access (open bridge over Tailscale)
 
-The daemon can serve the same JSON-RPC API to the iOS companion over a token-gated WebSocket
-bridge. Bind it to your **private tailnet** address — never a public interface; anyone holding
-the token can read your panes and type into your agents.
+The daemon serves the same JSON-RPC API over a token-gated WebSocket bridge, so you can drive
+it from any client — the protocol is documented in [docs/protocol.md](docs/protocol.md). A
+native **iOS companion app** (fleet view, live conversations, Approve button) is built and
+ships once an Apple Developer account is in place; until then the bridge and `remote pair`
+pairing work for any client you point at them. Bind it to your **private tailnet** address —
+never a public interface; anyone holding the token can read your panes and type into your agents.
 
-1. **Install [Tailscale](https://tailscale.com)** on the Mac *and* the phone, signed into the
-   same tailnet, so the phone can reach the Mac at its `100.x.y.z` address.
+1. **Install [Tailscale](https://tailscale.com)** on the Mac (and any device you'll connect
+   from), signed into the same tailnet, so it can reach the Mac at its `100.x.y.z` address.
 2. **Enable the bridge**, then restart the daemon to apply:
    ```sh
    repomon remote enable     # detects the Tailscale IPv4, binds ws://<ip>:7878, mints a token
    repomon daemon restart
    ```
    No Tailscale detected? Pass the address yourself: `repomon remote enable --bind <ip:port>`.
-3. **Pair the phone:** `repomon remote pair` prints a QR (and a `repomon://<host:port>#<token>`
-   link). Scan it in the app — or with the Camera app, which opens it directly.
+3. **Pair a client:** `repomon remote pair` prints a QR (and a `repomon://<host:port>#<token>`
+   link) for a client to connect.
 
 Manage it with `repomon remote status` (shows the bind and a masked token),
 `repomon remote enable --rotate-token` (mint a new token, then re-pair), and
 `repomon remote disable` (stops serving; keeps the token). Each change needs a
-`repomon daemon restart` to take effect. Lock-screen push (APNs) is configured on the app
-side — see the companion app's README.
+`repomon daemon restart` to take effect.
 
 ## Documentation
 
