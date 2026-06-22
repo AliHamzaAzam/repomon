@@ -1,5 +1,5 @@
 #!/bin/sh
-# repomon installer — downloads prebuilt binaries from GitHub Releases.
+# repomon installer. Downloads prebuilt binaries from GitHub Releases.
 # No Homebrew, no Rust, no Xcode required.
 #
 #   curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -24,12 +24,12 @@ case "$os" in
   Linux)
     case "$arch" in
       x86_64) target="x86_64-unknown-linux-gnu" ;;
-      *) echo "no prebuilt binary for Linux $arch — install from source:" >&2
+      *) echo "no prebuilt binary for Linux $arch. Install from source:" >&2
          echo "  cargo install --git https://github.com/$REPO repomon-tui repomon-daemon" >&2
          exit 1 ;;
     esac ;;
   *)
-    echo "unsupported OS: $os — see the README for the from-source install." >&2
+    echo "unsupported OS: $os. See the README for the from-source install." >&2
     exit 1 ;;
 esac
 
@@ -59,10 +59,24 @@ case ":$PATH:" in
   *) echo "Note: $DEST is not on your PATH. Add this to your shell rc:"; echo "    export PATH=\"$DEST:\$PATH\"" ;;
 esac
 
-# Runtime dependency checks (we can't install these without a package manager)
+# Runtime dependency checks. repomon needs tmux (agents run in it) and git.
+install_hint() { # $1 = package; prints the install command for this OS
+  case "$os" in
+    Darwin) echo "  brew install $1" ;;
+    Linux)
+      if command -v apt    >/dev/null 2>&1; then echo "  sudo apt install $1"
+      elif command -v dnf  >/dev/null 2>&1; then echo "  sudo dnf install $1"
+      elif command -v pacman >/dev/null 2>&1; then echo "  sudo pacman -S $1"
+      elif command -v zypper >/dev/null 2>&1; then echo "  sudo zypper install $1"
+      else echo "  install '$1' with your package manager"; fi ;;
+    *) echo "  install '$1' with your package manager" ;;
+  esac
+}
 for dep in tmux git; do
-  command -v "$dep" >/dev/null 2>&1 || \
-    echo "Warning: '$dep' not found — repomon needs it (agents run in tmux; git operations use git)."
+  if ! command -v "$dep" >/dev/null 2>&1; then
+    echo "Warning: '$dep' is not installed. repomon needs it. Install it:"
+    install_hint "$dep"
+  fi
 done
 
 echo

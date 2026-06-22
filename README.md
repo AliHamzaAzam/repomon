@@ -1,8 +1,8 @@
 # repomon
 
-**Run a fleet of AI coding agents across all your repos — from one terminal.**
+**Run a fleet of AI coding agents across all your repos, from one terminal.**
 
-Many repos × many worktrees × many agents on one screen — durable in tmux, the ones waiting
+Many repos × many worktrees × many agents on one screen. Durable in tmux, the ones waiting
 on you float to the top, and you can approve a prompt from your phone.
 
 <p>
@@ -15,7 +15,7 @@ on you float to the top, and you can approve a prompt from your phone.
 
 <!-- Hero demo GIF: docs/demo.gif -->
 <p align="center">
-  <img src="docs/demo.gif" alt="repomon — triaging a fleet of AI coding agents across repos" width="900">
+  <img src="docs/demo.gif" alt="repomon: triaging a fleet of AI coding agents across repos" width="900">
 </p>
 
 Other tools run parallel agents in *one repo, many worktrees* (Claude Squad, Conductor,
@@ -43,10 +43,10 @@ FLEET   8 agents · 4 repos · 3 need you                    ↑ sorted: needs-y
 
 repomon is one tool with four **zoom levels**, one selection that follows you the whole way:
 
-- **Fleet** — every agent on one screen; the ones waiting on you float to the top.
-- **Split** — fleet sidebar + the selected agent's live output and an input line.
-- **Babysit grid** — live tiles auto-sized to your window; watch and nudge several at once.
-- **Focus** — one agent full-screen with full live terminal, input, and controls.
+- **Fleet**: every agent on one screen; the ones waiting on you float to the top.
+- **Split**: fleet sidebar + the selected agent's live output and an input line.
+- **Babysit grid**: live tiles auto-sized to your window; watch and nudge several at once.
+- **Focus**: one agent full-screen with full live terminal, input, and controls.
 
 Arrow keys drive everything (`↵`/`→` zoom in, `esc`/`←` zoom out, `space` the grid). Agents
 run in durable tmux sessions, so they survive closing the UI and reattach (`a`) with full
@@ -60,22 +60,22 @@ Agents: Claude Code is first-class (rich status from its transcript); Codex and 
 run, with a tmux-alive fallback for any kind. See [docs/agents.md](docs/agents.md).
 
 **Remote access**: an optional token-gated WebSocket bridge serves the same JSON-RPC API
-over a private network (Tailscale). The daemon detects per-session state changes — including
-interactive permission dialogs read from the pane — broadcasts them as `event.notification`,
+over a private network (Tailscale). The daemon detects per-session state changes (including
+interactive permission dialogs read from the pane), broadcasts them as `event.notification`,
 and can push them to Apple devices via APNs directly (no relay). The bridge and protocol are
 **open**, so any client can drive it today (see [docs/protocol.md](docs/protocol.md)). A
-polished **iOS companion app** — fleet view, live conversations, and an Approve button for
-pending dialogs — is built and ships once an Apple Developer account is in place.
+polished **iOS companion app** (fleet view, live conversations, and an Approve button for
+pending dialogs) is built and ships once an Apple Developer account is in place.
 
 ## How it compares
 
 |  | **repomon** | Claude Squad / ccmanager | GUI apps (Conductor, Crystal) | built-in `claude agents` |
 |---|---|---|---|---|
 | **Scope** | many repos × worktrees × agents | one repo, many worktrees | one repo, many worktrees | one tool, flat list |
-| **Runtime** | durable tmux — survives close, reattach | tmux | app process | inside the CLI |
+| **Runtime** | durable tmux: survives close, reattach | tmux | app process | inside the CLI |
 | **Triage** | needs-you float to top, `g` to jump | flat list | varies | grouped by state |
-| **Usage limits** | live usage corner + auto-continue | — | — | — |
-| **Remote** | open WebSocket bridge + APNs over Tailscale (iOS app soon) | — | — | — |
+| **Usage limits** | live usage corner + auto-continue | ✗ | ✗ | ✗ |
+| **Remote** | open WebSocket bridge + APNs over Tailscale (iOS app soon) | ✗ | ✗ | ✗ |
 | **Lives in the terminal** | ✅ (4-zoom TUI) | ✅ | ❌ (GUI) | ✅ |
 
 Honest take: if you work in **one** repo, Claude Squad/ccmanager or a GUI may be simpler.
@@ -87,13 +87,13 @@ A background daemon (`repomond`) owns SQLite, file watchers, the git layer, and 
 tmux-backed agent runtime, exposing a JSON-RPC API over a Unix socket. The TUI (`repomon`)
 is a thin client. Three crates:
 
-- `repomon-core` — data model, gix git layer, SQLite store, watchers, agent runtime.
-- `repomon-daemon` — `repomond`: the socket server and background services.
-- `repomon-tui` — `repomon`: the terminal UI.
+- `repomon-core`: data model, gix git layer, SQLite store, watchers, agent runtime.
+- `repomon-daemon`: the `repomond` socket server and background services.
+- `repomon-tui`: the `repomon` terminal UI.
 
 ## Install
 
-**One line, no deps** (macOS & Linux x86_64, incl. WSL2 — prebuilt binaries, no Rust or Xcode):
+**One line, no deps** (macOS & Linux x86_64, incl. WSL2; prebuilt binaries, no Rust or Xcode):
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -106,11 +106,11 @@ brew install AliHamzaAzam/tap/repomon      # or: brew tap AliHamzaAzam/tap && br
 brew services start repomon                # optional: run the daemon at login
 ```
 
-Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest) —
-per-arch (`aarch64`/`x86_64`) or the `universal` build — extract, and put `repomon` and `repomond`
+Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest):
+per-arch (`aarch64`/`x86_64`) or the `universal` build, then extract, and put `repomon` and `repomond`
 on your `PATH`.
 
-**From source** — any platform with the Rust toolchain (e.g. ARM Linux, or anywhere without a
+**From source**: any platform with the Rust toolchain (e.g. ARM Linux, or anywhere without a
 prebuilt binary):
 
 ```sh
@@ -118,8 +118,11 @@ cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-
 ```
 
 repomon needs `tmux` (agents run in tmux) and `git` at runtime. Windows isn't supported natively
-yet — use **WSL2** (the Linux build runs there). Then enable cd-on-exit by adding to
-your `~/.zshrc` (or `~/.bashrc`):
+yet; use **WSL2** (the Linux build runs there).
+
+Don't have `tmux`? Install it: `brew install tmux` (macOS), `sudo apt install tmux` (Debian / Ubuntu / WSL2), `sudo dnf install tmux` (Fedora), `sudo pacman -S tmux` (Arch).
+
+Then enable cd-on-exit by adding to your `~/.zshrc` (or `~/.bashrc`):
 
 ```sh
 eval "$(repomon shell-init zsh)"
@@ -128,7 +131,7 @@ eval "$(repomon shell-init zsh)"
 ## Usage
 
 ```sh
-repomon                                # just run it — starts the daemon if needed, then the TUI
+repomon                                # just run it: starts the daemon if needed, then the TUI
 repomon add ~/code/pos-saas            # register a repo
 repomon discover ~/code --add          # or find and register many at once
 
@@ -160,10 +163,10 @@ eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repo
 ## Remote access (open bridge over Tailscale)
 
 The daemon serves the same JSON-RPC API over a token-gated WebSocket bridge, so you can drive
-it from any client — the protocol is documented in [docs/protocol.md](docs/protocol.md). A
+it from any client; the protocol is documented in [docs/protocol.md](docs/protocol.md). A
 native **iOS companion app** (fleet view, live conversations, Approve button) is built and
 ships once an Apple Developer account is in place; until then the bridge and `remote pair`
-pairing work for any client you point at them. Bind it to your **private tailnet** address —
+pairing work for any client you point at them. Bind it to your **private tailnet** address,
 never a public interface; anyone holding the token can read your panes and type into your agents.
 
 1. **Install [Tailscale](https://tailscale.com)** on the Mac (and any device you'll connect
@@ -184,9 +187,9 @@ Manage it with `repomon remote status` (shows the bind and a masked token),
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — how the daemon, TUI, and core fit together.
-- [docs/protocol.md](docs/protocol.md) — the JSON-RPC socket reference.
-- [docs/agents.md](docs/agents.md) — how agents run and how status is detected.
+- [docs/architecture.md](docs/architecture.md): how the daemon, TUI, and core fit together.
+- [docs/protocol.md](docs/protocol.md): the JSON-RPC socket reference.
+- [docs/agents.md](docs/agents.md): how agents run and how status is detected.
 
 ## Status
 
