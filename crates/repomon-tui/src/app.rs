@@ -22,6 +22,7 @@ use repomon_core::notify::{
     SessKey,
 };
 use repomon_core::protocol::Notification;
+use repomon_core::TmuxRuntime;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
@@ -3248,6 +3249,25 @@ impl App {
     }
 
     async fn stop_agent(&mut self) {
+        // On an expanded agent sub-row with no tmux window — an external (not repomon-managed)
+        // session — there's nothing to kill, and falling through would kill the lane's primary
+        // window by default. The daemon reaps genuinely-orphaned windows on its own.
+        if let Some(FleetRow {
+            lane_idx,
+            session: Some(s),
+        }) = self.selected_row()
+        {
+            let windowless = self
+                .visible_lanes()
+                .into_iter()
+                .nth(lane_idx)
+                .and_then(|l| l.agent_sessions.get(s))
+                .is_some_and(|sess| sess.tmux_window.is_none());
+            if windowless {
+                self.status = "external session — not managed by repomon".into();
+                return;
+            }
+        }
         if let Some(id) = self.selected_lane().map(|l| l.id) {
             let _ = self
                 .client
@@ -3616,17 +3636,19 @@ enum SessionRef {
     Transcript(String),
 }
 
-/// Indices into `sessions` in a STABLE display order — by durable identity (`session_id`, then
-/// transcript path / window) — so expanded sub-rows (and their user labels) keep their position
-/// instead of reshuffling when the daemon re-sorts sessions by recent activity.
+/// Indices into `sessions` in a STABLE display order — managed agents by tmux **slot** (= spawn
+/// order: `lane-N`, `lane-N-2`, `lane-N-3`), then windowless/external sessions by start time — so
+/// expanded sub-rows (and their user labels) keep their position instead of reshuffling when the
+/// daemon re-sorts sessions by recent activity. `session_id` is only the final tiebreaker.
 fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..sessions.len()).collect();
     let key = |s: &AgentSession| {
-        (
-            s.session_id.clone(),
-            s.manifest_path.clone(),
-            s.tmux_window.clone(),
-        )
+        let slot = s
+            .tmux_window
+            .as_deref()
+            .and_then(TmuxRuntime::slot_of_window)
+            .unwrap_or(usize::MAX);
+        (slot, s.started_at, s.session_id.clone())
     };
     idx.sort_by(|&a, &b| key(&sessions[a]).cmp(&key(&sessions[b])));
     idx
@@ -4153,26 +4175,29 @@ mod tests {
     }
 
     #[test]
-    fn stable_session_order_sorts_by_durable_id() {
-        // Order follows session_id (stable), NOT the input order (which the daemon churns by
-        // activity), so renamed sub-rows hold their position. Input ids c, a, b → indices 1,2,0.
+    fn stable_session_order_follows_spawn_slot() {
+        // Managed agents order by tmux slot (lane-N, lane-N-2, lane-N-3), NOT by session_id and
+        // NOT by the daemon's input order (it churns by recent activity) — so sub-rows hold their
+        // position instead of reshuffling. session_ids here are anti-correlated with slot to prove
+        // the slot drives the order.
         let sessions = [
-            sess(Some("ccc"), AgentStatus::Running, false),
-            sess(Some("aaa"), AgentStatus::Running, false),
-            sess(Some("bbb"), AgentStatus::Running, false),
+            managed("lane-7", Some("zzz")),
+            managed("lane-7-2", Some("mmm")),
+            managed("lane-7-3", Some("aaa")),
         ];
-        assert_eq!(stable_session_order(&sessions), vec![1, 2, 0]);
-        // Reversing the input yields the SAME display order (stability under reshuffle).
-        let rev = [
-            sess(Some("bbb"), AgentStatus::Running, false),
-            sess(Some("aaa"), AgentStatus::Running, false),
-            sess(Some("ccc"), AgentStatus::Running, false),
-        ];
-        let ordered: Vec<&str> = stable_session_order(&rev)
+        let ordered: Vec<&str> = stable_session_order(&sessions)
             .into_iter()
-            .map(|i| rev[i].session_id.as_deref().unwrap())
+            .map(|i| sessions[i].tmux_window.as_deref().unwrap())
             .collect();
-        assert_eq!(ordered, vec!["aaa", "bbb", "ccc"]);
+        assert_eq!(ordered, vec!["lane-7", "lane-7-2", "lane-7-3"]);
+
+        // A windowless (external) session sorts after every managed one, regardless of its id.
+        let mixed = [
+            sess(Some("aaa"), AgentStatus::Running, false),
+            managed("lane-7-2", Some("mmm")),
+            managed("lane-7", Some("zzz")),
+        ];
+        assert_eq!(stable_session_order(&mixed), vec![2, 1, 0]);
     }
 
     #[test]
