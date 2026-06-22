@@ -126,10 +126,6 @@ eval "$(repomon shell-init zsh)"
 ## Usage
 
 ```sh
-cargo build --release                  # builds repomond + repomon
-# optional: install both on PATH
-cargo install --path crates/repomon-tui && cargo install --path crates/repomon-daemon
-
 repomon                                # just run it — starts the daemon if needed, then the TUI
 repomon add ~/code/pos-saas            # register a repo
 repomon discover ~/code --add          # or find and register many at once
@@ -146,11 +142,8 @@ repomon lane delete feat/inventory --delete-branch
 force in-process always, or manage the daemon with
 `repomon daemon start | stop | restart | status | logs | install | uninstall`.
 
-> **Dev note:** because the daemon outlives the UI, after you rebuild run
-> `repomon daemon restart` (or it auto-starts fresh once stopped) so the new code is served.
-
-Testing it: `cargo build` (so both binaries exist), then `./target/debug/repomon` — or after
-`cargo build --release`, `./target/release/repomon`.
+> **Building from source?** After a rebuild, run `repomon daemon restart` so the new code is
+> served (the daemon outlives the UI). The dev build runs from `./target/debug/repomon`.
 
 ## Shell integration (cd-on-exit)
 
@@ -195,14 +188,17 @@ Manage it with `repomon remote status` (shows the bind and a masked token),
 
 ## Status
 
-The Observatory (fleet/lanes/today), the agent multiplexer (spawn, live output, input,
-attach, babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/search),
+The fleet view (lanes/today), the agent multiplexer (spawn, live output, input, attach,
+babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/search),
 per-session notifications (pane-sniffed permission-dialog detection, fired as desktop popups
 even when the TUI is closed or parked full-screen in an agent), and the remote access layer
-(WebSocket bridge + APNs + pairing) are all in; an iOS companion app lives in a separate
-private repo. Deferred follow-ups: a SwiftUI menu-bar companion (much of it now
-exists as the iOS app's shared RepomonKit), an embedded PTY renderer (vs the tmux pivot),
+(WebSocket bridge + APNs + pairing) are all in. The iOS companion app is built and ships once
+an Apple Developer account is in place. Deferred: an embedded PTY renderer (vs the tmux pivot),
 a web dashboard, and Windows support.
+
+---
+
+If repomon saves you a few context-switches a day, a ⭐ helps other people find it.
 
 ## License
 
