@@ -6,7 +6,7 @@
 //! there with full scrollback. All methods are synchronous; the daemon calls them from
 //! `spawn_blocking`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Error, Result};
@@ -51,6 +51,33 @@ impl TmuxRuntime {
         } else {
             format!("lane-{lane}-{slot}")
         }
+    }
+
+    /// Parse a managed agent window name back into `(lane, slot)` — the inverse of
+    /// [`window_name`]/[`slot_name`]. `lane-7` → `(7, 1)`, `lane-7-3` → `(7, 3)`. Returns `None`
+    /// for any name that isn't a well-formed lane window (a terminal, the usage probe, or a
+    /// malformed `lane-…`), so callers can safely ignore non-agent windows. Matches the exact
+    /// shapes [`lane_windows_in`] counts, so the reaper and the overlay agree on what's a slot.
+    pub fn parse_lane_window(name: &str) -> Option<(LaneId, usize)> {
+        let rest = name.strip_prefix("lane-")?;
+        match rest.split_once('-') {
+            None => rest.parse::<LaneId>().ok().map(|id| (id, 1)),
+            Some((id, slot)) => {
+                let id = id.parse::<LaneId>().ok()?;
+                let slot = slot.parse::<usize>().ok().filter(|&s| s >= 2)?;
+                Some((id, slot))
+            }
+        }
+    }
+
+    /// The lane a managed window belongs to, or `None` if it isn't a lane window.
+    pub fn lane_id_of(name: &str) -> Option<LaneId> {
+        Self::parse_lane_window(name).map(|(id, _)| id)
+    }
+
+    /// The 1-based agent slot a managed window occupies, or `None` if it isn't a lane window.
+    pub fn slot_of_window(name: &str) -> Option<usize> {
+        Self::parse_lane_window(name).map(|(_, slot)| slot)
     }
 
     /// Filter `names` down to `lane`'s agent windows, in slot order (= spawn order). Exact
@@ -166,6 +193,31 @@ impl TmuxRuntime {
         let out =
             self.run_allow_absent(&["list-windows", "-t", &self.session, "-F", "#{window_name}"])?;
         Ok(out.lines().map(str::to_string).collect())
+    }
+
+    /// Each window's name, current pane working directory, and last pane-activity time (Unix
+    /// epoch seconds). Used by the orphan reaper: the cwd spots `lane-<id>` windows whose cwd no
+    /// longer matches the worktree that id maps to (a stale window left by a re-registered /
+    /// renumbered worktree), and the activity time lets it spare a window whose agent is still
+    /// actively producing output.
+    pub fn list_windows_with_activity(&self) -> Result<Vec<(String, PathBuf, i64)>> {
+        let out = self.run_allow_absent(&[
+            "list-windows",
+            "-t",
+            &self.session,
+            "-F",
+            "#{window_name}\t#{pane_current_path}\t#{window_activity}",
+        ])?;
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.splitn(3, '\t');
+                let name = it.next()?.to_string();
+                let path = PathBuf::from(it.next()?);
+                let activity = it.next().and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0);
+                Some((name, path, activity))
+            })
+            .collect())
     }
 
     pub fn has_window(&self, lane: LaneId) -> bool {
@@ -514,6 +566,31 @@ mod tests {
         );
         assert_eq!(TmuxRuntime::lane_windows_in(&names, 12), vec!["lane-12"]);
         assert!(TmuxRuntime::lane_windows_in(&names, 3).is_empty());
+    }
+
+    #[test]
+    fn parses_lane_windows_back_to_id_and_slot() {
+        // Base window is slot 1; `-N` suffix is slot N (N >= 2).
+        assert_eq!(TmuxRuntime::parse_lane_window("lane-7"), Some((7, 1)));
+        assert_eq!(TmuxRuntime::parse_lane_window("lane-7-2"), Some((7, 2)));
+        assert_eq!(TmuxRuntime::parse_lane_window("lane-81-3"), Some((81, 3)));
+        // Non-lane windows and malformed names are not agent windows.
+        assert_eq!(TmuxRuntime::parse_lane_window("term-1"), None);
+        assert_eq!(TmuxRuntime::parse_lane_window("usage-probe-work"), None);
+        assert_eq!(TmuxRuntime::parse_lane_window("lane-"), None);
+        assert_eq!(TmuxRuntime::parse_lane_window("lane-1-x"), None);
+        // Slot 1 is only ever spelled `lane-7`, never `lane-7-1`.
+        assert_eq!(TmuxRuntime::parse_lane_window("lane-7-1"), None);
+    }
+
+    #[test]
+    fn lane_id_and_slot_accessors() {
+        assert_eq!(TmuxRuntime::lane_id_of("lane-42-2"), Some(42));
+        assert_eq!(TmuxRuntime::lane_id_of("lane-42"), Some(42));
+        assert_eq!(TmuxRuntime::lane_id_of("term-1"), None);
+        assert_eq!(TmuxRuntime::slot_of_window("lane-42"), Some(1));
+        assert_eq!(TmuxRuntime::slot_of_window("lane-42-3"), Some(3));
+        assert_eq!(TmuxRuntime::slot_of_window("term-1"), None);
     }
 
     #[test]

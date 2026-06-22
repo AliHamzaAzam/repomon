@@ -142,6 +142,12 @@ async fn main() {
     // `[usage_probe]` and a TUI being attached, so it costs nothing until enabled and watched.
     tokio::spawn(repomon_daemon::usage_watch::usage_watcher(ctx.clone()));
 
+    // Reap orphaned `lane-<id>` windows whose id no longer maps to the worktree they claim —
+    // leftovers from a re-registered worktree or a store reset the long-lived tmux server
+    // outlived. Sweeps immediately on startup, then slowly, so phantom "exited" sessions
+    // (idle `claude` processes that never exit on their own) clean themselves up.
+    tokio::spawn(repomon_daemon::reap::reap_watcher(ctx.clone()));
+
     // Index commit history in the background (timeline / sessions / search).
     {
         let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());
