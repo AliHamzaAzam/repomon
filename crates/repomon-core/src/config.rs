@@ -255,8 +255,14 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// The platform data directory for the SQLite database.
+/// The platform data directory for the SQLite database. `REPOMON_DATA_DIR` overrides it — handy
+/// for tests and for running an isolated second instance (its own DB) alongside the real daemon.
 pub fn data_dir() -> PathBuf {
+    if let Ok(x) = std::env::var("REPOMON_DATA_DIR") {
+        if !x.is_empty() {
+            return PathBuf::from(x);
+        }
+    }
     directories::ProjectDirs::from("", "", "repomon")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| home().join(".local").join("share").join("repomon"))
@@ -382,5 +388,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(socket_path(&c), PathBuf::from("/tmp/custom.sock"));
+    }
+
+    #[test]
+    fn data_dir_respects_env_override() {
+        std::env::set_var("REPOMON_DATA_DIR", "/tmp/repomon-data-override-test");
+        assert_eq!(data_dir(), PathBuf::from("/tmp/repomon-data-override-test"));
+        std::env::remove_var("REPOMON_DATA_DIR");
     }
 }
