@@ -27,6 +27,13 @@ const UNKNOWN_RETRY_MIN: i64 = 20; // coarse retry when no reset time is known (
 const GIVE_UP_AFTER_HOURS: i64 = 6; // stop this long after first detecting the pause (>5h window)
 const SEND_COOLDOWN_SECS: i64 = 90; // suppress re-detect of the stale on-screen message
 const RESET_BUFFER_SECS: i64 = 60; // resume a little after the stated reset, never before
+// Consecutive ticks with no limit message before we believe the pause is really gone. The
+// detection is a pane screen-scrape (`detect_usage_limit`) that misfires for a tick when the
+// menu redraws or scrolls; clearing on a single miss flips the public status RateLimited→running
+// and back, re-firing the rate-limit / resumed notifications repeatedly across the multi-hour
+// pause. Requiring two consecutive misses (~40s at the 20s TICK) rides out a single flaky capture;
+// a genuine resume keeps the menu gone, so the real Clear lags by only one tick.
+const CLEAR_AFTER_MISSES: u8 = 2;
 
 /// The public view of a lane's rate-limit pause, read by `overlay_agents` for the TUI.
 #[derive(Debug, Clone)]
@@ -47,6 +54,10 @@ struct Sched {
     /// We've already selected "Stop and wait for limit to reset" on Claude's menu for this
     /// pause, so don't select it again (reset only when the lane clears).
     menu_confirmed: bool,
+    /// Consecutive ticks the limit message has been *absent* while still tracking this pause. The
+    /// loop bumps it on a missed detection and resets it on a hit; [`decide`] only clears once it
+    /// reaches [`CLEAR_AFTER_MISSES`], so a single flaky pane capture can't fake a resume.
+    miss_streak: u8,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -128,14 +139,14 @@ fn decide(
                 }
             }
         },
-        // No limit message on screen — if we were tracking one, the agent resumed.
-        None => {
-            if current.is_some() {
-                Action::Clear
-            } else {
-                Action::Nothing
-            }
-        }
+        // No limit message on screen — if we were tracking one, the agent *may* have resumed, but
+        // the detection flaps, so only believe it once the message has been gone for a couple of
+        // consecutive ticks (the loop bumps `miss_streak`). A single miss is treated as noise.
+        None => match current {
+            Some(s) if s.miss_streak >= CLEAR_AFTER_MISSES => Action::Clear,
+            Some(_) => Action::Nothing,
+            None => Action::Nothing,
+        },
     }
 }
 
@@ -186,6 +197,15 @@ pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
                 };
             let detection = detect_usage_limit(&pane);
             let armed = global_on && !off.contains(&lane);
+            // Track the absent-message streak so a single flaky capture doesn't read as a resume:
+            // bump on a miss, reset on a hit. `decide` clears only once it reaches the threshold.
+            if let Some(s) = sched.get_mut(&lane) {
+                if detection.is_some() {
+                    s.miss_streak = 0;
+                } else {
+                    s.miss_streak = s.miss_streak.saturating_add(1);
+                }
+            }
             let action = decide(sched.get(&lane), detection.as_ref(), armed, now);
             apply(&ctx, &mut sched, lane, action, &message, now).await;
         }
@@ -216,6 +236,7 @@ async fn apply(
                     gave_up: false,
                     cooldown_until: None,
                     menu_confirmed: false,
+                    miss_streak: 0,
                 },
             );
             ctx.rate_limits
@@ -303,6 +324,7 @@ mod tests {
             gave_up,
             cooldown_until: cooldown_in.map(|s| n + chrono::Duration::seconds(s)),
             menu_confirmed: true, // default: menu already handled, so tests reach the Send path
+            miss_streak: 0,
         }
     }
 
@@ -405,8 +427,20 @@ mod tests {
     }
 
     #[test]
-    fn clears_when_message_gone() {
-        let s = sched(-1, false, None);
+    fn single_missed_detection_does_not_clear() {
+        // One tick with the limit message absent (miss_streak just bumped to 1) is treated as a
+        // flaky capture, not a resume — clearing here is what re-fired RateLimited/Resumed in a
+        // loop across the pause.
+        let mut s = sched(-1, false, None);
+        s.miss_streak = 1;
+        assert_eq!(decide(Some(&s), None, true, now()), Action::Nothing);
+    }
+
+    #[test]
+    fn clears_after_consecutive_missed_detections() {
+        // The message has been gone for CLEAR_AFTER_MISSES consecutive ticks: believe the resume.
+        let mut s = sched(-1, false, None);
+        s.miss_streak = CLEAR_AFTER_MISSES;
         assert_eq!(decide(Some(&s), None, true, now()), Action::Clear);
     }
 

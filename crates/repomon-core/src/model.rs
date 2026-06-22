@@ -269,6 +269,12 @@ pub struct AgentSession {
     /// client attribute account-level usage (the `/usage` probe) to the focused agent. Not persisted.
     #[serde(default)]
     pub config_dir: Option<PathBuf>,
+    /// A user-set short label for this session, overlaid at list time from the persisted
+    /// `session_labels` store (keyed by `session_id`). When set, clients show it instead of the
+    /// auto-derived summary. `None` when unset or when the session has no durable id. Not persisted
+    /// on the session row itself.
+    #[serde(default)]
+    pub custom_label: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
@@ -17,7 +18,8 @@ use repomon_core::model::{
     RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
-    diff_session_transitions, session_by_key, session_statuses, slot_by_key, SessKey,
+    activity_allows_refire, diff_session_transitions, session_by_key, session_statuses, slot_by_key,
+    SessKey,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -33,6 +35,9 @@ use crate::view;
 pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
 /// Don't re-fire the same session's notification within this window (suppresses status flapping).
 const NOTIF_DEBOUNCE: Duration = Duration::from_secs(30);
+/// How long to keep an alert's activity latch after its session leaves the snapshot, so a
+/// vanish+reappear can't slip a repeat through (mirrors the daemon's `LATCH_GRACE`).
+const NOTIF_LATCH_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
 /// Cap on the in-app notification history feed.
 const NOTIF_HISTORY_CAP: usize = 200;
 
@@ -86,7 +91,20 @@ pub struct Pane {
 pub struct ClickZone {
     pub rect: Rect,
     pub lane: LaneId,
+    /// Which agent within the lane this row targets, when the sidebar is expanded into per-agent
+    /// rows; `None` for a normal lane row / lane header.
+    pub session: Option<usize>,
     pub interactive: bool,
+}
+
+/// A row in the fleet sidebar: a lane (header), or — when `expand_agents` is on and the lane runs
+/// several agents — one of that lane's agent sub-rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FleetRow {
+    /// Index into [`App::visible_lanes`].
+    pub lane_idx: usize,
+    /// `Some(i)` = the lane's `i`-th agent sub-row; `None` = the lane header / single-agent row.
+    pub session: Option<usize>,
 }
 
 /// Two left-clicks on the same lane within this window count as a double-click (→ open the real
@@ -121,7 +139,9 @@ pub struct Settings {
     pub notify_show_why: bool,
     pub notify_coalesce: bool,
     pub notify_click_focus: bool,
+    pub notify_subagents: bool,
     pub usage_probe: bool,
+    pub expand_agents: bool,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -130,7 +150,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 16;
+const SETTINGS_COUNT: usize = 18;
 
 pub struct App {
     pub client: DaemonClient,
@@ -142,6 +162,12 @@ pub struct App {
     pub selected: usize,
     pub filter: String,
     pub filtering: bool,
+    /// Inline rename of the selected agent sub-row (expanded sidebar): active flag, edit buffer,
+    /// and the pinned target — the agent's durable transcript `session_id`, captured when the
+    /// rename starts so a cursor move / refresh during the edit can't retarget it.
+    pub renaming: bool,
+    pub rename_buf: String,
+    rename_target: Option<String>,
     pub status: String,
     pub nl_repo_idx: usize,
     pub nl_branch: String,
@@ -219,11 +245,24 @@ pub struct App {
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
     notif_seeded: bool,
+    /// Set when the TUI returns from a full-screen attach: forces the next `detect_notifications`
+    /// to re-seed instead of diffing. The daemon owned desktop popups while the TUI was parked
+    /// (its heartbeat went stale), so replaying the gap's transitions would double-fire them.
+    notif_reseed: bool,
+    /// Whether `prev_status` was built including subagents (the `notify_subagents` toggle). When it
+    /// flips, the tracked key set changes wholesale, so `detect_notifications` re-seeds.
+    notif_subagents: bool,
     /// Debounce keyed by (lane, session, kind): the last time each *kind* of alert fired for a
     /// session. Keying on the kind suppresses a flapping identical alert without swallowing a
     /// genuinely different transition (e.g. a usage-limit alert right after a needs-you one);
     /// keying on the session lets two agents in one lane each raise the same kind of alert.
     notif_debounce: HashMap<(LaneId, SessKey, NotifKind), Instant>,
+    /// Activity-anchored re-fire latch: the session's `last_activity_at` (transcript mtime) when
+    /// each (lane, session, kind) last fired. A repeat fires only once that advances — real work
+    /// since the last alert — so the status flapping a 30s debounce can't catch (idle-decay, lsof
+    /// undercount, sniff wobble) doesn't re-alert. Covers NeedsYou/RateLimited/Resumed; Idle keeps
+    /// to `notif_debounce`. The `Instant` is for pruning only.
+    notif_latch: HashMap<(LaneId, SessKey, NotifKind), (DateTime<Utc>, Instant)>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
     /// Cursor in the Notifications view: offset into the feed, newest-first (0 = newest).
@@ -321,6 +360,9 @@ impl App {
             selected: 0,
             filter: String::new(),
             filtering: false,
+            renaming: false,
+            rename_buf: String::new(),
+            rename_target: None,
             status: String::new(),
             nl_repo_idx: 0,
             nl_branch: String::new(),
@@ -371,7 +413,10 @@ impl App {
             settings_geom: std::cell::Cell::new(0),
             prev_status: HashMap::new(),
             notif_seeded: false,
+            notif_reseed: false,
+            notif_subagents: false,
             notif_debounce: HashMap::new(),
+            notif_latch: HashMap::new(),
             notifications: VecDeque::new(),
             notif_sel: 0,
             notif_banner: None,
@@ -464,8 +509,10 @@ impl App {
     pub async fn refresh_lanes(&mut self) {
         match self.client.call_typed::<Vec<Lane>>("lane.list", None).await {
             Ok(l) => {
-                // Keep the cursor on the same lane across the attention re-sort below.
+                // Keep the cursor on the same lane (and the same agent sub-row, when expanded)
+                // across the attention re-sort below.
                 let keep = self.selected_lane().map(|l| l.id);
+                let keep_ref = self.selected_session_ref();
                 self.lanes = l;
                 // Forget remembered agent selections for lanes that no longer exist.
                 self.session_memory
@@ -476,9 +523,7 @@ impl App {
                 self.detect_notifications();
                 self.sort_lanes();
                 if let Some(id) = keep {
-                    if let Some(i) = self.visible_lanes().iter().position(|l| l.id == id) {
-                        self.selected = i;
-                    }
+                    self.select_lane_session(id, keep_ref);
                 }
             }
             Err(e) => self.status = format!("lane.list failed: {e}"),
@@ -501,12 +546,16 @@ impl App {
             .iter()
             .map(|l| (l.id, self.lane_attention(l)))
             .collect();
+        // Within a repo + pin + attention bucket, order by lane id (creation order) — a STABLE
+        // key. Sorting by recent activity here made lanes bubble around on every agent output
+        // (visible jumbling, worse with the expanded agent tree). Needs-you still floats up via
+        // the `attention` bucket; only the within-bucket churn is removed.
         self.lanes.sort_by_key(|l| {
             (
                 repo_order[&l.repo.id],
                 !l.pinned,
                 attention[&l.id],
-                std::cmp::Reverse(l.last_activity_at),
+                l.id,
             )
         });
     }
@@ -534,37 +583,36 @@ impl App {
             .and_then(|_| self.notifications.back())
             .map(|e| e.lane_id);
 
-        // Resolve the target under one immutable borrow of the lanes, then mutate.
-        let lanes = self.visible_lanes();
-        let hits: Vec<usize> = lanes
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| self.lane_needs_attention(l))
-            .map(|(i, _)| i)
-            .collect();
-        let banner_idx = banner_lane
-            .and_then(|id| lanes.iter().position(|l| l.id == id))
-            .filter(|&i| i != self.selected);
-        let label = |i: usize| format!("{}/{}", lanes[i].repo.name, lanes[i].worktree.name);
-
-        let (target, msg) = if let Some(i) = banner_idx {
-            (Some(i), format!("→ {} (just alerted)", label(i)))
-        } else if hits.is_empty() {
-            (None, "no agents need you".to_string())
-        } else {
-            let next = hits
+        // Work in lane-index space (rows can be per-agent), then map the chosen lane to its row.
+        let cur = self.selected_row().map(|r| r.lane_idx).unwrap_or(0);
+        let (target_id, msg) = {
+            let lanes = self.visible_lanes();
+            let hits: Vec<usize> = lanes
                 .iter()
-                .copied()
-                .find(|&i| i > self.selected)
-                .unwrap_or(hits[0]);
-            let pos = hits.iter().position(|&i| i == next).unwrap_or(0);
-            (
-                Some(next),
-                format!("needs you {}/{} — {}", pos + 1, hits.len(), label(next)),
-            )
+                .enumerate()
+                .filter(|(_, l)| self.lane_needs_attention(l))
+                .map(|(i, _)| i)
+                .collect();
+            let banner_idx = banner_lane
+                .and_then(|id| lanes.iter().position(|l| l.id == id))
+                .filter(|&i| i != cur);
+            let label = |i: usize| format!("{}/{}", lanes[i].repo.name, lanes[i].worktree.name);
+
+            if let Some(i) = banner_idx {
+                (Some(lanes[i].id), format!("→ {} (just alerted)", label(i)))
+            } else if hits.is_empty() {
+                (None, "no agents need you".to_string())
+            } else {
+                let next = hits.iter().copied().find(|&i| i > cur).unwrap_or(hits[0]);
+                let pos = hits.iter().position(|&i| i == next).unwrap_or(0);
+                (
+                    Some(lanes[next].id),
+                    format!("needs you {}/{} — {}", pos + 1, hits.len(), label(next)),
+                )
+            }
         };
-        if let Some(i) = target {
-            self.selected = i;
+        if let Some(id) = target_id {
+            self.select_lane_session(id, None);
         }
         self.status = msg;
     }
@@ -661,38 +709,44 @@ impl App {
 
     /// Select lane `id` — clearing any filter that hides it — and open it in Focus.
     fn jump_to_lane(&mut self, id: LaneId) {
-        let find = |me: &Self| me.visible_lanes().iter().position(|l| l.id == id);
-        let mut idx = find(self);
-        if idx.is_none() && (!self.filter.is_empty() || self.urgent_only) {
+        let exists = |me: &Self| me.visible_lanes().iter().any(|l| l.id == id);
+        if !exists(self) && (!self.filter.is_empty() || self.urgent_only) {
             self.filter.clear();
             self.filtering = false;
             self.urgent_only = false;
-            idx = find(self);
         }
-        match idx {
-            Some(i) => {
-                self.selected = i;
-                self.focus_insert = false;
-                self.reset_scroll();
-                self.view = View::Focus;
-            }
-            None => self.status = "that lane no longer exists".into(),
+        if exists(self) {
+            self.select_lane_session(id, None);
+            self.focus_insert = false;
+            self.reset_scroll();
+            self.view = View::Focus;
+        } else {
+            self.status = "that lane no longer exists".into();
         }
     }
 
     /// Diff the freshly-fetched per-session statuses against the previous snapshot and fire a
     /// notification on each meaningful transition. The first call only seeds the snapshot.
     fn detect_notifications(&mut self) {
-        // Snapshot the new statuses, one entry per real agent session.
+        // Snapshot the new statuses, one entry per real agent session. Inferred file-activity
+        // sessions (worktree-isolated subagents) only count when the user opted in.
+        let subagents = self.settings.notify_subagents;
         let now: HashMap<(LaneId, SessKey), AgentStatus> = self
             .lanes
             .iter()
-            .flat_map(|l| session_statuses(l.id, &l.agent_sessions))
+            .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
             .collect();
 
-        if !self.notif_seeded {
+        // Re-seed (don't diff) on the first list, or after returning from a full-screen attach.
+        // While the TUI was parked the daemon owned desktop popups (its `local_watcher_seen`
+        // heartbeat went stale), so replaying the transitions that happened in the gap would
+        // double-fire what the daemon already delivered. The subagent toggle flipping likewise
+        // changes the tracked key set wholesale, so re-seed there too.
+        if !self.notif_seeded || self.notif_reseed || subagents != self.notif_subagents {
             self.prev_status = now;
             self.notif_seeded = true;
+            self.notif_reseed = false;
+            self.notif_subagents = subagents;
             return;
         }
 
@@ -723,7 +777,26 @@ impl App {
                     continue;
                 }
             }
-            self.notif_debounce.insert(dkey, Instant::now());
+            // Activity latch: don't re-fire an alert for a session that hasn't done real work
+            // since it last fired — gates out the status flapping (idle-decay, lsof undercount,
+            // sniff wobble) the time-debounce can't. Idle has no activity anchor, so it's exempt.
+            let activity = self
+                .lanes
+                .iter()
+                .find(|l| l.id == key.0)
+                .and_then(|l| session_by_key(l, &key.1, subagents))
+                .map(|s| s.last_activity_at);
+            if kind != NotifKind::Idle
+                && !activity_allows_refire(self.notif_latch.get(&dkey).map(|(t, _)| *t), activity)
+            {
+                continue;
+            }
+            self.notif_debounce.insert(dkey.clone(), Instant::now());
+            if kind != NotifKind::Idle {
+                if let Some(a) = activity {
+                    self.notif_latch.insert(dkey, (a, Instant::now()));
+                }
+            }
             fires.push((key, kind));
         }
 
@@ -734,6 +807,11 @@ impl App {
         let prev = &self.prev_status;
         self.notif_debounce.retain(|(lane, sess, _), t| {
             prev.contains_key(&(*lane, sess.clone())) || t.elapsed() < NOTIF_DEBOUNCE
+        });
+        // The latch keeps entries through a vanish+reappear (the repeat we're stopping); drop one
+        // only once its session has been gone longer than it could plausibly return.
+        self.notif_latch.retain(|(lane, sess, _), (_, seen)| {
+            prev.contains_key(&(*lane, sess.clone())) || seen.elapsed() < NOTIF_LATCH_GRACE
         });
 
         // A burst (≥2 alerts in one tick) coalesces into a single popup + banner so the desktop
@@ -780,10 +858,11 @@ impl App {
     fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind, quiet: bool) {
         // Compose under an immutable borrow that ends before we mutate `self`. The session may
         // be gone when its disappearance was the trigger — compose degrades to a generic line.
+        let subagents = self.settings.notify_subagents;
         let Some((title, body, session_id)) = self.lanes.iter().find(|l| l.id == id).map(|l| {
-            let sess = session_by_key(l, key);
+            let sess = session_by_key(l, key, subagents);
             // Which of the lane's side-by-side agents this is (1-based in the body when >1).
-            let slot = slot_by_key(l, key);
+            let slot = slot_by_key(l, key, subagents);
             let (t, b) = notify::compose(kind, l, sess, slot, self.settings.notify_show_why);
             (t, b, sess.and_then(|s| s.session_id.clone()))
         }) else {
@@ -836,8 +915,77 @@ impl App {
             .collect()
     }
 
+    /// The sidebar rows in display order. One row per visible lane, except a lane running several
+    /// agents expands into a header row plus one row per agent when `expand_agents` is on. `selected`
+    /// indexes this list. Render and navigation BOTH go through here so they never drift.
+    pub fn fleet_rows(&self) -> Vec<FleetRow> {
+        let lanes = self.visible_lanes();
+        let mut rows = Vec::new();
+        for (i, lane) in lanes.iter().enumerate() {
+            rows.push(FleetRow {
+                lane_idx: i,
+                session: None,
+            });
+            if self.settings.expand_agents && lane.agent_sessions.len() > 1 {
+                // Emit sub-rows in a STABLE order (by durable session identity), not the daemon's
+                // newest-active-first order — otherwise renamed rows jump around as agents take
+                // turns. `session` keeps the real index so selection still targets the right agent.
+                for s in stable_session_order(&lane.agent_sessions) {
+                    rows.push(FleetRow {
+                        lane_idx: i,
+                        session: Some(s),
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    fn selected_row(&self) -> Option<FleetRow> {
+        self.fleet_rows().get(self.selected).copied()
+    }
+
+    fn rows_len(&self) -> usize {
+        self.fleet_rows().len()
+    }
+
     pub fn selected_lane(&self) -> Option<&Lane> {
-        self.visible_lanes().into_iter().nth(self.selected)
+        let row = self.fleet_rows().get(self.selected).copied()?;
+        self.visible_lanes().into_iter().nth(row.lane_idx)
+    }
+
+    /// The stable identity of the agent on the selected row, when it's an agent sub-row.
+    fn selected_session_ref(&self) -> Option<SessionRef> {
+        let row = self.selected_row()?;
+        let s = row.session?;
+        let lane = self.visible_lanes().into_iter().nth(row.lane_idx)?;
+        lane.agent_sessions.get(s).and_then(agent_session_ref)
+    }
+
+    /// Move the fleet cursor onto `lane_id`, preferring the agent sub-row matching `sref` (stable
+    /// across refreshes/reorders), else that lane's header row. No-op when the lane isn't visible.
+    fn select_lane_session(&mut self, lane_id: LaneId, sref: Option<SessionRef>) {
+        let (lane_pos, want) = {
+            let lanes = self.visible_lanes();
+            let Some(lane_pos) = lanes.iter().position(|l| l.id == lane_id) else {
+                return;
+            };
+            let want = sref
+                .as_ref()
+                .and_then(|r| session_index_for_ref(&lanes[lane_pos].agent_sessions, r));
+            (lane_pos, want)
+        };
+        let rows = self.fleet_rows();
+        let target = rows
+            .iter()
+            .position(|r| r.lane_idx == lane_pos && r.session == want)
+            .or_else(|| {
+                rows.iter()
+                    .position(|r| r.lane_idx == lane_pos && r.session.is_none())
+            });
+        if let Some(t) = target {
+            self.selected = t;
+        }
     }
 
     /// Lane ids to babysit in the grid: pinned first, then by attention, then most-active.
@@ -857,7 +1005,7 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        let n = self.visible_lanes().len();
+        let n = self.rows_len();
         if n == 0 {
             self.selected = 0;
         } else if self.selected >= n {
@@ -992,6 +1140,61 @@ impl App {
     /// to the number of sessions on that lane.
     fn sync_session_cursor(&mut self) {
         let sel = self.selected_lane().map(|l| l.id);
+        // Honor a just-spawned agent's focus intent FIRST — before the expanded early-return below,
+        // which would otherwise skip it. Once its window appears on the spawn lane, point the
+        // cursor (and, when expanded, the selected row) at the new agent.
+        if let Some((lane, window)) = self.pending_focus_window.clone() {
+            if sel == Some(lane) {
+                let hit = self.selected_lane().and_then(|l| {
+                    l.agent_sessions
+                        .iter()
+                        .position(|s| s.tmux_window.as_deref() == Some(window.as_str()))
+                });
+                match hit {
+                    Some(i) => {
+                        self.session_idx = i;
+                        self.pending_focus_window = None;
+                        self.pending_focus_ticks = 0;
+                        self.reset_scroll();
+                        if self.settings.expand_agents {
+                            let sref = self
+                                .selected_lane()
+                                .and_then(|l| l.agent_sessions.get(i))
+                                .and_then(agent_session_ref);
+                            self.select_lane_session(lane, sref);
+                        }
+                        return;
+                    }
+                    None => {
+                        self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
+                        if self.pending_focus_ticks > 5 {
+                            self.pending_focus_window = None;
+                            self.pending_focus_ticks = 0;
+                        }
+                    }
+                }
+            } else {
+                // Selection moved off the spawn lane before the agent appeared — drop the intent.
+                self.pending_focus_window = None;
+                self.pending_focus_ticks = 0;
+            }
+        }
+        // In expanded mode an agent sub-row IS the session cursor — drive `session_idx` straight
+        // from the selected row (the memory logic below is for the collapsed lane rows).
+        if self.settings.expand_agents {
+            if let Some(FleetRow {
+                session: Some(s), ..
+            }) = self.selected_row()
+            {
+                let lane_id = self.selected_lane().map(|l| l.id);
+                if self.session_idx != s || self.session_lane != lane_id {
+                    self.reset_scroll();
+                }
+                self.session_lane = lane_id;
+                self.session_idx = s;
+                return;
+            }
+        }
         if sel != self.session_lane {
             // Remember the agent the outgoing lane had selected, then restore the one we last
             // had on the lane we're arriving at — so returning to a multi-agent project keeps
@@ -1018,37 +1221,6 @@ impl App {
                 })
                 .unwrap_or(0);
             self.reset_scroll(); // scrollback buffer belonged to the previous lane
-        }
-        // After a spawn, jump the cursor onto the new agent's window the moment it shows up in
-        // the lane list (the daemon surfaces it as a placeholder right away), so you land on the
-        // agent you just started — not the lane's existing one. Give up after a few refreshes so
-        // a window that never appears can't pin the cursor.
-        if let Some((lane, window)) = self.pending_focus_window.clone() {
-            if sel == Some(lane) {
-                let hit = self.selected_lane().and_then(|l| {
-                    l.agent_sessions
-                        .iter()
-                        .position(|s| s.tmux_window.as_deref() == Some(window.as_str()))
-                });
-                match hit {
-                    Some(i) => {
-                        self.session_idx = i;
-                        self.pending_focus_window = None;
-                        self.pending_focus_ticks = 0;
-                    }
-                    None => {
-                        self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
-                        if self.pending_focus_ticks > 5 {
-                            self.pending_focus_window = None;
-                            self.pending_focus_ticks = 0;
-                        }
-                    }
-                }
-            } else {
-                // Selection moved off the spawn lane before the agent appeared — drop the intent.
-                self.pending_focus_window = None;
-                self.pending_focus_ticks = 0;
-            }
         }
         let n = self
             .selected_lane()
@@ -1084,9 +1256,7 @@ impl App {
     fn select_grid_active(&mut self) {
         let ids = self.grid_lane_ids();
         if let Some(&id) = ids.get(self.grid_active) {
-            if let Some(pos) = self.visible_lanes().iter().position(|l| l.id == id) {
-                self.selected = pos;
-            }
+            self.select_lane_session(id, None);
         }
     }
 
@@ -1211,6 +1381,17 @@ impl App {
         // The scrollback snapshot belonged to the previous agent's window — drop it so the new
         // agent shows its own live tail instead of stale lines.
         self.reset_scroll();
+        // In expanded mode the selected row drives session_idx, so move the cursor onto the new
+        // agent's sub-row — otherwise the per-tick cursor sync snaps session_idx straight back.
+        if self.settings.expand_agents {
+            if let Some(lane_id) = self.selected_lane().map(|l| l.id) {
+                let sref = self
+                    .selected_lane()
+                    .and_then(|l| l.agent_sessions.get(self.session_idx))
+                    .and_then(agent_session_ref);
+                self.select_lane_session(lane_id, sref);
+            }
+        }
     }
 
     async fn on_notification(&mut self, note: Notification) {
@@ -1253,6 +1434,11 @@ impl App {
                 return;
             }
             Event::Mouse(me) => {
+                // Inline rename is modal: ignore the pointer too, so a click/scroll can't retarget
+                // the rename to a different agent.
+                if self.renaming {
+                    return;
+                }
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
                 // Remember the real pointer column from positioned events — wheel events report
                 // column 0 on many terminals, so this is how we know which pane the wheel is over.
@@ -1327,6 +1513,8 @@ impl App {
         }
         self.status.clear();
         match self.view {
+            // Inline session rename is modal: while active it swallows every key, in any view.
+            _ if self.renaming => self.rename_key(key).await,
             View::NewLane => self.new_lane_key(key).await,
             View::Split => self.split_key(key).await,
             View::Focus => self.focus_key(key).await,
@@ -1342,10 +1530,91 @@ impl App {
             View::LaneJump => self.lane_jump_key(key),
             _ if self.filtering => self.filter_key(key),
             _ => {
-                if let Some(action) = keybinds::nav(key) {
+                // `R` renames the selected agent sub-row in the expanded fleet sidebar.
+                if key.code == KeyCode::Char('R') {
+                    self.start_rename();
+                } else if let Some(action) = keybinds::nav(key) {
                     self.apply(action).await;
                 }
             }
+        }
+    }
+
+    /// Begin renaming the agent on the selected sub-row. Pins the target's transcript `session_id`
+    /// now (resolved from the selected ROW, not the laggy `session_idx`) so a cursor move or a 1s
+    /// refresh during the edit can't retarget the rename. No-op unless an agent row is selected.
+    fn start_rename(&mut self) {
+        let Some(FleetRow {
+            lane_idx,
+            session: Some(s),
+        }) = self.selected_row()
+        else {
+            self.status =
+                "rename: select an agent row (turn on 'expand agent rows' in settings)".into();
+            return;
+        };
+        let (sid, label) = {
+            let lanes = self.visible_lanes();
+            let Some(sess) = lanes
+                .into_iter()
+                .nth(lane_idx)
+                .and_then(|l| l.agent_sessions.get(s))
+            else {
+                return;
+            };
+            (sess.session_id.clone(), sess.custom_label.clone())
+        };
+        let Some(sid) = sid else {
+            self.status = "can't rename — this session has no transcript id yet".into();
+            return;
+        };
+        self.rename_target = Some(sid);
+        self.rename_buf = label.unwrap_or_default();
+        self.renaming = true;
+    }
+
+    async fn rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) => self.rename_buf.push(c),
+            KeyCode::Backspace => {
+                self.rename_buf.pop();
+            }
+            KeyCode::Enter => self.commit_rename().await,
+            KeyCode::Esc => {
+                self.renaming = false;
+                self.rename_buf.clear();
+                self.rename_target = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Persist the rename (empty buffer clears the label), keyed by the pinned transcript id.
+    async fn commit_rename(&mut self) {
+        self.renaming = false;
+        let label = std::mem::take(&mut self.rename_buf).trim().to_string();
+        let Some(session_id) = self.rename_target.take() else {
+            return;
+        };
+        let label_val = if label.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!(label)
+        };
+        match self
+            .client
+            .call("session.rename", Some(json!({ "session_id": session_id, "label": label_val })))
+            .await
+        {
+            Ok(_) => {
+                self.status = if label.is_empty() {
+                    "label cleared".into()
+                } else {
+                    format!("renamed → {label}")
+                };
+                self.refresh_lanes().await; // show the new label at once
+            }
+            Err(e) => self.status = format!("rename failed: {e}"),
         }
     }
 
@@ -1662,8 +1931,14 @@ impl App {
         if let Some(x) = b("notify_click_focus") {
             self.settings.notify_click_focus = x;
         }
+        if let Some(x) = b("notify_subagents") {
+            self.settings.notify_subagents = x;
+        }
         if let Some(x) = b("usage_probe") {
             self.settings.usage_probe = x;
+        }
+        if let Some(x) = b("expand_agents") {
+            self.settings.expand_agents = x;
         }
     }
 
@@ -1690,7 +1965,9 @@ impl App {
             "notify_show_why": self.settings.notify_show_why,
             "notify_coalesce": self.settings.notify_coalesce,
             "notify_click_focus": self.settings.notify_click_focus,
+            "notify_subagents": self.settings.notify_subagents,
             "usage_probe": self.settings.usage_probe,
+            "expand_agents": self.settings.expand_agents,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -1826,8 +2103,24 @@ impl App {
                 self.save_settings().await;
             }
             15 => {
+                self.settings.notify_subagents = !self.settings.notify_subagents;
+                self.save_settings().await;
+            }
+            16 => {
                 self.settings.usage_probe = !self.settings.usage_probe;
                 self.save_settings().await;
+            }
+            17 => {
+                // Toggling changes the fleet row count, so re-anchor the cursor to the same
+                // lane/agent afterward (else `selected` drifts to a different — or out-of-range — row).
+                let keep = self.selected_lane().map(|l| l.id);
+                let keep_ref = self.selected_session_ref();
+                self.settings.expand_agents = !self.settings.expand_agents;
+                self.save_settings().await;
+                match keep {
+                    Some(id) => self.select_lane_session(id, keep_ref),
+                    None => self.clamp_selection(),
+                }
             }
             _ => {}
         }
@@ -1835,7 +2128,7 @@ impl App {
 
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=15 => self.adjust_setting(true).await,
+            0..=2 | 5..=17 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
@@ -1907,6 +2200,17 @@ impl App {
         if let Some(i) = idx {
             self.session_lane = Some(lane_id); // keep sync_session_cursor from resetting it
             self.session_idx = i;
+            // In expanded mode, also land the fleet cursor on that agent's row so the per-tick
+            // cursor sync (which keys off the selected row) keeps it there.
+            if self.settings.expand_agents {
+                let sref = self
+                    .lanes
+                    .iter()
+                    .find(|l| l.id == lane_id)
+                    .and_then(|l| l.agent_sessions.get(i))
+                    .and_then(agent_session_ref);
+                self.select_lane_session(lane_id, sref);
+            }
         }
     }
 
@@ -2196,10 +2500,17 @@ impl App {
 
     /// Make `id` the active lane: move the Fleet cursor to it and, in Grid, the tile cursor too,
     /// so `selected_lane()` (which key-forwarding targets) points at it.
-    fn activate_lane(&mut self, id: LaneId) {
-        if let Some(pos) = self.visible_lanes().iter().position(|l| l.id == id) {
-            self.selected = pos;
-        }
+    fn activate_lane(&mut self, id: LaneId, session: Option<usize>) {
+        let sref = match session {
+            Some(s) => self
+                .visible_lanes()
+                .iter()
+                .find(|l| l.id == id)
+                .and_then(|l| l.agent_sessions.get(s))
+                .and_then(agent_session_ref),
+            None => None,
+        };
+        self.select_lane_session(id, sref);
         if self.view == View::Grid {
             if let Some(gi) = self.grid_lane_ids().iter().position(|&l| l == id) {
                 self.grid_active = gi;
@@ -2232,7 +2543,7 @@ impl App {
                 let now = std::time::Instant::now();
                 let dbl = is_double_click(self.last_click, z.lane, now);
                 self.last_click = Some((now, z.lane));
-                self.activate_lane(z.lane);
+                self.activate_lane(z.lane, z.session);
                 if dbl {
                     self.focus_insert = false;
                     self.attach_request = Some(z.lane); // double-click → real terminal
@@ -2263,7 +2574,7 @@ impl App {
                 self.grid_active = self.grid_active.saturating_sub(1);
             }
         } else {
-            let n = self.visible_lanes().len();
+            let n = self.rows_len();
             if down && n > 0 && self.selected + 1 < n {
                 self.selected += 1;
             } else if !down {
@@ -2409,6 +2720,11 @@ impl App {
         if key.code == KeyCode::Char('i') {
             self.reset_scroll();
             self.focus_insert = true;
+            return;
+        }
+        // `R` renames the selected agent sub-row (the editor shows in the sidebar tree).
+        if key.code == KeyCode::Char('R') {
+            self.start_rename();
             return;
         }
         match key.code {
@@ -3019,7 +3335,7 @@ impl App {
         match action {
             Action::MoveUp => self.selected = self.selected.saturating_sub(1),
             Action::MoveDown => {
-                let n = self.visible_lanes().len();
+                let n = self.rows_len();
                 if n > 0 && self.selected + 1 < n {
                     self.selected += 1;
                 }
@@ -3300,6 +3616,22 @@ enum SessionRef {
     Transcript(String),
 }
 
+/// Indices into `sessions` in a STABLE display order — by durable identity (`session_id`, then
+/// transcript path / window) — so expanded sub-rows (and their user labels) keep their position
+/// instead of reshuffling when the daemon re-sorts sessions by recent activity.
+fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..sessions.len()).collect();
+    let key = |s: &AgentSession| {
+        (
+            s.session_id.clone(),
+            s.manifest_path.clone(),
+            s.tmux_window.clone(),
+        )
+    };
+    idx.sort_by(|&a, &b| key(&sessions[a]).cmp(&key(&sessions[b])));
+    idx
+}
+
 /// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
 fn agent_session_ref(s: &AgentSession) -> Option<SessionRef> {
     if let Some(w) = &s.tmux_window {
@@ -3505,6 +3837,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
+    // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
+    // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
+    let _ = app.client.call("watcher.park", None).await;
     tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
     disable_mouse();
     ratatui::restore();
@@ -3518,6 +3853,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
+    // The daemon fired desktop popups while we were parked (our heartbeat went stale); re-seed
+    // notification edge-detection so the next refresh doesn't replay — and double-fire — them.
+    app.notif_reseed = true;
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
 }
 
@@ -3527,6 +3865,8 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
+    // Signal the park so the daemon covers desktop popups immediately (see do_attach).
+    let _ = app.client.call("watcher.park", None).await;
     tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
     disable_mouse();
     ratatui::restore();
@@ -3541,6 +3881,8 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.last_viewport.clear();
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
+    // Re-seed notification edge-detection — the daemon owned popups while we were parked.
+    app.notif_reseed = true;
 }
 
 /// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
@@ -3729,6 +4071,7 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             config_dir: None,
+            custom_label: None,
         }
     }
 
@@ -3807,6 +4150,29 @@ mod tests {
         );
         assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 3);
         assert_eq!(attention_rank(&[], true), 3);
+    }
+
+    #[test]
+    fn stable_session_order_sorts_by_durable_id() {
+        // Order follows session_id (stable), NOT the input order (which the daemon churns by
+        // activity), so renamed sub-rows hold their position. Input ids c, a, b → indices 1,2,0.
+        let sessions = [
+            sess(Some("ccc"), AgentStatus::Running, false),
+            sess(Some("aaa"), AgentStatus::Running, false),
+            sess(Some("bbb"), AgentStatus::Running, false),
+        ];
+        assert_eq!(stable_session_order(&sessions), vec![1, 2, 0]);
+        // Reversing the input yields the SAME display order (stability under reshuffle).
+        let rev = [
+            sess(Some("bbb"), AgentStatus::Running, false),
+            sess(Some("aaa"), AgentStatus::Running, false),
+            sess(Some("ccc"), AgentStatus::Running, false),
+        ];
+        let ordered: Vec<&str> = stable_session_order(&rev)
+            .into_iter()
+            .map(|i| rev[i].session_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ordered, vec!["aaa", "bbb", "ccc"]);
     }
 
     #[test]

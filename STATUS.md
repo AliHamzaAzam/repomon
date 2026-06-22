@@ -2,7 +2,7 @@
 
 _Snapshot: 2026-05-30 · branch `main` · 44 commits · github.com/AliHamzaAzam/repomon (private)_
 
-repomon is a Rust TUI "mission control" for parallel AI coding agents across many repos,
+repomon is a Rust TUI for running a fleet of AI coding agents across many repos,
 branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned milestones
 (M0–M13) are complete and the quality/perf gates pass — ready for hands-on testing.**
 
@@ -15,7 +15,7 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 | **3 — Dashboard / history** | M11 history indexer · timeline · jaccard correlations · session detection · markdown export · commit search | ✅ |
 | **4 — Polish (Rust-only)** | M12 accent-color slot + mouse · M13 docs + perf | ✅ |
 
-10 views, 5 CLI subcommands, 39 RPC methods wired.
+10 views, 5 CLI subcommands, 40 RPC methods wired.
 
 ## Quality bar (verified)
 
@@ -43,6 +43,14 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 - **Plain terminals** per worktree (`t`), multiple allowed.
 - Revamped **Grid** (real navigation, Instagram-style position dots, clean exit).
 - repomon's tmux runs on a **dedicated socket**, isolated from the user's own tmux.
+- **Notifications hardened** — desktop popups land faster (daemon edge-detector tick 8s→2s),
+  attach-return no longer replays a duplicate backlog (re-seed instead of re-diff), and a new
+  `notify_subagents` toggle (default off) suppresses alerts when worktree-isolated *subagents*
+  finish — you're alerted only when the *main* agent finishes.
+- **Expand agent rows** (opt-in `expand_agents`) — a lane running several agents can render as a
+  tree in the sidebar (header + one row per agent, each with a 1-4 word summary + status) instead
+  of an `×N` badge; sub-rows are individually selectable. Press `R` to rename an agent; the label
+  persists in the daemon keyed by transcript id (`session.rename` RPC, `session_labels` table).
 - **Account-usage corner** (opt-in `usage_probe`) — limit windows (% used) + reset shown
   bottom-right for the focused agent's account, **provider-aware**: Claude `/usage` (5h + weekly,
   per `~/.claude*` account) and Codex `/status` (5h/weekly or Free monthly). Scraped via a hidden

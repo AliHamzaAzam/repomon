@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{AgentSession, AgentStatus, Lane, LaneId};
@@ -36,6 +36,16 @@ impl NotifKind {
             NotifKind::RateLimited => "⏳",
             NotifKind::Resumed => "▶",
             NotifKind::Idle => "○",
+        }
+    }
+    /// The stable snake_case token for this kind (matches the serde wire name). Used to build a
+    /// notification's dedup id so a flapped re-send carries the same id and clients can drop it.
+    pub fn slug(self) -> &'static str {
+        match self {
+            NotifKind::NeedsYou => "needs_you",
+            NotifKind::RateLimited => "rate_limited",
+            NotifKind::Resumed => "resumed",
+            NotifKind::Idle => "idle",
         }
     }
     fn verb(self) -> &'static str {
@@ -70,15 +80,21 @@ pub enum SessKey {
     Fallback,
 }
 
-/// Key/status pairs for one lane's *real* agent sessions. Inferred "file activity" placeholders
-/// are dropped so they never drive named alerts. On a (theoretically impossible) duplicate key,
-/// the higher-priority status wins — the same order the old per-lane rollup used.
+/// Key/status pairs for one lane's *real* agent sessions, used to drive notifications.
+///
+/// `inferred` "file-activity" sessions are worktree-isolated subagents (a Claude Code subagent
+/// runs inside its parent's process and leaves no transcript or process of its own). They are
+/// dropped unless `include_subagents` is set — the `notify_subagents` toggle, off by default, so
+/// the user is alerted only when the *main* agent finishes, not each subagent it spawns. On a
+/// (theoretically impossible) duplicate key, the higher-priority status wins — the same order the
+/// old per-lane rollup used.
 pub fn session_statuses(
     lane_id: LaneId,
     sessions: &[AgentSession],
+    include_subagents: bool,
 ) -> Vec<((LaneId, SessKey), AgentStatus)> {
     let mut out: Vec<((LaneId, SessKey), AgentStatus)> = Vec::new();
-    for s in sessions.iter().filter(|s| !s.inferred) {
+    for s in sessions.iter().filter(|s| include_subagents || !s.inferred) {
         let key = (
             lane_id,
             s.session_id
@@ -143,11 +159,16 @@ pub fn diff_session_transitions(
 }
 
 /// Resolve a session key back to the lane's session, for composing the notification text.
-/// `None` when the session vanished (i.e. its disappearance was the trigger).
-pub fn session_by_key<'a>(lane: &'a Lane, key: &SessKey) -> Option<&'a AgentSession> {
+/// `None` when the session vanished (i.e. its disappearance was the trigger). `include_subagents`
+/// must match the value passed to [`session_statuses`] so an inferred-subagent key resolves.
+pub fn session_by_key<'a>(
+    lane: &'a Lane,
+    key: &SessKey,
+    include_subagents: bool,
+) -> Option<&'a AgentSession> {
     lane.agent_sessions
         .iter()
-        .filter(|s| !s.inferred)
+        .filter(|s| include_subagents || !s.inferred)
         .find(|s| match key {
             SessKey::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
             SessKey::Fallback => s.session_id.is_none(),
@@ -155,9 +176,14 @@ pub fn session_by_key<'a>(lane: &'a Lane, key: &SessKey) -> Option<&'a AgentSess
 }
 
 /// Which of the lane's real sessions `key` resolves to: `(index, count)`, for the
-/// "agent 2/3" tag in multi-agent lanes. `None` when the session vanished.
-pub fn slot_by_key(lane: &Lane, key: &SessKey) -> Option<(usize, usize)> {
-    let real: Vec<&AgentSession> = lane.agent_sessions.iter().filter(|s| !s.inferred).collect();
+/// "agent 2/3" tag in multi-agent lanes. `None` when the session vanished. `include_subagents`
+/// must match the value passed to [`session_statuses`].
+pub fn slot_by_key(lane: &Lane, key: &SessKey, include_subagents: bool) -> Option<(usize, usize)> {
+    let real: Vec<&AgentSession> = lane
+        .agent_sessions
+        .iter()
+        .filter(|s| include_subagents || !s.inferred)
+        .collect();
     let i = real.iter().position(|s| match key {
         SessKey::Transcript(id) => s.session_id.as_deref() == Some(id.as_str()),
         SessKey::Fallback => s.session_id.is_none(),
@@ -177,9 +203,44 @@ pub fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> O
         (Some(RateLimited), Some(Running)) => Some(NotifKind::Resumed),
         // Finished its turn / needs you.
         (p, Some(Waiting)) if p != Some(Waiting) => Some(NotifKind::NeedsYou),
-        // Was active, now quiet (idle / ended / the session went away).
-        (Some(Running) | Some(Waiting), Some(Idle) | Some(Ended) | None) => Some(NotifKind::Idle),
+        // The session actually ended — its tmux window/process is gone (`None`) or the transcript
+        // closed (`Ended`). Fires regardless of the status it last held (it may have decayed to
+        // Idle first), so a real stop is reported promptly. A still-present session merely *decaying*
+        // to `Idle` after IDLE_AFTER is intentionally NOT alerted: that popup is ~10 minutes stale by
+        // construction (the decay is a 10-min-old event), which produced bursts of stale "went idle"
+        // alerts. The status still decays for the UI; only the notification is suppressed.
+        (Some(_), None) => Some(NotifKind::Idle),
+        (Some(p), Some(Ended)) if p != Ended => Some(NotifKind::Idle),
         _ => None,
+    }
+}
+
+/// Whether an alert for a session may fire again, anchored on the session's transcript activity
+/// rather than on elapsed time.
+///
+/// The status signal a notification is derived from flaps: a frozen-but-waiting transcript decays
+/// `Waiting → Idle` at the 10-minute mark and flips back on the next byte; the `lsof` live-process
+/// probe undercounts and drops then re-includes a session; the pane sniff (and usage-limit sniff)
+/// are screen-scrapes that read `Some → None → Some`. Every such round-trip re-detects a transition
+/// and, since the only other guard is a 30s time-debounce, re-fires the *same* alert minutes or
+/// hours later. [`AgentSession::last_activity_at`](crate::model::AgentSession::last_activity_at) —
+/// the transcript mtime — advances **only on real agent output**, never on any of those flaps, so
+/// it is the right thing to gate a repeat on: re-fire only when the agent has actually done new
+/// work since it last alerted (the user replied and it ran, then waited again), not when detection
+/// merely wobbled. Caller keeps a per-`(lane, session, kind)` record of the activity timestamp at
+/// the last fire and passes it as `prev_fired_at`.
+///
+/// Used for `NeedsYou` / `RateLimited` / `Resumed`, whose session is present in the snapshot when
+/// they fire (so `current_activity` is `Some`). `Idle` fires on disappearance — no activity anchor
+/// — and stays on the time-debounce.
+pub fn activity_allows_refire(
+    prev_fired_at: Option<DateTime<Utc>>,
+    current_activity: Option<DateTime<Utc>>,
+) -> bool {
+    match (prev_fired_at, current_activity) {
+        (None, _) => true,           // never fired this (lane, session, kind) — let it through
+        (Some(_), None) => false,    // fired before and no fresh anchor to justify a repeat
+        (Some(p), Some(c)) => c > p, // only when the transcript advanced since the last fire
     }
 }
 
@@ -426,6 +487,7 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             config_dir: None,
+            custom_label: None,
         }
     }
 
@@ -493,12 +555,15 @@ mod tests {
             transition_kind(Some(RateLimited), Some(Waiting)),
             Some(NotifKind::NeedsYou)
         );
-        // Went quiet (idle / ended / the agent went away).
-        assert_eq!(
-            transition_kind(Some(Running), Some(Idle)),
-            Some(NotifKind::Idle)
-        );
+        // Ended: the session went away (window/process gone) — a real stop, alerted promptly,
+        // whatever it was doing just before (including after it had decayed to Idle).
         assert_eq!(transition_kind(Some(Waiting), None), Some(NotifKind::Idle));
+        assert_eq!(transition_kind(Some(Running), None), Some(NotifKind::Idle));
+        assert_eq!(transition_kind(Some(Idle), None), Some(NotifKind::Idle));
+        // The bare 10-minute inactivity decay (still present, just `Idle` now) is NOT an alert —
+        // it would be ~10 min stale. This is the fix for the bursts of old "went idle" popups.
+        assert_eq!(transition_kind(Some(Running), Some(Idle)), None);
+        assert_eq!(transition_kind(Some(Waiting), Some(Idle)), None);
         // Non-events: you replied, work simply started, or nothing changed.
         assert_eq!(transition_kind(Some(Waiting), Some(Running)), None);
         assert_eq!(transition_kind(None, Some(Running)), None);
@@ -515,7 +580,7 @@ mod tests {
             sess(None, Running, true), // inferred file-activity placeholder — excluded
             sess(None, Running, false),
         ];
-        let got = session_statuses(7, &sessions);
+        let got = session_statuses(7, &sessions, false);
         assert_eq!(got.len(), 3);
         assert!(got.contains(&((7, SessKey::Transcript("a".into())), Waiting)));
         assert!(got.contains(&((7, SessKey::Transcript("b".into())), RateLimited)));
@@ -524,9 +589,34 @@ mod tests {
         // Defensive: a duplicate key keeps the higher-priority status.
         let dup = vec![sess(None, Idle, false), sess(None, Waiting, false)];
         assert_eq!(
-            session_statuses(7, &dup),
+            session_statuses(7, &dup, false),
             vec![((7, SessKey::Fallback), Waiting)]
         );
+    }
+
+    #[test]
+    fn subagents_excluded_by_default_included_when_opted_in() {
+        use AgentStatus::*;
+        // A lane with only an inferred worktree-isolated subagent (no transcript/process), the
+        // shape `overlay_agents` produces for a Claude Code subagent.
+        let sessions = vec![sess(None, Running, true)];
+
+        // Default: subagents never drive notifications — the inferred session is dropped, so it
+        // can't fire an Idle when it finishes.
+        assert!(session_statuses(7, &sessions, false).is_empty());
+
+        // Opted in (`notify_subagents = true`): the subagent surfaces as a Fallback session so
+        // its finish (→ disappearance) can alert.
+        assert_eq!(
+            session_statuses(7, &sessions, true),
+            vec![((7, SessKey::Fallback), Running)]
+        );
+
+        // A main (transcript-backed) agent alongside a subagent: the main always counts; the
+        // subagent only when opted in.
+        let mixed = vec![sess(Some("main"), Waiting, false), sess(None, Running, true)];
+        assert_eq!(session_statuses(7, &mixed, false).len(), 1);
+        assert_eq!(session_statuses(7, &mixed, true).len(), 2);
     }
 
     #[test]
@@ -612,6 +702,67 @@ mod tests {
     }
 
     #[test]
+    fn subagent_finishing_fires_idle_only_when_included() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [7].into();
+        let managed = HashSet::new();
+
+        // A lane whose only agent is an inferred worktree-isolated subagent, running then gone.
+        let running = vec![sess(None, Running, true)];
+        let gone: Vec<AgentSession> = vec![];
+
+        // Default (subagents excluded): the subagent never enters the tracked set, so its finish
+        // is invisible — no Idle.
+        let prev: HashMap<_, _> = session_statuses(7, &running, false).into_iter().collect();
+        let now: HashMap<_, _> = session_statuses(7, &gone, false).into_iter().collect();
+        assert!(prev.is_empty());
+        assert!(diff_session_transitions(&prev, &now, &live, &managed).is_empty());
+
+        // Opted in: the subagent is tracked, so its disappearance fires Idle (it was active).
+        let prev: HashMap<_, _> = session_statuses(7, &running, true).into_iter().collect();
+        let now: HashMap<_, _> = session_statuses(7, &gone, true).into_iter().collect();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![((7, SessKey::Fallback), NotifKind::Idle)]
+        );
+    }
+
+    #[test]
+    fn reseed_snapshot_fires_nothing() {
+        use AgentStatus::*;
+        // Re-seeding (what the TUI does on attach-return / toggle flip, and the daemon on
+        // re-enable) sets prev = now; diffing an unchanged snapshot must produce no alerts, which
+        // is what stops the daemon-covered backlog from double-firing.
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+        let k = |id: &str| (1, SessKey::Transcript(id.into()));
+        let snap: HashMap<_, _> = [(k("a"), Waiting), (k("b"), RateLimited)].into();
+        assert!(diff_session_transitions(&snap, &snap, &live, &managed).is_empty());
+    }
+
+    #[test]
+    fn activity_latch_gates_repeats_on_real_work() {
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::minutes(5);
+
+        // First time this (lane, session, kind) is seen: always fires.
+        assert!(activity_allows_refire(None, Some(t0)));
+
+        // Already fired and the transcript hasn't advanced — the flap cases the latch exists to
+        // kill: an idle-decayed Waiting returning to Waiting, an lsof undercount dropping then
+        // re-adding the session, a sniff reading Some→None→Some. All share the same last_activity.
+        assert!(!activity_allows_refire(Some(t0), Some(t0)));
+
+        // Fired before, but the session vanished (no current anchor): suppress the repeat rather
+        // than re-firing off a presence flap.
+        assert!(!activity_allows_refire(Some(t0), None));
+
+        // Genuine new work since the last alert (user replied, the agent ran and waited again):
+        // the transcript advanced, so re-fire.
+        assert!(activity_allows_refire(Some(t0), Some(t1)));
+    }
+
+    #[test]
     fn compose_shows_the_why_and_the_slot() {
         let mut s = sess(Some("abc"), AgentStatus::Waiting, false);
         s.title = Some("build the parser".into());
@@ -649,10 +800,15 @@ mod tests {
             sess(Some("b"), AgentStatus::Waiting, false),
         ];
         assert_eq!(
-            slot_by_key(&l, &SessKey::Transcript("b".into())),
+            slot_by_key(&l, &SessKey::Transcript("b".into()), false),
             Some((1, 2))
         );
-        assert_eq!(slot_by_key(&l, &SessKey::Transcript("zz".into())), None);
+        assert_eq!(slot_by_key(&l, &SessKey::Transcript("zz".into()), false), None);
+        // With subagents included, the inferred session occupies a slot too (now 3 real).
+        assert_eq!(
+            slot_by_key(&l, &SessKey::Transcript("b".into()), true),
+            Some((2, 3))
+        );
     }
 
     #[test]
@@ -693,6 +849,15 @@ mod tests {
             serde_json::to_string(&NotifKind::RateLimited).unwrap(),
             "\"rate_limited\""
         );
+        // slug() must stay in lock-step with the serde wire name (it keys the dedup id).
+        for k in [
+            NotifKind::NeedsYou,
+            NotifKind::RateLimited,
+            NotifKind::Resumed,
+            NotifKind::Idle,
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), format!("\"{}\"", k.slug()));
+        }
     }
 
     #[cfg(target_os = "macos")]

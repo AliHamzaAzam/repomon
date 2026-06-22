@@ -17,9 +17,9 @@ use crate::notify::NotifKind;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
-    "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · C auto-cont  ·  ←/esc back";
+    "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
     "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
 const FOCUS_CMD_KEYS: &str =
@@ -32,10 +32,12 @@ const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
 
 /// Record a clickable lane region for the mouse handler to hit-test (see `App::handle_click`).
-fn click_zone(app: &App, rect: Rect, lane: LaneId, interactive: bool) {
+/// `session` targets one agent within the lane when the sidebar is expanded into per-agent rows.
+fn click_zone(app: &App, rect: Rect, lane: LaneId, session: Option<usize>, interactive: bool) {
     app.click_zones.borrow_mut().push(ClickZone {
         rect,
         lane,
+        session,
         interactive,
     });
 }
@@ -191,7 +193,7 @@ fn render_settings(f: &mut Frame, app: &App) {
         s.default_agent.clone()
     };
     let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-    let items: [(&str, String, &str); 16] = [
+    let items: [(&str, String, &str); 18] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
         ("auto-continue", onoff(s.auto_continue), "space toggles"),
@@ -237,9 +239,19 @@ fn render_settings(f: &mut Frame, app: &App) {
             "needs terminal-notifier",
         ),
         (
+            "  · subagents finishing",
+            onoff(s.notify_subagents),
+            "off = only the main agent",
+        ),
+        (
             "usage corner (spawns claude)",
             onoff(s.usage_probe),
             "/usage probe · space toggles",
+        ),
+        (
+            "expand agent rows",
+            onoff(s.expand_agents),
+            "per-agent sidebar rows · space toggles",
         ),
     ];
     // Size the columns to the content so values and hints line up no matter how long a label is:
@@ -814,8 +826,8 @@ fn render_fleet(f: &mut Frame, app: &App) {
         .map(|sl| sl.saturating_sub(h / 2))
         .unwrap_or(0)
         .min(max_scroll);
-    // Click-to-select: register each *visible* lane row at its on-screen position (scroll-adjusted).
-    for (li, lane_id) in &lane_rows {
+    // Click-to-select: register each *visible* row at its on-screen position (scroll-adjusted).
+    for (li, lane_id, session) in &lane_rows {
         if *li >= scroll && *li < scroll + h {
             click_zone(
                 app,
@@ -826,6 +838,7 @@ fn render_fleet(f: &mut Frame, app: &App) {
                     height: 1,
                 },
                 *lane_id,
+                *session,
                 false,
             );
         }
@@ -892,7 +905,7 @@ fn render_split(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(right), body[2]);
     // Clicking the pane focuses the selected agent for typing (double-click → real terminal).
     if let Some(id) = id {
-        click_zone(app, body[2], id, true);
+        click_zone(app, body[2], id, None, true);
     }
     // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
     if app.focus_insert && app.scroll == 0 && has_output {
@@ -1063,7 +1076,7 @@ fn render_grid(f: &mut Frame, app: &App) {
             }
             let cell = cells[c * 2];
             let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
-            click_zone(app, cell, ids[idx], true);
+            click_zone(app, cell, ids[idx], None, true);
             f.render_widget(
                 Paragraph::new(tile_lines(
                     app,
@@ -1525,17 +1538,18 @@ fn render_new_lane(f: &mut Frame, app: &App) {
 
 // ---- shared line builders ----------------------------------------------------
 
+#[allow(clippy::type_complexity)]
 fn fleet_lines(
     app: &App,
     content: Rect,
-) -> (Vec<Line<'static>>, Option<usize>, Vec<(usize, LaneId)>) {
+) -> (Vec<Line<'static>>, Option<usize>, Vec<(usize, LaneId, Option<usize>)>) {
     let width = content.width;
     let now = Utc::now();
     let mut lines = Vec::new();
-    // The selected lane's line index (so the caller can scroll to keep it visible) and every lane
-    // row's line index (so a click maps back to its lane through the scroll offset).
+    // The selected row's line index (so the caller can scroll to keep it visible) and every row's
+    // (line index, lane, agent session) so a click maps back through the scroll offset.
     let mut selected_line: Option<usize> = None;
-    let mut lane_rows: Vec<(usize, LaneId)> = Vec::new();
+    let mut lane_rows: Vec<(usize, LaneId, Option<usize>)> = Vec::new();
     lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
     lines.push(rule(width, true, app));
     lines.push(Line::raw(""));
@@ -1578,22 +1592,29 @@ fn fleet_lines(
         lines.push(Line::raw("  then n to create a lane.".to_string()));
     }
 
+    let rows = app.fleet_rows();
     let mut current: Option<RepoId> = None;
-    for (i, lane) in visible.iter().enumerate() {
-        if current != Some(lane.repo.id) {
+    for (ri, row) in rows.iter().enumerate() {
+        let Some(&lane) = visible.get(row.lane_idx) else {
+            continue;
+        };
+        if row.session.is_none() && current != Some(lane.repo.id) {
             if current.is_some() {
                 lines.push(Line::raw("")); // a gap between repo groups
             }
             current = Some(lane.repo.id);
             lines.push(repo_header(width, &lane.repo.name, app));
         }
-        let selected = i == app.selected;
-        let mut line = lane_row(lane, now, app, selected);
-        if !selected && app.hover_lane == Some(lane.id) {
+        let selected = ri == app.selected;
+        let mut line = match row.session {
+            None => lane_row(lane, now, app, selected),
+            Some(s) => agent_subrow(&lane.agent_sessions[s], app, selected),
+        };
+        if !selected && row.session.is_none() && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
         }
         let li = lines.len();
-        lane_rows.push((li, lane.id));
+        lane_rows.push((li, lane.id, row.session));
         if selected {
             selected_line = Some(li);
         }
@@ -1624,43 +1645,53 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         )),
         Line::raw(""),
     ];
+    let _ = now;
+    let rows = app.fleet_rows();
     let mut current: Option<RepoId> = None;
-    for (i, lane) in visible.iter().enumerate() {
-        if current != Some(lane.repo.id) {
+    for (ri, row) in rows.iter().enumerate() {
+        let Some(&lane) = visible.get(row.lane_idx) else {
+            continue;
+        };
+        if row.session.is_none() && current != Some(lane.repo.id) {
             current = Some(lane.repo.id);
             lines.push(Line::from(Span::styled(
                 lane.repo.name.clone(),
                 app.theme.muted(),
             )));
         }
-        let glyph = status_glyph(lane);
-        let counts = dirty_str(&lane.state.dirty);
-        let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
-        let count = agent_count_badge(lane);
-        let _ = now;
-        let mut line = if i == app.selected {
-            let badge = count.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
-            Line::from(Span::styled(
-                format!(" {glyph}{rest}{badge}"),
-                app.theme.selected(),
-            ))
-        } else {
-            let glyph_style = if lane.state.dirty.is_clean() {
-                app.theme.muted()
-            } else {
-                app.theme.accented()
-            };
-            let mut spans = vec![
-                Span::raw(" "),
-                Span::styled(glyph.to_string(), glyph_style),
-                Span::raw(rest),
-            ];
-            if let Some(c) = &count {
-                spans.push(Span::styled(format!(" {c}"), app.theme.accented()));
+        let selected = ri == app.selected;
+        let mut line = match row.session {
+            None => {
+                let glyph = status_glyph(lane);
+                let counts = dirty_str(&lane.state.dirty);
+                let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
+                let count = agent_count_badge(lane);
+                if selected {
+                    let badge = count.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
+                    Line::from(Span::styled(
+                        format!(" {glyph}{rest}{badge}"),
+                        app.theme.selected(),
+                    ))
+                } else {
+                    let glyph_style = if lane.state.dirty.is_clean() {
+                        app.theme.muted()
+                    } else {
+                        app.theme.accented()
+                    };
+                    let mut spans = vec![
+                        Span::raw(" "),
+                        Span::styled(glyph.to_string(), glyph_style),
+                        Span::raw(rest),
+                    ];
+                    if let Some(c) = &count {
+                        spans.push(Span::styled(format!(" {c}"), app.theme.accented()));
+                    }
+                    Line::from(spans)
+                }
             }
-            Line::from(spans)
+            Some(s) => agent_subrow(&lane.agent_sessions[s], app, selected),
         };
-        if i != app.selected && app.hover_lane == Some(lane.id) {
+        if !selected && row.session.is_none() && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
         }
         let li = lines.len() as u16;
@@ -1674,6 +1705,7 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
                     height: 1,
                 },
                 lane.id,
+                row.session,
                 true,
             );
         }
@@ -1888,6 +1920,62 @@ fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
 fn agent_count_badge(lane: &Lane) -> Option<String> {
     let n = lane.agent_sessions.len();
     (n > 1).then(|| format!("×{n}"))
+}
+
+/// A short 1-4 word summary of an agent session for the expanded sidebar: the user's `custom_label`
+/// when set, else the first few words of the session's title (its opening prompt), else its last
+/// message, falling back to the agent name.
+fn agent_summary(sess: &repomon_core::model::AgentSession) -> String {
+    if let Some(l) = &sess.custom_label {
+        if !l.is_empty() {
+            return l.clone();
+        }
+    }
+    let src = sess
+        .title
+        .as_deref()
+        .or(sess.last_message.as_deref())
+        .unwrap_or("");
+    let words: Vec<&str> = src.split_whitespace().take(4).collect();
+    if words.is_empty() {
+        sess.agent.short().to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// One agent sub-row under an expanded lane: `↳ summary   <status glyph>`. While the selected row
+/// is being renamed, shows the live edit buffer with a cursor instead of the summary.
+fn agent_subrow(
+    sess: &repomon_core::model::AgentSession,
+    app: &App,
+    selected: bool,
+) -> Line<'static> {
+    use repomon_core::model::AgentStatus;
+    let (glyph, gstyle) = match sess.status {
+        AgentStatus::RateLimited => (theme::RATE_LIMITED, app.theme.rate_limited()),
+        AgentStatus::Waiting => (theme::WAITING, app.theme.needs_you()),
+        AgentStatus::Running => (theme::AGENT_ACTIVE, app.theme.running()),
+        _ if sess.inferred => (theme::INFERRED_ACTIVE, app.theme.dim()),
+        _ => ("·", app.theme.dim()),
+    };
+    let summary = if selected && app.renaming {
+        format!("{}_", app.rename_buf) // live rename buffer + cursor
+    } else {
+        trunc(&agent_summary(sess), 30)
+    };
+    if selected {
+        return Line::from(Span::styled(
+            format!("     ↳ {summary}  {glyph}"),
+            app.theme.selected(),
+        ));
+    }
+    Line::from(vec![
+        Span::raw("     ↳ "),
+        Span::styled(format!("{summary:<30}"), app.theme.muted()),
+        Span::raw(" "),
+        Span::styled(glyph.to_string(), gstyle),
+    ])
 }
 
 fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<'static> {

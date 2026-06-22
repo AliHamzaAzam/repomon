@@ -72,6 +72,11 @@ pub struct Config {
     /// Make desktop popups click-to-focus the terminal (uses `terminal-notifier` when
     /// installed; falls back to plain popups otherwise).
     pub notify_click_focus: bool,
+    /// Notify when a worktree-isolated *subagent* finishes (an inferred file-activity session,
+    /// e.g. a Claude Code subagent that leaves no transcript or process of its own). Off by
+    /// default: you're alerted only when the *main* agent finishes, not each subagent it spawns.
+    /// Turn on to get a popup for every subagent too.
+    pub notify_subagents: bool,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
     /// Remote access: the WebSocket JSON-RPC bridge that companion apps (iOS) connect
@@ -84,6 +89,9 @@ pub struct Config {
     /// running `/usage` in a hidden throwaway `claude` session per account every few minutes —
     /// which spawns a background process and writes a tiny transcript. See `docs/agents.md`.
     pub usage_probe: bool,
+    /// In the sidebars, expand a lane running several agents into one row per agent (a tree under
+    /// the lane) instead of a single row with an `×N` badge. Off by default.
+    pub expand_agents: bool,
 }
 
 impl Default for Config {
@@ -108,10 +116,12 @@ impl Default for Config {
             notify_show_why: true,
             notify_coalesce: true,
             notify_click_focus: true,
+            notify_subagents: false,
             repos: HashMap::new(),
             remote: RemoteConfig::default(),
             push: PushConfig::default(),
             usage_probe: false,
+            expand_agents: false,
         }
     }
 }
@@ -245,8 +255,14 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// The platform data directory for the SQLite database.
+/// The platform data directory for the SQLite database. `REPOMON_DATA_DIR` overrides it — handy
+/// for tests and for running an isolated second instance (its own DB) alongside the real daemon.
 pub fn data_dir() -> PathBuf {
+    if let Ok(x) = std::env::var("REPOMON_DATA_DIR") {
+        if !x.is_empty() {
+            return PathBuf::from(x);
+        }
+    }
     directories::ProjectDirs::from("", "", "repomon")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| home().join(".local").join("share").join("repomon"))
@@ -372,5 +388,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(socket_path(&c), PathBuf::from("/tmp/custom.sock"));
+    }
+
+    #[test]
+    fn data_dir_respects_env_override() {
+        std::env::set_var("REPOMON_DATA_DIR", "/tmp/repomon-data-override-test");
+        assert_eq!(data_dir(), PathBuf::from("/tmp/repomon-data-override-test"));
+        std::env::remove_var("REPOMON_DATA_DIR");
     }
 }

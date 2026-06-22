@@ -23,7 +23,7 @@ use repomon_core::{config, Config};
 #[command(
     name = "repomon",
     version,
-    about = "Terminal mission control for parallel coding agents"
+    about = "Run a fleet of AI coding agents across all your repos, from one terminal"
 )]
 struct Cli {
     #[command(subcommand)]

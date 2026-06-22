@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use a2::{
-    Client, ClientConfig, DefaultNotificationBuilder, Endpoint, ErrorReason, NotificationBuilder,
-    NotificationOptions, Priority,
+    Client, ClientConfig, CollapseId, DefaultNotificationBuilder, Endpoint, ErrorReason,
+    NotificationBuilder, NotificationOptions, Priority,
 };
 use repomon_core::config::PushConfig;
 use serde_json::Value;
@@ -77,9 +77,27 @@ impl Push {
             .set_body(body)
             .set_sound("default")
             .set_category(category);
+        // Collapse duplicates of the same alert on the lock screen: the daemon stamps each payload
+        // with a stable `id` (lane:session:kind:activity) that only changes on real new activity,
+        // so a flapped re-send replaces rather than stacks. APNs caps the value at 64 bytes; our
+        // ids are ASCII, so a byte slice is a safe truncation.
+        let collapse = data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                // Cap at 64 bytes (APNs limit), backing up to a char boundary so a future
+                // multibyte id can't panic the slice (today's ids are ASCII).
+                let mut end = s.len().min(64);
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &s[..end]
+            })
+            .and_then(|s| CollapseId::new(s).ok());
         let options = NotificationOptions {
             apns_topic: Some(&self.topic),
             apns_priority: Some(Priority::High),
+            apns_collapse_id: collapse,
             ..Default::default()
         };
         let mut payload = builder.build(device_token, options);

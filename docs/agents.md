@@ -169,6 +169,21 @@ Codex's 5-hour/weekly or (Free plan) monthly. Caveats, by design:
   PM`), or shows nothing. If a tool restyles its screen, recapture the fixture
   (`crates/repomon-core/src/agent/fixtures/`) and adjust the parser.
 
+## Expanded agent rows + rename
+
+By default a lane running several agents shows as one sidebar row with an `×N` badge. Turn on
+**`expand agent rows`** in Settings (`,`) to instead show the lane as a small tree: the lane header
+(keeping `×N`) with one indented row per agent — `↳ <summary>  <status>`. The summary is auto-derived
+(the first 1–4 words of that agent's opening prompt), and each agent's own status glyph is shown, so
+you can see and select individual agents directly in the Fleet/Split sidebars. Up/down navigate the
+rows; selecting an agent row makes it the active agent (Enter/focus/attach/stop/keys target it).
+
+Press **`R`** on a selected agent row to **rename** it inline (Enter saves, Esc cancels; an empty
+name clears the custom label). The label persists in the daemon keyed by the agent's transcript id,
+so it survives refreshes and daemon restarts, and never bleeds onto a different agent that later
+reuses the slot. (Sessions without a transcript id yet — a just-spawned placeholder — can't be
+renamed until their transcript appears.) See `session.rename` in `docs/protocol.md`.
+
 ## External sessions (running in another terminal)
 
 Because status comes from the transcript, a `claude` you start in any other terminal inside a

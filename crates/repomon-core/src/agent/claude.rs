@@ -67,6 +67,7 @@ impl TranscriptSummary {
             resume_at: None,
             inferred: false,
             config_dir: self.config_dir,
+            custom_label: None, // overlay sets this from the session_labels store
         }
     }
 }
@@ -326,8 +327,16 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
             }
             Some("user") => {
                 last_type = Some("user");
+                // Title from the first *real* prompt — skip Claude Code's injected scaffolding
+                // (the local-command caveat, slash-command invocations, local-command stdout),
+                // which would otherwise show up as "<local-command-caveat>Caveat: …".
                 if title.is_none() {
-                    title = user_text(&v).map(|t| truncate(&t, 60));
+                    if let Some(t) = user_text(&v) {
+                        let t = t.trim();
+                        if !t.is_empty() && !is_synthetic_user_text(t) {
+                            title = Some(truncate(t, 60));
+                        }
+                    }
                 }
             }
             Some("summary") => {
@@ -508,6 +517,19 @@ pub fn config_base_for_session(cwd: &Path, session_id: &str) -> Option<Option<Pa
 
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Whether a user message is Claude Code's injected scaffolding rather than a real prompt — the
+/// local-command caveat, a slash-command invocation, or local-command stdout. Such messages must
+/// not become the session title/summary.
+fn is_synthetic_user_text(t: &str) -> bool {
+    let t = t.trim_start();
+    t.starts_with("Caveat:")
+        || t.starts_with("<local-command-caveat>")
+        || t.starts_with("<command-name>")
+        || t.starts_with("<command-message>")
+        || t.starts_with("<command-args>")
+        || t.starts_with("<local-command-stdout>")
 }
 
 fn user_text(v: &Value) -> Option<String> {
@@ -759,6 +781,31 @@ mod tests {
             parse_transcript(&path).unwrap().status,
             AgentStatus::Idle,
             "a frozen transcript still decays to Idle on a cache hit"
+        );
+    }
+
+    #[test]
+    fn synthetic_user_text_detected() {
+        assert!(is_synthetic_user_text(
+            "Caveat: The messages below were generated while running local commands"
+        ));
+        assert!(is_synthetic_user_text("<local-command-caveat>Caveat: …"));
+        assert!(is_synthetic_user_text("<command-name>/foo</command-name>"));
+        assert!(is_synthetic_user_text("  <local-command-stdout>out"));
+        assert!(!is_synthetic_user_text("Refactor the parser to stream"));
+    }
+
+    #[test]
+    fn title_skips_local_command_scaffolding() {
+        // The first user message is Claude Code's injected caveat; the title must be the next,
+        // real prompt — not "<local-command-caveat>Caveat: …".
+        let root = tempfile::tempdir().unwrap();
+        let caveat = r#"{"type":"user","message":{"content":"<local-command-caveat>Caveat: generated while running local commands"}}"#;
+        let real = r#"{"type":"user","message":{"content":"Refactor the parser to stream"}}"#;
+        let path = write_transcript(root.path(), "caveat.jsonl", &[caveat, real]);
+        assert_eq!(
+            parse_transcript(&path).unwrap().title.as_deref(),
+            Some("Refactor the parser to stream")
         );
     }
 

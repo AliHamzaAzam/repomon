@@ -48,6 +48,11 @@ pub struct Ctx {
     /// Cache of how many live `claude` processes have each working dir (ps/lsof, ~2s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
     pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
+    /// Per-worktree "highest count seen recently" used to make [`live_cwds`] sticky-high: a single
+    /// `pgrep`/`lsof` undercount can otherwise drop a session from the overlay (then re-add it next
+    /// probe), churning the lane list and — before the notification activity-latch — re-firing
+    /// alerts. We hold the higher count for a short grace so one bad sample can't hide a session.
+    pub cwds_sticky: Mutex<HashMap<PathBuf, (usize, Instant)>>,
     /// The composite `lane.list` overlay (lanes + live agent sessions), cached for a short TTL so
     /// many clients polling every ~1s don't each re-run the tmux/lsof/transcript scan. Invalidated
     /// on structural changes (spawn/adopt/stop/lane create/delete) so user actions show at once.
@@ -120,6 +125,7 @@ impl Ctx {
             viewport: Mutex::new(Vec::new()),
             viewport_focus: Mutex::new(None),
             live_cwds: Mutex::new(None),
+            cwds_sticky: Mutex::new(HashMap::new()),
             overlay_cache: Mutex::new(None),
             prompt_cache: Mutex::new(HashMap::new()),
             rate_limits: Mutex::new(HashMap::new()),
