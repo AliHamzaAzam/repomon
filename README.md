@@ -1,12 +1,27 @@
 # repomon
 
-**Mission control for parallel AI coding agents — across many repos, branches, and
-worktrees, from one terminal.**
+**Run a fleet of AI coding agents across all your repos — from one terminal.**
+
+Many repos × many worktrees × many agents on one screen — durable in tmux, the ones waiting
+on you float to the top, and you can approve a prompt from your phone.
+
+<p>
+  <a href="https://github.com/AliHamzaAzam/repomon/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AliHamzaAzam/repomon?color=00b3b3&label=release"></a>
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+  <img alt="Platforms: macOS · Linux" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-555">
+  <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange">
+  <img alt="For Claude Code · Codex · Aider" src="https://img.shields.io/badge/for-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Aider-8A2BE2">
+</p>
+
+<!-- Hero demo GIF: docs/demo.gif -->
+<p align="center">
+  <img src="docs/demo.gif" alt="repomon — triaging a fleet of AI coding agents across repos" width="900">
+</p>
 
 Other tools run parallel agents in *one repo, many worktrees* (Claude Squad, Conductor,
-Crystal, ccmanager, …). repomon is built for the developer with 5–15 active projects and a
-fleet of agents running at once: **many repos × many worktrees × many agents**, on one
-screen, spawned and steered from one place.
+Crystal, ccmanager). repomon is built for the developer juggling **5–15 active projects** with
+a fleet of agents running at once: **many repos × many worktrees × many agents**, spawned and
+steered from one place.
 
 ```
 REPOMON                                              14:02 fri 29 may 2026
@@ -52,6 +67,20 @@ changes — including interactive permission dialogs read from the pane — broa
 iOS companion app, which renders the fleet, the agents' conversations, and an Approve
 button for pending dialogs.
 
+## How it compares
+
+|  | **repomon** | Claude Squad / ccmanager | GUI apps (Conductor, Crystal) | built-in `claude agents` |
+|---|---|---|---|---|
+| **Scope** | many repos × worktrees × agents | one repo, many worktrees | one repo, many worktrees | one tool, flat list |
+| **Runtime** | durable tmux — survives close, reattach | tmux | app process | inside the CLI |
+| **Triage** | needs-you float to top, `g` to jump | flat list | varies | grouped by state |
+| **Usage limits** | live usage corner + auto-continue | — | — | — |
+| **Remote** | approve from your phone (iOS over Tailscale) | — | — | — |
+| **Lives in the terminal** | ✅ (4-zoom TUI) | ✅ | ❌ (GUI) | ✅ |
+
+Honest take: if you work in **one** repo, Claude Squad/ccmanager or a GUI may be simpler.
+repomon earns its keep once you're running agents across **several** projects at once.
+
 ## Architecture
 
 A background daemon (`repomond`) owns SQLite, file watchers, the git layer, and the
@@ -64,17 +93,17 @@ is a thin client. Three crates:
 
 ## Install
 
+**One line, no deps** (prebuilt binaries — no Rust or Xcode):
+
+```sh
+curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
+```
+
 **Homebrew** (macOS):
 
 ```sh
 brew install AliHamzaAzam/tap/repomon      # or: brew tap AliHamzaAzam/tap && brew install repomon
 brew services start repomon                # optional: run the daemon at login
-```
-
-**Without Homebrew** — prebuilt binaries, no Rust or Xcode needed:
-
-```sh
-curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
 ```
 
 Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest) —

@@ -2,7 +2,7 @@
 
 _Snapshot: 2026-05-30 · branch `main` · 44 commits · github.com/AliHamzaAzam/repomon (private)_
 
-repomon is a Rust TUI "mission control" for parallel AI coding agents across many repos,
+repomon is a Rust TUI for running a fleet of AI coding agents across many repos,
 branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned milestones
 (M0–M13) are complete and the quality/perf gates pass — ready for hands-on testing.**
 
