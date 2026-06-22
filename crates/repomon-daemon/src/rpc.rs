@@ -326,6 +326,13 @@ struct Browse {
 /// Dispatch a single request to its handler.
 pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
     match method {
+        // ---- system ----
+        // The local TUI calls this just before parking in a full-screen tmux attach (where it
+        // stops sending its lane.list heartbeat). `socket` special-cases the method to age out
+        // `local_watcher_seen` so the daemon takes over desktop popups on its very next tick
+        // instead of waiting out LOCAL_TTL — closing the handoff gap. The dispatch is a no-op ack.
+        "watcher.park" => to_value(()),
+
         // ---- repos ----
         "repo.list" => to_value(ctx.registry.list().await.map_err(internal)?),
         "repo.add" => {
@@ -1165,6 +1172,10 @@ const MAX_SESSIONS_PER_LANE: usize = 8;
 /// agent in it — the fallback that surfaces Claude Code worktree-isolated subagents, which leave
 /// no transcript or process of their own. Short, so the indicator tracks actual work.
 const ACTIVITY_WINDOW_SECS: i64 = 90;
+/// Extra grace before an inferred (file-activity) session is dropped, so a brief lull between a
+/// subagent's edits doesn't read as a finish and flap the session present→absent→present (which,
+/// with subagent notifications on, would fire an Idle on each lull).
+const INFERRED_GRACE_SECS: i64 = 30;
 
 /// TTL for the cached lane overlay. Short enough that a freshly-spawned agent's window placeholder
 /// (and exited-agent / rate-limit transitions) still surface within a refresh or two; long enough
@@ -1239,6 +1250,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         let mut prev = ctx.last_managed_windows.lock().await;
         if prev.difference(&managed_now).next().is_some() {
             *ctx.live_cwds.lock().await = None;
+            // Also drop the sticky-high counts so a `/exit`ed managed agent disappears within one
+            // refresh instead of being held for the grace (tmux closes the window as its process
+            // dies, so this is the genuine-exit signal — see `live_cwds_cached`).
+            ctx.cwds_sticky.lock().await.clear();
         }
         *prev = managed_now;
     }
@@ -1316,7 +1331,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // runs inside its parent's process and leaves no transcript or process here). The main
             // checkout is excluded so hand-edits there don't masquerade as an agent.
             let active = !lane.worktree.is_main
-                && (chrono::Utc::now() - changed).num_seconds() < ACTIVITY_WINDOW_SECS;
+                && (chrono::Utc::now() - changed).num_seconds()
+                    < ACTIVITY_WINDOW_SECS + INFERRED_GRACE_SECS;
             if active {
                 if changed > lane.last_activity_at {
                     lane.last_activity_at = changed;
@@ -1364,7 +1380,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // choices). Neither is in the JSONL. Sniff the panes of managed Running/Waiting sessions:
     // a detected dialog sets `pending_prompt` (clients gate approve/menu controls on it),
     // becomes the notification-ready "why", and flips Running → Waiting.
-    let candidates: Vec<(usize, usize, String)> = lanes
+    let candidates: Vec<(usize, usize, String, AgentStatus)> = lanes
         .iter()
         .enumerate()
         .flat_map(|(li, lane)| {
@@ -1376,7 +1392,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         && !s.inferred
                         && matches!(s.status, AgentStatus::Running | AgentStatus::Waiting);
                     sniffable
-                        .then(|| s.tmux_window.clone().map(|w| (li, si, w)))
+                        .then(|| s.tmux_window.clone().map(|w| (li, si, w, s.status)))
                         .flatten()
                 })
         })
@@ -1386,13 +1402,26 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // subprocess cost. Reuse a recent result per window and only re-capture stale ones, so
         // rapid overlays (notify_watch + client polls) share one sniff per window per TTL.
         const SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+        // A Running session is the one that can *newly* raise a dialog (its transcript ends in a
+        // tool call, but the pane may be on a permission/plan/menu prompt that only the sniff
+        // sees), so a NeedsYou can be up to SNIFF_TTL late. Re-capture those on a much shorter TTL
+        // to cut that latency; a session already classified Waiting has its dialog confirmed, so
+        // let its result ride the full TTL. The extra captures are bounded — only while a session
+        // is actively Running — and the notification engine's activity latch absorbs any added
+        // flap from sniffing more often.
+        const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(5);
         let mut prompts: Vec<Option<String>> = Vec::with_capacity(candidates.len());
         let mut misses: Vec<usize> = Vec::new();
         {
             let cache = ctx.prompt_cache.lock().await;
-            for (idx, (_, _, w)) in candidates.iter().enumerate() {
+            for (idx, (_, _, w, status)) in candidates.iter().enumerate() {
+                let ttl = if *status == AgentStatus::Running {
+                    RUNNING_SNIFF_TTL
+                } else {
+                    SNIFF_TTL
+                };
                 match cache.get(w) {
-                    Some((t, p)) if t.elapsed() < SNIFF_TTL => prompts.push(p.clone()),
+                    Some((t, p)) if t.elapsed() < ttl => prompts.push(p.clone()),
                     _ => {
                         prompts.push(None);
                         misses.push(idx);
@@ -1421,7 +1450,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 prompts[i] = p;
             }
         }
-        for ((li, si, _), found) in candidates.into_iter().zip(prompts) {
+        for ((li, si, _, _), found) in candidates.into_iter().zip(prompts) {
             if let Some(summary) = found {
                 let s = &mut lanes[li].agent_sessions[si];
                 s.status = AgentStatus::Waiting;
@@ -1650,14 +1679,38 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
             }
         }
     }
-    let fresh = tokio::task::spawn_blocking(live_claude_cwds)
+    let map = tokio::task::spawn_blocking(live_claude_cwds)
         .await
         .ok()
-        .flatten();
-    if let Some(map) = &fresh {
-        *ctx.live_cwds.lock().await = Some((std::time::Instant::now(), map.clone()));
+        .flatten()?;
+    // Sticky-high: a single `pgrep`/`lsof` undercount must not drop a session from the overlay
+    // (then re-add it next probe), which churns the lane list and used to re-fire alerts. Hold each
+    // worktree's highest recently-observed count for a short grace, so one bad sample can't hide a
+    // session; a genuine count drop decays after the grace. Managed exits stay prompt because the
+    // managed-window-vanish path clears this map (and tmux closes the window the moment the process
+    // dies), so this lingering only ever affects external sessions — acceptable, like the cache TTL.
+    const STICKY_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+    let now = std::time::Instant::now();
+    let mut effective = map.clone();
+    {
+        let mut sticky = ctx.cwds_sticky.lock().await;
+        // Refresh a worktree's held high only when this sample meets or exceeds it — an under-read
+        // leaves the high's timestamp untouched so it can age out (real exits eventually decay).
+        for (k, &c) in &map {
+            let refresh = sticky.get(k).map(|(hi, _)| c >= *hi).unwrap_or(true);
+            if refresh {
+                sticky.insert(k.clone(), (c, now));
+            }
+        }
+        sticky.retain(|_, (_, seen)| seen.elapsed() < STICKY_GRACE);
+        // Lift the fresh count to the surviving held high (covers worktrees missing from `map`).
+        for (k, (hi, _)) in sticky.iter() {
+            let e = effective.entry(k.clone()).or_insert(0);
+            *e = (*e).max(*hi);
+        }
     }
-    fresh
+    *ctx.live_cwds.lock().await = Some((now, effective.clone()));
+    Some(effective)
 }
 
 /// Is the command's program on PATH (or an absolute/relative path that exists)?

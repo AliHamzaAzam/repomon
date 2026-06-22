@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
@@ -17,7 +18,8 @@ use repomon_core::model::{
     RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
-    diff_session_transitions, session_by_key, session_statuses, slot_by_key, SessKey,
+    activity_allows_refire, diff_session_transitions, session_by_key, session_statuses, slot_by_key,
+    SessKey,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -33,6 +35,9 @@ use crate::view;
 pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
 /// Don't re-fire the same session's notification within this window (suppresses status flapping).
 const NOTIF_DEBOUNCE: Duration = Duration::from_secs(30);
+/// How long to keep an alert's activity latch after its session leaves the snapshot, so a
+/// vanish+reappear can't slip a repeat through (mirrors the daemon's `LATCH_GRACE`).
+const NOTIF_LATCH_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
 /// Cap on the in-app notification history feed.
 const NOTIF_HISTORY_CAP: usize = 200;
 
@@ -252,6 +257,12 @@ pub struct App {
     /// genuinely different transition (e.g. a usage-limit alert right after a needs-you one);
     /// keying on the session lets two agents in one lane each raise the same kind of alert.
     notif_debounce: HashMap<(LaneId, SessKey, NotifKind), Instant>,
+    /// Activity-anchored re-fire latch: the session's `last_activity_at` (transcript mtime) when
+    /// each (lane, session, kind) last fired. A repeat fires only once that advances — real work
+    /// since the last alert — so the status flapping a 30s debounce can't catch (idle-decay, lsof
+    /// undercount, sniff wobble) doesn't re-alert. Covers NeedsYou/RateLimited/Resumed; Idle keeps
+    /// to `notif_debounce`. The `Instant` is for pruning only.
+    notif_latch: HashMap<(LaneId, SessKey, NotifKind), (DateTime<Utc>, Instant)>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
     /// Cursor in the Notifications view: offset into the feed, newest-first (0 = newest).
@@ -405,6 +416,7 @@ impl App {
             notif_reseed: false,
             notif_subagents: false,
             notif_debounce: HashMap::new(),
+            notif_latch: HashMap::new(),
             notifications: VecDeque::new(),
             notif_sel: 0,
             notif_banner: None,
@@ -765,7 +777,26 @@ impl App {
                     continue;
                 }
             }
-            self.notif_debounce.insert(dkey, Instant::now());
+            // Activity latch: don't re-fire an alert for a session that hasn't done real work
+            // since it last fired — gates out the status flapping (idle-decay, lsof undercount,
+            // sniff wobble) the time-debounce can't. Idle has no activity anchor, so it's exempt.
+            let activity = self
+                .lanes
+                .iter()
+                .find(|l| l.id == key.0)
+                .and_then(|l| session_by_key(l, &key.1, subagents))
+                .map(|s| s.last_activity_at);
+            if kind != NotifKind::Idle
+                && !activity_allows_refire(self.notif_latch.get(&dkey).map(|(t, _)| *t), activity)
+            {
+                continue;
+            }
+            self.notif_debounce.insert(dkey.clone(), Instant::now());
+            if kind != NotifKind::Idle {
+                if let Some(a) = activity {
+                    self.notif_latch.insert(dkey, (a, Instant::now()));
+                }
+            }
             fires.push((key, kind));
         }
 
@@ -776,6 +807,11 @@ impl App {
         let prev = &self.prev_status;
         self.notif_debounce.retain(|(lane, sess, _), t| {
             prev.contains_key(&(*lane, sess.clone())) || t.elapsed() < NOTIF_DEBOUNCE
+        });
+        // The latch keeps entries through a vanish+reappear (the repeat we're stopping); drop one
+        // only once its session has been gone longer than it could plausibly return.
+        self.notif_latch.retain(|(lane, sess, _), (_, seen)| {
+            prev.contains_key(&(*lane, sess.clone())) || seen.elapsed() < NOTIF_LATCH_GRACE
         });
 
         // A burst (≥2 alerts in one tick) coalesces into a single popup + banner so the desktop
@@ -3801,6 +3837,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
+    // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
+    // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
+    let _ = app.client.call("watcher.park", None).await;
     tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
     disable_mouse();
     ratatui::restore();
@@ -3826,6 +3865,8 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
+    // Signal the park so the daemon covers desktop popups immediately (see do_attach).
+    let _ = app.client.call("watcher.park", None).await;
     tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
     disable_mouse();
     ratatui::restore();

@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{AgentSession, AgentStatus, Lane, LaneId};
@@ -36,6 +36,16 @@ impl NotifKind {
             NotifKind::RateLimited => "⏳",
             NotifKind::Resumed => "▶",
             NotifKind::Idle => "○",
+        }
+    }
+    /// The stable snake_case token for this kind (matches the serde wire name). Used to build a
+    /// notification's dedup id so a flapped re-send carries the same id and clients can drop it.
+    pub fn slug(self) -> &'static str {
+        match self {
+            NotifKind::NeedsYou => "needs_you",
+            NotifKind::RateLimited => "rate_limited",
+            NotifKind::Resumed => "resumed",
+            NotifKind::Idle => "idle",
         }
     }
     fn verb(self) -> &'static str {
@@ -196,6 +206,35 @@ pub fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> O
         // Was active, now quiet (idle / ended / the session went away).
         (Some(Running) | Some(Waiting), Some(Idle) | Some(Ended) | None) => Some(NotifKind::Idle),
         _ => None,
+    }
+}
+
+/// Whether an alert for a session may fire again, anchored on the session's transcript activity
+/// rather than on elapsed time.
+///
+/// The status signal a notification is derived from flaps: a frozen-but-waiting transcript decays
+/// `Waiting → Idle` at the 10-minute mark and flips back on the next byte; the `lsof` live-process
+/// probe undercounts and drops then re-includes a session; the pane sniff (and usage-limit sniff)
+/// are screen-scrapes that read `Some → None → Some`. Every such round-trip re-detects a transition
+/// and, since the only other guard is a 30s time-debounce, re-fires the *same* alert minutes or
+/// hours later. [`AgentSession::last_activity_at`](crate::model::AgentSession::last_activity_at) —
+/// the transcript mtime — advances **only on real agent output**, never on any of those flaps, so
+/// it is the right thing to gate a repeat on: re-fire only when the agent has actually done new
+/// work since it last alerted (the user replied and it ran, then waited again), not when detection
+/// merely wobbled. Caller keeps a per-`(lane, session, kind)` record of the activity timestamp at
+/// the last fire and passes it as `prev_fired_at`.
+///
+/// Used for `NeedsYou` / `RateLimited` / `Resumed`, whose session is present in the snapshot when
+/// they fire (so `current_activity` is `Some`). `Idle` fires on disappearance — no activity anchor
+/// — and stays on the time-debounce.
+pub fn activity_allows_refire(
+    prev_fired_at: Option<DateTime<Utc>>,
+    current_activity: Option<DateTime<Utc>>,
+) -> bool {
+    match (prev_fired_at, current_activity) {
+        (None, _) => true,           // never fired this (lane, session, kind) — let it through
+        (Some(_), None) => false,    // fired before and no fresh anchor to justify a repeat
+        (Some(p), Some(c)) => c > p, // only when the transcript advanced since the last fire
     }
 }
 
@@ -693,6 +732,28 @@ mod tests {
     }
 
     #[test]
+    fn activity_latch_gates_repeats_on_real_work() {
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::minutes(5);
+
+        // First time this (lane, session, kind) is seen: always fires.
+        assert!(activity_allows_refire(None, Some(t0)));
+
+        // Already fired and the transcript hasn't advanced — the flap cases the latch exists to
+        // kill: an idle-decayed Waiting returning to Waiting, an lsof undercount dropping then
+        // re-adding the session, a sniff reading Some→None→Some. All share the same last_activity.
+        assert!(!activity_allows_refire(Some(t0), Some(t0)));
+
+        // Fired before, but the session vanished (no current anchor): suppress the repeat rather
+        // than re-firing off a presence flap.
+        assert!(!activity_allows_refire(Some(t0), None));
+
+        // Genuine new work since the last alert (user replied, the agent ran and waited again):
+        // the transcript advanced, so re-fire.
+        assert!(activity_allows_refire(Some(t0), Some(t1)));
+    }
+
+    #[test]
     fn compose_shows_the_why_and_the_slot() {
         let mut s = sess(Some("abc"), AgentStatus::Waiting, false);
         s.title = Some("build the parser".into());
@@ -779,6 +840,15 @@ mod tests {
             serde_json::to_string(&NotifKind::RateLimited).unwrap(),
             "\"rate_limited\""
         );
+        // slug() must stay in lock-step with the serde wire name (it keys the dedup id).
+        for k in [
+            NotifKind::NeedsYou,
+            NotifKind::RateLimited,
+            NotifKind::Resumed,
+            NotifKind::Idle,
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), format!("\"{}\"", k.slug()));
+        }
     }
 
     #[cfg(target_os = "macos")]

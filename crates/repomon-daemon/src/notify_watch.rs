@@ -12,10 +12,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use repomon_core::model::{AgentStatus, LaneId};
 use repomon_core::notify::{
-    compose, diff_session_transitions, session_by_key, session_statuses, slot_by_key, NotifKind,
-    SessKey,
+    activity_allows_refire, compose, diff_session_transitions, session_by_key, session_statuses,
+    slot_by_key, NotifKind, SessKey,
 };
 use repomon_core::Config;
 use serde_json::json;
@@ -31,6 +32,11 @@ use crate::{push, rpc, Ctx};
 const TICK: Duration = Duration::from_secs(2);
 /// Don't re-fire the same session's notification within this window (status flapping).
 const DEBOUNCE: Duration = Duration::from_secs(30);
+/// How long to keep an alert's activity latch after its session leaves the snapshot, so a
+/// vanish+reappear (an `lsof` undercount, the 6h recency gate, `claude --resume` churn) can't slip
+/// a repeat through the gap. Covers the longest flap window — a multi-hour usage-limit pause —
+/// comfortably; a transcript gone longer than this can't re-enter under the same id anyway.
+const LATCH_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
 /// How long since the local TUI's last request before we treat it as parked (attached) or closed
 /// and let the daemon fire desktop popups itself. The TUI refreshes ~1s, so a few seconds of
 /// silence means it isn't watching.
@@ -43,6 +49,11 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut prev: HashMap<(LaneId, SessKey), AgentStatus> = HashMap::new();
     let mut seeded = false;
     let mut debounce: HashMap<(LaneId, SessKey, NotifKind), Instant> = HashMap::new();
+    // Activity-anchored re-fire latch: the session's `last_activity_at` (transcript mtime) at the
+    // moment each (lane, session, kind) last fired. A repeat is allowed only once that advances —
+    // i.e. the agent did real work since — so status flapping can't re-alert (see
+    // `activity_allows_refire`). Applies to NeedsYou/RateLimited/Resumed; Idle stays on `debounce`.
+    let mut latch: HashMap<(LaneId, SessKey, NotifKind), (DateTime<Utc>, Instant)> = HashMap::new();
     // The subagent-inclusion setting the current `prev` snapshot was built with. When it flips,
     // the set of tracked keys changes wholesale (inferred sessions appear/vanish), so we re-seed
     // rather than diff — otherwise toggling it off would fire a spurious Idle for every subagent.
@@ -56,6 +67,7 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             prev.clear();
             seeded = false;
             debounce.clear();
+            latch.clear();
             continue;
         }
         // The TUI fires its own desktop popups while it's actively watching; the daemon takes over
@@ -97,13 +109,37 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             if debounce.get(&dkey).is_some_and(|t| t.elapsed() < DEBOUNCE) {
                 continue;
             }
-            debounce.insert(dkey, Instant::now());
+            // Activity latch: suppress a repeat of this alert unless the session's transcript has
+            // advanced since it last fired. Defeats the status flapping (idle-decay, lsof
+            // undercount, sniff wobble) that the time-debounce can't. Idle has no activity anchor
+            // (it fires on disappearance), so it stays on the debounce alone.
+            let activity = lanes
+                .iter()
+                .find(|l| l.id == key.0)
+                .and_then(|l| session_by_key(l, &key.1, subagents))
+                .map(|s| s.last_activity_at);
+            if kind != NotifKind::Idle
+                && !activity_allows_refire(latch.get(&dkey).map(|(t, _)| *t), activity)
+            {
+                continue;
+            }
+            debounce.insert(dkey.clone(), Instant::now());
+            if kind != NotifKind::Idle {
+                if let Some(a) = activity {
+                    latch.insert(dkey, (a, Instant::now()));
+                }
+            }
             fires.push((key, kind));
         }
         prev = now;
         let snapshot = &prev;
         debounce.retain(|(lane, sess, _), t| {
             snapshot.contains_key(&(*lane, sess.clone())) || t.elapsed() < DEBOUNCE
+        });
+        // Keep latch entries through a vanish+reappear (that's the repeat we're stopping); only
+        // drop one once its session has been gone longer than it could plausibly return.
+        latch.retain(|(lane, sess, _), (_, seen)| {
+            snapshot.contains_key(&(*lane, sess.clone())) || seen.elapsed() < LATCH_GRACE
         });
 
         for ((lane_id, key), kind) in fires {
@@ -124,9 +160,20 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             let prompt = dialog
                 .clone()
                 .or_else(|| sess.and_then(|s| s.last_message.clone()));
+            // Stable dedup id: a genuine re-alert advances the session's activity and so gets a new
+            // id, but a flapped re-send (same lane/session/kind, same activity) repeats the id — so
+            // a client that briefly reconnects or APNs that double-delivers can drop the duplicate.
+            let session_id = sess.and_then(|s| s.session_id.clone());
+            let activity_epoch = sess.map(|s| s.last_activity_at.timestamp()).unwrap_or(0);
+            let dedup_id = format!(
+                "{lane_id}:{}:{}:{activity_epoch}",
+                session_id.as_deref().unwrap_or("-"),
+                kind.slug(),
+            );
             let payload = json!({
+                "id": dedup_id,
                 "lane_id": lane_id,
-                "session_id": sess.and_then(|s| s.session_id.clone()),
+                "session_id": session_id,
                 "kind": kind,
                 "title": title,
                 "body": body,
