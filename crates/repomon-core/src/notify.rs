@@ -203,8 +203,14 @@ pub fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> O
         (Some(RateLimited), Some(Running)) => Some(NotifKind::Resumed),
         // Finished its turn / needs you.
         (p, Some(Waiting)) if p != Some(Waiting) => Some(NotifKind::NeedsYou),
-        // Was active, now quiet (idle / ended / the session went away).
-        (Some(Running) | Some(Waiting), Some(Idle) | Some(Ended) | None) => Some(NotifKind::Idle),
+        // The session actually ended — its tmux window/process is gone (`None`) or the transcript
+        // closed (`Ended`). Fires regardless of the status it last held (it may have decayed to
+        // Idle first), so a real stop is reported promptly. A still-present session merely *decaying*
+        // to `Idle` after IDLE_AFTER is intentionally NOT alerted: that popup is ~10 minutes stale by
+        // construction (the decay is a 10-min-old event), which produced bursts of stale "went idle"
+        // alerts. The status still decays for the UI; only the notification is suppressed.
+        (Some(_), None) => Some(NotifKind::Idle),
+        (Some(p), Some(Ended)) if p != Ended => Some(NotifKind::Idle),
         _ => None,
     }
 }
@@ -549,12 +555,15 @@ mod tests {
             transition_kind(Some(RateLimited), Some(Waiting)),
             Some(NotifKind::NeedsYou)
         );
-        // Went quiet (idle / ended / the agent went away).
-        assert_eq!(
-            transition_kind(Some(Running), Some(Idle)),
-            Some(NotifKind::Idle)
-        );
+        // Ended: the session went away (window/process gone) — a real stop, alerted promptly,
+        // whatever it was doing just before (including after it had decayed to Idle).
         assert_eq!(transition_kind(Some(Waiting), None), Some(NotifKind::Idle));
+        assert_eq!(transition_kind(Some(Running), None), Some(NotifKind::Idle));
+        assert_eq!(transition_kind(Some(Idle), None), Some(NotifKind::Idle));
+        // The bare 10-minute inactivity decay (still present, just `Idle` now) is NOT an alert —
+        // it would be ~10 min stale. This is the fix for the bursts of old "went idle" popups.
+        assert_eq!(transition_kind(Some(Running), Some(Idle)), None);
+        assert_eq!(transition_kind(Some(Waiting), Some(Idle)), None);
         // Non-events: you replied, work simply started, or nothing changed.
         assert_eq!(transition_kind(Some(Waiting), Some(Running)), None);
         assert_eq!(transition_kind(None, Some(Running)), None);
