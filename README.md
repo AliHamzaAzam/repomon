@@ -93,7 +93,7 @@ is a thin client. Three crates:
 
 ## Install
 
-**One line, no deps** (prebuilt binaries — no Rust or Xcode):
+**One line, no deps** (macOS — prebuilt binaries, no Rust or Xcode):
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -110,7 +110,8 @@ Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repo
 per-arch (`aarch64`/`x86_64`) or the `universal` build — extract, and put `repomon` and `repomond`
 on your `PATH`.
 
-**From source** (Rust toolchain):
+**From source** — Linux or macOS (needs the Rust toolchain). This is the Linux install path
+(prebuilt binaries are macOS-only for now):
 
 ```sh
 cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
