@@ -79,7 +79,7 @@ pub fn build_timeline(
         let set: HashSet<usize> = c
             .iter()
             .enumerate()
-            .filter(|(_, &n)| n > 0)
+            .filter(|&(_, &n)| n > 0)
             .map(|(i, _)| i)
             .collect();
         active.push((*repo_id, set));
