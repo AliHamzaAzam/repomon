@@ -88,6 +88,10 @@ pub struct Ctx {
     /// count immediately so the vanished agent drops from the `×N` count without waiting out the
     /// `live_cwds` cache TTL.
     pub last_managed_windows: Mutex<HashSet<String>>,
+    /// Last tmux window list a probe returned successfully. Reused for one overlay tick when
+    /// `list_windows` fails transiently (fork/connection fault under load), so a single bad
+    /// snapshot doesn't drop every managed agent — see `rpc::resolve_windows`.
+    pub last_good_windows: Mutex<Vec<String>>,
     pub shutdown: Notify,
 }
 
@@ -136,6 +140,7 @@ impl Ctx {
             local_watcher_seen: Mutex::new(None),
             input_seen: Mutex::new(HashMap::new()),
             last_managed_windows: Mutex::new(HashSet::new()),
+            last_good_windows: Mutex::new(Vec::new()),
             shutdown: Notify::new(),
         })
     }
