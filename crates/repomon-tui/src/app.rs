@@ -1184,7 +1184,7 @@ impl App {
                     }
                     None => {
                         self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
-                        if self.pending_focus_ticks > 5 {
+                        if self.pending_focus_ticks > PENDING_FOCUS_GIVE_UP_TICKS {
                             self.pending_focus_window = None;
                             self.pending_focus_ticks = 0;
                         }
@@ -3663,6 +3663,10 @@ enum SessionRef {
 /// within ~grace refreshes.
 const FOCUS_DETACH_GRACE: u8 = 3;
 
+/// How many ~1s refreshes to keep trying to land the cursor on a just-spawned agent's window
+/// before giving up (the transcript/window may take a moment to appear).
+const PENDING_FOCUS_GIVE_UP_TICKS: u8 = 5;
+
 /// Next consecutive-missing count for the focused agent after a lane refresh: reset to 0 when a
 /// managed session is present, else incremented (saturating). Counted per refresh (≈1s), NOT per
 /// render tick, so the grace measures seconds rather than event-loop iterations.
@@ -3775,11 +3779,13 @@ async fn event_loop(
     let mut events_alive = true;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
+        // Resolve the selected session/window BEFORE syncing the viewport, so a just-spawned
+        // window isn't momentarily streamed as the wrong pane (selected_window() is correct).
+        app.sync_session_cursor();
         app.sync_viewport().await;
         app.sync_pane_size().await;
         app.sync_recent_commits().await;
         app.sync_terminals().await;
-        app.sync_session_cursor();
         app.sync_title();
         app.check_focus_alive();
         // Expire a stale notification banner so the footer hints come back.
@@ -3869,6 +3875,10 @@ async fn event_loop(
 /// Suspend the TUI, attach to the lane's tmux window (the selected agent's, when several run
 /// side by side), then re-enter.
 async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) {
+    // Flush any input buffered just before the attach (e.g. a paste finished as the user hit attach)
+    // so it isn't silently dropped when the TUI suspends — attach requested outside the input burst
+    // skips the event-loop's post-burst flush.
+    app.flush_pending_input().await;
     let window = app.selected_window();
     let resp = app
         .client
