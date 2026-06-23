@@ -346,6 +346,10 @@ pub struct App {
     attach_target: Option<String>,
     /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
     input_suspended: Arc<AtomicBool>,
+    /// Set by the reader thread once it has actually entered its paused branch — so an attach waits
+    /// for a CONFIRMED handoff (the reader is no longer touching stdin) instead of a guessed sleep,
+    /// preventing the reader from fighting tmux for the terminal (split input / spurious detach).
+    reader_parked: Arc<AtomicBool>,
     /// Per-account Claude usage (from the daemon's `/usage` probe), shown in the bottom-right
     /// corner for the focused agent's account. Empty unless `usage_probe` is enabled.
     pub usage: Vec<repomon_core::agent::AccountUsage>,
@@ -469,6 +473,7 @@ impl App {
             attach_request: None,
             attach_target: None,
             input_suspended: Arc::new(AtomicBool::new(false)),
+            reader_parked: Arc::new(AtomicBool::new(false)),
             usage: Vec::new(),
             last_usage_fetch: None,
         }
@@ -1365,6 +1370,21 @@ impl App {
         self.selected_lane()
             .and_then(|l| l.agent_sessions.get(self.session_idx))
             .and_then(|s| s.tmux_window.clone())
+    }
+
+    /// Wait (bounded) for the stdin reader thread to confirm it has parked, so `tmux attach` gets
+    /// sole ownership of the terminal — a confirmed handoff instead of a guessed sleep, so the
+    /// reader can't keep reading stdin and split keystrokes with tmux (which corrupts the terminal
+    /// and can feed tmux a sequence it misreads as a detach key). Bounded (~400ms) so a reader
+    /// wedged in a blocking read can't hang the attach; a timeout is logged for diagnosis.
+    async fn await_reader_parked(&self) {
+        for _ in 0..40 {
+            if self.reader_parked.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tui_log("WARN reader did not park before attach; terminal handoff may be racy");
     }
 
     /// The usage account key of the agent the user is looking at — the selected lane's selected
@@ -3593,13 +3613,18 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     // don't fight tmux for the terminal — otherwise keystrokes get split and the session
     // misbehaves. Polling (rather than a blocking read) lets us check the flag.
     let suspended = app.input_suspended.clone();
+    let parked = app.reader_parked.clone();
     std::thread::spawn(move || {
         use ratatui::crossterm::event;
         loop {
             if suspended.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(40));
+                // Announce we're parked so an attach knows stdin is fully released to tmux, and
+                // poll the flag on a short interval so we resume promptly.
+                parked.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
+            parked.store(false, Ordering::Relaxed);
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
@@ -3910,7 +3935,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
     // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
     let _ = app.client.call("watcher.park", None).await;
-    tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
+    app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_mouse();
     ratatui::restore();
     tmux_attach(&target);
@@ -3937,7 +3962,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.input_suspended.store(true, Ordering::Relaxed);
     // Signal the park so the daemon covers desktop popups immediately (see do_attach).
     let _ = app.client.call("watcher.park", None).await;
-    tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
+    app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_mouse();
     ratatui::restore();
     tmux_attach(target);
@@ -3960,10 +3985,34 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
 /// otherwise tmux refuses to attach ("sessions should be nested with care").
 fn tmux_attach(target: &str) {
     let socket = target.split(':').next().unwrap_or("repomon");
-    let _ = std::process::Command::new("tmux")
+    tui_log(&format!("attach -> {target}"));
+    let start = std::time::Instant::now();
+    let status = std::process::Command::new("tmux")
         .args(["-L", socket, "attach", "-t", target])
         .env_remove("TMUX")
         .status();
+    // Log when (and how) the attach ended so an *unexpected* detach is traceable after the fact:
+    // a very short duration / non-zero exit points at a failed attach or an external detach.
+    tui_log(&format!(
+        "attach <- {target} after {:.1}s status={:?}",
+        start.elapsed().as_secs_f32(),
+        status.as_ref().ok().map(|s| s.code())
+    ));
+}
+
+/// Append a timestamped diagnostic line to the TUI log. The TUI can't use tracing/stderr (ratatui
+/// owns the screen), so attach/detach diagnostics go straight to a file next to the daemon log.
+fn tui_log(line: &str) {
+    use std::io::Write;
+    let dir = repomon_core::service::log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("repomon-tui.log"))
+    {
+        let _ = writeln!(f, "{} {line}", chrono::Utc::now().to_rfc3339());
+    }
 }
 
 /// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
