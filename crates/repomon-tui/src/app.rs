@@ -4004,6 +4004,14 @@ fn tmux_attach(target: &str) {
         start.elapsed().as_secs_f32(),
         status.as_ref().ok().map(|s| s.code())
     ));
+    // On detach, tmux prints "[detached (from session …)]" to the PRIMARY screen (it just left its
+    // own alternate screen). repomon re-enters its alternate screen and hides it during use — but
+    // it resurfaces when repomon finally exits the alternate screen on quit. We're on the primary
+    // screen right now, so wipe it (clear + home) to leave a clean terminal behind on quit.
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b[H\x1b[2J");
+    let _ = out.flush();
 }
 
 /// Append a timestamped diagnostic line to the TUI log. The TUI can't use tracing/stderr (ratatui
