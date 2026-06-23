@@ -881,11 +881,13 @@ mod tests {
             write_transcript(&dir, &format!("{id}.jsonl"), &[line]);
         }
 
-        std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path());
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path()) };
         let all = summaries_for(cwd, Duration::hours(6), 8);
         let capped = summaries_for(cwd, Duration::hours(6), 2);
         let single = summary_for(cwd);
-        std::env::remove_var("REPOMON_CLAUDE_PROJECTS");
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::remove_var("REPOMON_CLAUDE_PROJECTS") };
 
         // Each concurrent session surfaces as its own entry, keyed by session id.
         assert_eq!(all.len(), 3, "all three sessions surface");

@@ -433,8 +433,10 @@ mod tests {
 
     #[test]
     fn data_dir_respects_env_override() {
-        std::env::set_var("REPOMON_DATA_DIR", "/tmp/repomon-data-override-test");
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::set_var("REPOMON_DATA_DIR", "/tmp/repomon-data-override-test") };
         assert_eq!(data_dir(), PathBuf::from("/tmp/repomon-data-override-test"));
-        std::env::remove_var("REPOMON_DATA_DIR");
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::remove_var("REPOMON_DATA_DIR") };
     }
 }

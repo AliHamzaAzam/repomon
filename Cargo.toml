@@ -8,7 +8,7 @@ members = [
 
 [workspace.package]
 version = "0.2.6"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 authors = ["Ali Hamza Azam"]
 rust-version = "1.86"
