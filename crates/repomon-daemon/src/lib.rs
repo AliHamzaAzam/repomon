@@ -46,7 +46,7 @@ pub struct Ctx {
     /// Which agent window the focused lane should stream, when the TUI has a specific session
     /// selected (Tab in Focus/Split). Lanes not named here stream their first slot.
     pub viewport_focus: Mutex<Option<(LaneId, String)>>,
-    /// Cache of how many live `claude` processes have each working dir (ps/lsof, ~2s TTL), so
+    /// Cache of how many live `claude` processes have each working dir (ps/lsof, 10s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
     pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
     /// Per-worktree "highest count seen recently" used to make [`live_cwds`] sticky-high: a single
@@ -92,6 +92,14 @@ pub struct Ctx {
     /// `list_windows` fails transiently (fork/connection fault under load), so a single bad
     /// snapshot doesn't drop every managed agent — see `rpc::resolve_windows`.
     pub last_good_windows: Mutex<Vec<String>>,
+    /// Consecutive empty `list_windows` results. A sudden total-empty is usually a tmux server
+    /// bounce, not every agent exiting at once — `resolve_windows` reuses last-good until this
+    /// reaches the confirm threshold, so a server restart doesn't mass-fire Idle.
+    pub window_empty_misses: Mutex<u8>,
+    /// Last successful per-worktree transcript scan, keyed by worktree path. Reused for one overlay
+    /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
+    /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
+    pub last_good_sessions: Mutex<HashMap<PathBuf, Vec<repomon_core::agent::TranscriptSummary>>>,
     pub shutdown: Notify,
 }
 
@@ -141,6 +149,8 @@ impl Ctx {
             input_seen: Mutex::new(HashMap::new()),
             last_managed_windows: Mutex::new(HashSet::new()),
             last_good_windows: Mutex::new(Vec::new()),
+            window_empty_misses: Mutex::new(0),
+            last_good_sessions: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
     }
