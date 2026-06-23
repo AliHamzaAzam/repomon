@@ -1608,7 +1608,10 @@ fn fleet_lines(
         let selected = ri == app.selected;
         let mut line = match row.session {
             None => lane_row(lane, now, app, selected),
-            Some(s) => agent_subrow(&lane.agent_sessions[s], app, selected),
+            Some(s) => match lane.agent_sessions.get(s) {
+                Some(sess) => agent_subrow(sess, app, selected),
+                None => continue, // index stale (lane list changed mid-frame) — skip defensively
+            },
         };
         if !selected && row.session.is_none() && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
@@ -1689,7 +1692,10 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
                     Line::from(spans)
                 }
             }
-            Some(s) => agent_subrow(&lane.agent_sessions[s], app, selected),
+            Some(s) => match lane.agent_sessions.get(s) {
+                Some(sess) => agent_subrow(sess, app, selected),
+                None => continue, // index stale (lane list changed mid-frame) — skip defensively
+            },
         };
         if !selected && row.session.is_none() && app.hover_lane == Some(lane.id) {
             line = line.style(app.theme.hover());
