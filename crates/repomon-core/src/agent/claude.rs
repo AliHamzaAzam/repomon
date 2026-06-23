@@ -164,7 +164,12 @@ pub fn agent_variants() -> Vec<(String, String)> {
                     .unwrap_or_else(|| "claude".to_string());
                 (
                     label,
-                    format!("CLAUDE_CONFIG_DIR={} claude", base.display()),
+                    // Runs via `sh -c` (tmux new-window), so quote the path — a config dir with a
+                    // space or shell metacharacter must not break the `VAR=val cmd` parse or inject.
+                    format!(
+                        "CLAUDE_CONFIG_DIR={} claude",
+                        super::shell_quote(&base.display().to_string())
+                    ),
                 )
             }
         })

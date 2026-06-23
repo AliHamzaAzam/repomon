@@ -24,6 +24,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0004_session_labels.sql"),
 ];
 
+/// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
+/// oldest are evicted, so a misbehaving/abusive client can't grow the table (or per-alert APNs
+/// fan-out) without bound.
+const MAX_DEVICES: usize = 32;
+
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
 /// A handle to the store. Cheap to clone; all clones talk to the same worker thread.
@@ -314,6 +319,13 @@ impl Store {
                 "INSERT INTO devices (device_token, registered_at) VALUES (?1, ?2)
                  ON CONFLICT(device_token) DO UPDATE SET registered_at = ?2",
                 params![token, Utc::now().to_rfc3339()],
+            )?;
+            // Keep only the newest MAX_DEVICES tokens so an abusive client can't grow the table
+            // (or the per-alert APNs fan-out) without bound.
+            c.execute(
+                "DELETE FROM devices WHERE device_token NOT IN
+                 (SELECT device_token FROM devices ORDER BY registered_at DESC LIMIT ?1)",
+                params![MAX_DEVICES as i64],
             )?;
             Ok(())
         })
@@ -707,6 +719,20 @@ mod tests {
     async fn migrates_and_starts_empty() {
         let s = store().await;
         assert!(s.list_repos().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_device_caps_to_newest() {
+        let s = store().await;
+        for i in 0..(MAX_DEVICES + 5) {
+            // registered_at is set to now(); distinct tokens, newest registered last.
+            s.register_device(format!("token-{i:03}")).await.unwrap();
+        }
+        let devices = s.list_devices().await.unwrap();
+        assert_eq!(devices.len(), MAX_DEVICES, "device count is capped");
+        // The earliest tokens were evicted; the most recent survive.
+        assert!(devices.iter().any(|t| t == &format!("token-{:03}", MAX_DEVICES + 4)));
+        assert!(!devices.iter().any(|t| t == "token-000"));
     }
 
     #[tokio::test]

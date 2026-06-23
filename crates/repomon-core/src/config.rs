@@ -15,6 +15,14 @@ use crate::error::{Error, Result};
 
 pub const DEFAULT_WORKTREE_TEMPLATE: &str = "~/code/{repo}-wt/{branch}";
 pub const DEFAULT_TMUX_SESSION: &str = "repomon";
+
+/// A tmux session name is safe to use as the `-L <label>` socket and in `session:window` targets.
+/// It's injected into many tmux command args, so restrict it to `[A-Za-z0-9_-]` — a name with a
+/// `:`, `=`, whitespace, or other metachar would corrupt target resolution (`exact_target` builds
+/// `{session}:={window}`). Empty is invalid.
+pub fn valid_tmux_session(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
 pub const DEFAULT_TIME_FORMAT: &str = "%H:%M %a %d %b %Y";
 
 /// Top-level user configuration.
@@ -175,7 +183,20 @@ impl Config {
     /// Load config from a specific file (used by tests; [`load`] wraps this).
     pub fn load_from(path: &std::path::Path) -> Result<Config> {
         match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).map_err(|e| Error::Config(e.to_string())),
+            Ok(s) => {
+                let mut cfg: Config = toml::from_str(&s).map_err(|e| Error::Config(e.to_string()))?;
+                // A malformed tmux session name would corrupt every tmux target it's spliced into;
+                // reset to the default rather than fail the daemon over a bad config char.
+                if !valid_tmux_session(&cfg.tmux_session) {
+                    tracing::warn!(
+                        "invalid tmux_session {:?} in config; using {:?}",
+                        cfg.tmux_session,
+                        DEFAULT_TMUX_SESSION
+                    );
+                    cfg.tmux_session = DEFAULT_TMUX_SESSION.to_string();
+                }
+                Ok(cfg)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(Error::Io(e)),
         }
@@ -305,6 +326,26 @@ fn default_socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_session_name_validation() {
+        assert!(valid_tmux_session("repomon"));
+        assert!(valid_tmux_session("work-2_b"));
+        assert!(!valid_tmux_session("")); // empty
+        assert!(!valid_tmux_session("a:b")); // colon corrupts session:window targets
+        assert!(!valid_tmux_session("a b")); // whitespace
+        assert!(!valid_tmux_session("a=b"));
+        assert!(!valid_tmux_session("a;rm -rf"));
+    }
+
+    #[test]
+    fn invalid_tmux_session_falls_back_to_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "tmux_session = \"bad:name\"\n").unwrap();
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!(c.tmux_session, DEFAULT_TMUX_SESSION);
+    }
 
     #[test]
     fn defaults_are_sane() {
