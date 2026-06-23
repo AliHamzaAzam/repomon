@@ -1221,22 +1221,37 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // All recently-active Claude sessions per worktree (one per transcript), so several
     // concurrent agents in one worktree each show up. Falls back to the generic monitor
     // (which also covers aider) when there's nothing recent from Claude.
-    let per_lane = tokio::task::spawn_blocking(move || {
+    let scan_paths = paths.clone();
+    let fresh_sessions: Result<Vec<Vec<_>>, String> = match tokio::task::spawn_blocking(move || {
         let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
         paths
             .iter()
             .map(|p| {
-                let recent = agent::claude::summaries_for(p, within, MAX_SESSIONS_PER_LANE);
-                if recent.is_empty() {
-                    agent::summary_for(p).into_iter().collect()
-                } else {
-                    recent
-                }
+                // Catch a panic in one lane's transcript parse so it can't empty the whole batch
+                // (the outer join would otherwise return `Err` and drop every lane's sessions).
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let recent = agent::claude::summaries_for(p, within, MAX_SESSIONS_PER_LANE);
+                    if recent.is_empty() {
+                        agent::summary_for(p).into_iter().collect()
+                    } else {
+                        recent
+                    }
+                }))
+                .unwrap_or_default()
             })
             .collect::<Vec<Vec<_>>>()
     })
     .await
-    .unwrap_or_default();
+    {
+        Ok(v) => Ok(v),
+        Err(e) => Err(e.to_string()),
+    };
+    // On a scan-task failure, reuse the last-good per-worktree sessions rather than collapsing
+    // every lane to empty (which detaches the TUI and fires stale notifications).
+    let per_lane = {
+        let mut last_good = ctx.last_good_sessions.lock().await;
+        reuse_per_path_on_failure(fresh_sessions, &scan_paths, &mut last_good)
+    };
 
     let metas = ctx.store.list_lane_meta().await.unwrap_or_default();
     // User-set session labels (keyed by transcript session_id), overlaid below.
@@ -1257,7 +1272,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     }
     let windows = {
         let mut last_good = ctx.last_good_windows.lock().await;
-        resolve_windows(fresh, &mut last_good)
+        let mut empty_misses = ctx.window_empty_misses.lock().await;
+        resolve_windows(fresh, &mut last_good, &mut empty_misses)
     };
     // If a managed (`lane-…`) window vanished since the last overlay — an agent `/exit`ed or was
     // stopped — the cached live-process count is now stale-high and would keep the dead session in
@@ -1300,14 +1316,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // running (a `/exit`ed one leaves a recent transcript but no process). But never drop a
         // transcript that pairs to a live managed window — keep at least one per window — so a
         // freshly-spawned second agent isn't hidden for up to ~10s by the cached process count.
-        if let Some(alive) = live.as_ref().map(|m| {
-            let key = lane
-                .worktree
-                .path
-                .canonicalize()
-                .unwrap_or_else(|_| lane.worktree.path.clone());
-            m.get(&key).copied().unwrap_or(0)
-        }) {
+        let alive = live.as_ref().and_then(|m| {
+            // A canonicalize failure (worktree path momentarily unreadable) must NOT degrade to a
+            // key miss → count 0 → `truncate(0)` that drops the lane's sessions. Skip filtering
+            // this tick instead (return None), like the probe-unavailable (`live == None`) path.
+            let key = lane.worktree.path.canonicalize().ok()?;
+            Some(m.get(&key).copied().unwrap_or(0))
+        });
+        if let Some(alive) = alive {
             summaries.truncate(alive.max(managed_n)); // sorted newest-first
         }
         if !summaries.is_empty() {
@@ -1669,13 +1685,60 @@ fn valid_session_id(s: &str) -> bool {
 /// `tmux` failing to spawn under load — distinct from a genuinely empty server), reuse the
 /// last-good list so a single bad snapshot doesn't momentarily drop every managed agent — which
 /// would flip sessions to `external`, detach the focused TUI, and fire stale notifications.
-fn resolve_windows(fresh: Result<Vec<String>, String>, last_good: &mut Vec<String>) -> Vec<String> {
+fn resolve_windows(
+    fresh: Result<Vec<String>, String>,
+    last_good: &mut Vec<String>,
+    empty_misses: &mut u8,
+) -> Vec<String> {
     match fresh {
+        // Transient probe fault (fork/connection): reuse last-good; don't touch the empty counter.
+        Err(_) => last_good.clone(),
+        // A sudden total vanish of every window is usually a tmux server bounce (e.g. the user ran
+        // `tmux kill-server`), not all agents exiting at once. Treat the first empties as a blip —
+        // reuse last-good — and accept the empty only after EMPTY_WINDOWS_CONFIRM in a row, so a
+        // bounce doesn't drop every managed session for a tick (which detaches the TUI and fires a
+        // wave of stale Idle notifications).
+        Ok(w) if w.is_empty() && !last_good.is_empty() => {
+            *empty_misses = empty_misses.saturating_add(1);
+            if *empty_misses >= EMPTY_WINDOWS_CONFIRM {
+                last_good.clear();
+                Vec::new()
+            } else {
+                last_good.clone()
+            }
+        }
         Ok(w) => {
+            *empty_misses = 0;
             *last_good = w.clone();
             w
         }
-        Err(_) => last_good.clone(),
+    }
+}
+
+/// Consecutive empty `list_windows` results before we believe the tmux server genuinely has no
+/// windows (vs. a transient bounce).
+const EMPTY_WINDOWS_CONFIRM: u8 = 2;
+
+/// Per-path analogue of [`resolve_windows`] for the transcript scan: on success, remember each
+/// path's result as last-good; on a scan-task failure (a join error / panic that escaped the
+/// per-lane `catch_unwind`), reuse the last-good per path so the whole fleet doesn't collapse to
+/// empty for that tick. Unknown paths fall back to empty.
+fn reuse_per_path_on_failure<T: Clone>(
+    fresh: Result<Vec<Vec<T>>, String>,
+    paths: &[std::path::PathBuf],
+    last_good: &mut HashMap<std::path::PathBuf, Vec<T>>,
+) -> Vec<Vec<T>> {
+    match fresh {
+        Ok(per_lane) => {
+            for (p, v) in paths.iter().zip(&per_lane) {
+                last_good.insert(p.clone(), v.clone());
+            }
+            per_lane
+        }
+        Err(_) => paths
+            .iter()
+            .map(|p| last_good.get(p).cloned().unwrap_or_default())
+            .collect(),
     }
 }
 
@@ -1711,8 +1774,8 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     Some(counts)
 }
 
-/// Cached [`live_claude_cwds`] with a ~2s TTL, so frequent `lane.list` calls don't hammer
-/// `lsof`.
+/// Cached [`live_claude_cwds`] with a 10s TTL (plus a 30s sticky-high grace against undercounts),
+/// so frequent `lane.list` calls don't hammer `lsof`.
 async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
     {
         let cache = ctx.live_cwds.lock().await;
@@ -1861,21 +1924,62 @@ mod tests {
     #[test]
     fn resolve_windows_reuses_last_good_only_on_probe_failure() {
         let mut last: Vec<String> = vec![];
+        let mut misses = 0u8;
         // A successful probe is returned verbatim and remembered as last-good.
         assert_eq!(
-            resolve_windows(Ok(vec!["lane-1".into(), "lane-2".into()]), &mut last),
+            resolve_windows(Ok(vec!["lane-1".into(), "lane-2".into()]), &mut last, &mut misses),
             vec!["lane-1", "lane-2"]
         );
         assert_eq!(last, vec!["lane-1", "lane-2"]);
         // A probe FAILURE reuses last-good instead of collapsing to empty (no spurious drop).
         assert_eq!(
-            resolve_windows(Err("tmux spawn failed".into()), &mut last),
+            resolve_windows(Err("tmux spawn failed".into()), &mut last, &mut misses),
             vec!["lane-1", "lane-2"]
         );
         assert_eq!(last, vec!["lane-1", "lane-2"]); // unchanged by failure
-        // A genuinely empty SUCCESS still clears (every agent really exited).
-        assert_eq!(resolve_windows(Ok(vec![]), &mut last), Vec::<String>::new());
+    }
+
+    #[test]
+    fn reuse_per_path_on_failure_keeps_last_good_per_path() {
+        use std::path::PathBuf;
+        let (a, b) = (PathBuf::from("/a"), PathBuf::from("/b"));
+        let paths = vec![a.clone(), b.clone()];
+        let mut lg: HashMap<PathBuf, Vec<i32>> = HashMap::new();
+        // Success caches each path's result and returns it verbatim.
+        assert_eq!(
+            reuse_per_path_on_failure(Ok(vec![vec![1, 2], vec![3]]), &paths, &mut lg),
+            vec![vec![1, 2], vec![3]]
+        );
+        assert_eq!(lg.get(&a), Some(&vec![1, 2]));
+        // A scan-task failure reuses the cached per-path results instead of collapsing to empty.
+        assert_eq!(
+            reuse_per_path_on_failure(Err("scan panicked".into()), &paths, &mut lg),
+            vec![vec![1, 2], vec![3]]
+        );
+        // A path with no cached value falls back to empty (not a panic).
+        assert_eq!(
+            reuse_per_path_on_failure::<i32>(Err("x".into()), &[PathBuf::from("/c")], &mut lg),
+            vec![Vec::<i32>::new()]
+        );
+    }
+
+    #[test]
+    fn resolve_windows_rides_out_a_one_tick_total_vanish() {
+        // last-good is non-empty; a single empty probe is treated as a likely tmux server bounce.
+        let mut last: Vec<String> = vec!["lane-1".into()];
+        let mut misses = 0u8;
+        // First empty: reuse last-good (don't drop everyone for a blip).
+        assert_eq!(
+            resolve_windows(Ok(vec![]), &mut last, &mut misses),
+            vec!["lane-1"]
+        );
+        assert_eq!(misses, 1);
+        // Sustained empty (EMPTY_WINDOWS_CONFIRM in a row): accept it — agents really are gone.
+        assert_eq!(resolve_windows(Ok(vec![]), &mut last, &mut misses), Vec::<String>::new());
         assert!(last.is_empty());
+        // A subsequent successful probe resets the counter.
+        resolve_windows(Ok(vec!["lane-9".into()]), &mut last, &mut misses);
+        assert_eq!(misses, 0);
     }
 
     #[test]
