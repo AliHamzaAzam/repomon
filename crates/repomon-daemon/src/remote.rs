@@ -7,33 +7,92 @@
 //! connection state. Bind this to a private address — typically the machine's Tailscale IP —
 //! never the open internet.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use repomon_core::protocol::{Request, Response, RpcError};
+use repomon_core::protocol::{Request, Response, RpcError, MAX_FRAME_BYTES};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HsRequest, Response as HsResponse,
 };
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{rpc, Ctx};
+
+/// Max concurrent remote connections — a coarse DoS backstop (auth precedes the upgrade, so this
+/// only bounds authenticated clients/reconnect churn).
+const MAX_REMOTE_CONNS: usize = 64;
+
+/// WebSocket frame/message limits for the bridge. Matches the Unix socket's `MAX_FRAME_BYTES` so a
+/// large `agent.capture` isn't truncated, but is set explicitly rather than left to tungstenite's
+/// default (which gave the remote path no stated bound).
+fn remote_ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_FRAME_BYTES))
+        .max_frame_size(Some(MAX_FRAME_BYTES))
+}
+
+/// Decrements the live-connection counter when a handler task ends.
+struct ConnGuard(Arc<AtomicUsize>);
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Methods the remote WebSocket bridge may invoke. **Default-deny**: anything not listed here
+/// (including any future RPC) is rejected over the network, so the bridge can't be used to manage
+/// the host. Allows read + interaction with *existing* agents and the companion's own push
+/// registration; blocks host-management (repo/lane/worktree mutation, agent spawn/adopt/stop,
+/// config writes, terminal/filesystem access, daemon shutdown) and secret-exposing reads
+/// (`config.get` can carry the remote token). The local Unix socket is unaffected.
+fn remote_method_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        // health check
+        "ping"
+        // reads
+        | "repo.list" | "lane.list" | "lane.get"
+        | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
+        | "agent.capture" | "agent.transcript"
+        | "usage.get" | "daemon.status"
+        // event stream + per-client streaming hint
+        | "subscribe" | "viewport.set"
+        // drive an existing agent
+        | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
+        | "agent.target" | "agent.resize"
+        // benign metadata
+        | "agent.pin" | "session.rename"
+        // companion self-registration for push
+        | "push.register" | "push.unregister"
+    )
+}
 
 /// Bind the WebSocket bridge and serve until shutdown is requested.
 pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     tracing::info!("remote bridge listening on ws://{bind}");
     let token = Arc::new(token);
+    let conns = Arc::new(AtomicUsize::new(0));
 
     loop {
         tokio::select! {
             _ = ctx.shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, addr)) => {
+                    // Reserve a slot; over the cap we drop the connection (guard decrements).
+                    let guard = ConnGuard(conns.clone());
+                    if conns.fetch_add(1, Ordering::Relaxed) >= MAX_REMOTE_CONNS {
+                        tracing::warn!("remote connection cap reached, dropping {addr}");
+                        continue; // `guard` drops here, undoing the increment
+                    }
                     let ctx = ctx.clone();
                     let token = token.clone();
                     tokio::spawn(async move {
+                        let _guard = guard;
                         if let Err(e) = handle_conn(ctx, stream, &token).await {
                             tracing::debug!("remote conn {addr}: {e}");
                         }
@@ -56,9 +115,12 @@ async fn handle_conn(
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     // Check the token during the handshake — an unauthorized client never completes the
     // upgrade and learns nothing but "401".
-    let ws =
-        tokio_tungstenite::accept_hdr_async(stream, |req: &HsRequest, resp| auth(req, resp, token))
-            .await?;
+    let ws = tokio_tungstenite::accept_hdr_async_with_config(
+        stream,
+        |req: &HsRequest, resp| auth(req, resp, token),
+        Some(remote_ws_config()),
+    )
+    .await?;
     let (mut sink, mut source) = ws.split();
 
     // Every connection holds an event receiver, but only forwards once subscribed —
@@ -88,13 +150,25 @@ async fn handle_conn(
                         continue;
                     }
                 };
-                if req.method == "subscribe" {
-                    forwarding = true;
-                }
                 let id = req.id;
-                let resp = match rpc::dispatch(&ctx, &req.method, req.params).await {
-                    Ok(value) => Response::ok(id, value),
-                    Err(err) => Response::err(id, err),
+                let resp = if remote_method_allowed(&req.method) {
+                    if req.method == "subscribe" {
+                        forwarding = true;
+                    }
+                    match rpc::dispatch(&ctx, &req.method, req.params).await {
+                        Ok(value) => Response::ok(id, value),
+                        Err(err) => Response::err(id, err),
+                    }
+                } else {
+                    // Default-deny: host-management RPCs aren't reachable over the network.
+                    tracing::warn!("remote bridge rejected method {:?}", req.method);
+                    Response::err(
+                        id,
+                        RpcError::new(
+                            -32601,
+                            format!("method '{}' not permitted over remote bridge", req.method),
+                        ),
+                    )
                 };
                 send_json(&mut sink, &resp).await?;
             }
@@ -177,5 +251,28 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secrex"));
         assert!(!constant_time_eq(b"secret", b"secret1"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn remote_allowlist_permits_read_and_interaction_only() {
+        // Read + interaction with existing agents, and the companion's own push registration.
+        for m in [
+            "ping", "repo.list",
+            "lane.list", "lane.get", "commit.recent", "agent.capture", "agent.transcript",
+            "agent.send_input", "agent.signal", "agent.key", "agent.scroll", "agent.target",
+            "agent.resize", "agent.pin", "subscribe", "viewport.set", "usage.get",
+            "daemon.status", "push.register", "push.unregister", "session.rename",
+        ] {
+            assert!(remote_method_allowed(m), "{m} should be allowed");
+        }
+        // Host-management, dangerous, and secret-exposing methods are blocked over the bridge.
+        for m in [
+            "agent.adopt", "agent.spawn", "agent.stop", "repo.add", "repo.remove", "repo.discover",
+            "lane.create", "lane.delete", "lane.merge", "lane.focus", "config.get", "config.set",
+            "terminal.open", "fs.browse", "daemon.shutdown", "agent.add", "agent.remove",
+            "agent.detect", "watcher.park", "some.future.method",
+        ] {
+            assert!(!remote_method_allowed(m), "{m} must be blocked");
+        }
     }
 }

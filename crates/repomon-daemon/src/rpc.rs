@@ -760,6 +760,13 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 let cfg = ctx.config.read().await;
                 (cfg.default_agent.clone(), cfg.agents.clone())
             };
+            // `command` is ultimately run via `sh -c` by tmux, so a session id that isn't a plain
+            // transcript id (UUID / `[A-Za-z0-9_-]`) could inject shell. Reject it up front.
+            if let Some(sid) = &p.session_id {
+                if !valid_session_id(sid) {
+                    return Err(RpcError::invalid_params("invalid session_id"));
+                }
+            }
             let detect = path.clone();
             let session_id = p.session_id.clone();
             let command = tokio::task::spawn_blocking(move || {
@@ -767,7 +774,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 let (config_dir, resume) = match &session_id {
                     Some(sid) => (
                         agent::claude::config_base_for_session(&detect, sid).flatten(),
-                        format!("--resume {sid}"),
+                        // Validated above; quote anyway as defense-in-depth.
+                        format!("--resume {}", agent::tmux::shell_quote(sid)),
                     ),
                     None => (
                         agent::claude::summary_for(&detect).and_then(|s| s.config_dir),
@@ -1648,6 +1656,14 @@ fn placeholder_window_index(shown: usize, managed_n: usize) -> Option<usize> {
     (managed_n > shown).then(|| managed_n - 1)
 }
 
+/// A Claude session id is safe to interpolate into a resume command (`claude --resume <id>`).
+/// Transcript ids are UUIDs / `[A-Za-z0-9_-]`; anything else (whitespace, `;`, `$`, quotes, `|`,
+/// backticks…) is rejected so `agent.adopt` can't be turned into shell injection — the command is
+/// ultimately run via `sh -c` by tmux. Empty is invalid.
+fn valid_session_id(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Pick the tmux window list for this overlay tick. On a successful probe, return the fresh list
 /// and remember it as last-good. On a probe *failure* (a transient fork/connection fault, e.g.
 /// `tmux` failing to spawn under load — distinct from a genuinely empty server), reuse the
@@ -1826,6 +1842,21 @@ async fn commits_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_id_validation_blocks_injection() {
+        // Real transcript ids pass.
+        assert!(valid_session_id("44ba81d8-be2c-4f0b-b9b3-c228fa53cc79"));
+        assert!(valid_session_id("abc_123-DEF"));
+        // Anything that could break out of `claude --resume <id>` under `sh -c` is rejected.
+        assert!(!valid_session_id("")); // empty
+        assert!(!valid_session_id("x; touch /tmp/pwned"));
+        assert!(!valid_session_id("$(id)"));
+        assert!(!valid_session_id("a`whoami`"));
+        assert!(!valid_session_id("a b")); // whitespace
+        assert!(!valid_session_id("a|b"));
+        assert!(!valid_session_id("../../etc"));
+    }
 
     #[test]
     fn resolve_windows_reuses_last_good_only_on_probe_failure() {

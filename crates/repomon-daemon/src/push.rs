@@ -13,6 +13,7 @@ use a2::{
     Client, ClientConfig, CollapseId, DefaultNotificationBuilder, Endpoint, ErrorReason,
     NotificationBuilder, NotificationOptions, Priority,
 };
+use futures::StreamExt;
 use repomon_core::config::PushConfig;
 use serde_json::Value;
 
@@ -134,17 +135,25 @@ pub async fn send_all(ctx: &Arc<Ctx>, title: &str, body: &str, category: &str, d
     let Some(push) = Push::from_config(&cfg) else {
         return;
     };
-    for token in devices {
-        match push.send(&token, title, body, category, data).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(
-                    "push: evicting dead device token {}…",
-                    &token[..8.min(token.len())]
-                );
-                let _ = ctx.store.unregister_device(token).await;
+    // Send concurrently (bounded) rather than serially, so N devices don't add N round-trips of
+    // latency to every alert; the device cap keeps N small regardless.
+    const SEND_CONCURRENCY: usize = 8;
+    futures::stream::iter(devices)
+        .for_each_concurrent(SEND_CONCURRENCY, |token| {
+            let push = &push;
+            async move {
+                match push.send(&token, title, body, category, data).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::info!(
+                            "push: evicting dead device token {}…",
+                            &token[..8.min(token.len())]
+                        );
+                        let _ = ctx.store.unregister_device(token).await;
+                    }
+                    Err(e) => tracing::warn!("push: send failed: {e}"),
+                }
             }
-            Err(e) => tracing::warn!("push: send failed: {e}"),
-        }
-    }
+        })
+        .await;
 }
