@@ -1488,6 +1488,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 prompts[i] = p;
             }
         }
+        // Prune the sniff cache so it can't grow without bound — every window name ever sniffed
+        // would otherwise leak an entry. Drop any window no longer present in the current tmux set,
+        // and any whose result is older than the longest sniff TTL (it would be re-captured anyway).
+        {
+            let live: std::collections::HashSet<&str> = windows.iter().map(String::as_str).collect();
+            let mut cache = ctx.prompt_cache.lock().await;
+            cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
+        }
         for ((li, si, _, _), found) in candidates.into_iter().zip(prompts) {
             if let Some(summary) = found {
                 let s = &mut lanes[li].agent_sessions[si];

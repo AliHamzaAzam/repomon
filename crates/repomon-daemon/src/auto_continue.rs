@@ -27,6 +27,11 @@ const UNKNOWN_RETRY_MIN: i64 = 20; // coarse retry when no reset time is known (
 const GIVE_UP_AFTER_HOURS: i64 = 6; // stop this long after first detecting the pause (>5h window)
 const SEND_COOLDOWN_SECS: i64 = 90; // suppress re-detect of the stale on-screen message
 const RESET_BUFFER_SECS: i64 = 60; // resume a little after the stated reset, never before
+// Hard ceiling on a single lane's pane capture. The per-lane scan is serialized, so without a
+// timeout one wedged tmux pane (a hung tmux server, a stuck `capture-pane`) would freeze
+// auto-continue for *every* lane. On a timeout we skip that lane this tick and move on; the
+// orphaned blocking capture is left to finish on its own. Mirrors `usage_watch`'s PROBE_TIMEOUT.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 // Consecutive ticks with no limit message before we believe the pause is really gone. The
 // detection is a pane screen-scrape (`detect_usage_limit`) that misfires for a tick when the
 // menu redraws or scrolls; clearing on a single miss flips the public status RateLimited→running
@@ -150,22 +155,27 @@ fn decide(
     }
 }
 
-/// Lane ids that currently have a managed agent window (`lane-<id>`).
+/// Lane ids that currently have a managed agent window. Uses [`TmuxRuntime::lane_id_of`] so slot
+/// windows (`lane-7-2`, `lane-7-3`, …) count too — a naive `strip_prefix("lane-").parse()` drops
+/// them, so a rate-limited agent in slot 2+ would never auto-resume. A lane with several slots
+/// yields the same id from each window, so we dedup down to one entry per lane.
 fn managed_lanes(tmux: &TmuxRuntime) -> Vec<LaneId> {
-    tmux.list_windows()
+    let mut lanes: Vec<LaneId> = tmux
+        .list_windows()
         .unwrap_or_default()
         .iter()
-        .filter_map(|w| {
-            w.strip_prefix("lane-")
-                .and_then(|s| s.parse::<LaneId>().ok())
-        })
-        .collect()
+        .filter_map(|w| TmuxRuntime::lane_id_of(w))
+        .collect();
+    lanes.sort_unstable();
+    lanes.dedup();
+    lanes
 }
 
 /// Background loop: scan managed agents and auto-continue any paused on a usage limit.
 pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
     let mut sched: HashMap<LaneId, Sched> = HashMap::new();
     let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
 
@@ -190,11 +200,18 @@ pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
 
         for lane in lanes {
             let tmuxc = ctx.tmux.clone();
-            let pane =
-                match tokio::task::spawn_blocking(move || tmuxc.capture(lane, Some(120))).await {
-                    Ok(Ok(p)) => p,
-                    _ => continue,
-                };
+            let capture = tokio::task::spawn_blocking(move || tmuxc.capture(lane, Some(120)));
+            // Bound the capture so one wedged pane can't freeze the serialized per-lane scan and
+            // stall auto-continue for every other lane. On timeout (or any error) skip this lane
+            // this tick and try again next time.
+            let pane = match tokio::time::timeout(CAPTURE_TIMEOUT, capture).await {
+                Ok(Ok(Ok(p))) => p,
+                Err(_) => {
+                    tracing::warn!("auto-continue capture for lane {lane} timed out; skipping");
+                    continue;
+                }
+                _ => continue,
+            };
             let detection = detect_usage_limit(&pane);
             let armed = global_on && !off.contains(&lane);
             // Track the absent-message streak so a single flaky capture doesn't read as a resume:
@@ -481,5 +498,35 @@ mod tests {
             decide(Some(&s), Some(&lim(None, Some(menu_at(0)))), true, now()),
             Action::Send
         );
+    }
+
+    /// The lane-id extraction `managed_lanes` runs over each window name: it must keep slot
+    /// windows (`lane-7-2`, …) — the old `strip_prefix("lane-").parse()` dropped them, so a
+    /// rate-limited agent in slot 2+ never auto-resumed — and collapse a lane's several slots to
+    /// one id. This mirrors `managed_lanes`'s body without forking tmux.
+    fn managed_ids_from(names: &[&str]) -> Vec<LaneId> {
+        let mut lanes: Vec<LaneId> = names
+            .iter()
+            .filter_map(|w| TmuxRuntime::lane_id_of(w))
+            .collect();
+        lanes.sort_unstable();
+        lanes.dedup();
+        lanes
+    }
+
+    #[test]
+    fn managed_lanes_includes_slot_windows() {
+        // lane 7 has only a slot-2 window (its slot-1 agent is gone): it must still be managed, so
+        // a rate-limit pause in that slot gets auto-continued. lane 3 has both slots → one id.
+        // Non-lane windows (terminals, the usage probe) and malformed names are ignored.
+        let names = [
+            "lane-3",
+            "lane-3-2",
+            "lane-7-2",
+            "term-1",
+            "usage-probe-work",
+            "lane-",
+        ];
+        assert_eq!(managed_ids_from(&names), vec![3, 7]);
     }
 }

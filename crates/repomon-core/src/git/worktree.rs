@@ -117,32 +117,57 @@ pub fn add(
     create_branch: bool,
 ) -> Result<()> {
     let new = new_path.to_string_lossy();
+    let args = add_args(&new, branch, source, create_branch);
+    run(repo_path, &args)?;
+    Ok(())
+}
+
+/// Build the `git worktree add` arg vector. A `--` separates options from
+/// positionals so a branch/path that looks like an option (e.g. `--foo`) is
+/// never parsed as a flag. `-b <branch>` is an option, so it stays before the
+/// separator.
+fn add_args<'a>(
+    new: &'a str,
+    branch: &'a str,
+    source: Option<&'a str>,
+    create_branch: bool,
+) -> Vec<&'a str> {
     let mut args: Vec<&str> = vec!["worktree", "add"];
     if create_branch {
         args.push("-b");
         args.push(branch);
-        args.push(&new);
+        args.push("--");
+        args.push(new);
         if let Some(s) = source {
             args.push(s);
         }
     } else {
-        args.push(&new);
+        args.push("--");
+        args.push(new);
         args.push(branch);
     }
-    run(repo_path, &args)?;
-    Ok(())
+    args
 }
 
 /// Remove a worktree (`--force` for dirty/locked checkouts when asked).
 pub fn remove(repo_path: &Path, worktree_path: &Path, force: bool) -> Result<()> {
     let p = worktree_path.to_string_lossy();
+    let args = remove_args(&p, force);
+    run(repo_path, &args)?;
+    Ok(())
+}
+
+/// Build the `git worktree remove` arg vector. A `--` separates the (optional)
+/// `--force` flag from the positional path so a path that looks like an option
+/// is treated as a positional.
+fn remove_args(path: &str, force: bool) -> Vec<&str> {
     let mut args: Vec<&str> = vec!["worktree", "remove"];
     if force {
         args.push("--force");
     }
-    args.push(&p);
-    run(repo_path, &args)?;
-    Ok(())
+    args.push("--");
+    args.push(path);
+    args
 }
 
 /// Prune stale worktree administrative entries.
@@ -210,6 +235,51 @@ bare
 
         assert!(e[3].bare);
         assert!(e[3].head.is_none());
+    }
+
+    #[test]
+    fn add_args_checkout_existing_separates_positionals() {
+        // No -b: `--` precedes the path and branch positionals.
+        assert_eq!(
+            add_args("/code/wt/foo", "feature/x", None, false),
+            ["worktree", "add", "--", "/code/wt/foo", "feature/x"]
+        );
+    }
+
+    #[test]
+    fn add_args_create_branch_keeps_flag_before_separator() {
+        // `-b <branch>` is an option, so it precedes `--`; path/source follow.
+        assert_eq!(
+            add_args("/code/wt/foo", "feature/x", Some("origin/main"), true),
+            ["worktree", "add", "-b", "feature/x", "--", "/code/wt/foo", "origin/main"]
+        );
+        // Without a source the trailing positional is simply omitted.
+        assert_eq!(
+            add_args("/code/wt/foo", "feature/x", None, true),
+            ["worktree", "add", "-b", "feature/x", "--", "/code/wt/foo"]
+        );
+    }
+
+    #[test]
+    fn add_args_treats_option_like_path_as_positional() {
+        // A path/branch that looks like a flag stays after `--`.
+        assert_eq!(
+            add_args("--force", "--bad-branch", None, false),
+            ["worktree", "add", "--", "--force", "--bad-branch"]
+        );
+    }
+
+    #[test]
+    fn remove_args_separates_positional() {
+        assert_eq!(
+            remove_args("/code/wt/foo", false),
+            ["worktree", "remove", "--", "/code/wt/foo"]
+        );
+        // `--force` is an option and precedes the `--` separator.
+        assert_eq!(
+            remove_args("--weird-path", true),
+            ["worktree", "remove", "--force", "--", "--weird-path"]
+        );
     }
 
     #[test]

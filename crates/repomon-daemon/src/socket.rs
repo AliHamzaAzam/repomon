@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response, RpcError};
 use serde_json::Value;
@@ -15,6 +16,12 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
 use crate::{rpc, Ctx};
+
+/// How long the reader will wait on a silent socket before tearing itself down. A half-open client
+/// (gone away but still holding the fd) otherwise parks the reader task forever, leaking one task
+/// per reconnect. Generous — well past the TUI's 1s `lane.list` poll, so a healthy idle client is
+/// never dropped; the connection task simply re-accepts on the next request.
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bind the socket and serve until shutdown is requested.
 pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
@@ -50,9 +57,23 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
 
     // Reader task: read_frame to completion, hand frames to the connection task.
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(128);
+    let reader_ctx = ctx.clone();
     tokio::spawn(async move {
-        // Stops on clean EOF, read error, or when the connection task drops the receiver.
-        while let Ok(Some(frame)) = protocol::read_frame(&mut read_half).await {
+        // `read_frame` isn't cancel-safe, so we only ever drop it *between* whole frames: the
+        // select races the next frame against shutdown and an idle ceiling, both of which can only
+        // fire while we're parked waiting for the first byte of a frame, never mid-frame.
+        // Stops on clean EOF, read error, the connection task dropping the receiver, daemon
+        // shutdown, or a client that goes silent while holding the socket half-open (idle timeout)
+        // — without which a wedged client would park this task forever, leaking one per reconnect.
+        loop {
+            let frame = tokio::select! {
+                _ = reader_ctx.shutdown.notified() => break,
+                read = protocol::read_frame(&mut read_half) => match read {
+                    Ok(Some(frame)) => frame,
+                    _ => break, // clean EOF or read error
+                },
+                _ = tokio::time::sleep(READ_IDLE_TIMEOUT) => break,
+            };
             if in_tx.send(frame).await.is_err() {
                 break;
             }

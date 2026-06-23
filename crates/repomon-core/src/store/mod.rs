@@ -22,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0002_agent_kind.sql"),
     include_str!("../../migrations/0003_devices.sql"),
     include_str!("../../migrations/0004_session_labels.sql"),
+    include_str!("../../migrations/0005_lanes_autoincrement.sql"),
 ];
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
@@ -816,6 +817,47 @@ mod tests {
         let m = meta.iter().find(|m| m.id == l1).unwrap();
         assert!(m.pinned);
         assert_eq!(m.tmux_window.as_deref(), Some("repomon:3"));
+    }
+
+    #[tokio::test]
+    async fn lane_ids_are_not_reused_after_delete() {
+        // Regression for stale "lane-<id>" tmux windows: without AUTOINCREMENT (migration 0005)
+        // SQLite reuses a freed rowid, so a re-registered worktree could inherit a still-running
+        // window's id. Ids must be strictly monotonic instead.
+        let s = store().await;
+        let r = s
+            .add_repo(PathBuf::from("/code/a"), "a".into(), None)
+            .await
+            .unwrap();
+
+        // Create a few lanes; the last one has the highest id.
+        s.get_or_create_lane(r.id, "/code/a".into()).await.unwrap();
+        s.get_or_create_lane(r.id, "/code/a-wt/one".into())
+            .await
+            .unwrap();
+        let max_id = s
+            .get_or_create_lane(r.id, "/code/a-wt/two".into())
+            .await
+            .unwrap();
+
+        // Free the highest id (a worktree being removed).
+        s.call(move |c| {
+            c.execute("DELETE FROM lanes WHERE id = ?1", params![max_id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Re-register a worktree: the new lane must get an id ABOVE the freed one, never the
+        // reused freed id.
+        let new_id = s
+            .get_or_create_lane(r.id, "/code/a-wt/three".into())
+            .await
+            .unwrap();
+        assert!(
+            new_id > max_id,
+            "lane id {new_id} must exceed the freed max {max_id}, not be reused"
+        );
     }
 
     #[tokio::test]
