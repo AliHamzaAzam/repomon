@@ -1234,9 +1234,23 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // User-set session labels (keyed by transcript session_id), overlaid below.
     let labels = ctx.store.list_session_labels().await.unwrap_or_default();
     let tmux = ctx.tmux.clone();
-    let windows = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
-        .await
-        .unwrap_or_default();
+    // Distinguish a *failed* probe from a genuinely empty server: on failure reuse the last-good
+    // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
+    // every managed agent — that flips sessions to `external`, detaches the focused TUI, and fires
+    // stale notifications). A real empty result still clears.
+    let fresh: Result<Vec<String>, String> =
+        match tokio::task::spawn_blocking(move || tmux.list_windows()).await {
+            Ok(Ok(w)) => Ok(w),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+    if let Err(ref e) = fresh {
+        tracing::warn!("tmux list-windows failed; reusing last-good window set this overlay: {e}");
+    }
+    let windows = {
+        let mut last_good = ctx.last_good_windows.lock().await;
+        resolve_windows(fresh, &mut last_good)
+    };
     // If a managed (`lane-…`) window vanished since the last overlay — an agent `/exit`ed or was
     // stopped — the cached live-process count is now stale-high and would keep the dead session in
     // the lane's `×N` count for up to the cache TTL. Drop the cache so `live_cwds_cached` recomputes
@@ -1634,6 +1648,21 @@ fn placeholder_window_index(shown: usize, managed_n: usize) -> Option<usize> {
     (managed_n > shown).then(|| managed_n - 1)
 }
 
+/// Pick the tmux window list for this overlay tick. On a successful probe, return the fresh list
+/// and remember it as last-good. On a probe *failure* (a transient fork/connection fault, e.g.
+/// `tmux` failing to spawn under load — distinct from a genuinely empty server), reuse the
+/// last-good list so a single bad snapshot doesn't momentarily drop every managed agent — which
+/// would flip sessions to `external`, detach the focused TUI, and fire stale notifications.
+fn resolve_windows(fresh: Result<Vec<String>, String>, last_good: &mut Vec<String>) -> Vec<String> {
+    match fresh {
+        Ok(w) => {
+            *last_good = w.clone();
+            w
+        }
+        Err(_) => last_good.clone(),
+    }
+}
+
 /// How many live `claude` CLI processes have each working directory. claude doesn't hold its
 /// transcript open, but its cwd is the worktree it runs in — so the count per worktree bounds
 /// how many of that worktree's sessions are actually running. `None` if the probe couldn't
@@ -1679,10 +1708,16 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
             }
         }
     }
-    let map = tokio::task::spawn_blocking(live_claude_cwds)
-        .await
-        .ok()
-        .flatten()?;
+    let map = match tokio::task::spawn_blocking(live_claude_cwds).await.ok().flatten() {
+        Some(m) => m,
+        None => {
+            // The probe couldn't run (pgrep/lsof spawn failed, e.g. under load). Returning None
+            // means "don't filter" — callers keep all recent sessions rather than truncating to a
+            // bogus low count — but it was silent; log it so a recurring flap is visible.
+            tracing::warn!("live claude-process probe (pgrep/lsof) failed; not truncating sessions");
+            return None;
+        }
+    };
     // Sticky-high: a single `pgrep`/`lsof` undercount must not drop a session from the overlay
     // (then re-add it next probe), which churns the lane list and used to re-fire alerts. Hold each
     // worktree's highest recently-observed count for a short grace, so one bad sample can't hide a
@@ -1791,6 +1826,26 @@ async fn commits_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_windows_reuses_last_good_only_on_probe_failure() {
+        let mut last: Vec<String> = vec![];
+        // A successful probe is returned verbatim and remembered as last-good.
+        assert_eq!(
+            resolve_windows(Ok(vec!["lane-1".into(), "lane-2".into()]), &mut last),
+            vec!["lane-1", "lane-2"]
+        );
+        assert_eq!(last, vec!["lane-1", "lane-2"]);
+        // A probe FAILURE reuses last-good instead of collapsing to empty (no spurious drop).
+        assert_eq!(
+            resolve_windows(Err("tmux spawn failed".into()), &mut last),
+            vec!["lane-1", "lane-2"]
+        );
+        assert_eq!(last, vec!["lane-1", "lane-2"]); // unchanged by failure
+        // A genuinely empty SUCCESS still clears (every agent really exited).
+        assert_eq!(resolve_windows(Ok(vec![]), &mut last), Vec::<String>::new());
+        assert!(last.is_empty());
+    }
 
     #[test]
     fn placeholder_for_the_newest_unpaired_window() {

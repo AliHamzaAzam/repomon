@@ -184,6 +184,10 @@ pub struct App {
     /// True while Focus is driving a repomon-managed agent — so when it exits (`/exit` or
     /// stop) we can drop back out of Focus instead of staring at a dead pane.
     focus_managed: bool,
+    /// Consecutive lane refreshes the focused agent has been absent. Detach (Focus → Split) only
+    /// once it reaches [`FOCUS_DETACH_GRACE`], so a transient overlay flap that drops the session
+    /// for a refresh or two doesn't kick the user out of a still-running agent.
+    focus_missing_ticks: u8,
     /// Whether repomon captures the mouse (for scroll-wheel nav). When off, the terminal owns
     /// the mouse so you can drag-select and copy the rendered output natively.
     pub mouse_on: bool,
@@ -374,6 +378,7 @@ impl App {
             output: HashMap::new(),
             focus_insert: false,
             focus_managed: false,
+            focus_missing_ticks: 0,
             // Mouse captured so the wheel scrolls the agent pane and drag-selects copy to the
             // clipboard. `y` releases it for native terminal selection/scroll if preferred.
             mouse_on: true,
@@ -525,6 +530,17 @@ impl App {
                 self.sort_lanes();
                 if let Some(id) = keep {
                     self.select_lane_session(id, keep_ref);
+                }
+                // Track how many consecutive refreshes the focused agent has been missing, so a
+                // transient overlay flap (one bad snapshot) doesn't detach the user — only a
+                // sustained absence does. Counted here (per data refresh), consumed by
+                // `check_focus_alive` (which runs every render tick). See [`FOCUS_DETACH_GRACE`].
+                if self.focus_managed {
+                    let present = self
+                        .selected_lane()
+                        .map(|l| l.agent_sessions.iter().any(|s| !s.external))
+                        .unwrap_or(false);
+                    self.focus_missing_ticks = next_focus_missing(present, self.focus_missing_ticks);
                 }
             }
             Err(e) => self.status = format!("lane.list failed: {e}"),
@@ -1237,6 +1253,7 @@ impl App {
     fn check_focus_alive(&mut self) {
         if self.view != View::Focus {
             self.focus_managed = false;
+            self.focus_missing_ticks = 0;
             return;
         }
         let has_managed = self
@@ -1245,8 +1262,12 @@ impl App {
             .unwrap_or(false);
         if has_managed {
             self.focus_managed = true;
-        } else if self.focus_managed {
+            self.focus_missing_ticks = 0;
+        } else if self.focus_managed && self.focus_missing_ticks >= FOCUS_DETACH_GRACE {
+            // Sustained absence (counted per lane refresh in `refresh_lanes`, not per render tick)
+            // — a real exit, not a one-snapshot flap. Drop back to Split.
             self.focus_managed = false;
+            self.focus_missing_ticks = 0;
             self.focus_insert = false;
             self.view = View::Split;
             self.status = "agent exited".into();
@@ -3636,6 +3657,23 @@ enum SessionRef {
     Transcript(String),
 }
 
+/// Consecutive lane refreshes a focused lane may show no managed session before Focus detaches.
+/// More than one, so a single transient overlay flap (one bad snapshot — a tmux/lsof probe blip)
+/// doesn't kick the user out of a still-running agent; a real exit stays absent and detaches
+/// within ~grace refreshes.
+const FOCUS_DETACH_GRACE: u8 = 3;
+
+/// Next consecutive-missing count for the focused agent after a lane refresh: reset to 0 when a
+/// managed session is present, else incremented (saturating). Counted per refresh (≈1s), NOT per
+/// render tick, so the grace measures seconds rather than event-loop iterations.
+fn next_focus_missing(present: bool, missing: u8) -> u8 {
+    if present {
+        0
+    } else {
+        missing.saturating_add(1)
+    }
+}
+
 /// Indices into `sessions` in a STABLE display order — managed agents by tmux **slot** (= spawn
 /// order: `lane-N`, `lane-N-2`, `lane-N-3`), then windowless/external sessions by start time — so
 /// expanded sub-rows (and their user labels) keep their position instead of reshuffling when the
@@ -4172,6 +4210,26 @@ mod tests {
         );
         assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 3);
         assert_eq!(attention_rank(&[], true), 3);
+    }
+
+    #[test]
+    fn focus_detach_waits_for_sustained_absence() {
+        // A present managed session resets the miss count (recovered flap).
+        assert_eq!(next_focus_missing(true, 2), 0);
+        // Consecutive absences accumulate, staying below the grace for the first couple refreshes…
+        let mut m = 0u8;
+        m = next_focus_missing(false, m);
+        assert_eq!(m, 1);
+        assert!(m < FOCUS_DETACH_GRACE, "one flap must not detach");
+        m = next_focus_missing(false, m);
+        assert_eq!(m, 2);
+        assert!(m < FOCUS_DETACH_GRACE, "a two-tick flap must not detach");
+        // …until a sustained absence reaches the grace (a real exit).
+        m = next_focus_missing(false, m);
+        assert_eq!(m, 3);
+        assert!(m >= FOCUS_DETACH_GRACE, "sustained absence detaches");
+        // A flicker back resets, so the next single absence won't detach.
+        assert_eq!(next_focus_missing(true, m), 0);
     }
 
     #[test]

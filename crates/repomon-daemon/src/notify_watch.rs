@@ -118,10 +118,22 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 .find(|l| l.id == key.0)
                 .and_then(|l| session_by_key(l, &key.1, subagents))
                 .map(|s| s.last_activity_at);
-            if kind != NotifKind::Idle
-                && !activity_allows_refire(latch.get(&dkey).map(|(t, _)| *t), activity)
-            {
+            let prev_fired = latch.get(&dkey).map(|(t, _)| *t);
+            if kind != NotifKind::Idle && !activity_allows_refire(prev_fired, activity) {
                 continue;
+            }
+            // Diagnostic for the "repeats an alert I already handled" report: a re-fire is only
+            // legitimate when the transcript advanced since last time (current_activity > prev_fired).
+            // If these logs show a re-fire with current_activity <= prev_fired (or prev_fired None
+            // for a session that clearly fired before), the latch is being bypassed.
+            if kind == NotifKind::NeedsYou {
+                tracing::info!(
+                    lane = key.0,
+                    session = ?key.1,
+                    prev_fired = ?prev_fired,
+                    current_activity = ?activity,
+                    "notify: NeedsYou firing"
+                );
             }
             debounce.insert(dkey.clone(), Instant::now());
             if kind != NotifKind::Idle {
