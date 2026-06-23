@@ -3952,6 +3952,10 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // notification edge-detection so the next refresh doesn't replay — and double-fire — them.
     app.notif_reseed = true;
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
+    // Snap straight back to FleetView: paint now, in the freshly re-init'd alternate screen, so the
+    // user doesn't sit looking at tmux's "[detached]" line + a stale/garbled screen while the next
+    // loop iteration's sync RPCs (which run before its own draw) complete.
+    let _ = terminal.draw(|f| view::render(f, app));
 }
 
 /// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.
@@ -3978,6 +3982,8 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
     // Re-seed notification edge-detection — the daemon owned popups while we were parked.
     app.notif_reseed = true;
+    // Paint immediately on return (see do_attach) so the detach message + stale screen don't linger.
+    let _ = terminal.draw(|f| view::render(f, app));
 }
 
 /// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
