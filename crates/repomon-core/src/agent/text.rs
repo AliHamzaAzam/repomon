@@ -92,7 +92,12 @@ const MONTHS: [&str; 12] = [
 /// name is present (the bare-time path handles that).
 fn parse_dated(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     for (mi, m) in MONTHS.iter().enumerate() {
-        let Some(pos) = lower.find(m) else { continue };
+        // Require word boundaries so a month token only matches standalone — otherwise the
+        // substring search false-matches inside words ("maybe"→may, "smart"→mar, "separate"→sep),
+        // yielding a bogus reset date that drives auto-continue scheduling.
+        let Some(pos) = find_word(lower, m) else {
+            continue;
+        };
         // The day may follow the month ("jun 21") or precede it ("19 jul").
         let day = first_int(&lower[pos + m.len()..]).or_else(|| last_int(&lower[..pos]))?;
         let time = find_reset_time(lower)?;
@@ -103,6 +108,25 @@ fn parse_dated(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
             dt = build_local(now.year() + 1, month, day, time)?;
         }
         return Some(dt.with_timezone(&Utc));
+    }
+    None
+}
+
+/// Find `word` in `s` only where it stands alone — the char before and after the match must be
+/// non-alphabetic (digits and punctuation are fine, so "jun21"/"19jul" still match). Without this,
+/// a plain substring search false-matches month names embedded in ordinary words.
+fn find_word(s: &str, word: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = s[from..].find(word) {
+        let pos = from + rel;
+        let before_ok = pos == 0 || !b[pos - 1].is_ascii_alphabetic();
+        let after = pos + word.len();
+        let after_ok = after >= b.len() || !b[after].is_ascii_alphabetic();
+        if before_ok && after_ok {
+            return Some(pos);
+        }
+        from = pos + 1;
     }
     None
 }
@@ -309,6 +333,33 @@ mod tests {
             .with_timezone(&Local);
         assert_eq!((dt.month(), dt.day()), (7, 19));
         assert_eq!((dt.hour(), dt.minute()), (4, 0));
+    }
+
+    #[test]
+    fn month_substring_inside_word_is_not_a_date() {
+        let now = Local.with_ymd_and_hms(2026, 6, 18, 20, 0, 0).unwrap();
+        // "maybe" contains "may" but must not extract a May date — it should fall back to the
+        // bare-time path (today, 5pm), not jump to month 5.
+        let dt = parse_reset_datetime("maybe later, around 5pm", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(dt.month(), 6); // June (today's month), not May
+        assert_eq!(dt.day(), 18);
+        assert_eq!((dt.hour(), dt.minute()), (17, 0));
+        // The dated path on its own finds nothing for these embedded substrings.
+        assert!(parse_dated("maybe later, around 5pm", now).is_none()); // "may"
+        assert!(parse_dated("smart move at 5pm", now).is_none()); // "mar"
+        assert!(parse_dated("separate them by 5pm", now).is_none()); // "sep"
+    }
+
+    #[test]
+    fn standalone_month_still_parses() {
+        let now = Local.with_ymd_and_hms(2026, 4, 30, 20, 0, 0).unwrap();
+        let dt = parse_reset_datetime("resets may 3 at 5pm", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!((dt.month(), dt.day()), (5, 3));
+        assert_eq!((dt.hour(), dt.minute()), (17, 0));
     }
 
     #[test]

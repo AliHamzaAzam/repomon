@@ -15,6 +15,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,37 @@ const LOCAL_TTL: Duration = Duration::from_secs(60);
 /// than let it `await` forever — otherwise one stuck probe freezes the whole watcher and every
 /// account's usage goes stale (the bug this guards against).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// Cooperative cancellation for a blocking probe. A probe runs on a `spawn_blocking` thread that
+/// the watcher stops `await`ing once [`PROBE_TIMEOUT`] elapses, but that thread keeps executing —
+/// sleeping and sending keys to tmux. Without a way to tell it to stop, those abandoned threads
+/// pile up (one per stuck round). [`probe_once`] polls this between its sleep/retry steps and
+/// self-aborts once the deadline passes or the watcher flips the flag, so it dies promptly instead
+/// of running to completion.
+#[derive(Clone)]
+struct Cancel {
+    deadline: Instant,
+    aborted: Arc<AtomicBool>,
+}
+
+impl Cancel {
+    fn new(timeout: Duration) -> Self {
+        Cancel {
+            deadline: Instant::now() + timeout,
+            aborted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Tell the probe to stop at its next checkpoint (called when the watcher abandons the await).
+    fn abort(&self) {
+        self.aborted.store(true, Ordering::Relaxed);
+    }
+
+    /// True once the probe should give up: past its deadline or explicitly aborted.
+    fn is_cancelled(&self) -> bool {
+        self.aborted.load(Ordering::Relaxed) || Instant::now() >= self.deadline
+    }
+}
 
 /// One account's last usage reading, with its display label and when it was captured.
 #[derive(Debug, Clone)]
@@ -75,14 +107,18 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
             let window = probe_window(&acct.label);
             let cwd = probe_cwd();
             let spec = acct.spec;
-            let probe = tokio::task::spawn_blocking(move || probe_once(&tmux, &window, &cwd, &spec));
+            let cancel = Cancel::new(PROBE_TIMEOUT);
+            let probe_cancel = cancel.clone();
+            let probe = tokio::task::spawn_blocking(move || {
+                probe_once(&tmux, &window, &cwd, &spec, &probe_cancel)
+            });
             let report = match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
                 Ok(join) => join.ok().flatten(),
                 Err(_) => {
-                    // Probe hung (a tmux call that never returned). Abandon it — keep this
-                    // account's last reading and carry on, so one stuck probe can't wedge the
-                    // watcher and freeze every account. (The orphaned blocking thread is left to
-                    // finish on its own; the next round's probe_once kills any leftover window.)
+                    // Probe hung (a tmux call that never returned). Abandon the await and tell the
+                    // blocking thread to stop at its next checkpoint, so abandoned probes don't pile
+                    // up driving tmux. Keep this account's last reading and carry on.
+                    cancel.abort();
                     tracing::warn!("usage probe for {} timed out; skipping this round", acct.key);
                     None
                 }
@@ -206,7 +242,13 @@ fn probe_window(label: &str) -> String {
 /// Spawn a hidden session, drive it to a ready prompt, run the usage command, parse the pane, then
 /// dismiss and kill the window. Blocking (tmux IO + waits) — call from `spawn_blocking`. Returns
 /// `None` on any failure (the caller keeps the previous reading).
-fn probe_once(tmux: &TmuxRuntime, window: &str, cwd: &Path, spec: &ProbeSpec) -> Option<UsageReport> {
+fn probe_once(
+    tmux: &TmuxRuntime,
+    window: &str,
+    cwd: &Path,
+    spec: &ProbeSpec,
+    cancel: &Cancel,
+) -> Option<UsageReport> {
     use std::thread::sleep;
 
     let _ = tmux.kill_named(window);
@@ -214,6 +256,11 @@ fn probe_once(tmux: &TmuxRuntime, window: &str, cwd: &Path, spec: &ProbeSpec) ->
 
     let mut ready = false;
     for _ in 0..40 {
+        // Bail to the cleanup below if the watcher abandoned us (deadline passed / aborted), so
+        // this blocking thread doesn't keep driving tmux after its round was given up on.
+        if cancel.is_cancelled() {
+            break;
+        }
         sleep(Duration::from_millis(500));
         let pane = tmux.capture_named(window, None).unwrap_or_default();
         match probe_state(&pane, spec) {
@@ -236,10 +283,16 @@ fn probe_once(tmux: &TmuxRuntime, window: &str, cwd: &Path, spec: &ProbeSpec) ->
         // or a slow render shouldn't lose the round. Re-sending is idempotent — the parse succeeds
         // as soon as the screen is up. Claude renders on the first try, so it never retries.
         'attempts: for _ in 0..3 {
+            if cancel.is_cancelled() {
+                break 'attempts;
+            }
             let _ = tmux.send_literal_named(window, spec.slash);
             sleep(Duration::from_millis(700));
             let _ = tmux.send_key_named(window, "Enter");
             for _ in 0..8 {
+                if cancel.is_cancelled() {
+                    break 'attempts;
+                }
                 sleep(Duration::from_millis(450));
                 let pane = tmux.capture_named(window, None).unwrap_or_default();
                 if let Some(r) = (spec.parse)(&pane) {
@@ -322,6 +375,7 @@ mod tests {
             "usage-probe-test",
             &probe_cwd(),
             &claude_spec("claude".to_string()),
+            &Cancel::new(PROBE_TIMEOUT),
         );
         let _ = std::process::Command::new("tmux")
             .args(["-L", "repomon-usagetest-claude", "kill-server"])
@@ -337,7 +391,13 @@ mod tests {
     #[ignore = "spawns a real `codex` and runs /status; run manually with --ignored"]
     fn probe_once_reads_real_codex() {
         let tmux = TmuxRuntime::new("repomon-usagetest-codex");
-        let report = probe_once(&tmux, "usage-probe-codex-test", &probe_cwd(), &codex_spec());
+        let report = probe_once(
+            &tmux,
+            "usage-probe-codex-test",
+            &probe_cwd(),
+            &codex_spec(),
+            &Cancel::new(PROBE_TIMEOUT),
+        );
         let _ = std::process::Command::new("tmux")
             .args(["-L", "repomon-usagetest-codex", "kill-server"])
             .output();

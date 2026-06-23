@@ -230,26 +230,54 @@ pub fn newest_transcript_in(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// Process-global memo for [`parse_transcript`], keyed by path and invalidated by file mtime.
-fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, TranscriptSummary)>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, TranscriptSummary)>>> =
-        OnceLock::new();
+/// How a cached entry is invalidated and aged.
+///
+/// `key` is `(mtime, len)`: mtime alone misses a same-second append (the file grows but the
+/// coarse-resolution mtime doesn't move), so the byte length is folded in to catch that case.
+/// `seq` is a monotonic access stamp used for LRU-ish eviction once the map is full.
+#[derive(Clone)]
+struct CacheEntry {
+    key: (SystemTime, u64),
+    seq: u64,
+    summary: TranscriptSummary,
+}
+
+/// Process-global memo for [`parse_transcript`], keyed by path and invalidated by file mtime+len.
+fn cache() -> &'static Mutex<HashMap<PathBuf, CacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Parse a transcript into a summary, memoised by file mtime.
+/// Monotonic counter handing out the `seq` access stamps for LRU eviction.
+fn cache_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The cache's soft capacity. Past this we evict the least-recently-used entry on each insert
+/// rather than clearing everything — so a fleet with more than this many transcripts doesn't
+/// re-parse the whole set on every refresh.
+const CACHE_CAP: usize = 1024;
+
+/// Parse a transcript into a summary, memoised by file mtime+length.
 ///
 /// `summary_for`/`summaries_for` call this on every fleet refresh (~1/s in live views). Without
 /// the memo, an idle-but-recent session's whole JSONL is re-read and re-parsed each time. The
-/// cache is keyed by path and invalidated when the file's mtime changes, so it stays correct
-/// while making repeated refreshes of unchanged transcripts nearly free.
+/// cache is keyed by path and invalidated when the file's mtime *or* length changes — length is
+/// folded in because a same-second append grows the file without moving the coarse-resolution
+/// mtime, which would otherwise serve a stale summary — so it stays correct while making repeated
+/// refreshes of unchanged transcripts nearly free.
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
-    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    if let Some(mtime) = mtime {
-        if let Ok(c) = cache().lock() {
-            if let Some((cached, summary)) = c.get(path) {
-                if *cached == mtime {
-                    let mut s = summary.clone();
+    let key = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+    if let Some(key) = key {
+        if let Ok(mut c) = cache().lock() {
+            if let Some(entry) = c.get_mut(path) {
+                if entry.key == key {
+                    entry.seq = cache_seq(); // touch: mark as recently used for LRU
+                    let mut s = entry.summary.clone();
                     // `status` is the one *time*-derived field: a transcript that stops changing
                     // still decays to Idle after IDLE_AFTER even though its mtime — our cache key
                     // — never moves again. The content-derived Waiting/Running stays valid while
@@ -263,14 +291,28 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
         }
     }
     let summary = parse_transcript_inner(path)?;
-    if let Some(mtime) = mtime {
+    if let Some(key) = key {
         if let Ok(mut c) = cache().lock() {
-            // Bound memory: transcript paths accumulate as sessions end. A periodic clear keeps
-            // the map from growing without limit — it simply re-warms on the next refresh.
-            if c.len() >= 1024 {
-                c.clear();
+            // Bound memory: transcript paths accumulate as sessions end. Past the cap, evict the
+            // single least-recently-used entry rather than clearing the whole map — a full clear
+            // makes a fleet of >CACHE_CAP transcripts re-parse everything on every refresh.
+            if c.len() >= CACHE_CAP && !c.contains_key(path) {
+                if let Some(oldest) = c
+                    .iter()
+                    .min_by_key(|(_, e)| e.seq)
+                    .map(|(p, _)| p.clone())
+                {
+                    c.remove(&oldest);
+                }
             }
-            c.insert(path.to_path_buf(), (mtime, summary.clone()));
+            c.insert(
+                path.to_path_buf(),
+                CacheEntry {
+                    key,
+                    seq: cache_seq(),
+                    summary: summary.clone(),
+                },
+            );
         }
     }
     Some(summary)
@@ -391,6 +433,14 @@ pub fn summary_for_root(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
         }
     }
     // Fallback (encoding drift): scan every project dir and match the recorded cwd.
+    rescan_by_cwd(root, cwd)
+}
+
+/// Encoding-drift fallback: scan every project dir under `root` and return the newest transcript
+/// whose recorded `cwd` matches `cwd`. The path→dir encoding isn't injective and Claude has
+/// changed it before, so a session can land in a dir name we don't predict; this finds it by the
+/// ground-truth `cwd` recorded inside the transcript. Returns `None` if nothing matches.
+fn rescan_by_cwd(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
     let want = canonical(cwd);
     let mut best: Option<TranscriptSummary> = None;
     for entry in std::fs::read_dir(root).ok()?.flatten() {
@@ -416,16 +466,22 @@ pub fn summary_for_root(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
 
 /// Summarize the Claude session for `cwd` — the hot path, used per-lane on every refresh.
 ///
-/// Only the encoded project directory is consulted (an O(1) lookup), so a worktree with no
-/// Claude session doesn't trigger an expensive scan of every project dir. For the
-/// encoding-drift fallback, call [`summary_for_root`] explicitly.
+/// The encoded project directory is consulted first (an O(1) lookup). If that dir is
+/// absent/empty — the path→dir encoding isn't injective and Claude has changed it before, so a
+/// live session can land in a dir name we don't predict — we fall back to the same recorded-cwd
+/// rescan [`summary_for_root`] uses, rather than silently dropping the agent from the fleet.
 pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
     let encoded = encode_project_dir(cwd);
 
     // Test override: a single projects dir, treated as the default account.
     if let Ok(p) = std::env::var("REPOMON_CLAUDE_PROJECTS") {
-        let dir = PathBuf::from(p).join(&encoded);
-        return newest_transcript_in(&dir).and_then(|t| parse_transcript(&t));
+        let root = PathBuf::from(p);
+        let dir = root.join(&encoded);
+        if let Some(s) = newest_transcript_in(&dir).and_then(|t| parse_transcript(&t)) {
+            return Some(s);
+        }
+        // Encoding drift: the encoded dir is absent/empty — match by recorded cwd instead.
+        return rescan_by_cwd(&root, cwd);
     }
 
     // Scan every config dir's encoded project subdir (usually 1-2), keeping the most recent —
@@ -433,20 +489,21 @@ pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
     let default = default_config_base();
     let mut best: Option<TranscriptSummary> = None;
     for base in config_bases() {
-        let dir = base.join("projects").join(&encoded);
-        if !dir.is_dir() {
-            continue;
-        }
-        if let Some(t) = newest_transcript_in(&dir) {
-            if let Some(mut s) = parse_transcript(&t) {
-                s.config_dir = (base != default).then(|| base.clone());
-                if best
-                    .as_ref()
-                    .map(|b| s.last_activity > b.last_activity)
-                    .unwrap_or(true)
-                {
-                    best = Some(s);
-                }
+        let root = base.join("projects");
+        let dir = root.join(&encoded);
+        // The encoded dir might be missing (encoding drift) or present-but-empty; either way fall
+        // through to the recorded-cwd rescan under this base so a live session is still found.
+        let s = newest_transcript_in(&dir)
+            .and_then(|t| parse_transcript(&t))
+            .or_else(|| rescan_by_cwd(&root, cwd));
+        if let Some(mut s) = s {
+            s.config_dir = (base != default).then(|| base.clone());
+            if best
+                .as_ref()
+                .map(|b| s.last_activity > b.last_activity)
+                .unwrap_or(true)
+            {
+                best = Some(s);
             }
         }
     }
@@ -741,7 +798,7 @@ mod tests {
         // return the poisoned value (proving it did not re-read the file).
         {
             let mut c = cache().lock().unwrap();
-            c.get_mut(&path).unwrap().1.title = Some("SENTINEL".into());
+            c.get_mut(&path).unwrap().summary.title = Some("SENTINEL".into());
         }
         let s2 = parse_transcript(&path).expect("parses");
         assert_eq!(
@@ -753,7 +810,7 @@ mod tests {
         // Staling the stored mtime forces a miss: the real content (not the sentinel) comes back.
         {
             let mut c = cache().lock().unwrap();
-            c.get_mut(&path).unwrap().0 = SystemTime::UNIX_EPOCH;
+            c.get_mut(&path).unwrap().key.0 = SystemTime::UNIX_EPOCH;
         }
         let s3 = parse_transcript(&path).expect("parses");
         assert_ne!(
@@ -780,7 +837,7 @@ mod tests {
         // still report Idle: status decays by the clock, not by a file change.
         {
             let mut c = cache().lock().unwrap();
-            c.get_mut(&path).unwrap().1.last_activity = Utc::now() - Duration::minutes(20);
+            c.get_mut(&path).unwrap().summary.last_activity = Utc::now() - Duration::minutes(20);
         }
         assert_eq!(
             parse_transcript(&path).unwrap().status,

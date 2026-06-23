@@ -91,7 +91,7 @@ impl Lanes {
         let mut repo_entries: Vec<(Repo, Vec<worktree::WorktreeEntry>)> = Vec::new();
         let mut wt_misses: Vec<Repo> = Vec::new();
         {
-            let cache = self.worktrees_cache.lock().unwrap();
+            let cache = self.worktrees_cache.lock().unwrap_or_else(|e| e.into_inner());
             for repo in repos {
                 match cache.get(&repo.path) {
                     Some((t, entries)) if t.elapsed() < WORKTREES_TTL => {
@@ -113,7 +113,7 @@ impl Lanes {
             wt_fresh.push(h.await.map_err(join_err)?);
         }
         {
-            let mut cache = self.worktrees_cache.lock().unwrap();
+            let mut cache = self.worktrees_cache.lock().unwrap_or_else(|e| e.into_inner());
             for (repo, entries_res) in wt_misses.into_iter().zip(wt_fresh) {
                 // A repo that's gone missing on disk shouldn't sink the whole fleet view.
                 if let Ok(entries) = entries_res {
@@ -177,7 +177,7 @@ impl Lanes {
         let mut must_walk: Vec<usize> = Vec::new(); // first-seen or watcher-invalidated
         let mut stale: Vec<(usize, Instant)> = Vec::new(); // clean but past the TTL (reusable)
         {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.state_cache.lock().unwrap_or_else(|e| e.into_inner());
             for (i, (_, entry, _, _, _)) in pending.iter().enumerate() {
                 match cache.get(&entry.path) {
                     None => must_walk.push(i),
@@ -212,7 +212,7 @@ impl Lanes {
             fresh.push(h.await.map_err(join_err)?);
         }
         {
-            let mut cache = self.state_cache.lock().unwrap();
+            let mut cache = self.state_cache.lock().unwrap_or_else(|e| e.into_inner());
             for (&i, st) in walk.iter().zip(fresh) {
                 if let Ok(s) = &st {
                     cache.insert(
@@ -275,17 +275,25 @@ impl Lanes {
         Ok(lanes)
     }
 
-    /// Drop cached git state for any worktree at or under `root` (or whose path the root sits
-    /// under) so the next `list` re-walks it. The file watcher calls this the moment a worktree's
-    /// files change, keeping the fleet's dirty state fresh without re-walking every worktree on
-    /// every poll.
+    /// Drop cached git state for the worktree that owns `root` so the next `list` re-walks it. The
+    /// file watcher calls this the moment a worktree's files change, keeping the fleet's dirty state
+    /// fresh without re-walking every worktree on every poll.
+    ///
+    /// A changed path belongs to a *single* worktree — the one whose cached path is the longest
+    /// prefix of the change (mirroring `watch::classify`'s `max_by_key(len)` ownership rule). The
+    /// earlier bidirectional `p.starts_with(root) || root.starts_with(p)` test also flagged the
+    /// PARENT worktree whenever a nested worktree changed, over-invalidating the cache and forcing
+    /// needless re-walks of the parent.
     pub fn invalidate_state(&self, root: &Path) {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let mut cache = self.state_cache.lock().unwrap();
-        for (p, e) in cache.iter_mut() {
-            if p.starts_with(&root) || root.starts_with(p) {
-                e.dirty = true;
-            }
+        let mut cache = self.state_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(e) = cache
+            .iter_mut()
+            .filter(|(p, _)| root.starts_with(p))
+            .max_by_key(|(p, _)| p.as_os_str().len())
+            .map(|(_, e)| e)
+        {
+            e.dirty = true;
         }
     }
 
@@ -338,7 +346,10 @@ impl Lanes {
             .await?;
 
         // A worktree was added — drop the cached enumeration so list() picks it up at once.
-        self.worktrees_cache.lock().unwrap().clear();
+        self.worktrees_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         // Re-list and return the freshly created lane.
         self.list()
@@ -387,8 +398,14 @@ impl Lanes {
                 .map_err(join_err)??;
         }
         // A worktree was removed — drop the cached enumeration and its stale state entry.
-        self.worktrees_cache.lock().unwrap().clear();
-        self.state_cache.lock().unwrap().remove(&wt_path);
+        self.worktrees_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.state_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&wt_path);
         Ok(())
     }
 
@@ -683,6 +700,54 @@ mod tests {
             .last_change_at
             .expect("a dirty worktree should report a change time");
         assert!((Utc::now() - changed).num_seconds().abs() < 60);
+    }
+
+    #[tokio::test]
+    async fn invalidate_marks_only_the_longest_matching_worktree() {
+        // A nested worktree lives under a parent worktree's path. A change inside the nested
+        // worktree must dirty *only* the nested entry (the longest cached prefix of the change),
+        // not the parent — the old bidirectional prefix test over-invalidated the parent.
+        let base = tempfile::tempdir().unwrap();
+        // Canonicalize so the manually-seeded keys match what `invalidate_state` canonicalizes to.
+        let parent = base.path().canonicalize().unwrap();
+        let nested = parent.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let lanes = Lanes::new(store, Config::default());
+
+        let entry = || StateEntry {
+            walked_at: Instant::now(),
+            dirty: false,
+            state: WorktreeState {
+                worktree_id: 1,
+                head: null_oid(),
+                branch: None,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                dirty: Default::default(),
+                last_commit_at: None,
+                locked: false,
+                prunable: false,
+                last_change_at: None,
+            },
+        };
+        {
+            let mut cache = lanes.state_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.insert(parent.clone(), entry());
+            cache.insert(nested.clone(), entry());
+        }
+
+        // A change inside the nested worktree.
+        lanes.invalidate_state(&nested.join("file.txt"));
+
+        let cache = lanes.state_cache.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(cache[&nested].dirty, "nested worktree should be flagged");
+        assert!(
+            !cache[&parent].dirty,
+            "parent worktree must not be flagged by a nested change"
+        );
     }
 
     #[tokio::test]

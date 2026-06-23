@@ -222,6 +222,14 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
+        let now = Instant::now();
+        // Prune lanes typed into longer ago than TYPING_WINDOW. This runs BEFORE the empty-viewport
+        // early-return below so `input_seen` is bounded even when no TUI viewport is set — otherwise
+        // a lane typed into while nothing is visible would leak its entry forever.
+        {
+            let mut m = ctx.input_seen.lock().await;
+            m.retain(|_, t| now.saturating_duration_since(*t) < TYPING_WINDOW);
+        }
         let lanes: Vec<LaneId> = ctx.viewport.lock().await.clone();
         if lanes.is_empty() {
             state.clear();
@@ -230,13 +238,9 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
         let focus = ctx.viewport_focus.lock().await.clone();
         let focus_lane = focus.as_ref().map(|(l, _)| *l);
         state.retain(|k, _| lanes.contains(k));
-        let now = Instant::now();
-        // Snapshot (and prune) which lanes were typed into recently — they capture at frame-rate.
-        let typing_lanes: HashMap<LaneId, Instant> = {
-            let mut m = ctx.input_seen.lock().await;
-            m.retain(|_, t| now.saturating_duration_since(*t) < TYPING_WINDOW);
-            m.clone()
-        };
+        // Snapshot which lanes were typed into recently — they capture at frame-rate. The map was
+        // just pruned above, so this is the live set of within-TYPING_WINDOW lanes.
+        let typing_lanes: HashMap<LaneId, Instant> = ctx.input_seen.lock().await.clone();
 
         // Service the focused lane first (so the per-tick cap never starves what the user is
         // watching), then the rest from a rotating offset so every background pane gets a turn.
