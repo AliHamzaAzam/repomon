@@ -224,7 +224,8 @@ pub fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> O
 /// are screen-scrapes that read `Some → None → Some`. Every such round-trip re-detects a transition
 /// and, since the only other guard is a 30s time-debounce, re-fires the *same* alert minutes or
 /// hours later. [`AgentSession::last_activity_at`](crate::model::AgentSession::last_activity_at) —
-/// the transcript mtime — advances **only on real agent output**, never on any of those flaps, so
+/// the latest transcript *message* timestamp (not the raw file mtime — Claude bumps that by
+/// rewriting trailer metadata) — advances **only on real agent output**, never on those flaps, so
 /// it is the right thing to gate a repeat on: re-fire only when the agent has actually done new
 /// work since it last alerted (the user replied and it ran, then waited again), not when detection
 /// merely wobbled. Caller keeps a per-`(lane, session, kind)` record of the activity timestamp at
