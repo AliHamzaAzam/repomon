@@ -321,7 +321,11 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
 /// Parse a transcript into a summary (uncached — see [`parse_transcript`]).
 fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
     let text = std::fs::read_to_string(path).ok()?;
-    let last_activity: DateTime<Utc> = std::fs::metadata(path)
+    // File mtime is only a fallback anchor: Claude bumps it by rewriting the transcript's trailer
+    // metadata (pr-link, ai-title, …) without adding a message, so mtime alone would read a frozen
+    // agent as freshly active and re-fire its stale "needs you" alert. Prefer the latest real
+    // message timestamp (tracked below), falling back to mtime when no entry carries one.
+    let mtime: DateTime<Utc> = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .map(DateTime::<Utc>::from)
         .unwrap_or_else(|_| Utc::now());
@@ -332,6 +336,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
     let mut title: Option<String> = None;
     let mut last_message: Option<String> = None;
     let mut cwd: Option<PathBuf> = None;
+    let mut last_msg_activity: Option<DateTime<Utc>> = None;
 
     for line in text.lines() {
         let v: Value = match serde_json::from_str(line) {
@@ -343,7 +348,20 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
                 cwd = Some(PathBuf::from(c));
             }
         }
-        match v.get("type").and_then(Value::as_str) {
+        let entry_type = v.get("type").and_then(Value::as_str);
+        // Count only real conversation turns as activity — not the untimestamped trailer
+        // (last-prompt/ai-title/…) or a pr-link refresh, which bump mtime without new work.
+        if matches!(entry_type, Some("assistant") | Some("user")) {
+            if let Some(ts) = v
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+            {
+                last_msg_activity = Some(last_msg_activity.map_or(ts, |p| p.max(ts)));
+            }
+        }
+        match entry_type {
             Some("assistant") => {
                 let mut has_tool = false;
                 if let Some(arr) = v
@@ -395,6 +413,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
         }
     }
 
+    let last_activity = last_msg_activity.unwrap_or(mtime);
     let status = if Utc::now() - last_activity > IDLE_AFTER {
         AgentStatus::Idle
     } else if last_type == Some("assistant") && !last_assistant_has_tool {
@@ -920,6 +939,27 @@ mod tests {
         assert_eq!(s.title.as_deref(), Some("add tests"));
         // The "why" behind a needs-you alert: the agent's final message text.
         assert_eq!(s.last_message.as_deref(), Some("Done — want me to also..."));
+    }
+
+    #[test]
+    fn stale_message_decays_to_idle_despite_fresh_mtime() {
+        // Claude rewrites a transcript's trailer metadata (pr-link, ai-title, …) without adding a
+        // message, bumping the file's mtime. last_activity must anchor on the last real message
+        // timestamp (long ago) so the agent reads Idle — not Waiting off the fresh mtime, which is
+        // what made the notify engine re-fire the same stale "needs you" alert hourly.
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [
+            r#"{"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","timestamp":"2020-01-01T00:00:05Z","message":{"content":[{"type":"text","text":"Done — need you."}]}}"#,
+        ];
+        // write_transcript creates the file now, so its mtime is fresh (the "metadata touch").
+        let path = write_transcript(dir.path(), "s.jsonl", &lines);
+        let s = parse_transcript(&path).unwrap();
+        assert_eq!(
+            s.status,
+            AgentStatus::Idle,
+            "an old last message with a freshly-touched mtime must read Idle, not Waiting"
+        );
     }
 
     #[test]
