@@ -3971,7 +3971,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_mouse();
     ratatui::restore();
+    let keepalive = spawn_attach_keepalive(&app.client);
     tmux_attach(&target);
+    keepalive.abort();
     // Diagnostic: time the terminal re-init + first paint after a detach. None of these touch the
     // daemon, so a stall here (vs a slow RPC) points at ratatui::init / drain / draw rather than the
     // network path — narrowing the "hangs for a bit on exit" report.
@@ -4016,7 +4018,9 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_mouse();
     ratatui::restore();
+    let keepalive = spawn_attach_keepalive(&app.client);
     tmux_attach(target);
+    keepalive.abort();
     *terminal = ratatui::init();
     if app.mouse_on {
         enable_mouse();
@@ -4041,6 +4045,26 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
 /// and reappear above the post-quit prompt. The message always sits exactly one line above the
 /// cursor on return, hence `up one, erase line, carriage return`.
 const DETACH_MSG_CLEANUP: &str = "\x1b[1A\x1b[2K\r";
+
+/// Keep the daemon connection alive across a (blocking) tmux attach. While parked the TUI sends no
+/// requests, and the daemon reaps any connection that's been silent for its READ_IDLE_TIMEOUT
+/// (120s) — after which the first RPC on return is written into a dead socket and the UI hangs for
+/// the full ~15s client timeout (confirmed: silent connection closed at exactly 120.0s). A
+/// `watcher.park` ping every 45s keeps the connection live AND re-asserts the parked state, so the
+/// daemon keeps owning desktop popups. The runtime is multi-threaded, so this task runs on another
+/// worker while `tmux_attach` blocks the event loop's worker; the client's reader task (still
+/// draining the socket while parked) resolves each ping's response. Abort it on return.
+fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> {
+    let client = client.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            if client.call("watcher.park", None).await.is_err() {
+                break; // connection already gone — nothing left to keep alive
+            }
+        }
+    })
+}
 
 /// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
 /// the session name). `$TMUX` is dropped so this works even when repomon runs inside tmux —
