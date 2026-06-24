@@ -89,10 +89,28 @@ impl DaemonClient {
             .await
             .map_err(|_| anyhow!("daemon connection closed"))?;
 
-        let resp = tokio::time::timeout(Duration::from_secs(15), rx)
-            .await
-            .map_err(|_| anyhow!("request '{method}' timed out"))?
-            .map_err(|_| anyhow!("request '{method}' was dropped"))?;
+        // Every RPC is awaited on the event loop's critical path, so a slow or unanswered one
+        // freezes the UI. A timeout almost always means the daemon reaped this connection (it does
+        // so after 120s of silence — e.g. a long parked attach with no keepalive); log it
+        // explicitly since the `?` below would otherwise hide it from the slow-RPC line.
+        let started = std::time::Instant::now();
+        let resp = match tokio::time::timeout(Duration::from_secs(15), rx).await {
+            Ok(r) => r.map_err(|_| anyhow!("request '{method}' was dropped"))?,
+            Err(_) => {
+                crate::app::tui_log(&format!(
+                    "RPC {method} TIMED OUT after 15s (daemon likely reaped the connection)"
+                ));
+                return Err(anyhow!("request '{method}' timed out"));
+            }
+        };
+        // Most calls are ~55ms; anything past this threshold is a real stall worth tracing.
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(300) {
+            crate::app::tui_log(&format!(
+                "slow RPC {method} took {:.2}s",
+                elapsed.as_secs_f32()
+            ));
+        }
         if let Some(err) = resp.error {
             return Err(anyhow!("{} (code {})", err.message, err.code));
         }

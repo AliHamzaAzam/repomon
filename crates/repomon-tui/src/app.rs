@@ -346,6 +346,10 @@ pub struct App {
     attach_target: Option<String>,
     /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
     input_suspended: Arc<AtomicBool>,
+    /// Set by the reader thread once it has actually entered its paused branch — so an attach waits
+    /// for a CONFIRMED handoff (the reader is no longer touching stdin) instead of a guessed sleep,
+    /// preventing the reader from fighting tmux for the terminal (split input / spurious detach).
+    reader_parked: Arc<AtomicBool>,
     /// Per-account Claude usage (from the daemon's `/usage` probe), shown in the bottom-right
     /// corner for the focused agent's account. Empty unless `usage_probe` is enabled.
     pub usage: Vec<repomon_core::agent::AccountUsage>,
@@ -469,6 +473,7 @@ impl App {
             attach_request: None,
             attach_target: None,
             input_suspended: Arc::new(AtomicBool::new(false)),
+            reader_parked: Arc::new(AtomicBool::new(false)),
             usage: Vec::new(),
             last_usage_fetch: None,
         }
@@ -1365,6 +1370,21 @@ impl App {
         self.selected_lane()
             .and_then(|l| l.agent_sessions.get(self.session_idx))
             .and_then(|s| s.tmux_window.clone())
+    }
+
+    /// Wait (bounded) for the stdin reader thread to confirm it has parked, so `tmux attach` gets
+    /// sole ownership of the terminal — a confirmed handoff instead of a guessed sleep, so the
+    /// reader can't keep reading stdin and split keystrokes with tmux (which corrupts the terminal
+    /// and can feed tmux a sequence it misreads as a detach key). Bounded (~400ms) so a reader
+    /// wedged in a blocking read can't hang the attach; a timeout is logged for diagnosis.
+    async fn await_reader_parked(&self) {
+        for _ in 0..40 {
+            if self.reader_parked.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tui_log("WARN reader did not park before attach; terminal handoff may be racy");
     }
 
     /// The usage account key of the agent the user is looking at — the selected lane's selected
@@ -3593,13 +3613,18 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     // don't fight tmux for the terminal — otherwise keystrokes get split and the session
     // misbehaves. Polling (rather than a blocking read) lets us check the flag.
     let suspended = app.input_suspended.clone();
+    let parked = app.reader_parked.clone();
     std::thread::spawn(move || {
         use ratatui::crossterm::event;
         loop {
             if suspended.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(40));
+                // Announce we're parked so an attach knows stdin is fully released to tmux, and
+                // poll the flag on a short interval so we resume promptly.
+                parked.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
+            parked.store(false, Ordering::Relaxed);
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
@@ -3781,11 +3806,29 @@ async fn event_loop(
     loop {
         // Resolve the selected session/window BEFORE syncing the viewport, so a just-spawned
         // window isn't momentarily streamed as the wrong pane (selected_window() is correct).
+        // Diagnostic: time the whole sync block with a per-call breakdown. Each call is awaited on
+        // this critical path, so several sub-threshold RPCs can add up to a visible stall that no
+        // single slow-RPC line would flag (e.g. the resync forced right after a detach).
+        let sync_t = std::time::Instant::now();
         app.sync_session_cursor();
         app.sync_viewport().await;
+        let t_viewport = sync_t.elapsed();
         app.sync_pane_size().await;
+        let t_panesize = sync_t.elapsed();
         app.sync_recent_commits().await;
+        let t_commits = sync_t.elapsed();
         app.sync_terminals().await;
+        let t_terminals = sync_t.elapsed();
+        if t_terminals >= Duration::from_millis(250) {
+            tui_log(&format!(
+                "slow sync block: total={:.2}s viewport={:.0}ms panesize={:.0}ms commits={:.0}ms terminals={:.0}ms",
+                t_terminals.as_secs_f32(),
+                t_viewport.as_millis(),
+                (t_panesize - t_viewport).as_millis(),
+                (t_commits - t_panesize).as_millis(),
+                (t_terminals - t_commits).as_millis()
+            ));
+        }
         app.sync_title();
         app.check_focus_alive();
         // Expire a stale notification banner so the footer hints come back.
@@ -3836,12 +3879,20 @@ async fn event_loop(
             },
             note = next_note(events), if events_alive => match note {
                 Some(n) => {
+                    // Diagnostic: time the drain. The backlog buffered while parked in a focused
+                    // attach is processed here on return; if parsing it (ANSI -> styled lines per
+                    // pane) is what stalls the UI after a detach, this records it with a count.
+                    let drain_started = std::time::Instant::now();
+                    let mut drained = 1usize;
                     app.on_notification(n).await;
                     // Coalesce a burst of notifications (and the backlog buffered while parked in
                     // a focused attach) into a single refresh instead of one ~100ms refresh each.
                     loop {
                         match events.try_recv() {
-                            Ok(n) => app.on_notification(n).await,
+                            Ok(n) => {
+                                drained += 1;
+                                app.on_notification(n).await;
+                            }
                             Err(broadcast::error::TryRecvError::Empty) => break,
                             Err(broadcast::error::TryRecvError::Lagged(_)) => {
                                 app.refresh_pending = true;
@@ -3854,6 +3905,13 @@ async fn event_loop(
                     }
                     if std::mem::take(&mut app.refresh_pending) {
                         app.refresh().await;
+                    }
+                    let drain_elapsed = drain_started.elapsed();
+                    if drain_elapsed >= Duration::from_millis(300) {
+                        tui_log(&format!(
+                            "slow notif drain: {drained} notes in {:.2}s",
+                            drain_elapsed.as_secs_f32()
+                        ));
                     }
                 }
                 None => events_alive = false,
@@ -3910,16 +3968,23 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
     // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
     let _ = app.client.call("watcher.park", None).await;
-    tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
+    app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_mouse();
     ratatui::restore();
+    let keepalive = spawn_attach_keepalive(&app.client);
     tmux_attach(&target);
+    keepalive.abort();
+    // Diagnostic: time the terminal re-init + first paint after a detach. None of these touch the
+    // daemon, so a stall here (vs a slow RPC) points at ratatui::init / drain / draw rather than the
+    // network path — narrowing the "hangs for a bit on exit" report.
+    let reinit_t = std::time::Instant::now();
     *terminal = ratatui::init();
     if app.mouse_on {
         enable_mouse();
     }
     let _ = terminal.clear();
     drain_pending_input();
+    let after_drain = reinit_t.elapsed();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
@@ -3927,6 +3992,19 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // notification edge-detection so the next refresh doesn't replay — and double-fire — them.
     app.notif_reseed = true;
     app.status = "back from the agent (it's still running) — ↵ to reopen".into();
+    // Snap straight back to FleetView: paint now, in the freshly re-init'd alternate screen, so the
+    // user doesn't sit looking at tmux's "[detached]" line + a stale/garbled screen while the next
+    // loop iteration's sync RPCs (which run before its own draw) complete.
+    let _ = terminal.draw(|f| view::render(f, app));
+    let reinit_total = reinit_t.elapsed();
+    if reinit_total >= Duration::from_millis(200) {
+        tui_log(&format!(
+            "post-detach reinit: total={:.2}s init+clear+drain={:.0}ms draw={:.0}ms",
+            reinit_total.as_secs_f32(),
+            after_drain.as_millis(),
+            (reinit_total - after_drain).as_millis()
+        ));
+    }
 }
 
 /// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.
@@ -3937,10 +4015,12 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.input_suspended.store(true, Ordering::Relaxed);
     // Signal the park so the daemon covers desktop popups immediately (see do_attach).
     let _ = app.client.call("watcher.park", None).await;
-    tokio::time::sleep(Duration::from_millis(120)).await; // let the reader thread release stdin
+    app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_mouse();
     ratatui::restore();
+    let keepalive = spawn_attach_keepalive(&app.client);
     tmux_attach(target);
+    keepalive.abort();
     *terminal = ratatui::init();
     if app.mouse_on {
         enable_mouse();
@@ -3953,6 +4033,37 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
     // Re-seed notification edge-detection — the daemon owned popups while we were parked.
     app.notif_reseed = true;
+    // Paint immediately on return (see do_attach) so the detach message + stale screen don't linger.
+    let _ = terminal.draw(|f| view::render(f, app));
+}
+
+/// Escape sequence emitted after `tmux attach` returns, to wipe tmux's "[detached (from session
+/// …)]" line off the PRIMARY screen so it doesn't resurface when repomon leaves its alternate
+/// screen on quit. It MUST erase the single message line IN PLACE (`\x1b[2K`) rather than do a
+/// full-screen clear (`\x1b[2J`/`\x1b[3J`): macOS Terminal.app scrolls a full-screen erase into the
+/// scrollback buffer (and exposes no clear-scrollback capability), so the line would survive there
+/// and reappear above the post-quit prompt. The message always sits exactly one line above the
+/// cursor on return, hence `up one, erase line, carriage return`.
+const DETACH_MSG_CLEANUP: &str = "\x1b[1A\x1b[2K\r";
+
+/// Keep the daemon connection alive across a (blocking) tmux attach. While parked the TUI sends no
+/// requests, and the daemon reaps any connection that's been silent for its READ_IDLE_TIMEOUT
+/// (120s) — after which the first RPC on return is written into a dead socket and the UI hangs for
+/// the full ~15s client timeout (confirmed: silent connection closed at exactly 120.0s). A
+/// `watcher.park` ping every 45s keeps the connection live AND re-asserts the parked state, so the
+/// daemon keeps owning desktop popups. The runtime is multi-threaded, so this task runs on another
+/// worker while `tmux_attach` blocks the event loop's worker; the client's reader task (still
+/// draining the socket while parked) resolves each ping's response. Abort it on return.
+fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> {
+    let client = client.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            if client.call("watcher.park", None).await.is_err() {
+                break; // connection already gone — nothing left to keep alive
+            }
+        }
+    })
 }
 
 /// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
@@ -3960,10 +4071,49 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
 /// otherwise tmux refuses to attach ("sessions should be nested with care").
 fn tmux_attach(target: &str) {
     let socket = target.split(':').next().unwrap_or("repomon");
-    let _ = std::process::Command::new("tmux")
+    tui_log(&format!("attach -> {target}"));
+    let start = std::time::Instant::now();
+    let status = std::process::Command::new("tmux")
         .args(["-L", socket, "attach", "-t", target])
         .env_remove("TMUX")
         .status();
+    // Log when (and how) the attach ended so an *unexpected* detach is traceable after the fact:
+    // a very short duration / non-zero exit points at a failed attach or an external detach.
+    tui_log(&format!(
+        "attach <- {target} after {:.1}s status={:?}",
+        start.elapsed().as_secs_f32(),
+        status.as_ref().ok().map(|s| s.code())
+    ));
+    // On detach, tmux prints "[detached (from session …)]\r\n" to the PRIMARY screen (it just left
+    // its own alternate screen), leaving the cursor on the line directly below that message. repomon
+    // re-enters its alternate screen and hides it during use, but it resurfaces when repomon finally
+    // leaves the alternate screen on quit. A full-screen erase (\x1b[2J) is the WRONG tool here:
+    // macOS Terminal.app (and others) scroll erased content into the scrollback buffer instead of
+    // discarding it, so the line survives there and reappears above the post-quit prompt (Terminal.app
+    // has no clear-scrollback capability either, so \x1b[3J can't help). Erase just the message line
+    // IN PLACE — \x1b[2K never scrolls — which removes it on every terminal while preserving the
+    // user's earlier scrollback. The message is always exactly one line above the cursor: a normal
+    // print lands it one line up; a print on the bottom row scrolls it up one with the cursor — same
+    // offset either way.
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "{DETACH_MSG_CLEANUP}");
+    let _ = out.flush();
+}
+
+/// Append a timestamped diagnostic line to the TUI log. The TUI can't use tracing/stderr (ratatui
+/// owns the screen), so attach/detach diagnostics go straight to a file next to the daemon log.
+pub(crate) fn tui_log(line: &str) {
+    use std::io::Write;
+    let dir = repomon_core::service::log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("repomon-tui.log"))
+    {
+        let _ = writeln!(f, "{} {line}", chrono::Utc::now().to_rfc3339());
+    }
 }
 
 /// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
@@ -4118,6 +4268,25 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detach_cleanup_erases_line_in_place_not_fullscreen() {
+        // macOS Terminal.app scrolls a full-screen erase into scrollback, where tmux's
+        // "[detached …]" line then survives to the post-quit prompt. The cleanup must erase only
+        // the message line in place. Guards against regressing to the \x1b[2J approach.
+        assert!(
+            DETACH_MSG_CLEANUP.contains("\x1b[2K"),
+            "must erase the detach line in place (\\x1b[2K)"
+        );
+        assert!(
+            !DETACH_MSG_CLEANUP.contains("2J"),
+            "must not full-screen clear (\\x1b[2J scrolls into Terminal.app scrollback)"
+        );
+        assert!(
+            !DETACH_MSG_CLEANUP.contains("3J"),
+            "must not clear scrollback (\\x1b[3J is unsupported on Terminal.app anyway)"
+        );
+    }
 
     /// A minimal real-or-inferred session, mirroring the daemon's `overlay_agents` literals.
     fn sess(session_id: Option<&str>, status: AgentStatus, inferred: bool) -> AgentSession {
