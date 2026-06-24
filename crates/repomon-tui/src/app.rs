@@ -3861,12 +3861,20 @@ async fn event_loop(
             },
             note = next_note(events), if events_alive => match note {
                 Some(n) => {
+                    // Diagnostic: time the drain. The backlog buffered while parked in a focused
+                    // attach is processed here on return; if parsing it (ANSI -> styled lines per
+                    // pane) is what stalls the UI after a detach, this records it with a count.
+                    let drain_started = std::time::Instant::now();
+                    let mut drained = 1usize;
                     app.on_notification(n).await;
                     // Coalesce a burst of notifications (and the backlog buffered while parked in
                     // a focused attach) into a single refresh instead of one ~100ms refresh each.
                     loop {
                         match events.try_recv() {
-                            Ok(n) => app.on_notification(n).await,
+                            Ok(n) => {
+                                drained += 1;
+                                app.on_notification(n).await;
+                            }
                             Err(broadcast::error::TryRecvError::Empty) => break,
                             Err(broadcast::error::TryRecvError::Lagged(_)) => {
                                 app.refresh_pending = true;
@@ -3879,6 +3887,13 @@ async fn event_loop(
                     }
                     if std::mem::take(&mut app.refresh_pending) {
                         app.refresh().await;
+                    }
+                    let drain_elapsed = drain_started.elapsed();
+                    if drain_elapsed >= Duration::from_millis(300) {
+                        tui_log(&format!(
+                            "slow notif drain: {drained} notes in {:.2}s",
+                            drain_elapsed.as_secs_f32()
+                        ));
                     }
                 }
                 None => events_alive = false,
@@ -3986,6 +4001,15 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     let _ = terminal.draw(|f| view::render(f, app));
 }
 
+/// Escape sequence emitted after `tmux attach` returns, to wipe tmux's "[detached (from session
+/// …)]" line off the PRIMARY screen so it doesn't resurface when repomon leaves its alternate
+/// screen on quit. It MUST erase the single message line IN PLACE (`\x1b[2K`) rather than do a
+/// full-screen clear (`\x1b[2J`/`\x1b[3J`): macOS Terminal.app scrolls a full-screen erase into the
+/// scrollback buffer (and exposes no clear-scrollback capability), so the line would survive there
+/// and reappear above the post-quit prompt. The message always sits exactly one line above the
+/// cursor on return, hence `up one, erase line, carriage return`.
+const DETACH_MSG_CLEANUP: &str = "\x1b[1A\x1b[2K\r";
+
 /// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
 /// the session name). `$TMUX` is dropped so this works even when repomon runs inside tmux —
 /// otherwise tmux refuses to attach ("sessions should be nested with care").
@@ -4004,19 +4028,26 @@ fn tmux_attach(target: &str) {
         start.elapsed().as_secs_f32(),
         status.as_ref().ok().map(|s| s.code())
     ));
-    // On detach, tmux prints "[detached (from session …)]" to the PRIMARY screen (it just left its
-    // own alternate screen). repomon re-enters its alternate screen and hides it during use — but
-    // it resurfaces when repomon finally exits the alternate screen on quit. We're on the primary
-    // screen right now, so wipe it (clear + home) to leave a clean terminal behind on quit.
+    // On detach, tmux prints "[detached (from session …)]\r\n" to the PRIMARY screen (it just left
+    // its own alternate screen), leaving the cursor on the line directly below that message. repomon
+    // re-enters its alternate screen and hides it during use, but it resurfaces when repomon finally
+    // leaves the alternate screen on quit. A full-screen erase (\x1b[2J) is the WRONG tool here:
+    // macOS Terminal.app (and others) scroll erased content into the scrollback buffer instead of
+    // discarding it, so the line survives there and reappears above the post-quit prompt (Terminal.app
+    // has no clear-scrollback capability either, so \x1b[3J can't help). Erase just the message line
+    // IN PLACE — \x1b[2K never scrolls — which removes it on every terminal while preserving the
+    // user's earlier scrollback. The message is always exactly one line above the cursor: a normal
+    // print lands it one line up; a print on the bottom row scrolls it up one with the cursor — same
+    // offset either way.
     use std::io::Write;
     let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b[H\x1b[2J");
+    let _ = write!(out, "{DETACH_MSG_CLEANUP}");
     let _ = out.flush();
 }
 
 /// Append a timestamped diagnostic line to the TUI log. The TUI can't use tracing/stderr (ratatui
 /// owns the screen), so attach/detach diagnostics go straight to a file next to the daemon log.
-fn tui_log(line: &str) {
+pub(crate) fn tui_log(line: &str) {
     use std::io::Write;
     let dir = repomon_core::service::log_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -4181,6 +4212,25 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detach_cleanup_erases_line_in_place_not_fullscreen() {
+        // macOS Terminal.app scrolls a full-screen erase into scrollback, where tmux's
+        // "[detached …]" line then survives to the post-quit prompt. The cleanup must erase only
+        // the message line in place. Guards against regressing to the \x1b[2J approach.
+        assert!(
+            DETACH_MSG_CLEANUP.contains("\x1b[2K"),
+            "must erase the detach line in place (\\x1b[2K)"
+        );
+        assert!(
+            !DETACH_MSG_CLEANUP.contains("2J"),
+            "must not full-screen clear (\\x1b[2J scrolls into Terminal.app scrollback)"
+        );
+        assert!(
+            !DETACH_MSG_CLEANUP.contains("3J"),
+            "must not clear scrollback (\\x1b[3J is unsupported on Terminal.app anyway)"
+        );
+    }
 
     /// A minimal real-or-inferred session, mirroring the daemon's `overlay_agents` literals.
     fn sess(session_id: Option<&str>, status: AgentStatus, inferred: bool) -> AgentSession {

@@ -89,10 +89,21 @@ impl DaemonClient {
             .await
             .map_err(|_| anyhow!("daemon connection closed"))?;
 
+        let started = std::time::Instant::now();
         let resp = tokio::time::timeout(Duration::from_secs(15), rx)
             .await
             .map_err(|_| anyhow!("request '{method}' timed out"))?
             .map_err(|_| anyhow!("request '{method}' was dropped"))?;
+        // Diagnostic: every RPC is awaited on the event loop's critical path, so a slow one freezes
+        // the UI. Log the offender (method + duration) — most calls are ~55ms; anything past this
+        // threshold is a real stall worth tracing (e.g. the sync RPCs fired right after a detach).
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(300) {
+            crate::app::tui_log(&format!(
+                "slow RPC {method} took {:.2}s",
+                elapsed.as_secs_f32()
+            ));
+        }
         if let Some(err) = resp.error {
             return Err(anyhow!("{} (code {})", err.message, err.code));
         }
