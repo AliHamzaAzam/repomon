@@ -3806,11 +3806,29 @@ async fn event_loop(
     loop {
         // Resolve the selected session/window BEFORE syncing the viewport, so a just-spawned
         // window isn't momentarily streamed as the wrong pane (selected_window() is correct).
+        // Diagnostic: time the whole sync block with a per-call breakdown. Each call is awaited on
+        // this critical path, so several sub-threshold RPCs can add up to a visible stall that no
+        // single slow-RPC line would flag (e.g. the resync forced right after a detach).
+        let sync_t = std::time::Instant::now();
         app.sync_session_cursor();
         app.sync_viewport().await;
+        let t_viewport = sync_t.elapsed();
         app.sync_pane_size().await;
+        let t_panesize = sync_t.elapsed();
         app.sync_recent_commits().await;
+        let t_commits = sync_t.elapsed();
         app.sync_terminals().await;
+        let t_terminals = sync_t.elapsed();
+        if t_terminals >= Duration::from_millis(250) {
+            tui_log(&format!(
+                "slow sync block: total={:.2}s viewport={:.0}ms panesize={:.0}ms commits={:.0}ms terminals={:.0}ms",
+                t_terminals.as_secs_f32(),
+                t_viewport.as_millis(),
+                (t_panesize - t_viewport).as_millis(),
+                (t_commits - t_panesize).as_millis(),
+                (t_terminals - t_commits).as_millis()
+            ));
+        }
         app.sync_title();
         app.check_focus_alive();
         // Expire a stale notification banner so the footer hints come back.
@@ -3954,12 +3972,17 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     disable_mouse();
     ratatui::restore();
     tmux_attach(&target);
+    // Diagnostic: time the terminal re-init + first paint after a detach. None of these touch the
+    // daemon, so a stall here (vs a slow RPC) points at ratatui::init / drain / draw rather than the
+    // network path — narrowing the "hangs for a bit on exit" report.
+    let reinit_t = std::time::Instant::now();
     *terminal = ratatui::init();
     if app.mouse_on {
         enable_mouse();
     }
     let _ = terminal.clear();
     drain_pending_input();
+    let after_drain = reinit_t.elapsed();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear(); // force a viewport resync after returning
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
@@ -3971,6 +3994,15 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // user doesn't sit looking at tmux's "[detached]" line + a stale/garbled screen while the next
     // loop iteration's sync RPCs (which run before its own draw) complete.
     let _ = terminal.draw(|f| view::render(f, app));
+    let reinit_total = reinit_t.elapsed();
+    if reinit_total >= Duration::from_millis(200) {
+        tui_log(&format!(
+            "post-detach reinit: total={:.2}s init+clear+drain={:.0}ms draw={:.0}ms",
+            reinit_total.as_secs_f32(),
+            after_drain.as_millis(),
+            (reinit_total - after_drain).as_millis()
+        ));
+    }
 }
 
 /// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.
