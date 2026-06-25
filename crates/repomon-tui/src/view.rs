@@ -121,7 +121,7 @@ fn render_agents(f: &mut Frame, app: &App) {
             lines.push(Line::raw(format!("  {}", app.status)));
         }
         f.render_widget(Paragraph::new(lines), rows[1]);
-        f.render_widget(footer(AGENTS_EDIT_KEYS, app), rows[2]);
+        f.render_widget(footer(AGENTS_EDIT_KEYS, app, rows[2].width), rows[2]);
         return;
     }
 
@@ -154,7 +154,7 @@ fn render_agents(f: &mut Frame, app: &App) {
         lines.push(Line::raw(format!("  {}", app.status)));
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
-    f.render_widget(footer(AGENTS_KEYS, app), rows[2]);
+    f.render_widget(footer(AGENTS_KEYS, app, rows[2].width), rows[2]);
 }
 
 const SETTINGS_KEYS: &str = "↑↓ / click a row  ·  ←/→ change · space/↵ toggle/edit  ·  esc back";
@@ -300,7 +300,7 @@ fn render_settings(f: &mut Frame, app: &App) {
     } else {
         SETTINGS_KEYS
     };
-    f.render_widget(footer(keys, app), rows[2]);
+    f.render_widget(footer(keys, app, rows[2].width), rows[2]);
 }
 
 const ADDREPO_KEYS: &str =
@@ -350,7 +350,7 @@ fn render_addrepo(f: &mut Frame, app: &App) {
         lines.push(line);
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
-    f.render_widget(footer(ADDREPO_KEYS, app), rows[2]);
+    f.render_widget(footer(ADDREPO_KEYS, app, rows[2].width), rows[2]);
 }
 
 const DASH_KEYS: &str = "1 fleet · 2 timeline · 3 sessions · 4 search  ·  ←/esc fleet · q quit";
@@ -472,7 +472,7 @@ fn render_timeline(f: &mut Frame, app: &App) {
         )),
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(footer(DASH_KEYS, app), rows[1]);
+    f.render_widget(footer(DASH_KEYS, app, rows[1].width), rows[1]);
 }
 
 /// Density levels → styled block spans, adjacent equal levels merged into one span. The blocks
@@ -542,6 +542,7 @@ fn render_sessions(f: &mut Frame, app: &App) {
         footer(
             "e export-md  ·  1 fleet · 2 timeline · 3 sessions · 4 search  ·  q quit",
             app,
+            rows[1].width,
         ),
         rows[1],
     );
@@ -623,6 +624,7 @@ fn render_notifications(f: &mut Frame, app: &App) {
         footer(
             "↑↓ move · ↵ open · t attach · d dismiss · c clear  ·  1 fleet · ←/esc back · q quit",
             app,
+            rows[1].width,
         ),
         rows[1],
     );
@@ -701,7 +703,7 @@ fn render_spawn_pick(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
     f.render_widget(
-        footer("↑↓ pick · 1-9 jump · ↵ spawn · esc cancel", app),
+        footer("↑↓ pick · 1-9 jump · ↵ spawn · esc cancel", app, rows[2].width),
         rows[2],
     );
 }
@@ -766,7 +768,7 @@ fn render_lane_jump(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
     f.render_widget(
-        footer("type to filter · ↑↓ pick · ↵ open · esc cancel", app),
+        footer("type to filter · ↑↓ pick · ↵ open · esc cancel", app, rows[2].width),
         rows[2],
     );
 }
@@ -806,7 +808,7 @@ fn render_search(f: &mut Frame, app: &App) {
         }
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(footer("type to search  ·  ←/esc fleet", app), rows[1]);
+    f.render_widget(footer("type to search  ·  ←/esc fleet", app, rows[1].width), rows[1]);
 }
 
 fn analytics_char(level: u8) -> &'static str {
@@ -847,7 +849,7 @@ fn render_fleet(f: &mut Frame, app: &App) {
         Paragraph::new(lines).scroll((scroll as u16, 0)),
         content,
     );
-    f.render_widget(footer(FLEET_KEYS, app), rows[1]);
+    f.render_widget(footer(FLEET_KEYS, app, rows[1].width), rows[1]);
 }
 
 fn render_split(f: &mut Frame, app: &App) {
@@ -938,7 +940,7 @@ fn render_split(f: &mut Frame, app: &App) {
     } else {
         SPLIT_KEYS
     };
-    f.render_widget(footer(keys, app), rows[3]);
+    f.render_widget(footer(keys, app, rows[3].width), rows[3]);
 }
 
 fn render_focus(f: &mut Frame, app: &App) {
@@ -1015,7 +1017,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     } else {
         FOCUS_CMD_KEYS
     };
-    f.render_widget(footer(keys, app), rows[3]);
+    f.render_widget(footer(keys, app, rows[3].width), rows[3]);
 }
 
 fn render_grid(f: &mut Frame, app: &App) {
@@ -1055,7 +1057,7 @@ fn render_grid(f: &mut Frame, app: &App) {
             ]),
             rows[1],
         );
-        f.render_widget(footer(GRID_KEYS, app), rows[3]);
+        f.render_widget(footer(GRID_KEYS, app, rows[3].width), rows[3]);
         return;
     }
 
@@ -1136,7 +1138,7 @@ fn render_grid(f: &mut Frame, app: &App) {
     } else {
         GRID_KEYS
     };
-    f.render_widget(footer(keys, app), rows[3]);
+    f.render_widget(footer(keys, app, rows[3].width), rows[3]);
 }
 
 fn tile_lines(
@@ -1533,7 +1535,7 @@ fn render_new_lane(f: &mut Frame, app: &App) {
         lines.push(Line::raw(format!("  {}", app.status)));
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(footer(NEWLANE_KEYS, app), rows[1]);
+    f.render_widget(footer(NEWLANE_KEYS, app, rows[1].width), rows[1]);
 }
 
 // ---- shared line builders ----------------------------------------------------
@@ -1834,7 +1836,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
 
 // ---- atoms -------------------------------------------------------------------
 
-fn footer(keys: &str, app: &App) -> Paragraph<'static> {
+fn footer(keys: &str, app: &App, width: u16) -> Paragraph<'static> {
     use ratatui::style::Modifier;
     // A fresh notification takes over the footer line briefly (then the key hints return).
     if let Some((msg, since)) = &app.notif_banner {
@@ -1845,10 +1847,135 @@ fn footer(keys: &str, app: &App) -> Paragraph<'static> {
             )));
         }
     }
-    Paragraph::new(Line::from(Span::styled(
-        keys.to_string(),
-        app.theme.muted(),
-    )))
+    // Reserve room for the bottom-right usage corner (drawn on top by `corner()`), so the hint bar
+    // never slides under it — measured exactly as `corner()` measures, in chars.
+    let reserve = corner_text(app).map_or(0, |(t, _)| t.chars().count() as u16 + 1);
+    let budget = width.saturating_sub(reserve);
+    Paragraph::new(Line::from(footer_spans(keys, app, budget)))
+}
+
+/// Render a footer hint string into styled spans: each item's leading key token(s) in the accent
+/// (bold), labels and separators muted, and the source's `"  ·  "` group breaks promoted to a muted
+/// `│` rail. Truncates at item boundaries to `budget` columns, ending in a muted `" …"`, so the
+/// usage corner keeps clear space. Glyph widths are counted in chars (as `corner()` does).
+fn footer_spans(keys: &str, app: &App, budget: u16) -> Vec<Span<'static>> {
+    let muted = app.theme.muted();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used: u16 = 0;
+    let mut truncated = false;
+    // Groups are the literal "  ·  " (two-space middot two-space): real group breaks are always that
+    // exact run, while every in-prose middot is single-spaced " · " inside parens, so this never
+    // fractures the *_INSERT strings.
+    'outer: for group in keys.split("  ·  ") {
+        for (ii, item) in split_items_depth0(group).into_iter().enumerate() {
+            // First item of a non-first group gets the "│" rail; later items get the "·" dot.
+            let sep = if spans.is_empty() {
+                ""
+            } else if ii == 0 {
+                " │ "
+            } else {
+                " · "
+            };
+            let (item_spans, item_w) = key_label_spans(item, app);
+            if item_w == 0 {
+                continue;
+            }
+            let sep_w = sep.chars().count() as u16;
+            if used + sep_w + item_w > budget {
+                truncated = true;
+                break 'outer;
+            }
+            if !sep.is_empty() {
+                spans.push(Span::styled(sep.to_string(), muted));
+                used += sep_w;
+            }
+            spans.extend(item_spans);
+            used += item_w;
+        }
+    }
+    if truncated {
+        spans.push(Span::styled(" …".to_string(), muted));
+    }
+    spans
+}
+
+/// Split a hint group into items on `" · "`, but only at paren depth 0 — so the middots inside a
+/// parenthetical like `"(esc · ⇧⇥ · ^C sent)"` never split the prose. Items are trimmed.
+fn split_items_depth0(group: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = group.char_indices().collect();
+    let mut items: Vec<&str> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        let (bi, c) = chars[i];
+        match c {
+            '(' => depth += 1,
+            ')' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+        // A " · " boundary (space, middot, space) only counts at the top level.
+        if depth == 0
+            && c == ' '
+            && chars.get(i + 1).is_some_and(|&(_, c1)| c1 == '·')
+            && chars.get(i + 2).is_some_and(|&(_, c2)| c2 == ' ')
+        {
+            items.push(group[start..bi].trim());
+            let (last_bi, last_c) = chars[i + 2];
+            start = last_bi + last_c.len_utf8();
+            i += 3;
+            continue;
+        }
+        i += 1;
+    }
+    items.push(group[start..].trim());
+    items.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+/// Style one hint item as `<key> <label>`: an accent (bold) key span plus a muted label span.
+/// Returns the spans and their width in chars. A bare key (e.g. `"q"`) yields just the accent span.
+fn key_label_spans(item: &str, app: &App) -> (Vec<Span<'static>>, u16) {
+    let (key, label) = split_key_label(item);
+    if key.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let mut w = key.chars().count() as u16;
+    let mut spans = vec![Span::styled(key, app.theme.footer_key())];
+    if let Some(label) = label {
+        let label = format!(" {label}");
+        w += label.chars().count() as u16;
+        spans.push(Span::styled(label, app.theme.muted()));
+    }
+    (spans, w)
+}
+
+/// Split a hint item into its key and optional label. The first whitespace token is always the key,
+/// and if it is purely symbolic, following symbolic tokens join it (so `"↑↓ ↵ open"` → key `"↑↓ ↵"`,
+/// label `"open"`). A bare key (e.g. `"q"`) returns `(key, None)`.
+fn split_key_label(item: &str) -> (String, Option<String>) {
+    let mut toks = item.split_whitespace();
+    let Some(first) = toks.next() else {
+        return (String::new(), None);
+    };
+    let mut key = first.to_string();
+    let chain = is_glyph_token(first);
+    let mut rest: Vec<&str> = Vec::new();
+    for t in toks {
+        if rest.is_empty() && chain && is_glyph_token(t) {
+            key.push(' ');
+            key.push_str(t);
+        } else {
+            rest.push(t);
+        }
+    }
+    let label = (!rest.is_empty()).then(|| rest.join(" "));
+    (key, label)
+}
+
+/// Whether a token is made entirely of key glyphs (arrows, enter, tab, shift, modifiers) — used to
+/// chain a second symbolic key onto the first, e.g. the `"↑↓ ↵"` in `"↑↓ ↵ open"`.
+fn is_glyph_token(t: &str) -> bool {
+    !t.is_empty() && t.chars().all(|c| "↑↓←→↵⇥⇧^/+*,".contains(c))
 }
 
 fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
@@ -2183,4 +2310,71 @@ pub fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn items_split_only_at_top_level() {
+        // A plain group: every " · " is a boundary.
+        assert_eq!(
+            split_items_depth0("↑↓ lane · tab session"),
+            vec!["↑↓ lane", "tab session"],
+        );
+        // The middots inside the parenthetical must NOT split the prose item.
+        assert_eq!(
+            split_items_depth0("keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll"),
+            vec!["keys → agent (esc · ⇧⇥ · ^C sent)", "PgUp/PgDn scroll"],
+        );
+    }
+
+    #[test]
+    fn insert_strings_keep_two_groups_with_prose_intact() {
+        // SPLIT_INSERT_KEYS / FOCUS_INSERT_KEYS shape: group split on "  ·  " then paren-aware items.
+        let groups: Vec<Vec<&str>> = SPLIT_INSERT_KEYS
+            .split("  ·  ")
+            .map(split_items_depth0)
+            .collect();
+        assert_eq!(groups.len(), 2);
+        // The first item is the whole prose sentence, parenthetical and all.
+        assert_eq!(groups[0][0], "keys → agent (esc · ⇧⇥ · ^C sent)");
+
+        let focus: Vec<Vec<&str>> = FOCUS_INSERT_KEYS
+            .split("  ·  ")
+            .map(split_items_depth0)
+            .collect();
+        assert_eq!(focus.len(), 2);
+        assert_eq!(focus[0][0], "keys → agent (esc · ⇧⇥ · ^C sent)");
+    }
+
+    #[test]
+    fn key_label_splits_and_chains_glyphs() {
+        // Single symbolic key + label.
+        assert_eq!(
+            split_key_label("i quick-type"),
+            ("i".into(), Some("quick-type".into())),
+        );
+        // Two-key glyph run: both arrows chain into the key.
+        assert_eq!(
+            split_key_label("↑↓ ↵ open"),
+            ("↑↓ ↵".into(), Some("open".into())),
+        );
+        // Bare key, no label.
+        assert_eq!(split_key_label("q"), ("q".into(), None));
+        // Multi-word labels are preserved (paren prose rides in the label).
+        assert_eq!(
+            split_key_label("keys → agent (esc · ⇧⇥ · ^C sent)"),
+            (
+                "keys".into(),
+                Some("→ agent (esc · ⇧⇥ · ^C sent)".into()),
+            ),
+        );
+        // A word-key does NOT chain a following arrow into the key.
+        assert_eq!(
+            split_key_label("wheel/PgUp scroll"),
+            ("wheel/PgUp".into(), Some("scroll".into())),
+        );
+    }
 }

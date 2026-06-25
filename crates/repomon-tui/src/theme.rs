@@ -130,6 +130,11 @@ impl Theme {
             _ => Style::default(),
         }
     }
+    /// Footer key glyphs: accent plus bold, so keystrokes read as keycaps against the muted labels.
+    /// In monochrome the accent is plain, leaving a bold-vs-dim contrast against the dim labels.
+    pub fn footer_key(&self) -> Style {
+        self.accented().add_modifier(Modifier::BOLD)
+    }
 
     // --- semantic status colors (plain when mono) ---
 
@@ -240,6 +245,18 @@ mod tests {
         assert_eq!(t.muted().fg, None);
         assert_eq!(t.header_style().fg, None);
         assert_eq!(t.selected().fg, None);
+    }
+
+    #[test]
+    fn footer_key_is_bold_and_mono_safe() {
+        // Colored: accent fg + bold.
+        let c = Theme::from_accent(None);
+        assert_eq!(c.footer_key().fg, Some(Color::Cyan));
+        assert!(c.footer_key().add_modifier.contains(Modifier::BOLD));
+        // Mono: no color, but still bold so keys read as keycaps against dim labels.
+        let m = Theme::from_accent(Some("mono"));
+        assert_eq!(m.footer_key().fg, None);
+        assert!(m.footer_key().add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

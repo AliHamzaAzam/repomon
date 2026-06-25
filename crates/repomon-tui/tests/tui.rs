@@ -85,6 +85,20 @@ async fn renders_fleet_with_a_registered_repo() {
         "today commit missing:\n{screen}"
     );
     assert!(screen.contains("click select"), "footer missing:\n{screen}");
+    // The footer now chunks groups with the muted "│" rail (was "  ·  ") and, at this width, the
+    // long Fleet hints truncate with an ellipsis instead of being clipped mid-word.
+    let footer_row = screen
+        .lines()
+        .find(|l| l.contains("click select"))
+        .expect("footer row missing");
+    assert!(
+        footer_row.contains('│'),
+        "footer group rail missing:\n{footer_row}"
+    );
+    assert!(
+        footer_row.contains('…'),
+        "footer should truncate with an ellipsis at width 100:\n{footer_row}"
+    );
 
     // The spawn picker lists the agents for the selected lane, with the default tagged and a
     // PATH warning for an undetected command.
