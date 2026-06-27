@@ -1603,7 +1603,7 @@ async fn diagnose_vanished_sessions(
                 continue;
             }
             let reason = vanish_reason(p, alive, cutoff);
-            tracing::info!(
+            tracing::debug!(
                 target: "repomon::overlay",
                 lane = lane.id,
                 session = %p.key,
