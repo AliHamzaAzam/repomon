@@ -1323,9 +1323,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let key = lane.worktree.path.canonicalize().ok()?;
             Some(m.get(&key).copied().unwrap_or(0))
         });
-        if let Some(alive) = alive {
-            summaries.truncate(alive.max(managed_n)); // sorted newest-first
-        }
+        // `summaries` is newest-first. The live-process probe can MISS live agents (it has
+        // reported 0 for a worktree holding a live session, truncating it away — the
+        // disappearing-sessions bug), so a probe count of 0 is treated as "unknown" and keeps the
+        // recent sessions rather than dropping a live agent; a genuinely `/exit`ed external
+        // session's transcript still ages out of the `SESSION_WINDOW_HOURS` window. Only a
+        // positive probe count (or a managed window) pares back lingering duplicates.
+        let keep = sessions_to_keep(summaries.len(), alive, managed_n);
+        summaries.truncate(keep);
         if !summaries.is_empty() {
             // Pair the newest `k` transcripts with the `k` windows, oldest with oldest (slot order
             // tracks spawn order, transcripts arrive newest-first). A heuristic, but it routes
@@ -1509,6 +1514,28 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
     // intermittent "sessions disappear after idle" report names its own cause in the log.
     diagnose_vanished_sessions(ctx, lanes, live.as_ref()).await;
+}
+
+/// How many of a lane's newest-first transcript sessions to keep, given the worktree's live
+/// `claude`-process count (`alive`) and its managed-window count (`managed_n`).
+///
+/// The live-process probe (`pgrep -x claude` + lsof) can miss live agents — it has reported 0 for
+/// a worktree holding a live session — so a probe count of 0 is treated as "unknown" and keeps
+/// every recent session rather than truncating a live agent away (the disappearing-sessions bug).
+/// A positive count, or a managed window, pares back lingering `/exit`ed duplicates as before; a
+/// probe failure (`None`) likewise doesn't filter.
+fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize) -> usize {
+    match alive {
+        Some(n) => {
+            let keep = n.max(managed_n);
+            if keep == 0 {
+                total // unreliable zero: keep recent sessions instead of dropping a live agent
+            } else {
+                keep.min(total)
+            }
+        }
+        None => total, // probe unavailable: don't filter
+    }
 }
 
 /// A stable identity for a surfaced session: its transcript id, else `win:<window>` (a managed
@@ -2029,6 +2056,24 @@ async fn commits_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_live_session_when_process_probe_reports_zero() {
+        // The disappearing-sessions bug: an external session (no managed window) whose worktree
+        // the live-`claude` probe undercounts to 0 must NOT be truncated away.
+        assert_eq!(sessions_to_keep(1, Some(0), 0), 1);
+        assert_eq!(sessions_to_keep(2, Some(0), 0), 2);
+        // A probe failure (None) likewise keeps everything (existing behavior).
+        assert_eq!(sessions_to_keep(2, None, 0), 2);
+        // A managed lane keeps its window count even when the probe reads 0.
+        assert_eq!(sessions_to_keep(3, Some(0), 1), 1);
+        // A positive probe count still pares back lingering `/exit`ed duplicates.
+        assert_eq!(sessions_to_keep(3, Some(1), 0), 1);
+        assert_eq!(sessions_to_keep(3, Some(2), 1), 2);
+        // Never keep more than exist.
+        assert_eq!(sessions_to_keep(1, Some(5), 0), 1);
+        assert_eq!(sessions_to_keep(0, Some(0), 0), 0);
+    }
 
     #[test]
     fn session_id_validation_blocks_injection() {
