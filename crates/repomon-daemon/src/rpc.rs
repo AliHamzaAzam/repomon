@@ -1508,7 +1508,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 
     // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
     // intermittent "sessions disappear after idle" report names its own cause in the log.
-    diagnose_vanished_sessions(ctx, lanes, &windows, live.as_ref()).await;
+    diagnose_vanished_sessions(ctx, lanes, live.as_ref()).await;
 }
 
 /// A stable identity for a surfaced session: its transcript id, else `win:<window>` (a managed
@@ -1526,14 +1526,20 @@ fn sess_key(s: &repomon_core::model::AgentSession) -> String {
 }
 
 /// Compare this overlay's per-lane sessions to the previous tick's; for each session that
-/// vanished, log it at INFO (`target: repomon::overlay`) with an attributed reason. The reason
-/// distinguishes a *correct* disappearance (the agent's process exited: `managed-window-gone` /
-/// `process-count-zero`) from the bug we're hunting (the row dropped while the process is still
-/// alive: `transcript-aged-out` / `process-alive-dropped`).
+/// vanished, log it at INFO (`target: repomon::overlay`) with a **process-first** attributed
+/// reason plus the worktree's live-`claude` count and the lane's remaining session count.
+///
+/// Process-first (not window-pairing-based) so a multi-agent exit transition — where transcripts
+/// re-pair to the surviving windows — doesn't masquerade as a bug. Reasons:
+/// - `process-exited` — no live `claude` remains in the worktree: a correct disappearance.
+/// - `transcript-aged-out` / `alive-but-dropped` — a `claude` is still alive there but this row
+///   dropped: the bug we're hunting. `alive=N sessions=M` disambiguates the multi-agent case
+///   (a clean single-agent bug reads `alive>=1 sessions=0`).
+/// - `inferred-expired` — a file-activity session aged out (~2 min, by design).
+/// - `probe-unavailable` — the pgrep/lsof probe couldn't run this tick.
 async fn diagnose_vanished_sessions(
     ctx: &Ctx,
     lanes: &[Lane],
-    windows: &[String],
     live: Option<&std::collections::HashMap<std::path::PathBuf, usize>>,
 ) {
     let current: std::collections::HashMap<repomon_core::model::LaneId, Vec<crate::OverlaySession>> =
@@ -1563,11 +1569,13 @@ async fn diagnose_vanished_sessions(
         let Some(prev) = prev_map.get(&lane.id) else {
             continue;
         };
+        // The worktree's live `claude` count — the process-first liveness signal.
+        let alive = live.and_then(|m| lane.worktree.path.canonicalize().ok().map(|k| m.get(&k).copied().unwrap_or(0)));
         for p in prev {
             if cur.iter().any(|c| c.key == p.key) {
                 continue;
             }
-            let reason = vanish_reason(p, windows, live, cutoff);
+            let reason = vanish_reason(p, alive, cutoff);
             tracing::info!(
                 target: "repomon::overlay",
                 lane = lane.id,
@@ -1575,6 +1583,8 @@ async fn diagnose_vanished_sessions(
                 external = p.external,
                 inferred = p.inferred,
                 window = ?p.window,
+                alive = ?alive,
+                sessions = cur.len(),
                 reason,
                 "session vanished"
             );
@@ -1583,39 +1593,33 @@ async fn diagnose_vanished_sessions(
     *prev_map = current;
 }
 
-/// Attribute a vanished session to a cause from the signals already computed this overlay.
+/// Attribute a vanished session from the worktree's live-`claude` count (`alive`) and the
+/// transcript age. See [`diagnose_vanished_sessions`] for the reason vocabulary.
 fn vanish_reason(
     p: &crate::OverlaySession,
-    windows: &[String],
-    live: Option<&std::collections::HashMap<std::path::PathBuf, usize>>,
+    alive: Option<usize>,
     cutoff: chrono::DateTime<chrono::Utc>,
 ) -> &'static str {
     if p.inferred {
         return "inferred-expired";
     }
-    if let Some(w) = &p.window {
-        return if windows.iter().any(|x| x == w) {
-            // The window is still alive but its session dropped — unexpected; worth a look.
-            "window-present-dropped"
-        } else {
-            "managed-window-gone"
-        };
-    }
-    // An external transcript session (no managed window): is its `claude` process still alive?
-    let alive = live.and_then(|m| p.worktree.canonicalize().ok().map(|k| m.get(&k).copied().unwrap_or(0)));
-    if alive == Some(0) {
-        return "process-count-zero";
-    }
-    // Process alive (or probe unavailable): did the transcript file age past the 6h window?
-    let aged = std::fs::metadata(&p.manifest)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(|t| chrono::DateTime::<chrono::Utc>::from(t) < cutoff)
-        .unwrap_or(false);
-    if aged {
-        "transcript-aged-out"
-    } else {
-        "process-alive-dropped"
+    match alive {
+        Some(0) => "process-exited",
+        None => "probe-unavailable",
+        Some(_) => {
+            // A `claude` is alive in this worktree, yet this row dropped. Did its transcript age
+            // past the 6h window (the gate hiding a live agent), or drop for another reason?
+            let aged = std::fs::metadata(&p.manifest)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t) < cutoff)
+                .unwrap_or(false);
+            if aged {
+                "transcript-aged-out"
+            } else {
+                "alive-but-dropped"
+            }
+        }
     }
 }
 
