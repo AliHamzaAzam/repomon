@@ -123,6 +123,10 @@ async fn main() {
     // Stream visible agents' output to subscribed TUIs.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
+    // Stream the repomind orchestrator's pane to a watching command-center view (self-gates on a
+    // running session + a watcher, so it's free until the orchestrator is opened).
+    tokio::spawn(repomon_daemon::stream_orchestrator(ctx.clone()));
+
     // Remote-access bridge (companion apps over Tailscale) — only when explicitly enabled
     // and a token exists; without both, no network listener is ever opened.
     {

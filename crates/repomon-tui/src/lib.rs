@@ -211,6 +211,7 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
     }
 
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
+    tokio::spawn(repomon_daemon::stream_orchestrator(ctx.clone()));
 
     {
         let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());

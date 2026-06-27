@@ -42,6 +42,16 @@ pub struct OverlaySession {
     pub worktree: PathBuf,
 }
 
+/// The daemon-owned repomind orchestrator: a single `claude` session in a dedicated tmux window
+/// named `orchestrator` (deliberately NOT `lane-*`, so it stays out of the lane overlay/reaper and
+/// never pollutes the fleet `lane.list`). `agent`/`model` record what it was launched with.
+#[derive(Clone)]
+pub struct OrchestratorSession {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub window: String,
+}
+
 /// Everything a request handler needs. Cheap to share via `Arc`.
 pub struct Ctx {
     pub store: Store,
@@ -119,6 +129,13 @@ pub struct Ctx {
     /// tick is logged with an attributed reason (idle-drop diagnostic). See
     /// `rpc::diagnose_vanished_sessions`.
     pub last_overlay_sessions: Mutex<HashMap<LaneId, Vec<OverlaySession>>>,
+    /// The single daemon-owned repomind orchestrator session, if one is running. `None` until
+    /// `orchestrator.start` spawns it; cleared by `orchestrator.stop`.
+    pub orchestrator: Mutex<Option<OrchestratorSession>>,
+    /// Whether a client (the TUI's command-center view) currently wants the orchestrator pane
+    /// streamed. Gates `stream_orchestrator` so capturing the pane costs nothing when nobody's
+    /// watching.
+    pub orchestrator_watched: Mutex<bool>,
     pub shutdown: Notify,
 }
 
@@ -171,6 +188,8 @@ impl Ctx {
             window_empty_misses: Mutex::new(0),
             last_good_sessions: Mutex::new(HashMap::new()),
             last_overlay_sessions: Mutex::new(HashMap::new()),
+            orchestrator: Mutex::new(None),
+            orchestrator_watched: Mutex::new(false),
             shutdown: Notify::new(),
         })
     }
@@ -363,6 +382,41 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 lane,
                 St { window, content, backoff, last_cap: now, cursor },
             );
+        }
+    }
+}
+
+/// Stream the repomind orchestrator's pane to subscribed clients. While a session is running AND a
+/// client has asked to watch it (`orchestrator_watched`), capture the `orchestrator` window every
+/// ~200ms and broadcast `event.orchestrator.output` whenever the pane text changes. Idle (no
+/// session or nobody watching) it does nothing but a cheap flag check.
+pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
+    use std::time::Duration;
+
+    let mut last: Option<String> = None;
+    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let watched = *ctx.orchestrator_watched.lock().await;
+        let running = ctx.orchestrator.lock().await.is_some();
+        if !watched || !running {
+            last = None;
+            continue;
+        }
+        let tmux = ctx.tmux.clone();
+        let content =
+            match tokio::task::spawn_blocking(move || tmux.capture_named("orchestrator", None)).await
+            {
+                Ok(Ok(c)) => c,
+                _ => continue,
+            };
+        if last.as_deref() != Some(content.as_str()) {
+            ctx.broadcast(
+                pubsub::topic::ORCHESTRATOR_OUTPUT,
+                serde_json::json!({ "content": content.clone() }),
+            );
+            last = Some(content);
         }
     }
 }
