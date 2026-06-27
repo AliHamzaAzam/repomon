@@ -91,10 +91,39 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         })
         .collect();
 
+    // Nothing to own or reap on a server with no managed windows.
+    if windows.is_empty() {
+        return;
+    }
+
+    // Single-owner guard: claim/verify ownership of this tmux server every sweep — PROACTIVELY, so
+    // the live daemon stamps the server well before any stray could, not only once it has orphans —
+    // and never reap on a server another daemon owns. A second repomond sharing this session (e.g. a
+    // stray test instance that kept the default `tmux_session` while pointing at its own store)
+    // would otherwise mark every real `lane-<id>` window an orphan and kill it (the disappearing-
+    // sessions bug). The owner token is this daemon's db path: stable across restarts (so the real
+    // daemon reclaims its own stamp) and distinct per instance (so a stray never matches).
+    let me = owner_token(ctx);
+    let tmux_g = ctx.tmux.clone();
+    let me_g = me.clone();
+    let owns = tokio::task::spawn_blocking(move || tmux_g.claim_or_verify_owner(&me_g))
+        .await
+        .unwrap_or(false);
+
     let orphans = orphan_lane_windows(&windows, &lane_paths);
     if orphans.is_empty() {
         return;
     }
+    if !owns {
+        tracing::warn!(
+            ?orphans,
+            owner = %me,
+            session = ctx.tmux.session(),
+            "another repomond owns this tmux server; skipping reap (would kill its windows)"
+        );
+        return;
+    }
+
     tracing::info!(?orphans, "reaping orphaned agent windows");
 
     let tmux = ctx.tmux.clone();
@@ -106,6 +135,16 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
     })
     .await;
     ctx.invalidate_overlay().await;
+}
+
+/// This daemon's identity for the tmux-server single-owner guard: its db path — stable across
+/// restarts (so the real daemon reclaims its own stamp) and distinct per instance (so a stray
+/// test daemon's path never matches). Falls back to the pid when storeless (embedded / tests).
+fn owner_token(ctx: &Ctx) -> String {
+    ctx.db_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("pid:{}", std::process::id()))
 }
 
 /// Periodic reaper task; the first sweep runs immediately (covers daemon startup).

@@ -186,6 +186,31 @@ impl TmuxRuntime {
         self.ok(&["has-session", "-t", &self.session])
     }
 
+    /// Cooperative single-owner guard for this tmux server (`tmux -L <session>`). Two `repomond`s
+    /// aimed at the same session — e.g. a stray test daemon that kept the default `tmux_session`
+    /// while using its own socket+store — must never run destructive sweeps against each other's
+    /// windows: the second daemon's store doesn't know the first's lanes, so its reaper would mark
+    /// every real `lane-<id>` window an orphan and kill it (the disappearing-sessions bug). The
+    /// first daemon to call this stamps `@repomon-owner` with its identity (`me`, its db path);
+    /// later daemons read a different value and back off. Returns true iff `me` owns the server.
+    pub fn claim_or_verify_owner(&self, me: &str) -> bool {
+        match self.server_owner() {
+            Some(owner) => owner == me,
+            None => {
+                // Claim it, then re-read: if another daemon set it concurrently we lose and back off.
+                let _ = self.ok(&["set-option", "-s", "@repomon-owner", me]);
+                self.server_owner().as_deref() == Some(me)
+            }
+        }
+    }
+
+    /// The identity the owning daemon stamped on this server, if any (unset/empty → `None`).
+    fn server_owner(&self) -> Option<String> {
+        let out = self.run(&["show-options", "-sv", "@repomon-owner"]).ok()?;
+        let s = out.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
     /// Window names currently in the session.
     pub fn list_windows(&self) -> Result<Vec<String>> {
         // No `has-session` preflight — `run_allow_absent` turns "no server / can't find session"
@@ -358,6 +383,7 @@ impl TmuxRuntime {
     }
 
     pub fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-literal", text = %text.chars().take(60).collect::<String>(), "tmux write");
         self.run(&["send-keys", "-t", &self.exact_target(window), "-l", text])?;
         Ok(())
     }
@@ -368,6 +394,7 @@ impl TmuxRuntime {
     }
 
     pub fn send_text_named(&self, window: &str, text: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-text", text = %text.chars().take(60).collect::<String>(), "tmux write");
         let target = self.exact_target(window);
         self.run(&["send-keys", "-t", &target, "-l", text])?;
         self.run(&["send-keys", "-t", &target, "Enter"])?;
@@ -380,6 +407,7 @@ impl TmuxRuntime {
     }
 
     pub fn send_key_named(&self, window: &str, key: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-key", key = %key, "tmux write");
         self.run(&["send-keys", "-t", &self.exact_target(window), key])?;
         Ok(())
     }
@@ -509,6 +537,7 @@ impl TmuxRuntime {
     /// Terminate a named window (an agent slot or a terminal). Exact-match target, so killing
     /// `lane-1` can't take out `lane-1-2`.
     pub fn kill_named(&self, name: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %name, op = "kill-window", "tmux write");
         self.run(&["kill-window", "-t", &self.exact_target(name)])?;
         Ok(())
     }
@@ -637,6 +666,29 @@ mod tests {
         // Tear down the test session.
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", rt.session()])
+            .output();
+    }
+
+    #[test]
+    fn single_owner_guard_claims_then_blocks_others() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-ownertest-{}", std::process::id()));
+        // A server must exist before server options can be set — spawn a throwaway window.
+        rt.spawn(1, &std::env::temp_dir(), "sh -c 'sleep 30'").unwrap();
+
+        // First caller claims the server and keeps verifying true on re-check (restart-safe).
+        assert!(rt.claim_or_verify_owner("daemon-A"), "first claim should win");
+        assert!(rt.claim_or_verify_owner("daemon-A"), "owner re-verifies true");
+        // A different daemon sharing the server (a stray test instance) is locked out of reaping.
+        assert!(!rt.claim_or_verify_owner("daemon-B"), "non-owner must back off");
+        // The original owner is unaffected by the other's attempt.
+        assert!(rt.claim_or_verify_owner("daemon-A"), "owner still owns after B's attempt");
+
+        let _ = Command::new("tmux")
+            .args(["-L", rt.session(), "kill-server"])
             .output();
     }
 }
