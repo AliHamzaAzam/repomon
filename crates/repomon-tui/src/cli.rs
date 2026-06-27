@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use repomon_core::model::{Lane, Repo};
 use repomon_core::{config, service, Config};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::client::DaemonClient;
 
@@ -288,9 +288,10 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
     Ok(())
 }
 
-/// `repomon orchestrate` — launch the repomind orchestrator: ensure the daemon is up, write an
-/// MCP config pointing `claude` at `repomond mcp`, and exec an interactive `claude` session
-/// wired to the fleet (and the user's mnemind memory, inherited from their own Claude config).
+/// `repomon orchestrate` — talk to the repomind orchestrator. Ensure the daemon is up, ask it to
+/// start (or reuse) the single daemon-owned orchestrator session, then `tmux attach` to that
+/// durable window. The session-building (MCP config + `claude` invocation) now lives daemon-side
+/// in `orchestrator.start`, so the CLI and the TUI drive **one** shared orchestrator.
 async fn handle_orchestrate(
     config: &Config,
     socket: Option<PathBuf>,
@@ -299,69 +300,70 @@ async fn handle_orchestrate(
     model: Option<String>,
     prompt: Option<String>,
 ) -> Result<()> {
-    let socket_path = socket.clone().unwrap_or_else(|| config::socket_path(config));
-    // Make sure a daemon is running before `repomond mcp` (spawned by claude) tries to connect.
-    crate::ensure_daemon(config, socket).await?;
-
-    let repomond = service::repomond_path();
-
-    // The MCP server's environment is authoritative for the socket + guardrails.
-    let mut env = serde_json::Map::new();
-    env.insert(
-        "REPOMON_MCP_SOCKET".into(),
-        json!(socket_path.to_string_lossy()),
-    );
-    env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
-    if let Some(n) = max_agents {
-        env.insert("REPOMON_MCP_MAX_AGENTS".into(), json!(n.to_string()));
-    }
-
-    let mcp_config = json!({
-        "mcpServers": {
-            "repomon": {
-                "command": repomond.to_string_lossy(),
-                "args": ["mcp"],
-                "env": serde_json::Value::Object(env),
-            }
-        }
-    });
-    let cfg_dir = config::config_dir();
-    std::fs::create_dir_all(&cfg_dir)?;
-    let mcp_config_path = cfg_dir.join("repomind-mcp.json");
-    std::fs::write(&mcp_config_path, serde_json::to_string_pretty(&mcp_config)?)?;
-
-    // Build the claude invocation. `--mcp-config` *adds* the repomon server; the user's own
-    // basic-memory (mnemind) server still loads from their config, so we don't redeclare it.
-    let mut cmd = std::process::Command::new("claude");
-    cmd.arg("--mcp-config").arg(&mcp_config_path);
-    cmd.arg("--append-system-prompt").arg(repomon_mcp::PERSONA);
-    // Pre-approve the fleet + memory tools so routine orchestration doesn't prompt; anything
-    // else (Bash, file edits) still gates through the normal permission flow.
-    cmd.arg("--allowedTools").arg("mcp__repomon,mcp__basic-memory");
-    if let Some(model) = &model {
-        cmd.arg("--model").arg(model);
-    }
-    if let Some(prompt) = &prompt {
-        cmd.arg(prompt);
-    }
-
     eprintln!("repomind: orchestrating the fleet (autonomy: {autonomy}). Talk to it below.\n");
 
-    // Replace this process with claude so it owns the terminal directly.
+    // Make sure a daemon is running, then drive it (it owns the orchestrator window).
+    let client = crate::ensure_daemon(config, socket).await?;
+
+    // Start (or adopt) the orchestrator session. Idempotent: a no-op if one is already running.
+    let mut start = serde_json::Map::new();
+    start.insert("autonomy".into(), json!(autonomy));
+    if let Some(model) = &model {
+        start.insert("model".into(), json!(model));
+    }
+    if let Some(n) = max_agents {
+        start.insert("max_agents".into(), json!(n));
+    }
+    if let Some(prompt) = &prompt {
+        start.insert("prompt".into(), json!(prompt));
+    }
+    client
+        .call("orchestrator.start", Some(Value::Object(start)))
+        .await
+        .map_err(|e| anyhow!("failed to start the orchestrator: {e}"))?;
+
+    // Resolve its attach target and attach to the durable tmux window.
+    let resp = client.call("orchestrator.target", None).await?;
+    let target = resp
+        .get("target")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let available = resp
+        .get("available")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false);
+    if !available || target.is_empty() {
+        return Err(anyhow!(
+            "the orchestrator session isn't available — is tmux installed and on PATH?"
+        ));
+    }
+
+    attach_tmux_target(&target)
+}
+
+/// Attach this process to a `session:window` target on repomon's dedicated tmux socket (the socket
+/// label is the session name). `$TMUX` is dropped so this works even from inside tmux. On unix we
+/// `exec` tmux so it owns the terminal directly (like a raw attach); detaching ends the command.
+fn attach_tmux_target(target: &str) -> Result<()> {
+    let socket_label = target.split(':').next().unwrap_or("repomon");
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args(["-L", socket_label, "attach", "-t", target])
+        .env_remove("TMUX");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // exec only returns on failure (otherwise this process is replaced by claude).
+        // exec only returns on failure (otherwise this process is replaced by tmux).
         let err = cmd.exec();
         Err(anyhow!(
-            "failed to launch `claude` ({err}). Is Claude Code installed and on PATH?"
+            "failed to attach to the orchestrator ({err}). Is tmux installed and on PATH?"
         ))
     }
     #[cfg(not(unix))]
     {
         let status = cmd
             .status()
-            .map_err(|e| anyhow!("failed to launch `claude` ({e}). Is it installed and on PATH?"))?;
+            .map_err(|e| anyhow!("failed to attach to the orchestrator ({e})."))?;
         std::process::exit(status.code().unwrap_or(0));
     }
 }
