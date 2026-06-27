@@ -2533,6 +2533,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "repomon-core"
 version = "0.2.9"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "directories",
@@ -2559,6 +2560,7 @@ dependencies = [
  "clap",
  "futures",
  "repomon-core",
+ "repomon-mcp",
  "serde",
  "serde_json",
  "tempfile",
@@ -2566,6 +2568,20 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "repomon-mcp"
+version = "0.2.9"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "repomon-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2582,6 +2598,7 @@ dependencies = [
  "ratatui",
  "repomon-core",
  "repomon-daemon",
+ "repomon-mcp",
  "serde",
  "serde_json",
  "tempfile",

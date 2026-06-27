@@ -43,6 +43,21 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
+    /// Talk to repomind — an orchestrator agent that manages the fleet for you. Launches a
+    /// `claude` session wired to the repomon MCP server (and your mnemind memory, if present).
+    Orchestrate {
+        /// How autonomous repomind is: autonomous (default), supervised, or read-only.
+        #[arg(long, default_value = "autonomous")]
+        autonomy: String,
+        /// Cap on how many agents repomind may run at once (default 4).
+        #[arg(long)]
+        max_agents: Option<usize>,
+        /// Override the model for the orchestrator session (e.g. opus, sonnet).
+        #[arg(long)]
+        model: Option<String>,
+        /// An initial goal to start repomind with (optional).
+        prompt: Option<String>,
+    },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
         /// Shell to generate completions for.
@@ -169,6 +184,12 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
         Command::Remote { cmd } => handle_remote(cmd)?,
+        Command::Orchestrate {
+            autonomy,
+            max_agents,
+            model,
+            prompt,
+        } => handle_orchestrate(config, socket, autonomy, max_agents, model, prompt).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
@@ -265,6 +286,84 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `repomon orchestrate` — launch the repomind orchestrator: ensure the daemon is up, write an
+/// MCP config pointing `claude` at `repomond mcp`, and exec an interactive `claude` session
+/// wired to the fleet (and the user's mnemind memory, inherited from their own Claude config).
+async fn handle_orchestrate(
+    config: &Config,
+    socket: Option<PathBuf>,
+    autonomy: String,
+    max_agents: Option<usize>,
+    model: Option<String>,
+    prompt: Option<String>,
+) -> Result<()> {
+    let socket_path = socket.clone().unwrap_or_else(|| config::socket_path(config));
+    // Make sure a daemon is running before `repomond mcp` (spawned by claude) tries to connect.
+    crate::ensure_daemon(config, socket).await?;
+
+    let repomond = service::repomond_path();
+
+    // The MCP server's environment is authoritative for the socket + guardrails.
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "REPOMON_MCP_SOCKET".into(),
+        json!(socket_path.to_string_lossy()),
+    );
+    env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
+    if let Some(n) = max_agents {
+        env.insert("REPOMON_MCP_MAX_AGENTS".into(), json!(n.to_string()));
+    }
+
+    let mcp_config = json!({
+        "mcpServers": {
+            "repomon": {
+                "command": repomond.to_string_lossy(),
+                "args": ["mcp"],
+                "env": serde_json::Value::Object(env),
+            }
+        }
+    });
+    let cfg_dir = config::config_dir();
+    std::fs::create_dir_all(&cfg_dir)?;
+    let mcp_config_path = cfg_dir.join("repomind-mcp.json");
+    std::fs::write(&mcp_config_path, serde_json::to_string_pretty(&mcp_config)?)?;
+
+    // Build the claude invocation. `--mcp-config` *adds* the repomon server; the user's own
+    // basic-memory (mnemind) server still loads from their config, so we don't redeclare it.
+    let mut cmd = std::process::Command::new("claude");
+    cmd.arg("--mcp-config").arg(&mcp_config_path);
+    cmd.arg("--append-system-prompt").arg(repomon_mcp::PERSONA);
+    // Pre-approve the fleet + memory tools so routine orchestration doesn't prompt; anything
+    // else (Bash, file edits) still gates through the normal permission flow.
+    cmd.arg("--allowedTools").arg("mcp__repomon,mcp__basic-memory");
+    if let Some(model) = &model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(prompt) = &prompt {
+        cmd.arg(prompt);
+    }
+
+    eprintln!("repomind: orchestrating the fleet (autonomy: {autonomy}). Talk to it below.\n");
+
+    // Replace this process with claude so it owns the terminal directly.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec only returns on failure (otherwise this process is replaced by claude).
+        let err = cmd.exec();
+        Err(anyhow!(
+            "failed to launch `claude` ({err}). Is Claude Code installed and on PATH?"
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .map_err(|e| anyhow!("failed to launch `claude` ({e}). Is it installed and on PATH?"))?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
 }
 
 /// A fresh 32-byte hex bearer token from the OS entropy pool (no extra deps).

@@ -100,6 +100,47 @@ fn is_limit_option(lower_text: &str) -> bool {
     lower_text.contains("stop and wait") || lower_text.contains("wait for limit")
 }
 
+/// How a pending prompt should be handled by an orchestrator: a routine **permission** ask the
+/// agent raised about its own next tool call (proceed / make this edit / trust the folder), or a
+/// genuine **decision** the agent is deferring to a human ("Which auth method should we use?").
+///
+/// An orchestrator may auto-answer a [`PromptClass::Permission`] in an autonomous posture, but
+/// must escalate a [`PromptClass::Decision`] to the human and never answer it itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptClass {
+    /// The agent is asking to go ahead with an action it already proposed (yes/no/allow).
+    Permission,
+    /// The agent is asking the human to make a real choice between substantive options.
+    Decision,
+}
+
+/// Classify a [`detect_pending_prompt`] summary as a routine permission ask or a real decision.
+///
+/// Conservative by construction: only the well-known permission phrasings Claude uses for its
+/// own tool calls map to [`PromptClass::Permission`]; everything else (any other question) is a
+/// [`PromptClass::Decision`] so an uncertain prompt is escalated to the human rather than
+/// auto-answered.
+pub fn classify_prompt(summary: &str) -> PromptClass {
+    let l = summary.to_lowercase();
+    // The phrasings Claude uses when asking to run its own proposed tool call. These are the
+    // only cases an autonomous orchestrator may answer without a human.
+    const PERMISSION_MARKERS: &[&str] = &[
+        "do you want to proceed",
+        "do you want to make this edit",
+        "do you want to make these edits",
+        "do you want to create",
+        "do you want to run",
+        "do you want to apply",
+        "do you want to allow",
+        "do you trust",
+    ];
+    if PERMISSION_MARKERS.iter().any(|m| l.contains(m)) {
+        PromptClass::Permission
+    } else {
+        PromptClass::Decision
+    }
+}
+
 /// Strip the dialog box borders (`│ … │`) and padding from an ANSI-stripped line.
 fn content(stripped: &str) -> &str {
     stripped
@@ -235,5 +276,29 @@ mod tests {
         let s = detect_pending_prompt(&pane).unwrap();
         assert_eq!(s.chars().count(), 120);
         assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn classify_permission_dialogs() {
+        for s in [
+            "Bash command — Do you want to proceed?",
+            "Do you want to make this edit to app.rs?",
+            "Do you trust the files in this folder?",
+            "Do you want to create README.md?",
+        ] {
+            assert_eq!(classify_prompt(s), PromptClass::Permission, "{s}");
+        }
+    }
+
+    #[test]
+    fn classify_real_questions_as_decisions() {
+        // Anything that isn't a known permission phrasing escalates to the human.
+        for s in [
+            "Which auth method should we use?",
+            "Should I target Postgres or SQLite for this?",
+            "What should the default timeout be?",
+        ] {
+            assert_eq!(classify_prompt(s), PromptClass::Decision, "{s}");
+        }
     }
 }

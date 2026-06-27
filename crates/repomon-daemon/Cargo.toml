@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 repomon-core = { workspace = true }
+repomon-mcp = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 a2 = { workspace = true }

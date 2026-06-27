@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use repomon_core::{config, Config, Store, Watcher};
 use repomon_daemon::{serve, Ctx};
 use serde_json::json;
@@ -16,22 +16,40 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "repomond", version, about = "The repomon background daemon")]
 struct Args {
     /// Override the socket path.
-    #[arg(long)]
+    #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Override the database path.
     #[arg(long)]
     data: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run as an MCP server over stdio for the repomind orchestrator. Connects to the running
+    /// daemon as a client and exposes the fleet as MCP tools; logs go to stderr so stdout stays
+    /// a clean protocol channel. Normally launched by `repomon orchestrate`, not by hand.
+    Mcp,
 }
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
+    // The MCP subcommand is a stdio protocol server: keep all logging on stderr and never run
+    // the daemon setup below (it connects to the *already-running* daemon as a client).
+    if let Some(Command::Mcp) = args.command {
+        run_mcp(args.socket).await;
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    let args = Args::parse();
     let config = Config::load().unwrap_or_default();
     let db = args.data.unwrap_or_else(config::db_path);
     let socket = args.socket.unwrap_or_else(|| config::socket_path(&config));
@@ -168,6 +186,27 @@ async fn main() {
 
     if let Err(e) = serve(ctx, &socket).await {
         eprintln!("serve error: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// `repomond mcp` — serve the MCP protocol over stdio for the repomind orchestrator.
+async fn run_mcp(socket_override: Option<PathBuf>) {
+    // Logs to stderr only: stdout carries the newline-delimited MCP JSON-RPC stream.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .init();
+
+    let config = Config::load().unwrap_or_default();
+    let socket = socket_override
+        .or_else(|| std::env::var("REPOMON_MCP_SOCKET").ok().map(PathBuf::from))
+        .unwrap_or_else(|| config::socket_path(&config));
+
+    if let Err(e) = repomon_mcp::serve_stdio(repomon_mcp::Options { socket }).await {
+        eprintln!("repomond mcp: {e}");
         std::process::exit(1);
     }
 }
