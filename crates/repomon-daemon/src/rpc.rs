@@ -1505,6 +1505,118 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             }
         }
     }
+
+    // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
+    // intermittent "sessions disappear after idle" report names its own cause in the log.
+    diagnose_vanished_sessions(ctx, lanes, &windows, live.as_ref()).await;
+}
+
+/// A stable identity for a surfaced session: its transcript id, else `win:<window>` (a managed
+/// placeholder with no transcript yet) or `inferred:<wt>` (a file-activity session).
+fn sess_key(s: &repomon_core::model::AgentSession) -> String {
+    if let Some(id) = &s.session_id {
+        id.clone()
+    } else if s.inferred {
+        format!("inferred:{}", s.worktree_id.unwrap_or(0))
+    } else if let Some(w) = &s.tmux_window {
+        format!("win:{w}")
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// Compare this overlay's per-lane sessions to the previous tick's; for each session that
+/// vanished, log it at INFO (`target: repomon::overlay`) with an attributed reason. The reason
+/// distinguishes a *correct* disappearance (the agent's process exited: `managed-window-gone` /
+/// `process-count-zero`) from the bug we're hunting (the row dropped while the process is still
+/// alive: `transcript-aged-out` / `process-alive-dropped`).
+async fn diagnose_vanished_sessions(
+    ctx: &Ctx,
+    lanes: &[Lane],
+    windows: &[String],
+    live: Option<&std::collections::HashMap<std::path::PathBuf, usize>>,
+) {
+    let current: std::collections::HashMap<repomon_core::model::LaneId, Vec<crate::OverlaySession>> =
+        lanes
+            .iter()
+            .map(|lane| {
+                let recs = lane
+                    .agent_sessions
+                    .iter()
+                    .map(|s| crate::OverlaySession {
+                        key: sess_key(s),
+                        external: s.external,
+                        inferred: s.inferred,
+                        window: s.tmux_window.clone(),
+                        manifest: s.manifest_path.clone(),
+                        worktree: lane.worktree.path.clone(),
+                    })
+                    .collect();
+                (lane.id, recs)
+            })
+            .collect();
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(SESSION_WINDOW_HOURS);
+    let mut prev_map = ctx.last_overlay_sessions.lock().await;
+    for lane in lanes {
+        let cur = &current[&lane.id];
+        let Some(prev) = prev_map.get(&lane.id) else {
+            continue;
+        };
+        for p in prev {
+            if cur.iter().any(|c| c.key == p.key) {
+                continue;
+            }
+            let reason = vanish_reason(p, windows, live, cutoff);
+            tracing::info!(
+                target: "repomon::overlay",
+                lane = lane.id,
+                session = %p.key,
+                external = p.external,
+                inferred = p.inferred,
+                window = ?p.window,
+                reason,
+                "session vanished"
+            );
+        }
+    }
+    *prev_map = current;
+}
+
+/// Attribute a vanished session to a cause from the signals already computed this overlay.
+fn vanish_reason(
+    p: &crate::OverlaySession,
+    windows: &[String],
+    live: Option<&std::collections::HashMap<std::path::PathBuf, usize>>,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> &'static str {
+    if p.inferred {
+        return "inferred-expired";
+    }
+    if let Some(w) = &p.window {
+        return if windows.iter().any(|x| x == w) {
+            // The window is still alive but its session dropped — unexpected; worth a look.
+            "window-present-dropped"
+        } else {
+            "managed-window-gone"
+        };
+    }
+    // An external transcript session (no managed window): is its `claude` process still alive?
+    let alive = live.and_then(|m| p.worktree.canonicalize().ok().map(|k| m.get(&k).copied().unwrap_or(0)));
+    if alive == Some(0) {
+        return "process-count-zero";
+    }
+    // Process alive (or probe unavailable): did the transcript file age past the 6h window?
+    let aged = std::fs::metadata(&p.manifest)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t) < cutoff)
+        .unwrap_or(false);
+    if aged {
+        "transcript-aged-out"
+    } else {
+        "process-alive-dropped"
+    }
 }
 
 /// List the subdirectories of `start` (default: $HOME) for the repo browser, marking which

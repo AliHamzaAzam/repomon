@@ -27,6 +27,21 @@ use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 
 pub use socket::serve;
 
+/// A session as the overlay last surfaced it, kept per lane so a session that vanishes on the
+/// next overlay can be attributed to a cause (the disappearing-sessions diagnostic). Keyed by
+/// `key`: the transcript session id, or `win:<window>` / `inferred:<wt>` when there is none.
+#[derive(Clone)]
+pub struct OverlaySession {
+    pub key: String,
+    pub external: bool,
+    pub inferred: bool,
+    pub window: Option<String>,
+    /// The transcript file this came from (empty for inferred / window-only placeholders).
+    pub manifest: PathBuf,
+    /// The lane's worktree path, for the live-process attribution.
+    pub worktree: PathBuf,
+}
+
 /// Everything a request handler needs. Cheap to share via `Arc`.
 pub struct Ctx {
     pub store: Store,
@@ -100,6 +115,10 @@ pub struct Ctx {
     /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
     /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
     pub last_good_sessions: Mutex<HashMap<PathBuf, Vec<repomon_core::agent::TranscriptSummary>>>,
+    /// What the overlay surfaced per lane on the previous tick, so a session that vanishes this
+    /// tick is logged with an attributed reason (idle-drop diagnostic). See
+    /// `rpc::diagnose_vanished_sessions`.
+    pub last_overlay_sessions: Mutex<HashMap<LaneId, Vec<OverlaySession>>>,
     pub shutdown: Notify,
 }
 
@@ -151,6 +170,7 @@ impl Ctx {
             last_good_windows: Mutex::new(Vec::new()),
             window_empty_misses: Mutex::new(0),
             last_good_sessions: Mutex::new(HashMap::new()),
+            last_overlay_sessions: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
     }
