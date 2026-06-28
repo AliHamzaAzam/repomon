@@ -375,6 +375,12 @@ struct OrchestratorResize {
     cols: u16,
     rows: u16,
 }
+#[derive(Deserialize)]
+struct OrchestratorTranscript {
+    /// How many recent transcript items to return.
+    #[serde(default = "default_transcript_limit")]
+    limit: usize,
+}
 
 /// Dispatch a single request to its handler.
 pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
@@ -1247,6 +1253,37 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             reconcile_orchestrator(ctx).await;
             let orch = ctx.orchestrator.lock().await;
             Ok(orchestrator_status_value(orch.as_ref()))
+        }
+        // Repomind's conversation as structured TranscriptItems, so a client (the iOS app) can render
+        // it as a chat instead of mirroring the raw pane. The orchestrator is the actively-used Claude
+        // session in $HOME; pick the newest $HOME transcript with real content across accounts. The
+        // tracked `agent` can be stale after a restart+adopt (it reflects config, not the running
+        // window's actual CLAUDE_CONFIG_DIR), and the ~empty usage-probe sessions also run in $HOME,
+        // so neither the account nor plain recency is a reliable selector on its own.
+        "orchestrator.transcript" => {
+            let p: OrchestratorTranscript = parse(params)?;
+            reconcile_orchestrator(ctx).await;
+            if ctx.orchestrator.lock().await.is_none() {
+                Ok(json!([]))
+            } else {
+                let items = tokio::task::spawn_blocking(move || {
+                    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+                    let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
+                    let summaries =
+                        agent::claude::summaries_for(&home, within, MAX_SESSIONS_PER_LANE);
+                    // summaries_for sorts newest-first; take the newest with message/tool activity
+                    // (skips the content-less usage-probe sessions), falling back to the newest.
+                    let pick = summaries
+                        .iter()
+                        .find(|s| s.last_message.is_some() || s.tool_call_count > 0)
+                        .or_else(|| summaries.first());
+                    pick.map(|s| agent::claude::transcript_tail(&s.manifest_path, p.limit))
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                to_value(items)
+            }
         }
         "orchestrator.start" => {
             let p: OrchestratorStart = parse(params)?;
