@@ -197,7 +197,17 @@ fn render_settings(f: &mut Frame, app: &App) {
         s.default_agent.clone()
     };
     let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-    let items: [(&str, String, &str); 18] = [
+    let orch_agent = if s.orchestrator_agent.is_empty() {
+        "(default claude)".to_string()
+    } else {
+        s.orchestrator_agent.clone()
+    };
+    let orch_model = if s.orchestrator_model.is_empty() {
+        "default".to_string()
+    } else {
+        s.orchestrator_model.clone()
+    };
+    let items: [(&str, String, &str); 20] = [
         ("accent", s.accent.clone(), "←/→ cycle · live"),
         ("default agent", default_agent, "←/→ cycle"),
         ("auto-continue", onoff(s.auto_continue), "space toggles"),
@@ -257,6 +267,8 @@ fn render_settings(f: &mut Frame, app: &App) {
             onoff(s.expand_agents),
             "per-agent sidebar rows · space toggles",
         ),
+        ("repomind account", orch_agent, "←/→ cycle · Claude account"),
+        ("repomind model", orch_model, "←/→ cycle · default/opus/sonnet"),
     ];
     // Size the columns to the content so values and hints line up no matter how long a label is:
     // the name column fits the widest label (+gap), the value column fits the default worktree

@@ -146,6 +146,10 @@ pub struct Settings {
     pub notify_subagents: bool,
     pub usage_probe: bool,
     pub expand_agents: bool,
+    /// The Claude account that powers the repomind orchestrator (empty = bare `claude`).
+    pub orchestrator_agent: String,
+    /// The orchestrator's model override (empty = the account default; e.g. `opus`/`sonnet`).
+    pub orchestrator_model: String,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -154,7 +158,10 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 18;
+const SETTINGS_COUNT: usize = 20;
+
+/// Model choices the orchestrator setting cycles through (empty = the account's default model).
+const ORCH_MODELS: &[&str] = &["", "opus", "sonnet"];
 
 pub struct App {
     pub client: DaemonClient,
@@ -2087,6 +2094,13 @@ impl App {
         if let Some(x) = b("expand_agents") {
             self.settings.expand_agents = x;
         }
+        // Orchestrator overrides are `Option<String>` daemon-side; a null/absent value clears them.
+        if let Some(a) = v.get("orchestrator_agent") {
+            self.settings.orchestrator_agent = s(a).unwrap_or_default();
+        }
+        if let Some(m) = v.get("orchestrator_model") {
+            self.settings.orchestrator_model = s(m).unwrap_or_default();
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
@@ -2115,6 +2129,9 @@ impl App {
             "notify_subagents": self.settings.notify_subagents,
             "usage_probe": self.settings.usage_probe,
             "expand_agents": self.settings.expand_agents,
+            // Empty string clears the override daemon-side (back to the account default).
+            "orchestrator_agent": self.settings.orchestrator_agent,
+            "orchestrator_model": self.settings.orchestrator_model,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -2269,13 +2286,38 @@ impl App {
                     None => self.clamp_selection(),
                 }
             }
+            18 => {
+                // The orchestrator's Claude account: cycle "(default)" + claude variants + customs.
+                let mut options: Vec<String> = vec![String::new()];
+                options.extend(self.orchestrator_agent_choices());
+                let refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+                self.settings.orchestrator_agent =
+                    cycle(&refs, &self.settings.orchestrator_agent, forward);
+                self.save_settings().await;
+            }
+            19 => {
+                self.settings.orchestrator_model =
+                    cycle(ORCH_MODELS, &self.settings.orchestrator_model, forward);
+                self.save_settings().await;
+            }
             _ => {}
         }
     }
 
+    /// The agent names the orchestrator can run under: Claude account variants plus custom agents
+    /// (Codex/Aider are excluded; repomind is fundamentally a Claude session). Built from the
+    /// `agent.detect` list already loaded into `nl_agents`.
+    fn orchestrator_agent_choices(&self) -> Vec<String> {
+        self.nl_agents
+            .iter()
+            .filter(|a| a.custom || a.name.starts_with("claude"))
+            .map(|a| a.name.clone())
+            .collect()
+    }
+
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=17 => self.adjust_setting(true).await,
+            0..=2 | 5..=19 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
