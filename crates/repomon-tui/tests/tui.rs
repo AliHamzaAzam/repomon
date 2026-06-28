@@ -274,6 +274,23 @@ async fn renders_fleet_with_a_registered_repo() {
         split.contains("REPOMIND_PANE_SENTINEL"),
         "split right column must show repomind's pane when the pinned row is selected:\n{split}"
     );
+    // The pinned row offers the same quick-type entry as a selected lane, plus opening the view.
+    assert!(
+        split.contains("i type to repomind"),
+        "split mode line must offer typing to repomind:\n{split}"
+    );
+    assert!(
+        split.contains("open the full command-center"),
+        "split mode line must still offer opening the command-center:\n{split}"
+    );
+    // While typing to repomind the mode line flips to INSERT (keys forward to repomind).
+    app.orch_insert = true;
+    let split_insert = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        split_insert.contains("keys go to repomind"),
+        "split insert mode line must show keys going to repomind:\n{split_insert}"
+    );
+    app.orch_insert = false;
     // And when repomind is off, the right column shows the start hint, not a blank.
     app.orch_output = None;
     app.orch_running = false;

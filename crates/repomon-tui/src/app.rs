@@ -2788,6 +2788,9 @@ impl App {
             .iter()
             .find(|z| z.rect.contains(Position { x: col, y: row }))
             .copied();
+        // Clicking a lane (or the gutter) leaves any repomind insert mode, since the selection is
+        // moving off the pinned row.
+        self.orch_insert = false;
         match hit {
             Some(z) => {
                 let now = std::time::Instant::now();
@@ -3061,8 +3064,9 @@ impl App {
             return;
         }
         let text = std::mem::take(&mut self.pending_input);
-        // In the command-center view the buffer targets the orchestrator window, not a lane.
-        if self.view == View::Orchestrator {
+        // The command-center, or the Split preview while typing to repomind (`orch_insert`), targets
+        // the orchestrator window rather than a lane.
+        if self.view == View::Orchestrator || self.orch_insert {
             let _ = self
                 .client
                 .call(
@@ -3093,6 +3097,16 @@ impl App {
     /// Focus, `i` enters insert mode to type straight to the agent here (esc returns); ↵/→
     /// still zooms into full-screen Focus.
     async fn split_key(&mut self, key: KeyEvent) {
+        // Typing to repomind from the Split preview (the pinned row is selected): mirror a lane's
+        // insert mode, but forward keystrokes to the orchestrator. `^O` leaves insert.
+        if self.orch_insert {
+            if leaves_insert(&key) {
+                self.orch_insert = false;
+                return;
+            }
+            self.send_orch_key(key).await;
+            return;
+        }
         if self.focus_insert {
             if leaves_insert(&key) {
                 self.focus_insert = false;
@@ -3115,10 +3129,21 @@ impl App {
             self.filter_key(key);
             return;
         }
-        // The pinned repomind row has no lane; ↵/→ open the full command-center.
-        if self.orchestrator_selected() && matches!(key.code, KeyCode::Enter | KeyCode::Right) {
-            self.open_orchestrator().await;
-            return;
+        // The pinned repomind row has no lane: `i` quick-types to repomind (exactly like `i` on a
+        // selected lane), and `↵`/`→` open the full command-center.
+        if self.orchestrator_selected() {
+            match key.code {
+                KeyCode::Char('i') => {
+                    self.reset_scroll();
+                    self.orch_insert = true;
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Right => {
+                    self.open_orchestrator().await;
+                    return;
+                }
+                _ => {}
+            }
         }
         // esc returns to the live tail before it would zoom out.
         if key.code == KeyCode::Esc && self.scroll > 0 {
@@ -3777,6 +3802,7 @@ impl App {
             }
             Action::ZoomIn => {
                 self.focus_insert = false; // don't carry click-focus typing across screens
+                self.orch_insert = false;
                 // ↵/→ on the pinned repomind row opens the command-center instead of zooming a lane.
                 if self.orchestrator_selected() && matches!(self.view, View::Fleet | View::Split) {
                     self.open_orchestrator().await;
@@ -3791,6 +3817,7 @@ impl App {
             }
             Action::ZoomOut => {
                 self.focus_insert = false;
+                self.orch_insert = false;
                 match self.view {
                     View::Focus => self.view = View::Split,
                     View::Split => self.view = View::Fleet,

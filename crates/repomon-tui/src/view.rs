@@ -22,6 +22,10 @@ const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
     "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
+const SPLIT_ORCH_KEYS: &str =
+    "i type to repomind · ↵/→ open command-center  ·  ↑↓ lane · click focus · wheel scroll  ·  ←/esc back";
+const SPLIT_ORCH_INSERT_KEYS: &str =
+    "keys → repomind (esc · ⇧⇥ · ^C sent) · ↵ send  ·  ^O leave insert";
 const FOCUS_CMD_KEYS: &str =
     "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
@@ -1158,10 +1162,16 @@ fn render_split(f: &mut Frame, app: &App) {
         }
     }
 
-    // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
-    let mode = if pinned {
+    // INSERT here forwards keystrokes straight to the selected agent (or repomind, on the pinned
+    // row) without leaving the Split view.
+    let mode = if pinned && app.orch_insert {
         Line::from(Span::styled(
-            " ○ repomind selected · ↵/→ open the command-center ",
+            " ● INSERT: keys go to repomind (esc · ⇧⇥ · ^C all sent) · ^O to command ",
+            app.theme.selected(),
+        ))
+    } else if pinned {
+        Line::from(Span::styled(
+            " ○ i type to repomind · ↵/→ open the full command-center ",
             app.theme.muted(),
         ))
     } else if app.focus_insert {
@@ -1177,7 +1187,11 @@ fn render_split(f: &mut Frame, app: &App) {
     };
     f.render_widget(Paragraph::new(mode), rows[2]);
 
-    let keys = if app.focus_insert {
+    let keys = if pinned && app.orch_insert {
+        SPLIT_ORCH_INSERT_KEYS
+    } else if pinned {
+        SPLIT_ORCH_KEYS
+    } else if app.focus_insert {
         SPLIT_INSERT_KEYS
     } else {
         SPLIT_KEYS
