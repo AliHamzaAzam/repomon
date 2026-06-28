@@ -1592,7 +1592,7 @@ fn ago(t: DateTime<Utc>) -> String {
 /// Parse a captured pane (with `-e` ANSI escapes) into styled lines, trimming the trailing blank
 /// rows tmux pads the pane with. Called once per `event.agent.output` delta (in
 /// `App::on_notification`) and cached, so the render path only slices — it never re-parses.
-pub(crate) fn parse_pane(raw: &str) -> Vec<Line<'static>> {
+pub fn parse_pane(raw: &str) -> Vec<Line<'static>> {
     use ansi_to_tui::IntoText;
     let mut lines: Vec<Line<'static>> = raw
         .into_text()

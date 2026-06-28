@@ -256,6 +256,33 @@ async fn renders_fleet_with_a_registered_repo() {
     assert_eq!(amber, agent, "value column misaligned (agent row):\n{st}");
     assert_eq!(amber, template, "value column misaligned (template):\n{st}");
 
+    // Split view with the pinned repomind row selected (selected == 0): the right column must
+    // render repomind's live pane (not blank, not "(no lane selected)").
+    app.orch_running = true;
+    let orch_raw = "REPOMIND_PANE_SENTINEL hello from repomind\nsecond line of the chat".to_string();
+    let orch_lines = repomon_tui::view::parse_pane(&orch_raw);
+    app.orch_output = Some(repomon_tui::app::Pane {
+        raw: orch_raw,
+        lines: orch_lines,
+        cursor: None,
+    });
+    app.selected = 0; // the pinned repomind row is always row 0 of the fleet
+    app.view = View::Split;
+    assert!(app.orchestrator_selected(), "row 0 must be the pinned repomind row");
+    let split = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        split.contains("REPOMIND_PANE_SENTINEL"),
+        "split right column must show repomind's pane when the pinned row is selected:\n{split}"
+    );
+    // And when repomind is off, the right column shows the start hint, not a blank.
+    app.orch_output = None;
+    app.orch_running = false;
+    let split_off = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        split_off.contains("repomind is off"),
+        "split right column must show the off/start hint when repomind isn't running:\n{split_off}"
+    );
+
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
