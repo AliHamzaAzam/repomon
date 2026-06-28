@@ -33,6 +33,8 @@ pub enum View {
     SpawnPick,
     /// Fuzzy lane switcher: type a few characters, jump to any lane across repos.
     LaneJump,
+    /// repomind command-center: fleet summary + the orchestrator's live chat pane.
+    Orchestrator,
 }
 
 /// A user intent derived from a key press in navigation mode.
@@ -96,6 +98,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('m') => Some(Action::Merge),
         KeyCode::Char('e') => Some(Action::SpawnAgent),
         KeyCode::Char('o') => Some(Action::AdoptAgent),
+        KeyCode::Char('O') => Some(Action::Goto(View::Orchestrator)),
         KeyCode::Char('t') => Some(Action::OpenTerminal),
         KeyCode::Char('T') => Some(Action::AttachTerminal),
         KeyCode::Char('y') => Some(Action::ToggleMouse),
@@ -108,6 +111,7 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('3') => Some(Action::Goto(View::Sessions)),
         KeyCode::Char('4') => Some(Action::Goto(View::Search)),
         KeyCode::Char('5') => Some(Action::Goto(View::Notifications)),
+        KeyCode::Char('6') => Some(Action::Goto(View::Orchestrator)),
         _ => None,
     }
 }
@@ -119,6 +123,14 @@ mod tests {
 
     fn k(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn orchestrator_hotkeys_open_the_command_center() {
+        // Uppercase `O` (lowercase `o` is adopt) and `6` both jump to the repomind view.
+        assert_eq!(nav(k('O')), Some(Action::Goto(View::Orchestrator)));
+        assert_eq!(nav(k('6')), Some(Action::Goto(View::Orchestrator)));
+        assert_eq!(nav(k('o')), Some(Action::AdoptAgent));
     }
 
     #[test]

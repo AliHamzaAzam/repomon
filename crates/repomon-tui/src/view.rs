@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use repomon_core::model::{Commit, DirtyState, Lane, LaneId, RepoId};
+use repomon_core::model::{AgentStatus, Commit, DirtyState, Lane, LaneId, RepoId};
 
 use crate::app::{AgField, App, ClickZone};
 use crate::keybinds::View;
@@ -17,7 +17,7 @@ use crate::notify::NotifKind;
 use crate::theme;
 
 const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · q";
 const SPLIT_KEYS: &str =
     "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
@@ -46,6 +46,9 @@ fn click_zone(app: &App, rect: Rect, lane: LaneId, session: Option<usize>, inter
 pub fn render(f: &mut Frame, app: &App) {
     // Clickable lane regions are recomputed each frame by the per-view renderers below.
     app.click_zones.borrow_mut().clear();
+    // The pinned "repomind" row's click rect is re-set only by Fleet/Split each frame; clear it so a
+    // stale rect can't be hit from another view.
+    app.orch_click.set(None);
     match app.view {
         View::Fleet => render_fleet(f, app),
         View::Split => render_split(f, app),
@@ -61,6 +64,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Notifications => render_notifications(f, app),
         View::SpawnPick => render_spawn_pick(f, app),
         View::LaneJump => render_lane_jump(f, app),
+        View::Orchestrator => render_orchestrator(f, app),
     }
     // Drawn last, over the free right end of the bottom row, so it overlays every view.
     corner(f, app);
@@ -819,7 +823,7 @@ fn render_fleet(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
     let content = rows[0];
-    let (lines, selected_line, lane_rows) = fleet_lines(app, content);
+    let (lines, selected_line, lane_rows, brain_line) = fleet_lines(app, content);
     // Scroll so the selected lane stays on screen (roughly centered), clamped to the list bounds —
     // this is what lets the fleet grow past one screenful and still be navigable with ↑/↓.
     let h = content.height as usize;
@@ -828,6 +832,17 @@ fn render_fleet(f: &mut Frame, app: &App) {
         .map(|sl| sl.saturating_sub(h / 2))
         .unwrap_or(0)
         .min(max_scroll);
+    // Register the pinned repomind row's on-screen rect (scroll-adjusted) so a click opens the view.
+    if let Some(bli) = brain_line {
+        if bli >= scroll && bli < scroll + h {
+            app.orch_click.set(Some(Rect {
+                x: content.x,
+                y: content.y + (bli - scroll) as u16,
+                width: content.width,
+                height: 1,
+            }));
+        }
+    }
     // Click-to-select: register each *visible* row at its on-screen position (scroll-adjusted).
     for (li, lane_id, session) in &lane_rows {
         if *li >= scroll && *li < scroll + h {
@@ -850,6 +865,166 @@ fn render_fleet(f: &mut Frame, app: &App) {
         content,
     );
     f.render_widget(footer(FLEET_KEYS, app, rows[1].width), rows[1]);
+}
+
+const ORCH_KEYS: &str =
+    "↑↓/PgUp scroll · i type to repomind · ↵/→ attach (real terminal)  ·  ←/esc back · q quit";
+const ORCH_INSERT_KEYS: &str =
+    "keys → repomind (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O command-mode";
+
+/// The pinned row's one-word state: `off` (no session), `chatting` (pane changed in the last few
+/// seconds), else `idle`.
+fn orch_status_word(app: &App) -> &'static str {
+    if !app.orch_running {
+        "off"
+    } else if app
+        .orch_last_output
+        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3))
+    {
+        "chatting"
+    } else {
+        "idle"
+    }
+}
+
+/// The pinned "repomind" fleet row (rendered at the top of Fleet and the Split sidebar).
+fn orch_row_line(app: &App, selected: bool) -> Line<'static> {
+    let word = orch_status_word(app);
+    let text = format!(" 🧠 repomind · {word}");
+    if selected {
+        Line::from(Span::styled(text, app.theme.selected()))
+    } else {
+        let state_style = if app.orch_running {
+            app.theme.accented()
+        } else {
+            app.theme.muted()
+        };
+        Line::from(vec![
+            Span::styled(" 🧠 ".to_string(), state_style),
+            Span::raw("repomind "),
+            Span::styled(format!("· {word}"), app.theme.muted()),
+        ])
+    }
+}
+
+/// The command-center: a curated fleet summary on the left, repomind's live pane on the right.
+fn render_orchestrator(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let rows = Layout::vertical([
+        Constraint::Length(2), // header
+        Constraint::Min(0),    // summary + pane
+        Constraint::Length(1), // mode line
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+    f.render_widget(
+        Paragraph::new(vec![
+            header_line(area.width, "REPOMON · REPOMIND", &fmt_clock(), app),
+            rule(area.width, true, app),
+        ]),
+        rows[0],
+    );
+    let body = Layout::horizontal([
+        Constraint::Length(34),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(rows[1]);
+    f.render_widget(Paragraph::new(orch_summary_lines(app)), body[0]);
+    let divider: Vec<Line> = (0..body[1].height)
+        .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
+        .collect();
+    f.render_widget(Paragraph::new(divider), body[1]);
+    // Record the pane size (the daemon has no orchestrator.resize yet, so this is informational;
+    // sync_pane_size only resizes Split/Focus lane windows).
+    app.focus_pane_dims.set(Some((body[2].width, body[2].height)));
+    let pane = app.orch_output.as_ref();
+    let has_output = pane.map(|p| !p.raw.trim().is_empty()).unwrap_or(false);
+    let right = if has_output {
+        let h = (body[2].height as usize).max(1);
+        let lines = pane.map(|p| p.lines.as_slice()).unwrap_or(&[]);
+        let (start, end) = output_window(lines.len(), h, app.scroll);
+        lines[start..end].to_vec()
+    } else {
+        let msg = if app.orch_running {
+            "(repomind is starting, its live pane appears here)"
+        } else {
+            "(repomind isn't running, it auto-starts when you open this view)"
+        };
+        vec![Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
+    };
+    f.render_widget(Paragraph::new(right), body[2]);
+
+    let mode = if app.orch_insert {
+        Line::from(Span::styled(
+            " ● INSERT: keys go to repomind (esc · ⇧⇥ · ^C all sent) · ^O to command ",
+            app.theme.selected(),
+        ))
+    } else {
+        Line::from(Span::styled(
+            " ○ i type to repomind · ↵/→ attach into its real terminal ",
+            app.theme.muted(),
+        ))
+    };
+    f.render_widget(Paragraph::new(mode), rows[2]);
+    let keys = if app.orch_insert {
+        ORCH_INSERT_KEYS
+    } else {
+        ORCH_KEYS
+    };
+    f.render_widget(footer(keys, app, rows[3].width), rows[3]);
+}
+
+/// The left column of the command-center: fleet counts plus the (only) lanes blocked on the user.
+fn orch_summary_lines(app: &App) -> Vec<Line<'static>> {
+    let running = app
+        .lanes
+        .iter()
+        .filter(|l| {
+            l.agent_sessions
+                .iter()
+                .any(|s| !s.inferred && s.status == AgentStatus::Running)
+        })
+        .count();
+    let needs: Vec<&Lane> = app
+        .lanes
+        .iter()
+        .filter(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()))
+        .collect();
+    let needs_style = if needs.is_empty() {
+        app.theme.muted()
+    } else {
+        app.theme.needs_you()
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("🧠 REPOMIND · {}", orch_status_word(app)),
+            app.theme.header_style(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(format!("  {running} running"), app.theme.accented()),
+            Span::raw("    "),
+            Span::styled(format!("{} need you", needs.len()), needs_style),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled("NEEDS YOU".to_string(), app.theme.header_style())),
+    ];
+    if needs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  nothing waiting, ask repomind what's next".to_string(),
+            app.theme.muted(),
+        )));
+    } else {
+        for l in needs {
+            let name = format!("{}/{}", l.repo.name, lane_name(l));
+            lines.push(Line::from(vec![
+                Span::styled("  ⏸ ".to_string(), app.theme.needs_you()),
+                Span::raw(trunc(&name, 28)),
+            ]));
+        }
+    }
+    lines
 }
 
 fn render_split(f: &mut Frame, app: &App) {
@@ -1544,7 +1719,12 @@ fn render_new_lane(f: &mut Frame, app: &App) {
 fn fleet_lines(
     app: &App,
     content: Rect,
-) -> (Vec<Line<'static>>, Option<usize>, Vec<(usize, LaneId, Option<usize>)>) {
+) -> (
+    Vec<Line<'static>>,
+    Option<usize>,
+    Vec<(usize, LaneId, Option<usize>)>,
+    Option<usize>,
+) {
     let width = content.width;
     let now = Utc::now();
     let mut lines = Vec::new();
@@ -1552,6 +1732,8 @@ fn fleet_lines(
     // (line index, lane, agent session) so a click maps back through the scroll offset.
     let mut selected_line: Option<usize> = None;
     let mut lane_rows: Vec<(usize, LaneId, Option<usize>)> = Vec::new();
+    // The pinned repomind row's line index, so the caller can register its (scroll-adjusted) click.
+    let mut brain_line: Option<usize> = None;
     lines.push(header_line(width, "REPOMON", &fmt_clock(), app));
     lines.push(rule(width, true, app));
     lines.push(Line::raw(""));
@@ -1597,6 +1779,19 @@ fn fleet_lines(
     let rows = app.fleet_rows();
     let mut current: Option<RepoId> = None;
     for (ri, row) in rows.iter().enumerate() {
+        let selected = ri == app.selected;
+        // The pinned repomind row sits above the lanes; it targets no lane, so render + record it
+        // before the lane lookup below.
+        if row.orchestrator {
+            let li = lines.len();
+            brain_line = Some(li);
+            if selected {
+                selected_line = Some(li);
+            }
+            lines.push(orch_row_line(app, selected));
+            lines.push(Line::raw(""));
+            continue;
+        }
         let Some(&lane) = visible.get(row.lane_idx) else {
             continue;
         };
@@ -1607,7 +1802,6 @@ fn fleet_lines(
             current = Some(lane.repo.id);
             lines.push(repo_header(width, &lane.repo.name, app));
         }
-        let selected = ri == app.selected;
         let mut line = match row.session {
             None => lane_row(lane, now, app, selected),
             Some(s) => match lane.agent_sessions.get(s) {
@@ -1637,7 +1831,7 @@ fn fleet_lines(
         lines.push(Line::raw(""));
         lines.push(Line::raw(format!("  {}", app.status)));
     }
-    (lines, selected_line, lane_rows)
+    (lines, selected_line, lane_rows, brain_line)
 }
 
 fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
@@ -1654,6 +1848,22 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
     let rows = app.fleet_rows();
     let mut current: Option<RepoId> = None;
     for (ri, row) in rows.iter().enumerate() {
+        let selected = ri == app.selected;
+        // The pinned repomind row sits above the lanes; record its click rect and continue.
+        if row.orchestrator {
+            let li = lines.len() as u16;
+            if li < content.height {
+                app.orch_click.set(Some(Rect {
+                    x: content.x,
+                    y: content.y + li,
+                    width: content.width,
+                    height: 1,
+                }));
+            }
+            lines.push(orch_row_line(app, selected));
+            lines.push(Line::raw(""));
+            continue;
+        }
         let Some(&lane) = visible.get(row.lane_idx) else {
             continue;
         };
@@ -1664,7 +1874,6 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
                 app.theme.muted(),
             )));
         }
-        let selected = ri == app.selected;
         let mut line = match row.session {
             None => {
                 let glyph = status_glyph(lane);

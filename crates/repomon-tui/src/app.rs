@@ -106,6 +106,9 @@ pub struct FleetRow {
     pub lane_idx: usize,
     /// `Some(i)` = the lane's `i`-th agent sub-row; `None` = the lane header / single-agent row.
     pub session: Option<usize>,
+    /// The pinned "repomind" orchestrator row at the top of the fleet (always row 0). When set,
+    /// `lane_idx`/`session` are meaningless; the row targets [`View::Orchestrator`], not a lane.
+    pub orchestrator: bool,
 }
 
 /// Two left-clicks on the same lane within this window count as a double-click (→ open the real
@@ -355,6 +358,23 @@ pub struct App {
     pub usage: Vec<repomon_core::agent::AccountUsage>,
     /// When `usage.get` was last fetched, to throttle the refresh well below the 1s tick.
     last_usage_fetch: Option<std::time::Instant>,
+    /// The repomind orchestrator's captured pane (parsed once per `event.orchestrator.output`),
+    /// rendered on the right of the command-center view. `None` until the first delta arrives.
+    pub orch_output: Option<Pane>,
+    /// Whether the orchestrator session is running (from `orchestrator.status` / its broadcast).
+    pub orch_running: bool,
+    /// The orchestrator's resolved agent (Claude account) and model, for the pinned row's label.
+    pub orch_agent: Option<String>,
+    pub orch_model: Option<String>,
+    /// Last time the orchestrator pane changed; drives the "chatting" vs "idle" pinned-row state.
+    pub orch_last_output: Option<Instant>,
+    /// INSERT mode in the command-center view: keystrokes forward to `orchestrator.send_input`.
+    pub orch_insert: bool,
+    /// The watch flag we last pushed to the daemon (`orchestrator.watch`), mirrored so `sync_viewport`
+    /// only toggles streaming on a real enter/leave of the view.
+    orch_watched: bool,
+    /// Screen rect of the pinned "repomind" row this frame, so a click on it selects + opens the view.
+    pub orch_click: std::cell::Cell<Option<Rect>>,
 }
 
 impl App {
@@ -476,6 +496,14 @@ impl App {
             reader_parked: Arc::new(AtomicBool::new(false)),
             usage: Vec::new(),
             last_usage_fetch: None,
+            orch_output: None,
+            orch_running: false,
+            orch_agent: None,
+            orch_model: None,
+            orch_last_output: None,
+            orch_insert: false,
+            orch_watched: false,
+            orch_click: std::cell::Cell::new(None),
         }
     }
 
@@ -494,6 +522,28 @@ impl App {
         if let Ok(r) = self.client.call_typed::<Vec<Repo>>("repo.list", None).await {
             self.repos = r;
         }
+        self.refresh_orchestrator().await;
+    }
+
+    /// Pull the orchestrator's running state for the pinned "repomind" row. Cheap; the live
+    /// `event.orchestrator.status` broadcast keeps it fresh between refreshes.
+    pub async fn refresh_orchestrator(&mut self) {
+        if let Ok(v) = self.client.call("orchestrator.status", None).await {
+            self.apply_orchestrator_status(&v);
+        }
+    }
+
+    /// Update the pinned-row state from an `orchestrator.status` shape (`{running, agent, model}`).
+    fn apply_orchestrator_status(&mut self, v: &serde_json::Value) {
+        self.orch_running = v.get("running").and_then(|b| b.as_bool()).unwrap_or(false);
+        self.orch_agent = v
+            .get("agent")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
+        self.orch_model = v
+            .get("model")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string());
     }
 
     /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick — usage moves
@@ -942,11 +992,18 @@ impl App {
     /// indexes this list. Render and navigation BOTH go through here so they never drift.
     pub fn fleet_rows(&self) -> Vec<FleetRow> {
         let lanes = self.visible_lanes();
-        let mut rows = Vec::new();
+        // Row 0 is always the pinned "repomind" orchestrator row, so `selected == 0` selects it
+        // and real lane rows start at index 1; the selection math below indexes this list directly.
+        let mut rows = vec![FleetRow {
+            lane_idx: 0,
+            session: None,
+            orchestrator: true,
+        }];
         for (i, lane) in lanes.iter().enumerate() {
             rows.push(FleetRow {
                 lane_idx: i,
                 session: None,
+                orchestrator: false,
             });
             if self.settings.expand_agents && lane.agent_sessions.len() > 1 {
                 // Emit sub-rows in a STABLE order (by durable session identity), not the daemon's
@@ -956,11 +1013,17 @@ impl App {
                     rows.push(FleetRow {
                         lane_idx: i,
                         session: Some(s),
+                        orchestrator: false,
                     });
                 }
             }
         }
         rows
+    }
+
+    /// Whether the pinned "repomind" row is the current selection.
+    pub fn orchestrator_selected(&self) -> bool {
+        self.selected_row().map(|r| r.orchestrator).unwrap_or(false)
     }
 
     fn selected_row(&self) -> Option<FleetRow> {
@@ -973,6 +1036,9 @@ impl App {
 
     pub fn selected_lane(&self) -> Option<&Lane> {
         let row = self.fleet_rows().get(self.selected).copied()?;
+        if row.orchestrator {
+            return None; // the pinned repomind row targets no lane
+        }
         self.visible_lanes().into_iter().nth(row.lane_idx)
     }
 
@@ -998,12 +1064,14 @@ impl App {
             (lane_pos, want)
         };
         let rows = self.fleet_rows();
+        // Exclude the pinned repomind row (its `lane_idx` is a placeholder `0`) so lane 0 never
+        // resolves to it.
         let target = rows
             .iter()
-            .position(|r| r.lane_idx == lane_pos && r.session == want)
+            .position(|r| !r.orchestrator && r.lane_idx == lane_pos && r.session == want)
             .or_else(|| {
                 rows.iter()
-                    .position(|r| r.lane_idx == lane_pos && r.session.is_none())
+                    .position(|r| !r.orchestrator && r.lane_idx == lane_pos && r.session.is_none())
             });
         if let Some(t) = target {
             self.selected = t;
@@ -1052,7 +1120,8 @@ impl App {
             | View::Settings
             | View::Notifications
             | View::SpawnPick
-            | View::LaneJump => Vec::new(),
+            | View::LaneJump
+            | View::Orchestrator => Vec::new(),
         }
     }
 
@@ -1084,6 +1153,16 @@ impl App {
                 .await;
             self.last_viewport = live;
             self.last_viewport_focus = focus;
+        }
+        // Stream the orchestrator pane only while the command-center view is open: toggle the
+        // daemon's watch flag on a real enter/leave (it gates `stream_orchestrator`).
+        let want_watch = self.view == View::Orchestrator;
+        if want_watch != self.orch_watched {
+            let _ = self
+                .client
+                .call("orchestrator.watch", Some(json!({ "on": want_watch })))
+                .await;
+            self.orch_watched = want_watch;
         }
     }
 
@@ -1453,6 +1532,18 @@ impl App {
                     .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
                 self.output.insert(id, Pane { raw, lines, cursor });
             }
+        } else if note.method == "event.orchestrator.output" {
+            if let Some(content) = note.params.get("content").and_then(|v| v.as_str()) {
+                let raw = content.to_string();
+                let lines = view::parse_pane(&raw);
+                let changed = self.orch_output.as_ref().map(|p| &p.raw) != Some(&raw);
+                if changed {
+                    self.orch_last_output = Some(Instant::now());
+                }
+                self.orch_output = Some(Pane { raw, lines, cursor: None });
+            }
+        } else if note.method == "event.orchestrator.status" {
+            self.apply_orchestrator_status(&note.params);
         } else {
             // Don't refresh inline — the event loop coalesces a burst of notifications into a
             // single refresh (each `refresh()` is a ~100ms lane.list, and bursts/exit-focus
@@ -1537,6 +1628,18 @@ impl App {
                             _ => {}
                         }
                     }
+                    // Command-center: the wheel scrolls the orchestrator pane; a left-click focuses
+                    // it for typing.
+                    View::Orchestrator => match me.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.scroll = self.scroll.saturating_add(3)
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.scroll = self.scroll.saturating_sub(3)
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => self.orch_insert = true,
+                        _ => {}
+                    },
                     // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
                     // terminal, a click on empty space blurs); the wheel still navigates.
                     _ => match me.kind {
@@ -1570,6 +1673,7 @@ impl App {
             View::Notifications => self.notifications_key(key),
             View::SpawnPick => self.spawn_pick_key(key).await,
             View::LaneJump => self.lane_jump_key(key),
+            View::Orchestrator => self.orchestrator_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 // `R` renames the selected agent sub-row in the expanded fleet sidebar.
@@ -1589,6 +1693,7 @@ impl App {
         let Some(FleetRow {
             lane_idx,
             session: Some(s),
+            ..
         }) = self.selected_row()
         else {
             self.status =
@@ -2574,6 +2679,15 @@ impl App {
     /// inside one focuses that lane (single-click → type in place for interactive zones; another
     /// click within `DOUBLE_CLICK` → open its real terminal). A click on empty space blurs.
     async fn handle_click(&mut self, col: u16, row: u16) {
+        // The pinned "repomind" row isn't a lane click-zone; hit-test it first: a click selects it
+        // and opens the command-center view.
+        if let Some(rect) = self.orch_click.get() {
+            if rect.contains(Position { x: col, y: row }) {
+                self.selected = 0;
+                self.open_orchestrator().await;
+                return;
+            }
+        }
         let hit = self
             .click_zones
             .borrow()
@@ -2668,6 +2782,121 @@ impl App {
         }
     }
 
+    /// Auto-start the orchestrator session (idempotent) and begin watching its pane when entering
+    /// the command-center view. `sync_viewport` flips the daemon's watch flag the same loop.
+    async fn load_orchestrator(&mut self) {
+        self.reset_scroll();
+        self.orch_insert = false;
+        match self.client.call("orchestrator.start", Some(json!({}))).await {
+            Ok(v) => self.apply_orchestrator_status(&v),
+            Err(e) => self.status = format!("repomind start failed: {e}"),
+        }
+    }
+
+    /// Open the command-center view (used by the pinned-row click). The keyboard path goes through
+    /// `apply(Action::Goto)`.
+    async fn open_orchestrator(&mut self) {
+        self.view = View::Orchestrator;
+        self.load_orchestrator().await;
+    }
+
+    /// Leave the command-center view back to Fleet; `sync_viewport` stops the pane stream.
+    async fn leave_orchestrator(&mut self) {
+        self.reset_scroll();
+        self.orch_insert = false;
+        self.view = View::Fleet;
+    }
+
+    /// Key handling in the command-center view: INSERT forwards to the orchestrator (mirrors
+    /// `focus_key`/`split_key`); `↵`/`→` attaches into its real tmux pane; `i` types in place.
+    async fn orchestrator_key(&mut self, key: KeyEvent) {
+        if self.orch_insert {
+            if leaves_insert(&key) {
+                self.orch_insert = false;
+                return;
+            }
+            // PgUp/PgDn scroll the captured pane even while typing (always reach repomon).
+            match key.code {
+                KeyCode::PageUp => {
+                    self.scroll = self.scroll.saturating_add(8);
+                    return;
+                }
+                KeyCode::PageDown => {
+                    self.scroll = self.scroll.saturating_sub(8);
+                    return;
+                }
+                _ => {}
+            }
+            if self.scroll > 0 {
+                self.reset_scroll();
+            }
+            self.send_orch_key(key).await;
+            return;
+        }
+        match key.code {
+            // ↵ / → "go all the way in" = attach to repomind's real tmux pane.
+            KeyCode::Enter | KeyCode::Right => {
+                self.reset_scroll();
+                self.attach_orchestrator().await;
+            }
+            // `i` types straight to repomind without leaving the view (mediated send-keys).
+            KeyCode::Char('i') => {
+                self.reset_scroll();
+                self.orch_insert = true;
+            }
+            KeyCode::PageUp | KeyCode::Up => self.scroll = self.scroll.saturating_add(8),
+            KeyCode::PageDown | KeyCode::Down => self.scroll = self.scroll.saturating_sub(8),
+            KeyCode::Esc | KeyCode::Left if self.scroll > 0 => self.reset_scroll(),
+            KeyCode::Esc | KeyCode::Left => self.leave_orchestrator().await,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Forward one keystroke to the orchestrator window (mirrors `send_agent_key`, but the
+    /// orchestrator is a singleton so there's no lane/window to target).
+    async fn send_orch_key(&mut self, key: KeyEvent) {
+        let Some((spec, literal)) = translate_key(&key) else {
+            return;
+        };
+        if literal {
+            // Buffer printables; the event loop flushes the run as one `orchestrator.send_input`.
+            self.pending_input.push_str(&spec);
+            return;
+        }
+        // A control key: send any buffered text first so order holds, then the key.
+        self.flush_pending_input().await;
+        let _ = self
+            .client
+            .call(
+                "orchestrator.key",
+                Some(json!({ "key": spec, "literal": false })),
+            )
+            .await;
+    }
+
+    /// Resolve the orchestrator's tmux target and queue a full `tmux attach` (reuses the generic
+    /// `do_attach_target` suspend/reinit path).
+    async fn attach_orchestrator(&mut self) {
+        self.flush_pending_input().await;
+        match self.client.call("orchestrator.target", None).await {
+            Ok(v) => {
+                let target = v
+                    .get("target")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let available = v.get("available").and_then(|a| a.as_bool()).unwrap_or(false);
+                if available && !target.is_empty() {
+                    self.attach_target = Some(target);
+                } else {
+                    self.status = "repomind isn't running yet".into();
+                }
+            }
+            Err(e) => self.status = format!("attach failed: {e}"),
+        }
+    }
+
     /// Forward one keystroke live to the selected lane's agent (insert-mode passthrough),
     /// so its own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
     async fn send_agent_key(&mut self, key: KeyEvent) {
@@ -2704,6 +2933,17 @@ impl App {
             return;
         }
         let text = std::mem::take(&mut self.pending_input);
+        // In the command-center view the buffer targets the orchestrator window, not a lane.
+        if self.view == View::Orchestrator {
+            let _ = self
+                .client
+                .call(
+                    "orchestrator.send_input",
+                    Some(json!({ "text": text, "enter": false })),
+                )
+                .await;
+            return;
+        }
         let Some(id) = self.selected_lane().map(|l| l.id) else {
             return;
         };
@@ -3296,6 +3536,7 @@ impl App {
         if let Some(FleetRow {
             lane_idx,
             session: Some(s),
+            ..
         }) = self.selected_row()
         {
             let windowless = self
@@ -3425,7 +3666,8 @@ impl App {
                     | View::Settings
                     | View::Notifications
                     | View::SpawnPick
-                    | View::LaneJump => self.view = View::Fleet,
+                    | View::LaneJump
+                    | View::Orchestrator => self.view = View::Fleet,
                     // Esc in Fleet clears the urgent filter first (like the text filter), then
                     // quits.
                     View::Fleet if self.urgent_only => {
@@ -3458,6 +3700,10 @@ impl App {
                         for ev in self.notifications.iter_mut() {
                             ev.read = true;
                         }
+                    }
+                    View::Orchestrator => {
+                        self.selected = 0; // highlight the pinned row on return to Fleet
+                        self.load_orchestrator().await;
                     }
                     _ => {}
                 }
@@ -3641,6 +3887,13 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     });
 
     let outcome = event_loop(&mut terminal, &mut app, &mut in_rx, &mut events).await;
+    // Stop the orchestrator pane stream on exit so the daemon doesn't keep capturing for a gone TUI.
+    if app.orch_watched {
+        let _ = app
+            .client
+            .call("orchestrator.watch", Some(json!({ "on": false })))
+            .await;
+    }
     disable_mouse();
     ratatui::restore();
     // Hand the title back to the shell (most shells re-set it at the next prompt anyway).
@@ -3837,7 +4090,7 @@ async fn event_loop(
                 app.notif_banner = None;
             }
         }
-        if app.view != View::Focus && app.scroll != 0 {
+        if !matches!(app.view, View::Focus | View::Orchestrator) && app.scroll != 0 {
             app.reset_scroll();
         }
         terminal.draw(|f| view::render(f, app))?;
