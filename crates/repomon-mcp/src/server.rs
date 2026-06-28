@@ -8,9 +8,9 @@
 
 use chrono::Utc;
 use repomon_core::client::DaemonClient;
-use repomon_core::model::{AgentChoice, Lane, Repo, TranscriptItem};
+use repomon_core::model::{AgentChoice, AgentSession, Lane, Repo, TranscriptItem};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::fleet::{self, Attention, Fleet, LaneDigest};
@@ -115,14 +115,9 @@ impl Server {
         self.policy.record_mutation()?;
 
         let (_, lanes) = self.fleet.current().await;
-        let active = lanes
-            .iter()
-            .filter(|l| {
-                l.agent
-                    .as_ref()
-                    .is_some_and(|ag| ag.window.is_some() && is_active(&ag.status))
-            })
-            .count();
+        // Count every active managed session, not one per lane: a lane can host several agents at
+        // once, and the cap is a hard promise to the user.
+        let active: usize = lanes.iter().map(|l| l.active_agents).sum();
         if active >= self.policy.max_concurrent_agents {
             return Err(format!(
                 "at the concurrent-agent cap ({} active). Stop or finish an agent before \
@@ -151,10 +146,23 @@ impl Server {
         self.policy.record_mutation()?;
         let submit = a.submit.unwrap_or(true);
         self.policy.check_send_dedupe(a.lane_id, &a.text)?;
+        // Target the session the orchestrator reasons about (the primary), not the daemon's default
+        // first window — they differ in a multi-agent lane.
+        let lane: Lane = self
+            .client
+            .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+            .map_err(rpc_err)?;
+        let window = target_window(fleet::primary_agent(&lane), a.window)?;
         self.client
             .call(
                 "agent.send_input",
-                Some(json!({ "lane_id": a.lane_id, "text": a.text, "enter": submit })),
+                Some(json!({
+                    "lane_id": a.lane_id,
+                    "text": a.text,
+                    "enter": submit,
+                    "window": window,
+                })),
             )
             .await
             .map_err(rpc_err)?;
@@ -172,30 +180,43 @@ impl Server {
             .await
             .map_err(rpc_err)?;
         let primary = fleet::primary_agent(&lane);
-        let attention = primary.map(fleet::agent_attention).unwrap_or(Attention::None);
+        let attention = primary
+            .map(fleet::agent_attention)
+            .unwrap_or(Attention::None);
         match attention {
             Attention::Permission => {}
             Attention::Decision => {
-                return Err("this lane is on a DECISION, not a routine permission. Refusing to \
+                return Err(
+                    "this lane is on a DECISION, not a routine permission. Refusing to \
                      auto-answer — surface the exact question to the human, then relay their \
                      choice with approve_agent {choice: <number>} or send_to_agent."
-                    .into());
+                        .into(),
+                );
             }
             Attention::EndOfTurn => {
-                return Err("the agent ended its turn (no open dialog) — use send_to_agent to \
+                return Err(
+                    "the agent ended its turn (no open dialog) — use send_to_agent to \
                      give it the next instruction, not approve_agent."
-                    .into());
+                        .into(),
+                );
             }
             Attention::None => {
-                return Err("no pending dialog on this lane to approve. Use read_agent to check \
+                return Err(
+                    "no pending dialog on this lane to approve. Use read_agent to check \
                      its current state."
-                    .into());
+                        .into(),
+                );
             }
         }
 
+        // Answer the window the dialog is actually on (the primary), not the lane's first window.
+        let window = target_window(primary, a.window)?;
         let (key, answered) = approve_key(a.choice.as_ref())?;
         self.client
-            .call("agent.key", Some(json!({ "lane_id": a.lane_id, "key": key })))
+            .call(
+                "agent.key",
+                Some(json!({ "lane_id": a.lane_id, "key": key, "window": window })),
+            )
             .await
             .map_err(rpc_err)?;
         Ok(json!({
@@ -211,12 +232,18 @@ impl Server {
         self.policy.record_mutation()?;
         if a.hard.unwrap_or(false) {
             self.client
-                .call("agent.signal", Some(json!({ "lane_id": a.lane_id, "key": "C-c" })))
+                .call(
+                    "agent.signal",
+                    Some(json!({ "lane_id": a.lane_id, "key": "C-c" })),
+                )
                 .await
                 .map_err(rpc_err)?;
         } else {
             self.client
-                .call("agent.key", Some(json!({ "lane_id": a.lane_id, "key": "Escape" })))
+                .call(
+                    "agent.key",
+                    Some(json!({ "lane_id": a.lane_id, "key": "Escape" })),
+                )
                 .await
                 .map_err(rpc_err)?;
         }
@@ -227,10 +254,12 @@ impl Server {
         let a: CreateLaneArgs = parse(args)?;
         self.policy.record_mutation()?;
         if !self.policy.autonomy.allows_create_lane() {
-            return Err("creating a lane needs the human's go-ahead at this autonomy level. Ask \
+            return Err(
+                "creating a lane needs the human's go-ahead at this autonomy level. Ask \
                  them to confirm the repo + branch, then proceed (or relaunch with \
                  --autonomy autonomous)."
-                .into());
+                    .into(),
+            );
         }
         let repos: Vec<Repo> = self
             .client
@@ -378,12 +407,20 @@ struct SendToAgentArgs {
     text: String,
     #[serde(default)]
     submit: Option<bool>,
+    /// Target a specific agent window in a multi-agent lane. Defaults to the lane's primary
+    /// (most-attention-worthy) managed session.
+    #[serde(default)]
+    window: Option<String>,
 }
 #[derive(Deserialize)]
 struct ApproveAgentArgs {
     lane_id: i64,
     #[serde(default)]
     choice: Option<Value>,
+    /// Target a specific agent window in a multi-agent lane. Defaults to the lane's primary
+    /// (most-attention-worthy) managed session.
+    #[serde(default)]
+    window: Option<String>,
 }
 #[derive(Deserialize)]
 struct InterruptAgentArgs {
@@ -529,15 +566,37 @@ fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
             }
         }
         Some(Value::Number(n)) => {
-            let i = n.as_u64().ok_or("option number must be a positive integer")?;
+            let i = n
+                .as_u64()
+                .ok_or("option number must be a positive integer")?;
             Ok((i.to_string(), format!("option {i}")))
         }
         Some(_) => Err("choice must be a string (\"yes\"/\"no\") or an option number".into()),
     }
 }
 
-fn is_active(status: &str) -> bool {
-    matches!(status, "running" | "waiting" | "rate-limited")
+/// Resolve which agent window an action should target on a lane: an explicit override wins,
+/// otherwise the primary (most-attention-worthy) managed session's window. Errors when the resolved
+/// session is external or windowless, so we never blind-send to the daemon's default (first) window
+/// — which in a multi-agent lane may be a different session than the one the orchestrator inspected.
+fn target_window(
+    primary: Option<&AgentSession>,
+    explicit: Option<String>,
+) -> Result<String, String> {
+    if let Some(w) = explicit {
+        return Ok(w);
+    }
+    let p = primary.ok_or("no agent session on this lane to target")?;
+    if p.external {
+        return Err(
+            "the lane's active session is external (not managed by repomon); refusing to \
+             act on it automatically. Surface it to the human instead."
+                .into(),
+        );
+    }
+    p.tmux_window
+        .clone()
+        .ok_or_else(|| "the lane's active session has no tmux window to target".into())
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -620,7 +679,8 @@ fn tool_catalog() -> Vec<ToolDef> {
                 json!({
                     "lane_id": { "type": "integer" },
                     "text": { "type": "string", "description": "What to send." },
-                    "submit": { "type": "boolean", "description": "Press Enter after (default true)." }
+                    "submit": { "type": "boolean", "description": "Press Enter after (default true)." },
+                    "window": { "type": "string", "description": "Target a specific agent window in a multi-agent lane (default: the lane's primary session)." }
                 }),
                 &["lane_id", "text"],
             ),
@@ -634,7 +694,8 @@ fn tool_catalog() -> Vec<ToolDef> {
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer" },
-                    "choice": { "description": "\"yes\" (default), \"no\", or an option number." }
+                    "choice": { "description": "\"yes\" (default), \"no\", or an option number." },
+                    "window": { "type": "string", "description": "Target a specific agent window in a multi-agent lane (default: the lane's primary session)." }
                 }),
                 &["lane_id"],
             ),
@@ -711,7 +772,50 @@ mod tests {
                 pending_prompt: None,
             }),
             extra_agents: 0,
+            active_agents: 1,
         }
+    }
+
+    fn agent_sess(external: bool, window: Option<&str>) -> AgentSession {
+        AgentSession {
+            id: 1,
+            agent: repomon_core::model::AgentKind::ClaudeCode,
+            repo_id: 1,
+            worktree_id: Some(1),
+            started_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            ended_at: None,
+            manifest_path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            tool_call_count: 0,
+            title: None,
+            status: repomon_core::model::AgentStatus::Waiting,
+            external,
+            session_id: None,
+            resume_at: None,
+            inferred: false,
+            tmux_window: window.map(str::to_string),
+            last_message: None,
+            pending_prompt: None,
+            config_dir: None,
+            custom_label: None,
+        }
+    }
+
+    #[test]
+    fn target_window_picks_primary_and_refuses_unmanaged() {
+        // An explicit override always wins.
+        assert_eq!(
+            target_window(None, Some("lane-2-3".into())).unwrap(),
+            "lane-2-3"
+        );
+        // Otherwise default to the primary's window.
+        let managed = agent_sess(false, Some("lane-7-2"));
+        assert_eq!(target_window(Some(&managed), None).unwrap(), "lane-7-2");
+        // Refuse an external session (do not auto-act on the user's own claude).
+        assert!(target_window(Some(&agent_sess(true, Some("lane-7"))), None).is_err());
+        // Refuse a windowless session, and a lane with no session at all.
+        assert!(target_window(Some(&agent_sess(false, None)), None).is_err());
+        assert!(target_window(None, None).is_err());
     }
 
     #[test]

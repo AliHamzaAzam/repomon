@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use repomon_core::agent::prompt::{classify_prompt, PromptClass};
+use repomon_core::agent::prompt::{PromptClass, classify_prompt};
 use repomon_core::client::DaemonClient;
 use repomon_core::model::{AgentSession, AgentStatus, Lane};
 use repomon_core::protocol::Notification;
 use serde::Serialize;
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{Mutex, broadcast, watch};
 
 /// What an agent needs from a human/orchestrator, derived from status + `pending_prompt`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -93,6 +93,12 @@ pub struct LaneDigest {
     /// How many additional agents share this lane beyond the primary (usually 0).
     #[serde(skip_serializing_if = "is_zero")]
     pub extra_agents: usize,
+    /// How many of this lane's sessions are managed (have a tmux window) AND active
+    /// (running/waiting/rate-limited). Drives the concurrent-agent cap, which must count every
+    /// active agent, not one per lane. Distinct from `extra_agents` (a raw extra-session count
+    /// that includes idle/external sessions).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub active_agents: usize,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -102,11 +108,17 @@ fn is_zero(n: &usize) -> bool {
 impl LaneDigest {
     /// The lane's rolled-up status string (the primary agent's, or `no-agent`).
     pub fn status(&self) -> &str {
-        self.agent.as_ref().map(|a| a.status.as_str()).unwrap_or("no-agent")
+        self.agent
+            .as_ref()
+            .map(|a| a.status.as_str())
+            .unwrap_or("no-agent")
     }
     /// The lane's rolled-up attention (the primary agent's, or none).
     pub fn attention(&self) -> Attention {
-        self.agent.as_ref().map(|a| a.attention).unwrap_or(Attention::None)
+        self.agent
+            .as_ref()
+            .map(|a| a.attention)
+            .unwrap_or(Attention::None)
     }
     pub fn headline(&self) -> Option<&str> {
         self.agent.as_ref().and_then(|a| a.headline.as_deref())
@@ -146,7 +158,13 @@ impl Fleet {
             s.generation = 1;
         }
 
-        tokio::spawn(run_poller(client, socket, snapshot.clone(), gen_tx, last_fp));
+        tokio::spawn(run_poller(
+            client,
+            socket,
+            snapshot.clone(),
+            gen_tx,
+            last_fp,
+        ));
         Fleet { snapshot, gen_rx }
     }
 
@@ -189,22 +207,45 @@ fn agent_rank(s: &AgentSession) -> (u8, u8, bool) {
         AgentStatus::RateLimited => 1,
         AgentStatus::Idle | AgentStatus::Ended => 0,
     };
-    (agent_attention(s).priority(), status_rank, s.tmux_window.is_some())
+    (
+        agent_attention(s).priority(),
+        status_rank,
+        s.tmux_window.is_some(),
+    )
 }
 
 /// Project a live `Lane` into its compact digest.
 pub fn project_lane(lane: &Lane, now: DateTime<Utc>) -> LaneDigest {
     let agent = primary_agent(lane).map(|s| project_agent(s, now));
     let extra = lane.agent_sessions.len().saturating_sub(1);
+    let active_agents = lane
+        .agent_sessions
+        .iter()
+        .filter(|s| s.tmux_window.is_some() && is_active_status(&s.status))
+        .count();
     LaneDigest {
         lane_id: lane.id,
         repo: lane.repo.name.clone(),
-        branch: lane.state.branch.clone().unwrap_or_else(|| "(detached)".into()),
+        branch: lane
+            .state
+            .branch
+            .clone()
+            .unwrap_or_else(|| "(detached)".into()),
         dirty: fmt_dirty(&lane.state.dirty),
         pinned: lane.pinned,
         agent,
         extra_agents: extra,
+        active_agents,
     }
+}
+
+/// Whether a session counts toward the live agent load (mirrors the server-side `is_active`):
+/// working, waiting on you, or paused on a rate limit, as opposed to idle/ended.
+pub fn is_active_status(s: &AgentStatus) -> bool {
+    matches!(
+        s,
+        AgentStatus::Running | AgentStatus::Waiting | AgentStatus::RateLimited
+    )
 }
 
 fn project_agent(s: &AgentSession, now: DateTime<Utc>) -> AgentDigest {
@@ -331,10 +372,8 @@ async fn run_poller(
 async fn wait_structural(events: &mut broadcast::Receiver<Notification>) {
     loop {
         match events.recv().await {
-            Ok(n)
-                if n.method.ends_with("lane.created") || n.method.ends_with("lane.deleted") =>
-            {
-                return
+            Ok(n) if n.method.ends_with("lane.created") || n.method.ends_with("lane.deleted") => {
+                return;
             }
             Ok(_) => continue,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -377,10 +416,19 @@ mod tests {
 
     #[test]
     fn attention_reflects_status_and_prompt() {
-        assert_eq!(agent_attention(&sess(AgentStatus::Running, None)), Attention::None);
-        assert_eq!(agent_attention(&sess(AgentStatus::RateLimited, None)), Attention::None);
+        assert_eq!(
+            agent_attention(&sess(AgentStatus::Running, None)),
+            Attention::None
+        );
+        assert_eq!(
+            agent_attention(&sess(AgentStatus::RateLimited, None)),
+            Attention::None
+        );
         // Waiting with no dialog = ended its turn, awaiting next instruction.
-        assert_eq!(agent_attention(&sess(AgentStatus::Waiting, None)), Attention::EndOfTurn);
+        assert_eq!(
+            agent_attention(&sess(AgentStatus::Waiting, None)),
+            Attention::EndOfTurn
+        );
         // Waiting on a permission dialog = auto-answerable.
         assert_eq!(
             agent_attention(&sess(
@@ -447,5 +495,63 @@ mod tests {
         // With only a running agent, attention is none.
         lane.agent_sessions = vec![sess(AgentStatus::Running, None)];
         assert_eq!(project_lane(&lane, Utc::now()).attention(), Attention::None);
+    }
+
+    fn lane_with(sessions: Vec<AgentSession>) -> Lane {
+        Lane {
+            id: 1,
+            repo: repomon_core::model::Repo {
+                id: 1,
+                path: PathBuf::from("/r"),
+                name: "r".into(),
+                added_at: Utc::now(),
+                worktree_root_template: None,
+            },
+            worktree: repomon_core::model::Worktree {
+                id: 1,
+                repo_id: 1,
+                path: PathBuf::from("/r"),
+                branch: Some("main".into()),
+                head: "0".repeat(40).parse().unwrap(),
+                is_main: true,
+                name: "main".into(),
+            },
+            state: repomon_core::model::WorktreeState {
+                worktree_id: 1,
+                head: "0".repeat(40).parse().unwrap(),
+                branch: Some("main".into()),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                dirty: Default::default(),
+                last_commit_at: None,
+                locked: false,
+                prunable: false,
+                last_change_at: None,
+            },
+            agent_sessions: sessions,
+            last_activity_at: Utc::now(),
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn active_agents_counts_managed_active_sessions_not_lanes() {
+        let windowless = {
+            let mut s = sess(AgentStatus::Running, None);
+            s.tmux_window = None; // active but unmanaged -> excluded
+            s
+        };
+        let lane = lane_with(vec![
+            sess(AgentStatus::Running, None),             // managed + active
+            sess(AgentStatus::Waiting, Some("proceed?")), // managed + active
+            sess(AgentStatus::Idle, None),                // managed but idle -> excluded
+            windowless,
+        ]);
+        // Three-plus agents in ONE lane: the cap must see 2 active, not 1-per-lane.
+        assert_eq!(project_lane(&lane, Utc::now()).active_agents, 2);
+
+        let idle_only = lane_with(vec![sess(AgentStatus::Idle, None)]);
+        assert_eq!(project_lane(&idle_only, Utc::now()).active_agents, 0);
     }
 }

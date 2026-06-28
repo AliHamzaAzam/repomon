@@ -93,6 +93,16 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
 | `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
+| `orchestrator.status` | — | `{ running, agent?, model?, window? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
+| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, window? }` (spawn or adopt the singleton `orchestrator` window running `claude` wired to the repomon MCP server; idempotent; re-spawns if the prior window died) |
+| `orchestrator.stop` | — | `{ running:false, … }` (kill the orchestrator window) |
+| `orchestrator.target` | — | `{ target, available }` (attach target for the orchestrator window; resets it to follow the attaching client's size) |
+| `orchestrator.send_input` | `{ text, enter=true }` | `null` (type an instruction to repomind, then Enter unless `enter=false`) |
+| `orchestrator.key` | `{ key, literal=false }` | `null` (one keystroke to repomind: literal char or key name) |
+| `orchestrator.watch` | `{ on }` | `null` (gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
+| `orchestrator.resize` | `{ cols, rows }` | `null` (size the orchestrator window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
+
+The `orchestrator` window is deliberately not a `lane-*` name, so it never appears in `lane.list` / the lane overlay / the reaper. It is the in-daemon backing for `repomon orchestrate` and the TUI's command-center view.
 
 `CreateLaneParams`: `{ repo_id, branch, source_branch?, path?, copy_files? }`.
 
@@ -116,5 +126,7 @@ when readable (a partial parse still returns what it could).
 | `event.agent.output` | `{ lane_id, content, cursor? }` (`cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused lane when its cursor is visible; `null`/absent otherwise) |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`; `prompt` is the agent's pending question verbatim). Emitted only while `[remote]` is enabled; the same alert goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
+| `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
+| `event.orchestrator.status` | `{ running, agent?, model?, window? }` — broadcast when the orchestrator starts, stops, or is reconciled to stopped after its window died. |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.

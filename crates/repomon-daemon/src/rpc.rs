@@ -10,10 +10,10 @@ use repomon_core::model::{
     CreateLaneParams, Lane, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
-use repomon_core::{analytics, session, Indexer, TmuxRuntime};
-use serde::de::DeserializeOwned;
+use repomon_core::{Indexer, TmuxRuntime, analytics, session};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 
 use crate::Ctx;
 
@@ -647,7 +647,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                         return Err(RpcError::invalid_params(format!(
                             "no custom agent named '{}'",
                             p.name
-                        )))
+                        )));
                     }
                 };
                 let prev_default = cfg.default_agent.clone();
@@ -897,7 +897,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            ctx.input_seen.lock().await.insert(lane, std::time::Instant::now());
+            ctx.input_seen
+                .lock()
+                .await
+                .insert(lane, std::time::Instant::now());
             Ok(Value::Null)
         }
         "agent.signal" => {
@@ -909,7 +912,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
-            ctx.input_seen.lock().await.insert(lane, std::time::Instant::now());
+            ctx.input_seen
+                .lock()
+                .await
+                .insert(lane, std::time::Instant::now());
             Ok(Value::Null)
         }
         "agent.key" => {
@@ -927,7 +933,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            ctx.input_seen.lock().await.insert(lane, std::time::Instant::now());
+            ctx.input_seen
+                .lock()
+                .await
+                .insert(lane, std::time::Instant::now());
             Ok(Value::Null)
         }
         "agent.stop" => {
@@ -1216,23 +1225,34 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         // Set/clear a user label for a session (keyed by transcript session_id; persisted).
         "session.rename" => {
             let p: SessionRename = parse(params)?;
-            let label = p.label.map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+            let label = p
+                .label
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty());
             ctx.store
                 .set_session_label(p.session_id, label)
                 .await
                 .map_err(internal)?;
             ctx.invalidate_overlay().await;
-            ctx.broadcast(crate::pubsub::topic::AGENT_STATUS, json!({ "renamed": true }));
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_STATUS,
+                json!({ "renamed": true }),
+            );
             Ok(Value::Null)
         }
 
         // ---- repomind orchestrator (a single daemon-owned `claude` session) ----
         "orchestrator.status" => {
+            // A window killed externally would otherwise still read as running; reconcile first.
+            reconcile_orchestrator(ctx).await;
             let orch = ctx.orchestrator.lock().await;
             Ok(orchestrator_status_value(orch.as_ref()))
         }
         "orchestrator.start" => {
             let p: OrchestratorStart = parse(params)?;
+            // Clear a session whose window died externally so a restart actually re-spawns instead
+            // of no-op'ing on a corpse.
+            reconcile_orchestrator(ctx).await;
             // Already tracking a live session: idempotent no-op (don't spawn a second window).
             {
                 let orch = ctx.orchestrator.lock().await;
@@ -1255,9 +1275,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             // spawning a duplicate `orchestrator` window.
             {
                 let tmux = ctx.tmux.clone();
-                let exists = tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
-                    .await
-                    .map_err(internal)?;
+                let exists =
+                    tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
+                        .await
+                        .map_err(internal)?;
                 if exists {
                     let session = crate::OrchestratorSession {
                         agent: agent.clone(),
@@ -1309,6 +1330,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(status)
         }
         "orchestrator.target" => {
+            // Clear + broadcast stopped if the window died, so a stale "running" can't linger.
+            reconcile_orchestrator(ctx).await;
             let tmux = ctx.tmux.clone();
             // Restore client-follow sizing before the attaching terminal renders it (mirrors
             // `agent.target`).
@@ -1582,14 +1605,20 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // newest unpaired window, which is the slot the latest spawn took.
             if let Some(w) = placeholder_window_index(paired, managed_n) {
                 let kind = lane_meta_kind(&metas, lane.id);
-                lane.agent_sessions
-                    .push(window_placeholder_session(lane, kind, lane_windows[w].clone()));
+                lane.agent_sessions.push(window_placeholder_session(
+                    lane,
+                    kind,
+                    lane_windows[w].clone(),
+                ));
             }
         } else if managed_n > 0 {
             // No parseable transcript: surface a repomon-spawned agent if its window is alive.
             let kind = lane_meta_kind(&metas, lane.id);
-            lane.agent_sessions
-                .push(window_placeholder_session(lane, kind, lane_windows[0].clone()));
+            lane.agent_sessions.push(window_placeholder_session(
+                lane,
+                kind,
+                lane_windows[0].clone(),
+            ));
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
             // an active agent we can't name (e.g. a Claude Code worktree-isolated subagent, which
@@ -1711,7 +1740,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             .unwrap_or_default();
             let mut cache = ctx.prompt_cache.lock().await;
             for (&i, p) in misses.iter().zip(fresh) {
-                cache.insert(candidates[i].2.clone(), (std::time::Instant::now(), p.clone()));
+                cache.insert(
+                    candidates[i].2.clone(),
+                    (std::time::Instant::now(), p.clone()),
+                );
                 prompts[i] = p;
             }
         }
@@ -1719,7 +1751,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // would otherwise leak an entry. Drop any window no longer present in the current tmux set,
         // and any whose result is older than the longest sniff TTL (it would be re-captured anyway).
         {
-            let live: std::collections::HashSet<&str> = windows.iter().map(String::as_str).collect();
+            let live: std::collections::HashSet<&str> =
+                windows.iter().map(String::as_str).collect();
             let mut cache = ctx.prompt_cache.lock().await;
             cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
         }
@@ -1784,25 +1817,27 @@ async fn diagnose_vanished_sessions(
     lanes: &[Lane],
     live: Option<&std::collections::HashMap<std::path::PathBuf, usize>>,
 ) {
-    let current: std::collections::HashMap<repomon_core::model::LaneId, Vec<crate::OverlaySession>> =
-        lanes
-            .iter()
-            .map(|lane| {
-                let recs = lane
-                    .agent_sessions
-                    .iter()
-                    .map(|s| crate::OverlaySession {
-                        key: sess_key(s),
-                        external: s.external,
-                        inferred: s.inferred,
-                        window: s.tmux_window.clone(),
-                        manifest: s.manifest_path.clone(),
-                        worktree: lane.worktree.path.clone(),
-                    })
-                    .collect();
-                (lane.id, recs)
-            })
-            .collect();
+    let current: std::collections::HashMap<
+        repomon_core::model::LaneId,
+        Vec<crate::OverlaySession>,
+    > = lanes
+        .iter()
+        .map(|lane| {
+            let recs = lane
+                .agent_sessions
+                .iter()
+                .map(|s| crate::OverlaySession {
+                    key: sess_key(s),
+                    external: s.external,
+                    inferred: s.inferred,
+                    window: s.tmux_window.clone(),
+                    manifest: s.manifest_path.clone(),
+                    worktree: lane.worktree.path.clone(),
+                })
+                .collect();
+            (lane.id, recs)
+        })
+        .collect();
 
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(SESSION_WINDOW_HOURS);
     let mut prev_map = ctx.last_overlay_sessions.lock().await;
@@ -1812,7 +1847,13 @@ async fn diagnose_vanished_sessions(
             continue;
         };
         // The worktree's live `claude` count — the process-first liveness signal.
-        let alive = live.and_then(|m| lane.worktree.path.canonicalize().ok().map(|k| m.get(&k).copied().unwrap_or(0)));
+        let alive = live.and_then(|m| {
+            lane.worktree
+                .path
+                .canonicalize()
+                .ok()
+                .map(|k| m.get(&k).copied().unwrap_or(0))
+        });
         for p in prev {
             if cur.iter().any(|c| c.key == p.key) {
                 continue;
@@ -2043,7 +2084,9 @@ fn placeholder_window_index(shown: usize, managed_n: usize) -> Option<usize> {
 /// backticks…) is rejected so `agent.adopt` can't be turned into shell injection — the command is
 /// ultimately run via `sh -c` by tmux. Empty is invalid.
 fn valid_session_id(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Pick the tmux window list for this overlay tick. On a successful probe, return the fresh list
@@ -2119,7 +2162,10 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     // accounting name differs from the exec name), so those worktrees read as alive=0 and had
     // their sessions truncated away — the disappearing-sessions bug. `-ww` disables column
     // truncation so a full-path `comm` isn't clipped before the basename match.
-    let ps = Command::new("ps").args(["-axww", "-o", "pid=,comm="]).output().ok()?;
+    let ps = Command::new("ps")
+        .args(["-axww", "-o", "pid=,comm="])
+        .output()
+        .ok()?;
     let pids: Vec<String> = std::str::from_utf8(&ps.stdout)
         .ok()?
         .lines()
@@ -2162,13 +2208,19 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
             }
         }
     }
-    let map = match tokio::task::spawn_blocking(live_claude_cwds).await.ok().flatten() {
+    let map = match tokio::task::spawn_blocking(live_claude_cwds)
+        .await
+        .ok()
+        .flatten()
+    {
         Some(m) => m,
         None => {
             // The probe couldn't run (pgrep/lsof spawn failed, e.g. under load). Returning None
             // means "don't filter" — callers keep all recent sessions rather than truncating to a
             // bogus low count — but it was silent; log it so a recurring flap is visible.
-            tracing::warn!("live claude-process probe (pgrep/lsof) failed; not truncating sessions");
+            tracing::warn!(
+                "live claude-process probe (pgrep/lsof) failed; not truncating sessions"
+            );
             return None;
         }
     };
@@ -2300,6 +2352,30 @@ fn orchestrator_status_value(orch: Option<&crate::OrchestratorSession>) -> Value
     }
 }
 
+/// Drop a stale orchestrator session: if we think one is running but its tmux window is gone (killed
+/// externally, or it `/exit`ed), clear the tracked session and broadcast the stopped status, so
+/// `orchestrator.status` reads accurately and `orchestrator.start` re-spawns rather than no-op on a
+/// corpse. Returns whether a session is still tracked afterward.
+async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
+    if ctx.orchestrator.lock().await.is_none() {
+        return false;
+    }
+    let tmux = ctx.tmux.clone();
+    // On a probe failure keep the session: don't declare it dead on a transient tmux hiccup.
+    let alive = tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
+        .await
+        .unwrap_or(true);
+    if alive {
+        return true;
+    }
+    *ctx.orchestrator.lock().await = None;
+    ctx.broadcast(
+        crate::pubsub::topic::ORCHESTRATOR_STATUS,
+        orchestrator_status_value(None),
+    );
+    false
+}
+
 /// Resolve the orchestrator's base launch command from its agent name, mirroring `agent.spawn`: a
 /// config custom wins, then an autodetected Claude variant (e.g. `claude-work` →
 /// `CLAUDE_CONFIG_DIR=… claude`), else the kind's default binary. `None` (no agent chosen) is bare
@@ -2359,10 +2435,7 @@ fn write_orchestrator_mcp_config(
 ) -> std::io::Result<PathBuf> {
     let repomond = repomon_core::service::repomond_path();
     let mut env = serde_json::Map::new();
-    env.insert(
-        "REPOMON_MCP_SOCKET".into(),
-        json!(socket.to_string_lossy()),
-    );
+    env.insert("REPOMON_MCP_SOCKET".into(), json!(socket.to_string_lossy()));
     env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
     if let Some(n) = max_agents {
         env.insert("REPOMON_MCP_MAX_AGENTS".into(), json!(n.to_string()));
@@ -2430,7 +2503,11 @@ mod tests {
         let mut misses = 0u8;
         // A successful probe is returned verbatim and remembered as last-good.
         assert_eq!(
-            resolve_windows(Ok(vec!["lane-1".into(), "lane-2".into()]), &mut last, &mut misses),
+            resolve_windows(
+                Ok(vec!["lane-1".into(), "lane-2".into()]),
+                &mut last,
+                &mut misses
+            ),
             vec!["lane-1", "lane-2"]
         );
         assert_eq!(last, vec!["lane-1", "lane-2"]);
@@ -2478,7 +2555,10 @@ mod tests {
         );
         assert_eq!(misses, 1);
         // Sustained empty (EMPTY_WINDOWS_CONFIRM in a row): accept it — agents really are gone.
-        assert_eq!(resolve_windows(Ok(vec![]), &mut last, &mut misses), Vec::<String>::new());
+        assert_eq!(
+            resolve_windows(Ok(vec![]), &mut last, &mut misses),
+            Vec::<String>::new()
+        );
         assert!(last.is_empty());
         // A subsequent successful probe resets the counter.
         resolve_windows(Ok(vec!["lane-9".into()]), &mut last, &mut misses);
@@ -2566,7 +2646,10 @@ mod tests {
             "claude --dangerously-skip-permissions"
         );
         // An unknown name falls through to the kind's default binary (mirrors agent.spawn).
-        assert_eq!(orchestrator_base_command(&Some("codex".into()), &customs), "codex");
+        assert_eq!(
+            orchestrator_base_command(&Some("codex".into()), &customs),
+            "codex"
+        );
     }
 
     #[test]
