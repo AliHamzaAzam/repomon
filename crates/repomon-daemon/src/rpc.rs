@@ -364,6 +364,12 @@ struct OrchestratorKey {
     #[serde(default)]
     literal: bool,
 }
+#[derive(Deserialize)]
+struct OrchestratorWatch {
+    /// `true` while a client is viewing the orchestrator pane (gates `stream_orchestrator` so the
+    /// daemon only captures the window while someone's watching).
+    on: bool,
+}
 
 /// Dispatch a single request to its handler.
 pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
@@ -1340,6 +1346,14 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            Ok(Value::Null)
+        }
+        // Gate the orchestrator pane stream: the TUI sets this `true` on entering the command-center
+        // view and `false` on leaving, so `stream_orchestrator` captures the window only while a
+        // client is actually watching.
+        "orchestrator.watch" => {
+            let p: OrchestratorWatch = parse(params)?;
+            *ctx.orchestrator_watched.lock().await = p.on;
             Ok(Value::Null)
         }
 
