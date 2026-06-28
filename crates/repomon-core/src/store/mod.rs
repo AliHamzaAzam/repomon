@@ -6,12 +6,12 @@
 //! `.await`. Schema migrations are hand-rolled against `PRAGMA user_version`.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::thread;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::types::Type;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 
 use crate::error::{Error, Result};
 use crate::model::*;
@@ -403,9 +403,8 @@ impl Store {
     pub async fn list_session_labels(&self) -> Result<std::collections::HashMap<String, String>> {
         self.call(|c| {
             let mut stmt = c.prepare("SELECT session_id, label FROM session_labels")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             let mut out = std::collections::HashMap::new();
             for row in rows {
                 let (k, v) = row?;
@@ -732,7 +731,11 @@ mod tests {
         let devices = s.list_devices().await.unwrap();
         assert_eq!(devices.len(), MAX_DEVICES, "device count is capped");
         // The earliest tokens were evicted; the most recent survive.
-        assert!(devices.iter().any(|t| t == &format!("token-{:03}", MAX_DEVICES + 4)));
+        assert!(
+            devices
+                .iter()
+                .any(|t| t == &format!("token-{:03}", MAX_DEVICES + 4))
+        );
         assert!(!devices.iter().any(|t| t == "token-000"));
     }
 
@@ -776,16 +779,18 @@ mod tests {
         let got = s.get_repo(b.id).await.unwrap();
         assert_eq!(got.worktree_root_template.as_deref(), Some("~/wt/{branch}"));
 
-        assert!(s
-            .find_repo_by_path(PathBuf::from("/code/a"))
-            .await
-            .unwrap()
-            .is_some());
-        assert!(s
-            .find_repo_by_path(PathBuf::from("/code/z"))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.find_repo_by_path(PathBuf::from("/code/a"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            s.find_repo_by_path(PathBuf::from("/code/z"))
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         s.remove_repo(r.id).await.unwrap();
         assert_eq!(s.list_repos().await.unwrap().len(), 1);

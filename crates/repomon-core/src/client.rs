@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::protocol::{read_frame, write_frame, Notification, Request, Response};
+use crate::protocol::{Notification, Request, Response, read_frame, write_frame};
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 

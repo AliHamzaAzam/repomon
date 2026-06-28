@@ -297,11 +297,7 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
             // single least-recently-used entry rather than clearing the whole map — a full clear
             // makes a fleet of >CACHE_CAP transcripts re-parse everything on every refresh.
             if c.len() >= CACHE_CAP && !c.contains_key(path) {
-                if let Some(oldest) = c
-                    .iter()
-                    .min_by_key(|(_, e)| e.seq)
-                    .map(|(p, _)| p.clone())
-                {
+                if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.seq).map(|(p, _)| p.clone()) {
                     c.remove(&oldest);
                 }
             }

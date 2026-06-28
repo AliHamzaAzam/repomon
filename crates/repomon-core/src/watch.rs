@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use notify::{Config, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, NoCache};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 use tokio::sync::broadcast;
 
 use crate::error::{Error, Result};

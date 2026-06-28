@@ -13,7 +13,7 @@ use repomon_core::model::LaneId;
 // Everything reusable — kinds, edge detection, text composition, and the local desktop delivery —
 // lives in core, shared with the daemon's notification engine; this module keeps only the in-app
 // feed event below.
-pub use repomon_core::notify::{compose, compose_burst, play_chime, send_native, NotifKind};
+pub use repomon_core::notify::{NotifKind, compose, compose_burst, play_chime, send_native};
 
 /// A fired notification, kept in the in-app history feed.
 #[derive(Debug, Clone)]

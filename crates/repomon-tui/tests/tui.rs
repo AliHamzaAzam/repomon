@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::{Config, Store};
-use repomon_daemon::{serve, Ctx};
+use repomon_daemon::{Ctx, serve};
 use repomon_tui::app::App;
 use repomon_tui::client::DaemonClient;
 use repomon_tui::render_to_string;
@@ -259,7 +259,8 @@ async fn renders_fleet_with_a_registered_repo() {
     // Split view with the pinned repomind row selected (selected == 0): the right column must
     // render repomind's live pane (not blank, not "(no lane selected)").
     app.orch_running = true;
-    let orch_raw = "REPOMIND_PANE_SENTINEL hello from repomind\nsecond line of the chat".to_string();
+    let orch_raw =
+        "REPOMIND_PANE_SENTINEL hello from repomind\nsecond line of the chat".to_string();
     let orch_lines = repomon_tui::view::parse_pane(&orch_raw);
     app.orch_output = Some(repomon_tui::app::Pane {
         raw: orch_raw,
@@ -268,7 +269,10 @@ async fn renders_fleet_with_a_registered_repo() {
     });
     app.selected = 0; // the pinned repomind row is always row 0 of the fleet
     app.view = View::Split;
-    assert!(app.orchestrator_selected(), "row 0 must be the pinned repomind row");
+    assert!(
+        app.orchestrator_selected(),
+        "row 0 must be the pinned repomind row"
+    );
     let split = render_to_string(&app, 100, 40).unwrap();
     assert!(
         split.contains("REPOMIND_PANE_SENTINEL"),

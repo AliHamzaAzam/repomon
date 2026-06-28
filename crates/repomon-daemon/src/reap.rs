@@ -180,21 +180,18 @@ mod tests {
         // lane 35) ends up with leftover windows named for ids it used to have — lane-81 (now no
         // lane at all) and lane-42 (that id has since been reused for a different worktree, /sxx).
         // Both are orphans; only windows whose id+cwd match a current lane are kept.
-        let lane_paths: HashMap<LaneId, PathBuf> = [
-            (1, p("/repo")),
-            (35, p("/aaa")),
-            (42, p("/sxx")),
-        ]
-        .into_iter()
-        .collect();
+        let lane_paths: HashMap<LaneId, PathBuf> =
+            [(1, p("/repo")), (35, p("/aaa")), (42, p("/sxx"))]
+                .into_iter()
+                .collect();
 
         let windows = vec![
-            idle("lane-81", "/aaa"),   // id 81: no such lane -> orphan
-            idle("lane-81-2", "/aaa"), // orphan
-            idle("lane-42", "/aaa"),   // id 42 is now /sxx, not /aaa -> cwd mismatch -> orphan
-            idle("lane-1", "/repo"),   // matches lane 1 -> keep
-            idle("lane-35", "/aaa"),   // matches lane 35 -> keep
-            idle("term-1", "/anywhere"),         // not a lane window -> ignored
+            idle("lane-81", "/aaa"),               // id 81: no such lane -> orphan
+            idle("lane-81-2", "/aaa"),             // orphan
+            idle("lane-42", "/aaa"), // id 42 is now /sxx, not /aaa -> cwd mismatch -> orphan
+            idle("lane-1", "/repo"), // matches lane 1 -> keep
+            idle("lane-35", "/aaa"), // matches lane 35 -> keep
+            idle("term-1", "/anywhere"), // not a lane window -> ignored
             idle("usage-probe-work", "/anywhere"), // not a lane window -> ignored
         ];
 

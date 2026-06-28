@@ -239,8 +239,8 @@ pub fn activity_allows_refire(
     current_activity: Option<DateTime<Utc>>,
 ) -> bool {
     match (prev_fired_at, current_activity) {
-        (None, _) => true,           // never fired this (lane, session, kind) — let it through
-        (Some(_), None) => false,    // fired before and no fresh anchor to justify a repeat
+        (None, _) => true, // never fired this (lane, session, kind) — let it through
+        (Some(_), None) => false, // fired before and no fresh anchor to justify a repeat
         (Some(p), Some(c)) => c > p, // only when the transcript advanced since the last fire
     }
 }
@@ -275,11 +275,12 @@ pub fn compose(
         lane.repo.name
     );
 
-    let mut parts = vec![lane
-        .state
-        .branch
-        .clone()
-        .unwrap_or_else(|| lane.worktree.name.clone())];
+    let mut parts = vec![
+        lane.state
+            .branch
+            .clone()
+            .unwrap_or_else(|| lane.worktree.name.clone()),
+    ];
     if let Some((i, n)) = slot {
         if n > 1 {
             parts.push(format!("agent {}/{}", i + 1, n));
@@ -615,7 +616,10 @@ mod tests {
 
         // A main (transcript-backed) agent alongside a subagent: the main always counts; the
         // subagent only when opted in.
-        let mixed = vec![sess(Some("main"), Waiting, false), sess(None, Running, true)];
+        let mixed = vec![
+            sess(Some("main"), Waiting, false),
+            sess(None, Running, true),
+        ];
         assert_eq!(session_statuses(7, &mixed, false).len(), 1);
         assert_eq!(session_statuses(7, &mixed, true).len(), 2);
     }
@@ -804,7 +808,10 @@ mod tests {
             slot_by_key(&l, &SessKey::Transcript("b".into()), false),
             Some((1, 2))
         );
-        assert_eq!(slot_by_key(&l, &SessKey::Transcript("zz".into()), false), None);
+        assert_eq!(
+            slot_by_key(&l, &SessKey::Transcript("zz".into()), false),
+            None
+        );
         // With subagents included, the inferred session occupies a slot too (now 3 real).
         assert_eq!(
             slot_by_key(&l, &SessKey::Transcript("b".into()), true),
@@ -857,7 +864,10 @@ mod tests {
             NotifKind::Resumed,
             NotifKind::Idle,
         ] {
-            assert_eq!(serde_json::to_string(&k).unwrap(), format!("\"{}\"", k.slug()));
+            assert_eq!(
+                serde_json::to_string(&k).unwrap(),
+                format!("\"{}\"", k.slug())
+            );
         }
     }
 

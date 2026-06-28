@@ -62,8 +62,8 @@ fn dirty_and_activity(
     repo: &gix::Repository,
     worktree_root: Option<&Path>,
 ) -> Result<(DirtyState, Option<DateTime<Utc>>)> {
-    use gix::status::index_worktree::Item as IwItem;
     use gix::status::Item;
+    use gix::status::index_worktree::Item as IwItem;
 
     let platform = repo.status(gix::progress::Discard).map_err(gix_err)?;
     let iter = platform

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -139,7 +139,10 @@ pub async fn run_stdio<H: ToolHandler>(
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let args = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 let handler = handler.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {

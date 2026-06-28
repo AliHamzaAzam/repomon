@@ -5,11 +5,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Subcommand;
 use repomon_core::model::{Lane, Repo};
-use repomon_core::{config, service, Config};
-use serde_json::{json, Value};
+use repomon_core::{Config, config, service};
+use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
@@ -569,7 +569,7 @@ pub fn shell_init(shell: clap_complete::Shell) -> Result<String> {
         other => {
             return Err(anyhow!(
                 "shell-init: unsupported shell '{other}'; use zsh, bash, or fish"
-            ))
+            ));
         }
     };
     Ok(snippet.to_string())
@@ -584,7 +584,10 @@ mod tests {
         let mut buf = Vec::new();
         clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "repomon", &mut buf);
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("repomon"), "completion script should mention repomon");
+        assert!(
+            out.contains("repomon"),
+            "completion script should mention repomon"
+        );
     }
 
     #[test]

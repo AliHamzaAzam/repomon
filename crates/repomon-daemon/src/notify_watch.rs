@@ -13,15 +13,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use repomon_core::Config;
 use repomon_core::model::{AgentStatus, LaneId};
 use repomon_core::notify::{
-    activity_allows_refire, compose, diff_session_transitions, session_by_key, session_statuses,
-    slot_by_key, NotifKind, SessKey,
+    NotifKind, SessKey, activity_allows_refire, compose, diff_session_transitions, session_by_key,
+    session_statuses, slot_by_key,
 };
-use repomon_core::Config;
 use serde_json::json;
 
-use crate::{push, rpc, Ctx};
+use crate::{Ctx, push, rpc};
 
 /// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
 /// the overlay, but the overlay's own caches absorb most of the cost: the composite snapshot is

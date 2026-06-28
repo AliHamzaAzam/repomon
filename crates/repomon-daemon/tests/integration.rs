@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{serve, Ctx};
+use repomon_daemon::{Ctx, serve};
 use serde_json::json;
 use tokio::net::UnixStream;
 
@@ -722,9 +722,11 @@ async fn agent_manager_add_set_default_and_remove() {
         .find(|c| c["name"] == "yolo")
         .unwrap();
     assert_eq!(yolo["default"], json!(true));
-    assert!(std::fs::read_to_string(&cfg_path)
-        .unwrap()
-        .contains("default_agent"));
+    assert!(
+        std::fs::read_to_string(&cfg_path)
+            .unwrap()
+            .contains("default_agent")
+    );
 
     // A built-in can also be the default.
     let r = call(

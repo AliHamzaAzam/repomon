@@ -21,9 +21,9 @@ use std::time::Instant;
 
 use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
-use repomon_core::{config, Config, Lanes, Registry, Store, TmuxRuntime, Watcher};
+use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
 use serde_json::Value;
-use tokio::sync::{broadcast, Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
 pub use socket::serve;
 
@@ -372,7 +372,11 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 is_focused && state.get(&lane).map(|s| s.cursor != cursor).unwrap_or(true);
             let changed = content_changed || cursor_changed;
             // Reset to the floor on any change; otherwise double the (clamped) interval toward cap.
-            let backoff = if changed { floor } else { (interval * 2).min(cap) };
+            let backoff = if changed {
+                floor
+            } else {
+                (interval * 2).min(cap)
+            };
             if changed {
                 ctx.broadcast(
                     pubsub::topic::AGENT_OUTPUT,
@@ -385,7 +389,13 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             }
             state.insert(
                 lane,
-                St { window, content, backoff, last_cap: now, cursor },
+                St {
+                    window,
+                    content,
+                    backoff,
+                    last_cap: now,
+                    cursor,
+                },
             );
         }
     }
@@ -449,7 +459,8 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         last_cap = now;
         let tmux = ctx.tmux.clone();
         let content =
-            match tokio::task::spawn_blocking(move || tmux.capture_named("orchestrator", None)).await
+            match tokio::task::spawn_blocking(move || tmux.capture_named("orchestrator", None))
+                .await
             {
                 Ok(Ok(c)) => c,
                 _ => continue,
@@ -465,7 +476,11 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         // tracks even when the text is unchanged. Reset to the floor on any change; otherwise double
         // the (clamped) interval toward the cap so a settled pane stops being re-captured.
         let changed = last.as_deref() != Some(content.as_str()) || last_cursor != cursor;
-        backoff = if changed { floor } else { (interval * 2).min(cap) };
+        backoff = if changed {
+            floor
+        } else {
+            (interval * 2).min(cap)
+        };
         if changed {
             ctx.broadcast(
                 pubsub::topic::ORCHESTRATOR_OUTPUT,

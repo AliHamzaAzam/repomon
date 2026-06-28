@@ -21,7 +21,9 @@ pub const DEFAULT_TMUX_SESSION: &str = "repomon";
 /// `:`, `=`, whitespace, or other metachar would corrupt target resolution (`exact_target` builds
 /// `{session}:={window}`). Empty is invalid.
 pub fn valid_tmux_session(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 pub const DEFAULT_TIME_FORMAT: &str = "%H:%M %a %d %b %Y";
 
@@ -193,7 +195,8 @@ impl Config {
     pub fn load_from(path: &std::path::Path) -> Result<Config> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
-                let mut cfg: Config = toml::from_str(&s).map_err(|e| Error::Config(e.to_string()))?;
+                let mut cfg: Config =
+                    toml::from_str(&s).map_err(|e| Error::Config(e.to_string()))?;
                 // A malformed tmux session name would corrupt every tmux target it's spliced into;
                 // reset to the default rather than fail the daemon over a bad config char.
                 if !valid_tmux_session(&cfg.tmux_session) {

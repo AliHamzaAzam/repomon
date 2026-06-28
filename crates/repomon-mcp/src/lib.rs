@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use repomon_core::client::DaemonClient;
 
 /// The orchestrator persona / system prompt shipped with repomind, passed to `claude` via

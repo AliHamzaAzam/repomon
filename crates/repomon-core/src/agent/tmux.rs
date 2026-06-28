@@ -239,7 +239,10 @@ impl TmuxRuntime {
                 let mut it = l.splitn(3, '\t');
                 let name = it.next()?.to_string();
                 let path = PathBuf::from(it.next()?);
-                let activity = it.next().and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0);
+                let activity = it
+                    .next()
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or(0);
                 Some((name, path, activity))
             })
             .collect())
@@ -358,9 +361,16 @@ impl TmuxRuntime {
     /// that owns its own scrollback. `false` for a plain shell (whose scrollback lives in tmux).
     pub fn alternate_on_named(&self, window: &str) -> bool {
         let target = self.exact_target(window);
-        self.run_allow_absent(&["display-message", "-p", "-t", &target, "-F", "#{alternate_on}"])
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false)
+        self.run_allow_absent(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "-F",
+            "#{alternate_on}",
+        ])
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
     }
 
     /// Forward `ticks` mouse-wheel scroll events to `window`'s app, so a full-screen agent scrolls
@@ -677,15 +687,28 @@ mod tests {
         }
         let rt = TmuxRuntime::new(format!("repomon-ownertest-{}", std::process::id()));
         // A server must exist before server options can be set — spawn a throwaway window.
-        rt.spawn(1, &std::env::temp_dir(), "sh -c 'sleep 30'").unwrap();
+        rt.spawn(1, &std::env::temp_dir(), "sh -c 'sleep 30'")
+            .unwrap();
 
         // First caller claims the server and keeps verifying true on re-check (restart-safe).
-        assert!(rt.claim_or_verify_owner("daemon-A"), "first claim should win");
-        assert!(rt.claim_or_verify_owner("daemon-A"), "owner re-verifies true");
+        assert!(
+            rt.claim_or_verify_owner("daemon-A"),
+            "first claim should win"
+        );
+        assert!(
+            rt.claim_or_verify_owner("daemon-A"),
+            "owner re-verifies true"
+        );
         // A different daemon sharing the server (a stray test instance) is locked out of reaping.
-        assert!(!rt.claim_or_verify_owner("daemon-B"), "non-owner must back off");
+        assert!(
+            !rt.claim_or_verify_owner("daemon-B"),
+            "non-owner must back off"
+        );
         // The original owner is unaffected by the other's attempt.
-        assert!(rt.claim_or_verify_owner("daemon-A"), "owner still owns after B's attempt");
+        assert!(
+            rt.claim_or_verify_owner("daemon-A"),
+            "owner still owns after B's attempt"
+        );
 
         let _ = Command::new("tmux")
             .args(["-L", rt.session(), "kill-server"])

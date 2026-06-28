@@ -3,26 +3,26 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
-use ratatui::DefaultTerminal;
+use repomon_core::TmuxRuntime;
 use repomon_core::model::{
     AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
     RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
-    activity_allows_refire, diff_session_transitions, session_by_key, session_statuses, slot_by_key,
-    SessKey,
+    SessKey, activity_allows_refire, diff_session_transitions, session_by_key, session_statuses,
+    slot_by_key,
 };
 use repomon_core::protocol::Notification;
-use repomon_core::TmuxRuntime;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
@@ -613,7 +613,8 @@ impl App {
                         .selected_lane()
                         .map(|l| l.agent_sessions.iter().any(|s| !s.external))
                         .unwrap_or(false);
-                    self.focus_missing_ticks = next_focus_missing(present, self.focus_missing_ticks);
+                    self.focus_missing_ticks =
+                        next_focus_missing(present, self.focus_missing_ticks);
                 }
             }
             Err(e) => self.status = format!("lane.list failed: {e}"),
@@ -640,14 +641,8 @@ impl App {
         // key. Sorting by recent activity here made lanes bubble around on every agent output
         // (visible jumbling, worse with the expanded agent tree). Needs-you still floats up via
         // the `attention` bucket; only the within-bucket churn is removed.
-        self.lanes.sort_by_key(|l| {
-            (
-                repo_order[&l.repo.id],
-                !l.pinned,
-                attention[&l.id],
-                l.id,
-            )
-        });
+        self.lanes
+            .sort_by_key(|l| (repo_order[&l.repo.id], !l.pinned, attention[&l.id], l.id));
     }
 
     /// How urgently this lane needs the user (lower = more urgent), accounting for whether a
@@ -1631,7 +1626,10 @@ impl App {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
                 // Remember the real pointer column from positioned events — wheel events report
                 // column 0 on many terminals, so this is how we know which pane the wheel is over.
-                if !matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                if !matches!(
+                    me.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
                     self.last_mouse_col = me.column;
                 }
                 // Bare movement just updates the hovered lane (highlighted on render).
@@ -1668,13 +1666,15 @@ impl App {
                     // navigates lanes. Wheel events report column 0 on many terminals, so fall back
                     // to the last positioned pointer column. A left-click focuses the clicked lane.
                     View::Split => {
-                        let col = if me.column > 0 { me.column } else { self.last_mouse_col };
+                        let col = if me.column > 0 {
+                            me.column
+                        } else {
+                            self.last_mouse_col
+                        };
                         let over_pane = col > 26;
                         match me.kind {
                             MouseEventKind::ScrollUp if over_pane => self.pane_scroll(true, 1),
-                            MouseEventKind::ScrollDown if over_pane => {
-                                self.pane_scroll(false, 1)
-                            }
+                            MouseEventKind::ScrollDown if over_pane => self.pane_scroll(false, 1),
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                                 self.handle_mouse(me)
                             }
@@ -1687,12 +1687,8 @@ impl App {
                     // Command-center: the wheel scrolls repomind's pane; a left-click jumps to a
                     // needs-you lane (left column) or focuses/attaches the pane (right column).
                     View::Orchestrator => match me.kind {
-                        MouseEventKind::ScrollUp => {
-                            self.scroll = self.scroll.saturating_add(3)
-                        }
-                        MouseEventKind::ScrollDown => {
-                            self.scroll = self.scroll.saturating_sub(3)
-                        }
+                        MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_add(3),
+                        MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.orchestrator_click(me.column, me.row).await
                         }
@@ -1808,7 +1804,10 @@ impl App {
         };
         match self
             .client
-            .call("session.rename", Some(json!({ "session_id": session_id, "label": label_val })))
+            .call(
+                "session.rename",
+                Some(json!({ "session_id": session_id, "label": label_val })),
+            )
             .await
         {
             Ok(_) => {
@@ -2891,7 +2890,11 @@ impl App {
     async fn load_orchestrator(&mut self) {
         self.reset_scroll();
         self.orch_insert = false;
-        match self.client.call("orchestrator.start", Some(json!({}))).await {
+        match self
+            .client
+            .call("orchestrator.start", Some(json!({})))
+            .await
+        {
             Ok(v) => self.apply_orchestrator_status(&v),
             Err(e) => self.status = format!("repomind start failed: {e}"),
         }
@@ -2990,7 +2993,10 @@ impl App {
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string();
-                let available = v.get("available").and_then(|a| a.as_bool()).unwrap_or(false);
+                let available = v
+                    .get("available")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
                 if available && !target.is_empty() {
                     self.attach_target = Some(target);
                 } else {
@@ -3910,8 +3916,9 @@ impl App {
                 // Unregister the selected lane's whole repo (all its lanes), with a two-press
                 // confirm. Unregister only: the daemon drops the registry row and stops watching
                 // the tree, but worktree files and running agents are left untouched.
-                let Some((repo_id, name)) =
-                    self.selected_lane().map(|l| (l.repo.id, l.repo.name.clone()))
+                let Some((repo_id, name)) = self
+                    .selected_lane()
+                    .map(|l| (l.repo.id, l.repo.name.clone()))
                 else {
                     return;
                 };
@@ -4763,7 +4770,10 @@ mod tests {
             Some(SessionRef::Transcript("uuid-2".into()))
         );
         // An inferred file-activity placeholder (no window, no id) has no stable handle.
-        assert_eq!(agent_session_ref(&sess(None, AgentStatus::Idle, true)), None);
+        assert_eq!(
+            agent_session_ref(&sess(None, AgentStatus::Idle, true)),
+            None
+        );
     }
 
     #[test]

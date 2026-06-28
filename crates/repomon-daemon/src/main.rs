@@ -6,10 +6,10 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use repomon_core::{config, Config, Store, Watcher};
-use repomon_daemon::{serve, Ctx};
+use repomon_core::{Config, Store, Watcher, config};
+use repomon_daemon::{Ctx, serve};
 use serde_json::json;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]

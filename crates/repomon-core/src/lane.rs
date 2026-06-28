@@ -91,7 +91,10 @@ impl Lanes {
         let mut repo_entries: Vec<(Repo, Vec<worktree::WorktreeEntry>)> = Vec::new();
         let mut wt_misses: Vec<Repo> = Vec::new();
         {
-            let cache = self.worktrees_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = self
+                .worktrees_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for repo in repos {
                 match cache.get(&repo.path) {
                     Some((t, entries)) if t.elapsed() < WORKTREES_TTL => {
@@ -113,7 +116,10 @@ impl Lanes {
             wt_fresh.push(h.await.map_err(join_err)?);
         }
         {
-            let mut cache = self.worktrees_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = self
+                .worktrees_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for (repo, entries_res) in wt_misses.into_iter().zip(wt_fresh) {
                 // A repo that's gone missing on disk shouldn't sink the whole fleet view.
                 if let Ok(entries) = entries_res {
@@ -172,8 +178,9 @@ impl Lanes {
         // keep their slightly-stale state and refresh on a later list. Walks run in parallel.
         // (Agent transcript writes touch no worktree, so they never invalidate a cached state.)
         const WALK_CAP: usize = 2;
-        let mut states: Vec<Option<Result<WorktreeState>>> =
-            std::iter::repeat_with(|| None).take(pending.len()).collect();
+        let mut states: Vec<Option<Result<WorktreeState>>> = std::iter::repeat_with(|| None)
+            .take(pending.len())
+            .collect();
         let mut must_walk: Vec<usize> = Vec::new(); // first-seen or watcher-invalidated
         let mut stale: Vec<(usize, Instant)> = Vec::new(); // clean but past the TTL (reusable)
         {

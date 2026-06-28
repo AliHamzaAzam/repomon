@@ -3,11 +3,11 @@
 //! configurable accent; see [`crate::theme`]). `accent = "mono"` restores the no-color look.
 
 use chrono::{DateTime, Local, Utc};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use repomon_core::model::{AgentStatus, Commit, DirtyState, Lane, LaneId, RepoId};
 
@@ -16,21 +16,16 @@ use crate::keybinds::View;
 use crate::notify::NotifKind;
 use crate::theme;
 
-const FLEET_KEYS: &str =
-    "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · q";
-const SPLIT_KEYS: &str =
-    "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
+const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+const SPLIT_KEYS: &str = "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
     "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
-const SPLIT_ORCH_KEYS: &str =
-    "i type to repomind · ↵/→ open command-center  ·  ↑↓ lane · click focus · wheel scroll  ·  ←/esc back";
+const SPLIT_ORCH_KEYS: &str = "i type to repomind · ↵/→ open command-center  ·  ↑↓ lane · click focus · wheel scroll  ·  ←/esc back";
 const SPLIT_ORCH_INSERT_KEYS: &str =
     "keys → repomind (esc · ⇧⇥ · ^C sent) · ↵ send  ·  ^O leave insert";
-const FOCUS_CMD_KEYS: &str =
-    "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
+const FOCUS_CMD_KEYS: &str = "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
-const GRID_KEYS: &str =
-    "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g/G next · f find  ·  spc/esc fleet · q quit";
+const GRID_KEYS: &str = "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g/G next · f find  ·  spc/esc fleet · q quit";
 const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
@@ -274,7 +269,11 @@ fn render_settings(f: &mut Frame, app: &App) {
             "per-agent sidebar rows · space toggles",
         ),
         ("repomind account", orch_agent, "←/→ cycle · Claude account"),
-        ("repomind model", orch_model, "←/→ cycle · default/opus/sonnet"),
+        (
+            "repomind model",
+            orch_model,
+            "←/→ cycle · default/opus/sonnet",
+        ),
     ];
     // Size the columns to the content so values and hints line up no matter how long a label is:
     // the name column fits the widest label (+gap), the value column fits the default worktree
@@ -325,8 +324,7 @@ fn render_settings(f: &mut Frame, app: &App) {
     f.render_widget(footer(keys, app, rows[2].width), rows[2]);
 }
 
-const ADDREPO_KEYS: &str =
-    "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d d discover · x x remove (+ only)  ·  esc back";
+const ADDREPO_KEYS: &str = "↑↓ select · ↵/→ enter · ←/h up  ·  a add repo · d d discover · x x remove (+ only)  ·  esc back";
 
 fn render_addrepo(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -725,7 +723,11 @@ fn render_spawn_pick(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
     f.render_widget(
-        footer("↑↓ pick · 1-9 jump · ↵ spawn · esc cancel", app, rows[2].width),
+        footer(
+            "↑↓ pick · 1-9 jump · ↵ spawn · esc cancel",
+            app,
+            rows[2].width,
+        ),
         rows[2],
     );
 }
@@ -790,7 +792,11 @@ fn render_lane_jump(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
     f.render_widget(
-        footer("type to filter · ↑↓ pick · ↵ open · esc cancel", app, rows[2].width),
+        footer(
+            "type to filter · ↑↓ pick · ↵ open · esc cancel",
+            app,
+            rows[2].width,
+        ),
         rows[2],
     );
 }
@@ -830,7 +836,10 @@ fn render_search(f: &mut Frame, app: &App) {
         }
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(footer("type to search  ·  ←/esc fleet", app, rows[1].width), rows[1]);
+    f.render_widget(
+        footer("type to search  ·  ←/esc fleet", app, rows[1].width),
+        rows[1],
+    );
 }
 
 fn analytics_char(level: u8) -> &'static str {
@@ -878,15 +887,11 @@ fn render_fleet(f: &mut Frame, app: &App) {
             );
         }
     }
-    f.render_widget(
-        Paragraph::new(lines).scroll((scroll as u16, 0)),
-        content,
-    );
+    f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), content);
     f.render_widget(footer(FLEET_KEYS, app, rows[1].width), rows[1]);
 }
 
-const ORCH_KEYS: &str =
-    "i message repomind · ↵/→ attach (full terminal) · ↑↓/PgUp/wheel scroll · click lane to jump  ·  ←/esc back · q quit";
+const ORCH_KEYS: &str = "i message repomind · ↵/→ attach (full terminal) · ↑↓/PgUp/wheel scroll · click lane to jump  ·  ←/esc back · q quit";
 const ORCH_INSERT_KEYS: &str =
     "type to repomind · ↵ send · ^O leave insert · PgUp/PgDn scroll · esc/^C → repomind";
 
@@ -975,7 +980,12 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
         if y < body[0].y + body[0].height {
             click_zone(
                 app,
-                Rect { x: body[0].x, y, width: body[0].width, height: 1 },
+                Rect {
+                    x: body[0].x,
+                    y,
+                    width: body[0].width,
+                    height: 1,
+                },
                 lane_id,
                 None,
                 false,
@@ -988,7 +998,8 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(divider), body[1]);
     // Record the pane size (the daemon has no orchestrator.resize yet, so this is informational;
     // sync_pane_size only resizes Split/Focus lane windows) and the rect for mouse focus/attach.
-    app.focus_pane_dims.set(Some((body[2].width, body[2].height)));
+    app.focus_pane_dims
+        .set(Some((body[2].width, body[2].height)));
     app.orch_pane_zone.set(Some(body[2]));
     let right = orch_pane_window(app, body[2].height as usize).unwrap_or_else(|| {
         let msg = if app.orch_running {
@@ -996,7 +1007,10 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
         } else {
             "  repomind isn't running"
         };
-        vec![Line::raw(""), Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
+        vec![
+            Line::raw(""),
+            Line::from(Span::styled(msg.to_string(), app.theme.dim())),
+        ]
     });
     f.render_widget(Paragraph::new(right), body[2]);
     // Draw repomind's real cursor where you're typing (insert mode, live tail) — same mechanism as
@@ -1067,7 +1081,10 @@ fn orch_summary_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<(usize,
             Span::styled(format!("{} need you", needs.len()), needs_style),
         ]),
         Line::raw(""),
-        Line::from(Span::styled("NEEDS YOU".to_string(), app.theme.header_style())),
+        Line::from(Span::styled(
+            "NEEDS YOU".to_string(),
+            app.theme.header_style(),
+        )),
     ];
     let mut hits = Vec::new();
     if needs.is_empty() {
@@ -1139,7 +1156,10 @@ fn render_split(f: &mut Frame, app: &App) {
             } else {
                 "  repomind is off  ·  press ↵ to start"
             };
-            vec![Line::raw(""), Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
+            vec![
+                Line::raw(""),
+                Line::from(Span::styled(msg.to_string(), app.theme.dim())),
+            ]
         })
     } else if has_output {
         let h = (body[2].height as usize).max(1);
@@ -1255,16 +1275,23 @@ fn render_focus(f: &mut Frame, app: &App) {
     let out_y0 = rows[1].y + body.len() as u16;
     let avail = (rows[1].height as usize).saturating_sub(body.len());
     // Record the pane size so the event loop fits the agent's tmux window to the full-screen view.
-    app.focus_pane_dims
-        .set(Some((rows[1].width, avail as u16)));
+    app.focus_pane_dims.set(Some((rows[1].width, avail as u16)));
     body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
     f.render_widget(Paragraph::new(body), rows[1]);
 
     // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
     if app.focus_insert && app.scroll == 0 {
-        if let Some((cx, cy)) = lane.and_then(|l| app.output.get(&l.id)).and_then(|p| p.cursor) {
+        if let Some((cx, cy)) = lane
+            .and_then(|l| app.output.get(&l.id))
+            .and_then(|p| p.cursor)
+        {
             let (cur_y0, start, count) = app.focus_geom.get();
-            let pane = Rect { x: rows[1].x, y: cur_y0, width: rows[1].width, height: count as u16 };
+            let pane = Rect {
+                x: rows[1].x,
+                y: cur_y0,
+                width: rows[1].width,
+                height: count as u16,
+            };
             place_pane_cursor(f, pane, start, count, (cx, cy));
         }
     }
@@ -1985,7 +2012,10 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
                 let rest = format!(" {:<10} {}", trunc(&lane_name(lane), 10), counts);
                 let count = agent_count_badge(lane);
                 if selected {
-                    let badge = count.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
+                    let badge = count
+                        .as_deref()
+                        .map(|c| format!(" {c}"))
+                        .unwrap_or_default();
                     Line::from(Span::styled(
                         format!(" {glyph}{rest}{badge}"),
                         app.theme.selected(),
@@ -2679,10 +2709,7 @@ mod tests {
         // Multi-word labels are preserved (paren prose rides in the label).
         assert_eq!(
             split_key_label("keys → agent (esc · ⇧⇥ · ^C sent)"),
-            (
-                "keys".into(),
-                Some("→ agent (esc · ⇧⇥ · ^C sent)".into()),
-            ),
+            ("keys".into(), Some("→ agent (esc · ⇧⇥ · ^C sent)".into()),),
         );
         // A word-key does NOT chain a following arrow into the key.
         assert_eq!(
