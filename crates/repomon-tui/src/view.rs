@@ -999,6 +999,18 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
         vec![Line::raw(""), Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
     });
     f.render_widget(Paragraph::new(right), body[2]);
+    // Draw repomind's real cursor where you're typing (insert mode, live tail) — same mechanism as
+    // the lane focus/insert pane.
+    if app.orch_insert && app.scroll == 0 {
+        if let Some(p) = app.orch_output.as_ref() {
+            if let Some((cx, cy)) = p.cursor {
+                let h = (body[2].height as usize).max(1);
+                let start = p.lines.len().saturating_sub(h);
+                let count = p.lines.len() - start;
+                place_pane_cursor(f, body[2], start, count, (cx, cy));
+            }
+        }
+    }
 
     let mode = if app.orch_insert {
         Line::from(Span::styled(
@@ -1153,6 +1165,17 @@ fn render_split(f: &mut Frame, app: &App) {
     // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
     if app.focus_insert && app.scroll == 0 && has_output {
         if let Some(p) = id.and_then(|i| app.output.get(&i)) {
+            if let Some((cx, cy)) = p.cursor {
+                let h = (body[2].height as usize).max(1);
+                let start = p.lines.len().saturating_sub(h);
+                let count = p.lines.len() - start;
+                place_pane_cursor(f, body[2], start, count, (cx, cy));
+            }
+        }
+    }
+    // The pinned repomind preview draws repomind's cursor while typing to it (same mechanism).
+    if pinned && app.orch_insert && app.scroll == 0 {
+        if let Some(p) = app.orch_output.as_ref() {
             if let Some((cx, cy)) = p.cursor {
                 let h = (body[2].height as usize).max(1);
                 let start = p.lines.len().saturating_sub(h);

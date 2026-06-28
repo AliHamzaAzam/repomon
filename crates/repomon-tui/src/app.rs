@@ -1585,11 +1585,18 @@ impl App {
             if let Some(content) = note.params.get("content").and_then(|v| v.as_str()) {
                 let raw = content.to_string();
                 let lines = view::parse_pane(&raw);
+                // repomind's real cursor `[col, row]` (parsed like the lane path), so the mediated
+                // pane can draw it where you're typing.
+                let cursor = note
+                    .params
+                    .get("cursor")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
                 let changed = self.orch_output.as_ref().map(|p| &p.raw) != Some(&raw);
                 if changed {
                     self.orch_last_output = Some(Instant::now());
                 }
-                self.orch_output = Some(Pane { raw, lines, cursor: None });
+                self.orch_output = Some(Pane { raw, lines, cursor });
             }
         } else if note.method == "event.orchestrator.status" {
             self.apply_orchestrator_status(&note.params);

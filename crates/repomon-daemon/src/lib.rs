@@ -394,6 +394,7 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
     use std::time::Duration;
 
     let mut last: Option<String> = None;
+    let mut last_cursor: Option<(u16, u16)> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -402,6 +403,7 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         let running = ctx.orchestrator.lock().await.is_some();
         if !watched || !running {
             last = None;
+            last_cursor = None;
             continue;
         }
         let tmux = ctx.tmux.clone();
@@ -411,12 +413,26 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
                 Ok(Ok(c)) => c,
                 _ => continue,
             };
-        if last.as_deref() != Some(content.as_str()) {
+        // Carry repomind's real cursor so the mediated pane draws it where you're typing (mirrors
+        // the focused-lane path in `stream_output`). One extra tmux fork on the single orchestrator
+        // pane, only while watched.
+        let tmux = ctx.tmux.clone();
+        let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named("orchestrator"))
+            .await
+            .ok()
+            .flatten();
+        // Re-push on a cursor-only move (arrowing within repomind's input box) so the rendered
+        // cursor tracks even when the text itself is unchanged.
+        if last.as_deref() != Some(content.as_str()) || last_cursor != cursor {
             ctx.broadcast(
                 pubsub::topic::ORCHESTRATOR_OUTPUT,
-                serde_json::json!({ "content": content.clone() }),
+                serde_json::json!({
+                    "content": content.clone(),
+                    "cursor": cursor.map(|(x, y)| [x, y]),
+                }),
             );
             last = Some(content);
+            last_cursor = cursor;
         }
     }
 }
