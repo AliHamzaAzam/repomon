@@ -1335,6 +1335,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            // Frame-rate echo while typing: `stream_orchestrator` captures at ~30ms within
+            // TYPING_WINDOW of this stamp, the same speedup `input_seen` gives a focused lane.
+            *ctx.orchestrator_input_seen.lock().await = Some(std::time::Instant::now());
             Ok(Value::Null)
         }
         "orchestrator.key" => {
@@ -1351,6 +1354,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            *ctx.orchestrator_input_seen.lock().await = Some(std::time::Instant::now());
             Ok(Value::Null)
         }
         // Gate the orchestrator pane stream: the TUI sets this `true` on entering the command-center

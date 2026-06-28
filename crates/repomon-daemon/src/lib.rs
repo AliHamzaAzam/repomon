@@ -136,6 +136,10 @@ pub struct Ctx {
     /// streamed. Gates `stream_orchestrator` so capturing the pane costs nothing when nobody's
     /// watching.
     pub orchestrator_watched: Mutex<bool>,
+    /// When the orchestrator pane was last typed into (any `orchestrator.send_input`/`key`), so
+    /// `stream_orchestrator` captures it at frame-rate while you type to repomind, the same
+    /// keystroke-echo speedup `input_seen` gives a focused lane. Goes quiet on its own.
+    pub orchestrator_input_seen: Mutex<Option<Instant>>,
     pub shutdown: Notify,
 }
 
@@ -190,6 +194,7 @@ impl Ctx {
             last_overlay_sessions: Mutex::new(HashMap::new()),
             orchestrator: Mutex::new(None),
             orchestrator_watched: Mutex::new(false),
+            orchestrator_input_seen: Mutex::new(None),
             shutdown: Notify::new(),
         })
     }
@@ -387,15 +392,31 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
 }
 
 /// Stream the repomind orchestrator's pane to subscribed clients. While a session is running AND a
-/// client has asked to watch it (`orchestrator_watched`), capture the `orchestrator` window every
-/// ~200ms and broadcast `event.orchestrator.output` whenever the pane text changes. Idle (no
-/// session or nobody watching) it does nothing but a cheap flag check.
+/// client has asked to watch it (`orchestrator_watched`), capture the `orchestrator` window and
+/// broadcast `event.orchestrator.output` whenever the pane text or cursor changes. Idle (no session
+/// or nobody watching) it does nothing but a cheap flag check.
+///
+/// Cadence mirrors the focused-lane regime in [`stream_output`], for this single pane: while you are
+/// typing to repomind (within `TYPING_WINDOW` of the last `orchestrator.send_input`/`key`) it
+/// captures at frame-rate so keystroke echo feels instant; once typing goes quiet it relaxes to a
+/// focused cadence and backs off toward a cap while the pane is unchanged. The old flat 200ms tick
+/// made typing in repomind echo at ~5fps versus a lane's ~30Hz.
 pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    const TYPING_FLOOR: Duration = Duration::from_millis(30);
+    const TYPING_CAP: Duration = Duration::from_millis(60);
+    const TYPING_WINDOW: Duration = Duration::from_millis(400);
+    const WATCH_FLOOR: Duration = Duration::from_millis(150);
+    const WATCH_CAP: Duration = Duration::from_millis(600);
 
     let mut last: Option<String> = None;
     let mut last_cursor: Option<(u16, u16)> = None;
-    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    let mut backoff = WATCH_FLOOR;
+    let mut last_cap = Instant::now();
+    // Wake at the tightest regime; the due-check below keeps a quiet pane at its slower cadence, so
+    // the extra wakeups are cheap no-ops (no capture) when nothing is being typed.
+    let mut tick = tokio::time::interval(TYPING_FLOOR);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
@@ -404,8 +425,28 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         if !watched || !running {
             last = None;
             last_cursor = None;
+            backoff = WATCH_FLOOR;
             continue;
         }
+        let now = Instant::now();
+        // Frame-rate while typing to repomind, else the watched-but-quiet focused cadence.
+        let typing = ctx
+            .orchestrator_input_seen
+            .lock()
+            .await
+            .is_some_and(|t| now.saturating_duration_since(t) < TYPING_WINDOW);
+        let (floor, cap) = if typing {
+            (TYPING_FLOOR, TYPING_CAP)
+        } else {
+            (WATCH_FLOOR, WATCH_CAP)
+        };
+        // Re-clamped each tick, so the first keystroke shrinks a stale 150ms wait to <=60ms and the
+        // pane captures on the next tick (prompt first-key echo); not due yet otherwise.
+        let interval = backoff.clamp(floor, cap);
+        if now < last_cap + interval {
+            continue;
+        }
+        last_cap = now;
         let tmux = ctx.tmux.clone();
         let content =
             match tokio::task::spawn_blocking(move || tmux.capture_named("orchestrator", None)).await
@@ -414,16 +455,18 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
                 _ => continue,
             };
         // Carry repomind's real cursor so the mediated pane draws it where you're typing (mirrors
-        // the focused-lane path in `stream_output`). One extra tmux fork on the single orchestrator
-        // pane, only while watched.
+        // the focused-lane path in `stream_output`). One extra tmux fork on the single pane.
         let tmux = ctx.tmux.clone();
         let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named("orchestrator"))
             .await
             .ok()
             .flatten();
-        // Re-push on a cursor-only move (arrowing within repomind's input box) so the rendered
-        // cursor tracks even when the text itself is unchanged.
-        if last.as_deref() != Some(content.as_str()) || last_cursor != cursor {
+        // Re-push on a cursor-only move (arrowing within repomind's input box) so the rendered cursor
+        // tracks even when the text is unchanged. Reset to the floor on any change; otherwise double
+        // the (clamped) interval toward the cap so a settled pane stops being re-captured.
+        let changed = last.as_deref() != Some(content.as_str()) || last_cursor != cursor;
+        backoff = if changed { floor } else { (interval * 2).min(cap) };
+        if changed {
             ctx.broadcast(
                 pubsub::topic::ORCHESTRATOR_OUTPUT,
                 serde_json::json!({
