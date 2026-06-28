@@ -382,6 +382,11 @@ pub struct App {
     orch_watched: bool,
     /// Screen rect of the pinned "repomind" row this frame, so a click on it selects + opens the view.
     pub orch_click: std::cell::Cell<Option<Rect>>,
+    /// Screen rect of repomind's live pane this frame (the command-center's right column, and the
+    /// Split right column while the pinned row is selected), so a click can focus / open / attach it.
+    pub orch_pane_zone: std::cell::Cell<Option<Rect>>,
+    /// Last left-click on the command-center pane, for double-click-to-attach detection.
+    orch_pane_last_click: Option<Instant>,
 }
 
 impl App {
@@ -511,6 +516,8 @@ impl App {
             orch_insert: false,
             orch_watched: false,
             orch_click: std::cell::Cell::new(None),
+            orch_pane_zone: std::cell::Cell::new(None),
+            orch_pane_last_click: None,
         }
     }
 
@@ -1161,9 +1168,11 @@ impl App {
             self.last_viewport = live;
             self.last_viewport_focus = focus;
         }
-        // Stream the orchestrator pane only while the command-center view is open: toggle the
-        // daemon's watch flag on a real enter/leave (it gates `stream_orchestrator`).
-        let want_watch = self.view == View::Orchestrator;
+        // Stream the orchestrator pane while the command-center view is open, or while the pinned
+        // repomind row is selected in Split (its right column previews the live pane). Toggle the
+        // daemon's watch flag only on a real change (it gates `stream_orchestrator`).
+        let want_watch = self.view == View::Orchestrator
+            || (self.view == View::Split && self.orchestrator_selected());
         if want_watch != self.orch_watched {
             let _ = self
                 .client
@@ -1635,8 +1644,8 @@ impl App {
                             _ => {}
                         }
                     }
-                    // Command-center: the wheel scrolls the orchestrator pane; a left-click focuses
-                    // it for typing.
+                    // Command-center: the wheel scrolls repomind's pane; a left-click jumps to a
+                    // needs-you lane (left column) or focuses/attaches the pane (right column).
                     View::Orchestrator => match me.kind {
                         MouseEventKind::ScrollUp => {
                             self.scroll = self.scroll.saturating_add(3)
@@ -1644,7 +1653,9 @@ impl App {
                         MouseEventKind::ScrollDown => {
                             self.scroll = self.scroll.saturating_sub(3)
                         }
-                        MouseEventKind::Down(MouseButton::Left) => self.orch_insert = true,
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.orchestrator_click(me.column, me.row).await
+                        }
                         _ => {}
                     },
                     // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
@@ -2730,6 +2741,14 @@ impl App {
                 return;
             }
         }
+        // In Split with the pinned row selected, the right column previews repomind; a click there
+        // opens the full command-center.
+        if let Some(rect) = self.orch_pane_zone.get() {
+            if rect.contains(Position { x: col, y: row }) {
+                self.open_orchestrator().await;
+                return;
+            }
+        }
         let hit = self
             .click_zones
             .borrow()
@@ -2939,6 +2958,40 @@ impl App {
         }
     }
 
+    /// A left-click in the command-center view: a needs-you lane in the left summary jumps to that
+    /// lane (Focus); the right column focuses repomind for typing, and a double-click attaches into
+    /// its real terminal. The click rects are registered each frame by `render_orchestrator`.
+    async fn orchestrator_click(&mut self, col: u16, row: u16) {
+        let pos = Position { x: col, y: row };
+        let lane = self
+            .click_zones
+            .borrow()
+            .iter()
+            .find(|z| z.rect.contains(pos))
+            .map(|z| z.lane);
+        if let Some(id) = lane {
+            self.jump_to_lane(id); // selects the lane and opens it in Focus
+            return;
+        }
+        if let Some(rect) = self.orch_pane_zone.get() {
+            if rect.contains(pos) {
+                let now = std::time::Instant::now();
+                let dbl = self
+                    .orch_pane_last_click
+                    .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK);
+                self.orch_pane_last_click = Some(now);
+                if dbl {
+                    self.orch_insert = false;
+                    self.attach_orchestrator().await; // double-click → full attach
+                } else {
+                    self.orch_insert = true; // single-click → type to repomind
+                }
+                return;
+            }
+        }
+        self.orch_insert = false; // clicked the gutter → blur
+    }
+
     /// Forward one keystroke live to the selected lane's agent (insert-mode passthrough),
     /// so its own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
     async fn send_agent_key(&mut self, key: KeyEvent) {
@@ -3027,6 +3080,11 @@ impl App {
         }
         if self.filtering {
             self.filter_key(key);
+            return;
+        }
+        // The pinned repomind row has no lane; ↵/→ open the full command-center.
+        if self.orchestrator_selected() && matches!(key.code, KeyCode::Enter | KeyCode::Right) {
+            self.open_orchestrator().await;
             return;
         }
         // esc returns to the live tail before it would zoom out.
@@ -3686,11 +3744,16 @@ impl App {
             }
             Action::ZoomIn => {
                 self.focus_insert = false; // don't carry click-focus typing across screens
-                self.view = match self.view {
-                    View::Fleet => View::Split,
-                    View::Split => View::Focus,
-                    View::Grid => View::Focus,
-                    other => other,
+                // ↵/→ on the pinned repomind row opens the command-center instead of zooming a lane.
+                if self.orchestrator_selected() && matches!(self.view, View::Fleet | View::Split) {
+                    self.open_orchestrator().await;
+                } else {
+                    self.view = match self.view {
+                        View::Fleet => View::Split,
+                        View::Split => View::Focus,
+                        View::Grid => View::Focus,
+                        other => other,
+                    }
                 }
             }
             Action::ZoomOut => {

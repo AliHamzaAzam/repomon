@@ -46,9 +46,11 @@ fn click_zone(app: &App, rect: Rect, lane: LaneId, session: Option<usize>, inter
 pub fn render(f: &mut Frame, app: &App) {
     // Clickable lane regions are recomputed each frame by the per-view renderers below.
     app.click_zones.borrow_mut().clear();
-    // The pinned "repomind" row's click rect is re-set only by Fleet/Split each frame; clear it so a
-    // stale rect can't be hit from another view.
+    // The pinned "repomind" row's click rect and repomind's pane rect are re-set only by the
+    // Fleet/Split/command-center renderers each frame; clear them so a stale rect can't be hit
+    // from another view.
     app.orch_click.set(None);
+    app.orch_pane_zone.set(None);
     match app.view {
         View::Fleet => render_fleet(f, app),
         View::Split => render_split(f, app),
@@ -880,9 +882,9 @@ fn render_fleet(f: &mut Frame, app: &App) {
 }
 
 const ORCH_KEYS: &str =
-    "↑↓/PgUp scroll · i type to repomind · ↵/→ attach (real terminal)  ·  ←/esc back · q quit";
+    "i message repomind · ↵/→ attach (full terminal) · ↑↓/PgUp/wheel scroll · click lane to jump  ·  ←/esc back · q quit";
 const ORCH_INSERT_KEYS: &str =
-    "keys → repomind (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O command-mode";
+    "type to repomind · ↵ send · ^O leave insert · PgUp/PgDn scroll · esc/^C → repomind";
 
 /// The pinned row's one-word state: `off` (no session), `chatting` (pane changed in the last few
 /// seconds), else `idle`.
@@ -899,24 +901,42 @@ fn orch_status_word(app: &App) -> &'static str {
     }
 }
 
+/// The brain glyph plus a single space, used as the pinned row / summary marker. The emoji is
+/// double-width, so it leads each line on its own (lane rows below sit on separate grid lines and
+/// are unaffected); any terminal width disagreement only touches this line's own trailing text.
+const BRAIN: &str = "🧠 ";
+
 /// The pinned "repomind" fleet row (rendered at the top of Fleet and the Split sidebar).
 fn orch_row_line(app: &App, selected: bool) -> Line<'static> {
     let word = orch_status_word(app);
-    let text = format!(" 🧠 repomind · {word}");
     if selected {
-        Line::from(Span::styled(text, app.theme.selected()))
+        Line::from(Span::styled(
+            format!("{BRAIN}repomind · {word}"),
+            app.theme.selected(),
+        ))
     } else {
-        let state_style = if app.orch_running {
+        let brain_style = if app.orch_running {
             app.theme.accented()
         } else {
             app.theme.muted()
         };
         Line::from(vec![
-            Span::styled(" 🧠 ".to_string(), state_style),
+            Span::styled(BRAIN.to_string(), brain_style),
             Span::raw("repomind "),
             Span::styled(format!("· {word}"), app.theme.muted()),
         ])
     }
+}
+
+/// repomind's live pane windowed to `height` (respecting scroll), or `None` when it has no output
+/// yet. Shared by the command-center's right column and the Split preview.
+fn orch_pane_window(app: &App, height: usize) -> Option<Vec<Line<'static>>> {
+    let pane = app.orch_output.as_ref()?;
+    if pane.raw.trim().is_empty() {
+        return None;
+    }
+    let (start, end) = output_window(pane.lines.len(), height.max(1), app.scroll);
+    Some(pane.lines[start..end].to_vec())
 }
 
 /// The command-center: a curated fleet summary on the left, repomind's live pane on the right.
@@ -936,45 +956,54 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
         ]),
         rows[0],
     );
+    // A comfortably-readable summary column (fixed width) with repomind's pane taking the rest.
     let body = Layout::horizontal([
-        Constraint::Length(34),
+        Constraint::Length(30),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
     .split(rows[1]);
-    f.render_widget(Paragraph::new(orch_summary_lines(app)), body[0]);
+    // Left summary; its returned click map lets a click on a needs-you lane jump to it.
+    let (summary, lane_hits) = orch_summary_lines(app, body[0].width);
+    f.render_widget(Paragraph::new(summary), body[0]);
+    for (line_idx, lane_id) in lane_hits {
+        let y = body[0].y + line_idx as u16;
+        if y < body[0].y + body[0].height {
+            click_zone(
+                app,
+                Rect { x: body[0].x, y, width: body[0].width, height: 1 },
+                lane_id,
+                None,
+                false,
+            );
+        }
+    }
     let divider: Vec<Line> = (0..body[1].height)
         .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
         .collect();
     f.render_widget(Paragraph::new(divider), body[1]);
     // Record the pane size (the daemon has no orchestrator.resize yet, so this is informational;
-    // sync_pane_size only resizes Split/Focus lane windows).
+    // sync_pane_size only resizes Split/Focus lane windows) and the rect for mouse focus/attach.
     app.focus_pane_dims.set(Some((body[2].width, body[2].height)));
-    let pane = app.orch_output.as_ref();
-    let has_output = pane.map(|p| !p.raw.trim().is_empty()).unwrap_or(false);
-    let right = if has_output {
-        let h = (body[2].height as usize).max(1);
-        let lines = pane.map(|p| p.lines.as_slice()).unwrap_or(&[]);
-        let (start, end) = output_window(lines.len(), h, app.scroll);
-        lines[start..end].to_vec()
-    } else {
+    app.orch_pane_zone.set(Some(body[2]));
+    let right = orch_pane_window(app, body[2].height as usize).unwrap_or_else(|| {
         let msg = if app.orch_running {
-            "(repomind is starting, its live pane appears here)"
+            "  repomind is starting… its live pane appears here"
         } else {
-            "(repomind isn't running, it auto-starts when you open this view)"
+            "  repomind isn't running"
         };
-        vec![Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
-    };
+        vec![Line::raw(""), Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
+    });
     f.render_widget(Paragraph::new(right), body[2]);
 
     let mode = if app.orch_insert {
         Line::from(Span::styled(
-            " ● INSERT: keys go to repomind (esc · ⇧⇥ · ^C all sent) · ^O to command ",
+            " ● INSERT: typing to repomind · ↵ send · ^O to command ",
             app.theme.selected(),
         ))
     } else {
         Line::from(Span::styled(
-            " ○ i type to repomind · ↵/→ attach into its real terminal ",
+            " ○ press i to message repomind · ↵/→ attach into its terminal ",
             app.theme.muted(),
         ))
     };
@@ -988,7 +1017,9 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
 }
 
 /// The left column of the command-center: fleet counts plus the (only) lanes blocked on the user.
-fn orch_summary_lines(app: &App) -> Vec<Line<'static>> {
+/// Returns the lines and, for each rendered needs-you lane, its `(line index, lane id)` so the
+/// caller can register a click zone that jumps to it.
+fn orch_summary_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<(usize, LaneId)>) {
     let running = app
         .lanes
         .iter()
@@ -1010,33 +1041,37 @@ fn orch_summary_lines(app: &App) -> Vec<Line<'static>> {
     };
     let mut lines = vec![
         Line::from(Span::styled(
-            format!("🧠 REPOMIND · {}", orch_status_word(app)),
+            format!("{BRAIN}REPOMIND · {}", orch_status_word(app)),
             app.theme.header_style(),
         )),
         Line::raw(""),
         Line::from(vec![
             Span::styled(format!("  {running} running"), app.theme.accented()),
-            Span::raw("    "),
+            Span::styled(" · ".to_string(), app.theme.muted()),
             Span::styled(format!("{} need you", needs.len()), needs_style),
         ]),
         Line::raw(""),
         Line::from(Span::styled("NEEDS YOU".to_string(), app.theme.header_style())),
     ];
+    let mut hits = Vec::new();
     if needs.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  nothing waiting, ask repomind what's next".to_string(),
+            "  all caught up".to_string(),
             app.theme.muted(),
         )));
     } else {
+        // Trim names to the column so the line never clips mid-word.
+        let cap = (width as usize).saturating_sub(5).max(8);
         for l in needs {
+            hits.push((lines.len(), l.id));
             let name = format!("{}/{}", l.repo.name, lane_name(l));
             lines.push(Line::from(vec![
                 Span::styled("  ⏸ ".to_string(), app.theme.needs_you()),
-                Span::raw(trunc(&name, 28)),
+                Span::raw(trunc(&name, cap)),
             ]));
         }
     }
-    lines
+    (lines, hits)
 }
 
 fn render_split(f: &mut Frame, app: &App) {
@@ -1071,14 +1106,26 @@ fn render_split(f: &mut Frame, app: &App) {
     // the visible width — no right-edge clipping).
     app.focus_pane_dims
         .set(Some((body[2].width, body[2].height)));
-    // Live agent output if there is any, otherwise the lane's git detail. Shows the scrollback
-    // window when scrolled (`scroll > 0`), else the live tail — both via `output_window`.
+    // With the pinned repomind row selected the right column previews its live pane; otherwise the
+    // selected lane's live agent output, falling back to the lane's git detail. Shows the
+    // scrollback window when scrolled (`scroll > 0`), else the live tail, both via `output_window`.
+    let pinned = app.orchestrator_selected();
     let id = app.selected_lane().map(|l| l.id);
     let has_output = id
         .and_then(|i| app.output.get(&i))
         .map(|p| !p.raw.trim().is_empty())
         .unwrap_or(false);
-    let right = if has_output {
+    let right = if pinned {
+        app.orch_pane_zone.set(Some(body[2]));
+        orch_pane_window(app, body[2].height as usize).unwrap_or_else(|| {
+            let msg = if app.orch_running {
+                "  repomind is starting…"
+            } else {
+                "  repomind is off  ·  press ↵ to start"
+            };
+            vec![Line::raw(""), Line::from(Span::styled(msg.to_string(), app.theme.dim()))]
+        })
+    } else if has_output {
         let h = (body[2].height as usize).max(1);
         let lines: &[Line<'static>] = if app.scroll > 0 {
             app.scroll_lines.as_deref().unwrap_or(&[])
@@ -1092,9 +1139,12 @@ fn render_split(f: &mut Frame, app: &App) {
         detail_lines(app)
     };
     f.render_widget(Paragraph::new(right), body[2]);
-    // Clicking the pane focuses the selected agent for typing (double-click → real terminal).
-    if let Some(id) = id {
-        click_zone(app, body[2], id, None, true);
+    // Clicking the pane focuses the selected agent for typing (double-click → real terminal). The
+    // pinned-row preview registers its own pane rect above instead (a click opens the command-center).
+    if !pinned {
+        if let Some(id) = id {
+            click_zone(app, body[2], id, None, true);
+        }
     }
     // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
     if app.focus_insert && app.scroll == 0 && has_output {
@@ -1109,7 +1159,12 @@ fn render_split(f: &mut Frame, app: &App) {
     }
 
     // INSERT here forwards keystrokes straight to the selected agent (no need to zoom).
-    let mode = if app.focus_insert {
+    let mode = if pinned {
+        Line::from(Span::styled(
+            " ○ repomind selected · ↵/→ open the command-center ",
+            app.theme.muted(),
+        ))
+    } else if app.focus_insert {
         Line::from(Span::styled(
             " ● INSERT — keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
             app.theme.selected(),
