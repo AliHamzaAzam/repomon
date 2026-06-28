@@ -370,6 +370,11 @@ struct OrchestratorWatch {
     /// daemon only captures the window while someone's watching).
     on: bool,
 }
+#[derive(Deserialize)]
+struct OrchestratorResize {
+    cols: u16,
+    rows: u16,
+}
 
 /// Dispatch a single request to its handler.
 pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
@@ -1354,6 +1359,20 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         "orchestrator.watch" => {
             let p: OrchestratorWatch = parse(params)?;
             *ctx.orchestrator_watched.lock().await = p.on;
+            Ok(Value::Null)
+        }
+        // Size the orchestrator window to the viewer's pane so the streamed capture fills it exactly
+        // (no right-edge overflow, and no trailing blank rows from a too-tall window). Mirrors
+        // `agent.resize`; `orchestrator.target` restores client-follow before a real attach.
+        "orchestrator.resize" => {
+            let p: OrchestratorResize = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            // Clamp to a sane floor so a momentary tiny layout can't shrink the window to nothing.
+            let (cols, rows) = (p.cols.max(20), p.rows.max(4));
+            tokio::task::spawn_blocking(move || tmux.resize_named(ORCHESTRATOR_WINDOW, cols, rows))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
             Ok(Value::Null)
         }
 

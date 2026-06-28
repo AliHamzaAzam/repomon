@@ -228,6 +228,9 @@ pub struct App {
     /// The `(lane, window, cols, rows)` of the last `agent.resize` sent, so it fires only on a real
     /// size/focus change rather than every tick.
     last_resize: Option<(LaneId, String, u16, u16)>,
+    /// The `(cols, rows)` of the last `orchestrator.resize` sent, so it fires only on a real size
+    /// change. Cleared after an attach (which restores the window's client-follow size).
+    last_orch_resize: Option<(u16, u16)>,
     /// Clickable lane regions for the current frame, recorded during render and read by the mouse
     /// handler. Cleared and repopulated every render.
     pub click_zones: RefCell<Vec<ClickZone>>,
@@ -428,6 +431,7 @@ impl App {
             focus_geom: std::cell::Cell::new((0, 0, 0)),
             focus_pane_dims: std::cell::Cell::new(None),
             last_resize: None,
+            last_orch_resize: None,
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
             hover_lane: None,
@@ -1211,6 +1215,35 @@ impl App {
             )
             .await;
         self.last_resize = Some(key);
+    }
+
+    /// Size the orchestrator's tmux window to the right-pane area while it's being streamed (the
+    /// command-center, or the Split preview when the pinned row is selected), so the captured pane
+    /// fills the view exactly instead of overflowing (too wide) or rendering blank (too tall, so
+    /// `output_window` would slice off the trailing empty rows). Mirrors `sync_pane_size`.
+    async fn sync_orchestrator_size(&mut self) {
+        let streaming = self.view == View::Orchestrator
+            || (self.view == View::Split && self.orchestrator_selected());
+        if !streaming {
+            return;
+        }
+        let Some((cols, rows)) = self.focus_pane_dims.get() else {
+            return;
+        };
+        if cols < 4 || rows < 2 {
+            return;
+        }
+        if self.last_orch_resize == Some((cols, rows)) {
+            return;
+        }
+        let _ = self
+            .client
+            .call(
+                "orchestrator.resize",
+                Some(json!({ "cols": cols, "rows": rows })),
+            )
+            .await;
+        self.last_orch_resize = Some((cols, rows));
     }
 
     /// Load the selected lane's recent commits (its branch history) when the selection
@@ -4172,6 +4205,7 @@ async fn event_loop(
         app.sync_viewport().await;
         let t_viewport = sync_t.elapsed();
         app.sync_pane_size().await;
+        app.sync_orchestrator_size().await;
         let t_panesize = sync_t.elapsed();
         app.sync_recent_commits().await;
         let t_commits = sync_t.elapsed();
@@ -4387,6 +4421,9 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
+    // The attach restored the orchestrator window's client-follow (full-terminal) size, so force a
+    // re-fit to the mediated pane on the next tick.
+    app.last_orch_resize = None;
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
     // Re-seed notification edge-detection — the daemon owned popups while we were parked.
