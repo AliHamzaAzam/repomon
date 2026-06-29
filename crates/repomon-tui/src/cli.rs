@@ -6,9 +6,12 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use clap::Subcommand;
-use repomon_core::model::{AgentChoice, Lane, LaneId, Repo};
+use repomon_core::model::{AgentChoice, Lane, LaneId, Repo, TranscriptItem};
 use repomon_core::{Config, config, service};
+use repomon_mcp::fleet::{self, Attention};
+use repomon_mcp::server::{approve_key, target_window};
 use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
@@ -139,6 +142,56 @@ pub enum LaneCmd {
         /// The task prompt. Use "-" or omit (when piped) to read the prompt from stdin.
         #[arg(long)]
         task: Option<String>,
+    },
+    /// Type an instruction into a lane's agent and submit it (mirrors MCP `send_to_agent`).
+    Send {
+        /// The lane (worktree) id to send to.
+        #[arg(long)]
+        lane: LaneId,
+        /// The text to send. Use "-" or omit (when piped) to read it from stdin.
+        #[arg(long)]
+        text: Option<String>,
+        /// Insert the text without pressing Enter (e.g. to paste a path).
+        #[arg(long)]
+        no_submit: bool,
+        /// Target a specific agent window in a multi-agent lane (default: the primary session).
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Answer a pending permission/decision dialog (mirrors MCP `approve_agent`).
+    Approve {
+        /// The lane (worktree) id to answer.
+        #[arg(long)]
+        lane: LaneId,
+        /// "yes" (default), "no", or an option number.
+        #[arg(long)]
+        choice: Option<String>,
+        /// Target a specific agent window in a multi-agent lane (default: the primary session).
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Interrupt a lane's agent: Escape (soft) by default, or Ctrl-C with --hard (mirrors
+    /// MCP `interrupt_agent`).
+    Interrupt {
+        /// The lane (worktree) id to interrupt.
+        #[arg(long)]
+        lane: LaneId,
+        /// Send Ctrl-C instead of Escape.
+        #[arg(long)]
+        hard: bool,
+        /// Target a specific agent window in a multi-agent lane (default: the lane's first slot).
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Read a lane's agent: status, attention, the open dialog, and a transcript tail
+    /// (mirrors MCP `read_agent`).
+    Read {
+        /// The lane (worktree) id to read.
+        #[arg(long)]
+        lane: LaneId,
+        /// How many transcript items to show (default 12).
+        #[arg(long, default_value_t = 12)]
+        transcript_limit: usize,
     },
 }
 
@@ -923,8 +976,148 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
                 None => println!("spawned {agent} in lane {lane}"),
             }
         }
+        LaneCmd::Send {
+            lane,
+            text,
+            no_submit,
+            window,
+        } => {
+            // Mirror MCP `send_to_agent`: resolve the primary window (reusing target_window's
+            // external-session refusal) and issue the same `agent.send_input` request.
+            let text = read_task(text)?.ok_or_else(|| {
+                anyhow!("no text to send — pass --text <s>, --text -, or pipe it on stdin")
+            })?;
+            let target: Lane = lane_get(&client, lane).await?;
+            let window =
+                target_window(fleet::primary_agent(&target), window).map_err(|e| anyhow!(e))?;
+            client
+                .call(
+                    "agent.send_input",
+                    Some(json!({
+                        "lane_id": lane,
+                        "text": text,
+                        "enter": !no_submit,
+                        "window": window,
+                    })),
+                )
+                .await?;
+            println!("sent to lane {lane} (window {window})");
+        }
+        LaneCmd::Approve {
+            lane,
+            choice,
+            window,
+        } => {
+            // Mirror MCP `approve_agent`, but: a human at the CLI legitimately answers decisions,
+            // so we only WARN (never refuse) when the lane isn't on a routine permission.
+            let target: Lane = lane_get(&client, lane).await?;
+            let primary = fleet::primary_agent(&target);
+            let attention = primary
+                .map(fleet::agent_attention)
+                .unwrap_or(Attention::None);
+            match attention {
+                Attention::Permission => {}
+                Attention::Decision => eprintln!(
+                    "warning: this lane is on a DECISION, not a routine permission — make sure \
+                     you mean to answer it for the human."
+                ),
+                Attention::EndOfTurn => eprintln!(
+                    "warning: the agent ended its turn (no open dialog) — your keypress will go \
+                     to the prompt. Consider `lane send` instead."
+                ),
+                Attention::None => {
+                    eprintln!("warning: no pending dialog detected on this lane right now.")
+                }
+            }
+            let window = target_window(primary, window).map_err(|e| anyhow!(e))?;
+            let choice = choice.map(Value::String);
+            let (key, answered) = approve_key(choice.as_ref()).map_err(|e| anyhow!(e))?;
+            client
+                .call(
+                    "agent.key",
+                    Some(json!({ "lane_id": lane, "key": key, "window": window })),
+                )
+                .await?;
+            println!("answered {answered} on lane {lane} (sent {key})");
+        }
+        LaneCmd::Interrupt { lane, hard, window } => {
+            // Mirror MCP `interrupt_agent`: soft = Escape via agent.key, --hard = C-c via
+            // agent.signal. `window` is optional (the daemon targets the lane's first slot).
+            if hard {
+                client
+                    .call(
+                        "agent.signal",
+                        Some(json!({ "lane_id": lane, "key": "C-c", "window": window })),
+                    )
+                    .await?;
+                println!("interrupted lane {lane} (hard, C-c)");
+            } else {
+                client
+                    .call(
+                        "agent.key",
+                        Some(json!({ "lane_id": lane, "key": "Escape", "window": window })),
+                    )
+                    .await?;
+                println!("interrupted lane {lane} (Escape)");
+            }
+        }
+        LaneCmd::Read {
+            lane,
+            transcript_limit,
+        } => {
+            // Mirror MCP `read_agent`: project the lane and print a compact transcript tail,
+            // reusing the same fleet helpers so the CLI and MCP report identical state.
+            let target: Lane = lane_get(&client, lane).await?;
+            let digest = fleet::project_lane(&target, Utc::now());
+            let primary = fleet::primary_agent(&target);
+            let session_id = primary.and_then(|s| s.session_id.clone());
+            let pending_prompt = primary.and_then(|s| s.pending_prompt.clone());
+            let transcript: Vec<TranscriptItem> = client
+                .call_typed(
+                    "agent.transcript",
+                    Some(json!({
+                        "lane_id": lane,
+                        "limit": transcript_limit,
+                        "session_id": session_id,
+                    })),
+                )
+                .await
+                .unwrap_or_default();
+
+            println!("lane {lane}  {}/{}", digest.repo, digest.branch);
+            println!("dirty:     {}", digest.dirty);
+            match &digest.agent {
+                Some(a) => {
+                    println!(
+                        "agent:     {} [{}]  attention={}",
+                        a.kind,
+                        a.status,
+                        a.attention.as_str()
+                    );
+                    if let Some(h) = &a.headline {
+                        println!("headline:  {h}");
+                    }
+                }
+                None => println!("agent:     (none)"),
+            }
+            if let Some(p) = &pending_prompt {
+                println!("pending:   {p}");
+            }
+            println!("--- transcript (last {}) ---", transcript.len());
+            for t in &transcript {
+                println!("[{}] {}", t.role, t.text);
+            }
+        }
     }
     Ok(())
+}
+
+/// Fetch a single lane's full state from the daemon (`lane.get`), shared by the read/send/approve
+/// verbs.
+async fn lane_get(client: &DaemonClient, lane: LaneId) -> Result<Lane> {
+    client
+        .call_typed("lane.get", Some(json!({ "lane_id": lane })))
+        .await
 }
 
 /// The configured default agent kind, mirroring the MCP server: ask the daemon to detect agents
@@ -1223,6 +1416,156 @@ mod tests {
             crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--task", "hi"]).is_err(),
             "`lane spawn` must require --lane"
         );
+    }
+
+    #[test]
+    fn lane_send_binds_args() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "lane",
+            "send",
+            "--lane",
+            "42",
+            "--text",
+            "continue",
+            "--no-submit",
+            "--window",
+            "lane-42-2",
+        ])
+        .expect("lane send should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Send {
+                        lane,
+                        text,
+                        no_submit,
+                        window,
+                    },
+            }) => {
+                assert_eq!(lane, 42);
+                assert_eq!(text.as_deref(), Some("continue"));
+                assert!(no_submit);
+                assert_eq!(window.as_deref(), Some("lane-42-2"));
+            }
+            _ => panic!("expected `lane send`"),
+        }
+    }
+
+    #[test]
+    fn lane_send_requires_lane() {
+        use clap::Parser;
+        assert!(
+            crate::Cli::try_parse_from(["repomon", "lane", "send", "--text", "hi"]).is_err(),
+            "`lane send` must require --lane"
+        );
+    }
+
+    #[test]
+    fn lane_approve_binds_args() {
+        use clap::Parser;
+        // Defaults: no choice, no window.
+        let cli = crate::Cli::try_parse_from(["repomon", "lane", "approve", "--lane", "7"])
+            .expect("lane approve should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Approve {
+                        lane,
+                        choice,
+                        window,
+                    },
+            }) => {
+                assert_eq!(lane, 7);
+                assert!(choice.is_none());
+                assert!(window.is_none());
+            }
+            _ => panic!("expected `lane approve`"),
+        }
+        // An explicit choice binds.
+        let cli = crate::Cli::try_parse_from([
+            "repomon", "lane", "approve", "--lane", "7", "--choice", "no",
+        ])
+        .expect("lane approve --choice should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Approve { choice, .. },
+            }) => assert_eq!(choice.as_deref(), Some("no")),
+            _ => panic!("expected `lane approve`"),
+        }
+    }
+
+    #[test]
+    fn lane_interrupt_binds_args() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["repomon", "lane", "interrupt", "--lane", "9", "--hard"])
+                .expect("lane interrupt should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Interrupt { lane, hard, window },
+            }) => {
+                assert_eq!(lane, 9);
+                assert!(hard);
+                assert!(window.is_none());
+            }
+            _ => panic!("expected `lane interrupt`"),
+        }
+    }
+
+    #[test]
+    fn lane_read_binds_args() {
+        use clap::Parser;
+        // Default transcript limit is 12.
+        let cli = crate::Cli::try_parse_from(["repomon", "lane", "read", "--lane", "3"])
+            .expect("lane read should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Read {
+                        lane,
+                        transcript_limit,
+                    },
+            }) => {
+                assert_eq!(lane, 3);
+                assert_eq!(transcript_limit, 12);
+            }
+            _ => panic!("expected `lane read`"),
+        }
+        // An explicit limit overrides.
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "lane",
+            "read",
+            "--lane",
+            "3",
+            "--transcript-limit",
+            "40",
+        ])
+        .expect("lane read --transcript-limit should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Read {
+                        transcript_limit, ..
+                    },
+            }) => assert_eq!(transcript_limit, 40),
+            _ => panic!("expected `lane read`"),
+        }
+    }
+
+    #[test]
+    fn approve_key_mapping_is_reused_from_mcp() {
+        // The CLI `lane approve` verb reuses the MCP server's approve_key mapping verbatim.
+        use repomon_mcp::server::approve_key;
+        assert_eq!(approve_key(None).unwrap().0, "Enter");
+        assert_eq!(
+            approve_key(Some(&serde_json::json!("no"))).unwrap().0,
+            "Escape"
+        );
+        assert_eq!(approve_key(Some(&serde_json::json!("2"))).unwrap().0, "2");
+        assert!(approve_key(Some(&serde_json::json!("maybe"))).is_err());
     }
 
     #[test]

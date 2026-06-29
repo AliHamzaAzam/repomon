@@ -1270,8 +1270,9 @@ fn tally(lanes: &[LaneDigest]) -> Value {
 
 /// Map an `approve_agent` choice to the tmux key to send and a human-readable summary.
 /// Default (absent / "yes") selects the highlighted option (Yes); "no" cancels with Escape; a
-/// number selects that menu option.
-fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
+/// number selects that menu option. Public so the `repomon lane approve` CLI verb reuses the exact
+/// same mapping instead of reimplementing it.
+pub fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
     match choice {
         None => Ok(("Enter".into(), "yes (default)".into())),
         Some(Value::String(s)) => {
@@ -1303,7 +1304,8 @@ fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
 /// otherwise the primary (most-attention-worthy) managed session's window. Errors when the resolved
 /// session is external or windowless, so we never blind-send to the daemon's default (first) window
 /// — which in a multi-agent lane may be a different session than the one the orchestrator inspected.
-fn target_window(
+/// Public so the `repomon lane send|approve` CLI verbs reuse it (and its external-session refusal).
+pub fn target_window(
     primary: Option<&AgentSession>,
     explicit: Option<String>,
 ) -> Result<String, String> {
