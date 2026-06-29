@@ -152,6 +152,10 @@ pub enum LaneCmd {
         /// codex: low|medium|high (higher levels clamp to high).
         #[arg(long)]
         effort: Option<String>,
+        /// Spawn even if the lane already has a live managed agent (otherwise refused, to avoid
+        /// putting two agents in one worktree).
+        #[arg(long)]
+        force: bool,
     },
     /// Type an instruction into a lane's agent and submit it (mirrors MCP `send_to_agent`).
     Send {
@@ -993,7 +997,22 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
             mode,
             model,
             effort,
+            force,
         } => {
+            // Verb-level duplicate-agent guard: refuse to spawn into a lane that already has a live
+            // managed agent (which would put two agents in one worktree), unless --force. This is
+            // intentionally NOT enforced daemon-side — the TUI multi-spawns a lane on purpose.
+            if !force {
+                let target: Lane = lane_get(&client, lane).await?;
+                if let Some(live) = fleet::live_managed_agent(&target) {
+                    let window = live.tmux_window.as_deref().unwrap_or("?");
+                    return Err(anyhow!(
+                        "lane {lane} already has a live agent (window {window}); spawning another \
+                         would put two agents in one worktree. Re-run with --force to spawn anyway, \
+                         or use `lane send`/`lane read` to drive the existing one."
+                    ));
+                }
+            }
             // Mirror the MCP `spawn_agent` tool: resolve the agent (configured default when
             // omitted) and issue the same `agent.spawn` daemon request. The daemon translates
             // mode/model/effort per agent kind (`default` mode emits nothing).
@@ -1455,16 +1474,32 @@ mod tests {
                         mode,
                         model,
                         effort,
+                        force,
                     },
             }) => {
                 assert_eq!(lane, 42);
                 assert!(agent.is_none());
                 assert!(task.is_none());
-                // Mode defaults to Default; the other launch options are unset.
+                // Mode defaults to Default; the other launch options are unset; force is off.
                 assert_eq!(mode, super::SpawnMode::Default);
                 assert!(model.is_none());
                 assert!(effort.is_none());
+                assert!(!force);
             }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_force_binds() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--lane", "42", "--force"])
+                .expect("lane spawn --force should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Spawn { force, .. },
+            }) => assert!(force),
             _ => panic!("expected `lane spawn`"),
         }
     }

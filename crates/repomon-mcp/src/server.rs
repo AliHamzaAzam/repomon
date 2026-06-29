@@ -265,6 +265,26 @@ impl Server {
             ));
         }
 
+        // Verb-level duplicate-agent guard: refuse to drop a second agent into a lane that already
+        // has a live managed one (a clobber hazard). `force` is honored here only — never forwarded
+        // to the daemon, whose agent.spawn intentionally allows the TUI's multi-spawn.
+        if !a.force {
+            let lane: Lane = self
+                .client
+                .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+                .await
+                .map_err(rpc_err)?;
+            if let Some(live) = fleet::live_managed_agent(&lane) {
+                let window = live.tmux_window.as_deref().unwrap_or("?");
+                return Err(format!(
+                    "lane {} already has a live agent (window {window}); spawning another would \
+                     put two agents in one worktree. Pass force:true to override, or use \
+                     send_to_agent / read_agent to drive the existing one.",
+                    a.lane_id
+                ));
+            }
+        }
+
         let agent = match a.agent {
             Some(name) => name,
             None => self.default_agent().await,
@@ -1055,6 +1075,10 @@ struct SpawnAgentArgs {
     /// Model override (e.g. "opus"). Optional.
     #[serde(default)]
     model: Option<String>,
+    /// Spawn even if the lane already has a live managed agent. Verb-level only (never forwarded
+    /// to the daemon). Optional.
+    #[serde(default)]
+    force: bool,
 }
 #[derive(Deserialize)]
 struct SendToAgentArgs {
@@ -1482,7 +1506,8 @@ fn tool_catalog() -> Vec<ToolDef> {
                     "task": { "type": "string", "description": "The task prompt to start the agent with." },
                     "mode": { "type": "string", "enum": ["default", "auto", "plan"], "description": "Launch mode: default (no flag), auto (accept edits / full-auto), or plan. Per-kind; ignored for unknown agents." },
                     "model": { "type": "string", "description": "Model override (e.g. opus). Optional." },
-                    "effort": { "type": "string", "description": "Reasoning effort, translated per agent kind. Claude: low|medium|high|xhigh|max|ultracode; codex: low|medium|high. Optional." }
+                    "effort": { "type": "string", "description": "Reasoning effort, translated per agent kind. Claude: low|medium|high|xhigh|max|ultracode; codex: low|medium|high. Optional." },
+                    "force": { "type": "boolean", "description": "Spawn even if the lane already has a live agent (otherwise refused, to avoid two agents in one worktree)." }
                 }),
                 &["lane_id"],
             ),
