@@ -273,7 +273,14 @@ impl Server {
             .client
             .call(
                 "agent.spawn",
-                Some(json!({ "lane_id": a.lane_id, "agent": agent, "task": a.task })),
+                Some(json!({
+                    "lane_id": a.lane_id,
+                    "agent": agent,
+                    "task": a.task,
+                    "effort": a.effort,
+                    "mode": a.mode,
+                    "model": a.model,
+                })),
             )
             .await
             .map_err(rpc_err)?;
@@ -1039,6 +1046,15 @@ struct SpawnAgentArgs {
     agent: Option<String>,
     #[serde(default)]
     task: Option<String>,
+    /// Reasoning-effort hint, translated daemon-side per agent kind. Optional.
+    #[serde(default)]
+    effort: Option<String>,
+    /// Launch mode: "default" (nothing), "auto", or "plan". Optional.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Model override (e.g. "opus"). Optional.
+    #[serde(default)]
+    model: Option<String>,
 }
 #[derive(Deserialize)]
 struct SendToAgentArgs {
@@ -1456,13 +1472,17 @@ fn tool_catalog() -> Vec<ToolDef> {
             description: "Start a coding agent working on a lane with a concrete task. Fold the \
                 repo's notes (from create_lane/repo_notes) into the task text. Counts against \
                 the concurrent-agent cap. Omit 'agent' to use the configured default (usually \
-                claude-code). The result embeds repo_notes (the repo's durable notes) when any \
-                exist — use them in follow-up instructions too.",
+                claude-code). Optional mode/model/effort tune the launch. The result embeds \
+                repo_notes (the repo's durable notes) when any exist; use them in follow-up \
+                instructions too.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane (worktree) to work in." },
                     "agent": { "type": "string", "description": "Agent kind/name, e.g. claude-code or codex. Optional." },
-                    "task": { "type": "string", "description": "The task prompt to start the agent with." }
+                    "task": { "type": "string", "description": "The task prompt to start the agent with." },
+                    "mode": { "type": "string", "enum": ["default", "auto", "plan"], "description": "Launch mode: default (no flag), auto (accept edits / full-auto), or plan. Per-kind; ignored for unknown agents." },
+                    "model": { "type": "string", "description": "Model override (e.g. opus). Optional." },
+                    "effort": { "type": "string", "description": "Reasoning effort, translated per agent kind. Claude: low|medium|high|xhigh|max|ultracode; codex: low|medium|high. Optional." }
                 }),
                 &["lane_id"],
             ),

@@ -266,6 +266,16 @@ struct AgentSpawn {
     agent: String,
     #[serde(default)]
     task: Option<String>,
+    /// Reasoning-effort hint, translated per agent kind (e.g. claude `MAX_THINKING_TOKENS`, codex
+    /// `model_reasoning_effort`). Additive; absent is the unchanged default.
+    #[serde(default)]
+    effort: Option<String>,
+    /// Permission/launch mode: `default` (emit nothing), `auto`, or `plan`. Additive.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Model override forwarded to the agent (e.g. `opus`). Additive.
+    #[serde(default)]
+    model: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentInput {
@@ -1920,31 +1930,70 @@ pub async fn dispatch(
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
-            // Resolve the chosen name to a command: a config custom wins, then an autodetected
-            // Claude variant (e.g. claude-work → `CLAUDE_CONFIG_DIR=… claude`), else the kind.
-            let command = {
+            // Resolve the chosen name to a command AND the kind whose flag dialect we translate
+            // launch options for: a config custom wins (kind inferred from the command it runs, so
+            // a claude wrapper still gets claude flags), then an autodetected Claude variant (e.g.
+            // claude-work → `CLAUDE_CONFIG_DIR=… claude`, still Claude under the hood), else the
+            // kind's default binary.
+            let (command, kind) = {
                 let cfg = ctx.config.read().await;
                 if let Some(c) = cfg.agents.get(&p.agent) {
-                    c.clone()
+                    let kind = kind_from_command(c);
+                    (c.clone(), kind)
                 } else if let Some((_, cmd)) = agent::claude::agent_variants()
                     .into_iter()
                     .find(|(n, _)| n == &p.agent)
                 {
-                    cmd
+                    (cmd, AgentKind::ClaudeCode)
                 } else {
-                    AgentKind::from_kind_str(&p.agent).command().to_string()
+                    let k = AgentKind::from_kind_str(&p.agent);
+                    (k.command().to_string(), k)
                 }
             };
-            let mut spec = SpawnSpec::new(command, path);
-            if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
-                spec = spec.arg(task);
+            // Translate --mode/--model/--effort into the kind's flags (and, for claude `ultracode`,
+            // a `/effort` input to inject). A no-op (byte-identical to the legacy command) when no
+            // options are requested.
+            let plan = apply_launch_options(
+                command,
+                &kind,
+                p.effort.as_deref(),
+                p.mode.as_deref(),
+                p.model.as_deref(),
+            );
+            // When we must inject `/effort` first, the task is sent as input AFTER the injection
+            // (so effort is set before the task), not appended as a launch argument.
+            let task = p
+                .task
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            let mut spec = SpawnSpec::new(plan.command, path);
+            let inject = plan.effort_inject;
+            let inject_task = if inject.is_some() { task.clone() } else { None };
+            if inject.is_none() {
+                if let Some(task) = task {
+                    spec = spec.arg(task);
+                }
             }
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
+            let window = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
+                let window = tmux.spawn(lane, &spec)?;
+                // Best-effort: set the effort level and type the task once the TUI is up. Operators
+                // do exactly this by hand; a short settle lets claude start reading input.
+                if let Some(eff) = inject {
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
+                    tmux.send_text_named(&window, &eff)?;
+                    if let Some(task) = inject_task {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                        tmux.send_text_named(&window, &task)?;
+                    }
+                }
+                Ok(window)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
@@ -4893,6 +4942,183 @@ pub(crate) fn orchestrator_base_command(
     }
 }
 
+/// The result of translating spawn launch options: the (possibly augmented) launch command, plus an
+/// optional `/effort` slash-command to inject as the session's FIRST input. Claude's native
+/// `--effort` flag covers low|medium|high|xhigh|max, but `ultracode` (the top level = xhigh +
+/// workflows) is only reachable via the `/effort` slash command, so that case is injected after the
+/// session opens — exactly how an operator sets it. When `effort_inject` is `Some`, the caller must
+/// send the task as input AFTER the injection (so effort is set before the task), not as a launch
+/// argument.
+#[derive(Debug, PartialEq, Eq)]
+struct LaunchPlan {
+    command: String,
+    effort_inject: Option<String>,
+}
+
+/// Translate the optional spawn launch options (`--mode` / `--model` / `--effort`) into the agent
+/// command's flags (and, for claude `ultracode`, a `/effort` input to inject), per [`AgentKind`].
+/// `command` is the already-resolved base launch command (e.g. `claude`, `CLAUDE_CONFIG_DIR=… claude`,
+/// or `codex`); it is run via `sh -c` by tmux, so every interpolated value is `shell_quote`d.
+///
+/// Invariants:
+/// - When nothing is requested (`mode` absent/`"default"`, no `effort`, no `model`) the command is
+///   returned **byte-identical** to the input (and `effort_inject` is `None`), so the default spawn
+///   path is unchanged.
+/// - Flags are only emitted for kinds whose dialect we know (Claude + variants, Codex). For any
+///   other kind (an unknown binary) requested options are ignored with a warning rather than
+///   injecting a flag the binary may not accept (which would make it exit on launch).
+fn apply_launch_options(
+    command: String,
+    kind: &AgentKind,
+    effort: Option<&str>,
+    mode: Option<&str>,
+    model: Option<&str>,
+) -> LaunchPlan {
+    // "default"/empty mean "no override" — treat them exactly like an absent option.
+    let mode = mode.filter(|m| !m.eq_ignore_ascii_case("default") && !m.is_empty());
+    let effort = effort.filter(|e| !e.is_empty());
+    let model = model.filter(|m| !m.is_empty());
+    if mode.is_none() && effort.is_none() && model.is_none() {
+        // Byte-identical default path.
+        return LaunchPlan {
+            command,
+            effort_inject: None,
+        };
+    }
+
+    let mut suffix = String::new(); // flags appended to the command
+    let mut effort_inject = None;
+
+    match kind {
+        AgentKind::ClaudeCode => {
+            if let Some(m) = model {
+                suffix.push_str(&format!(" --model {}", shell_quote(m)));
+            }
+            match mode {
+                Some("auto") => suffix.push_str(" --permission-mode acceptEdits"),
+                Some("plan") => suffix.push_str(" --permission-mode plan"),
+                Some(other) => {
+                    tracing::warn!("spawn: unknown --mode '{other}' for claude; ignoring")
+                }
+                None => {}
+            }
+            if let Some(e) = effort {
+                match claude_effort(e) {
+                    ClaudeEffort::Flag(level) => {
+                        suffix.push_str(&format!(" --effort {}", shell_quote(level)))
+                    }
+                    // `ultracode` isn't a valid --effort flag value (claude warns and ignores it),
+                    // so set it via the /effort slash command injected as the first input.
+                    ClaudeEffort::Inject(level) => effort_inject = Some(format!("/effort {level}")),
+                    ClaudeEffort::Unknown => tracing::warn!(
+                        "spawn: unrecognized --effort '{e}' for claude \
+                         (use low|medium|high|xhigh|max|ultracode); ignoring"
+                    ),
+                }
+            }
+        }
+        AgentKind::Codex => {
+            if let Some(m) = model {
+                suffix.push_str(&format!(" --model {}", shell_quote(m)));
+            }
+            match mode {
+                Some("auto") => suffix.push_str(" --full-auto"),
+                Some("plan") => {
+                    tracing::warn!("spawn: codex has no plan mode; ignoring --mode plan")
+                }
+                Some(other) => {
+                    tracing::warn!("spawn: unknown --mode '{other}' for codex; ignoring")
+                }
+                None => {}
+            }
+            if let Some(e) = effort {
+                match codex_reasoning_effort(e) {
+                    Some(level) => suffix.push_str(&format!(
+                        " -c model_reasoning_effort={}",
+                        shell_quote(level)
+                    )),
+                    None => tracing::warn!(
+                        "spawn: unrecognized --effort '{e}' for codex (use low|medium|high); ignoring"
+                    ),
+                }
+            }
+        }
+        other => tracing::warn!(
+            "spawn: launch options (--mode/--model/--effort) aren't supported for agent kind \
+             '{}'; ignoring",
+            other.as_str()
+        ),
+    }
+
+    LaunchPlan {
+        command: format!("{command}{suffix}"),
+        effort_inject,
+    }
+}
+
+/// How a claude `--effort` level is realized: a native `--effort` flag value (low|medium|high|
+/// xhigh|max), or `ultracode` which must be injected as a `/effort` slash command after launch.
+enum ClaudeEffort {
+    Flag(&'static str),
+    Inject(&'static str),
+    Unknown,
+}
+
+/// Classify an `--effort` level for a claude-kind agent. The native `--effort` launch flag accepts
+/// low|medium|high|xhigh|max; `ultracode` (= xhigh + workflows) is only settable via the `/effort`
+/// slash command, so it is injected instead.
+fn claude_effort(effort: &str) -> ClaudeEffort {
+    match effort.trim().to_lowercase().as_str() {
+        "low" => ClaudeEffort::Flag("low"),
+        "medium" => ClaudeEffort::Flag("medium"),
+        "high" => ClaudeEffort::Flag("high"),
+        "xhigh" => ClaudeEffort::Flag("xhigh"),
+        "max" => ClaudeEffort::Flag("max"),
+        "ultracode" => ClaudeEffort::Inject("ultracode"),
+        _ => ClaudeEffort::Unknown,
+    }
+}
+
+/// Normalize an `--effort` level to a codex `model_reasoning_effort` value. Codex tops out at
+/// `high`, so the claude-only levels (xhigh/max/ultracode) clamp to `high` with a warning.
+fn codex_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort.trim().to_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "max" | "ultracode" => {
+            tracing::warn!(
+                "spawn: codex has no '{}' effort; clamping to high",
+                effort.trim().to_lowercase()
+            );
+            Some("high")
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort agent kind for a resolved (custom) launch command, so a custom configured agent that
+/// wraps `claude`/`codex` still gets the right flag dialect. Reuses [`program_of`] (which skips
+/// leading `VAR=value` env assignments) and matches the program's basename. An unrecognized program
+/// yields `Other` (launch options are then ignored rather than guessed). A custom command with a
+/// space inside a quoted env value can't be parsed by whitespace and falls back to `Other` — a safe
+/// no-op, not a wrong flag.
+fn kind_from_command(command: &str) -> AgentKind {
+    match program_of(command).map(program_basename) {
+        Some("claude") => AgentKind::ClaudeCode,
+        Some("codex") => AgentKind::Codex,
+        Some("aider") => AgentKind::Aider,
+        Some("cursor") | Some("cursor-agent") => AgentKind::Cursor,
+        Some(other) => AgentKind::Other(other.to_string()),
+        None => AgentKind::Other(String::new()),
+    }
+}
+
+/// The basename of a program path (`/usr/bin/claude` → `claude`).
+fn program_basename(prog: &str) -> &str {
+    prog.rsplit('/').next().unwrap_or(prog)
+}
+
 /// Build the full `claude` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
 /// the window command through a shell). `--mcp-config` *adds* the repomon fleet server; the user's
 /// own basic-memory (mnemind) server still loads from their Claude config, so we don't redeclare
@@ -5975,6 +6201,200 @@ mod tests {
         let cmd =
             build_codex_orchestrator_command("codex", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" -s read-only"), "{cmd}");
+    }
+
+    #[test]
+    fn launch_options_default_path_is_byte_identical() {
+        // The whole point: with no options requested, the command is returned VERBATIM (and no
+        // injection) so the default spawn path is unchanged from before this feature landed.
+        let base = "CLAUDE_CONFIG_DIR='/h/.claude' claude".to_string();
+        let identical = |plan: LaunchPlan, expect: &str| {
+            assert_eq!(plan.command, expect);
+            assert_eq!(plan.effort_inject, None);
+        };
+        identical(
+            apply_launch_options(base.clone(), &AgentKind::ClaudeCode, None, None, None),
+            &base,
+        );
+        // mode "default" (and an empty string) are treated as "no override".
+        identical(
+            apply_launch_options(
+                base.clone(),
+                &AgentKind::ClaudeCode,
+                None,
+                Some("default"),
+                None,
+            ),
+            &base,
+        );
+        identical(
+            apply_launch_options(
+                base.clone(),
+                &AgentKind::ClaudeCode,
+                Some(""),
+                Some(""),
+                Some(""),
+            ),
+            &base,
+        );
+        // Codex and unknown kinds with no options are also identical.
+        identical(
+            apply_launch_options("codex".into(), &AgentKind::Codex, None, None, None),
+            "codex",
+        );
+        identical(
+            apply_launch_options(
+                "ultracode --x".into(),
+                &AgentKind::Other("ultracode".into()),
+                None,
+                None,
+                None,
+            ),
+            "ultracode --x",
+        );
+    }
+
+    #[test]
+    fn launch_options_claude_mode_and_model() {
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            None,
+            Some("plan"),
+            Some("opus"),
+        );
+        assert_eq!(plan.command, "claude --model 'opus' --permission-mode plan");
+        assert_eq!(plan.effort_inject, None);
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            None,
+            Some("auto"),
+            None,
+        );
+        assert_eq!(plan.command, "claude --permission-mode acceptEdits");
+    }
+
+    #[test]
+    fn launch_options_claude_effort_uses_native_flag() {
+        // claude's native --effort flag covers low|medium|high|xhigh|max.
+        for level in ["low", "medium", "high", "xhigh", "max"] {
+            let plan = apply_launch_options(
+                "claude".into(),
+                &AgentKind::ClaudeCode,
+                Some(level),
+                None,
+                None,
+            );
+            assert_eq!(plan.command, format!("claude --effort '{level}'"));
+            assert_eq!(plan.effort_inject, None);
+        }
+        // An unrecognized effort is ignored (no stray flag that would confuse the binary).
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            Some("turbo"),
+            None,
+            None,
+        );
+        assert_eq!(plan.command, "claude");
+        assert_eq!(plan.effort_inject, None);
+    }
+
+    #[test]
+    fn launch_options_claude_ultracode_injects_slash_effort() {
+        // `ultracode` isn't a valid --effort flag value (claude warns + ignores it), so it is set
+        // via the /effort slash command injected as the session's first input — NOT a launch flag.
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            Some("ultracode"),
+            None,
+            Some("opus"),
+        );
+        assert_eq!(plan.command, "claude --model 'opus'"); // no --effort flag
+        assert_eq!(plan.effort_inject.as_deref(), Some("/effort ultracode"));
+    }
+
+    #[test]
+    fn launch_options_codex_mapping() {
+        let plan = apply_launch_options(
+            "codex".into(),
+            &AgentKind::Codex,
+            Some("high"),
+            Some("auto"),
+            Some("gpt-5"),
+        );
+        assert_eq!(
+            plan.command,
+            "codex --model 'gpt-5' --full-auto -c model_reasoning_effort='high'"
+        );
+        assert_eq!(plan.effort_inject, None);
+        // codex has no plan mode -> ignored, no stray flag.
+        let plan =
+            apply_launch_options("codex".into(), &AgentKind::Codex, None, Some("plan"), None);
+        assert_eq!(plan.command, "codex");
+        // claude-only levels clamp to high (codex tops out there); ultracode is NOT injected here.
+        let plan = apply_launch_options(
+            "codex".into(),
+            &AgentKind::Codex,
+            Some("ultracode"),
+            None,
+            None,
+        );
+        assert_eq!(plan.command, "codex -c model_reasoning_effort='high'");
+        assert_eq!(plan.effort_inject, None);
+    }
+
+    #[test]
+    fn launch_options_unknown_kind_never_injects_flags() {
+        // A truly unknown agent gets every option ignored (a stray flag could make it exit on
+        // launch); the command is left untouched.
+        let plan = apply_launch_options(
+            "weirdbin".into(),
+            &AgentKind::Other("weirdbin".into()),
+            Some("high"),
+            Some("plan"),
+            Some("opus"),
+        );
+        assert_eq!(plan.command, "weirdbin");
+        assert_eq!(plan.effort_inject, None);
+    }
+
+    #[test]
+    fn launch_options_shell_quotes_values() {
+        // Every value reaches `sh -c`, so a model with metacharacters must be quoted, not injected.
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            None,
+            None,
+            Some("a'b; rm -rf /"),
+        );
+        assert_eq!(plan.command, "claude --model 'a'\\''b; rm -rf /'");
+    }
+
+    #[test]
+    fn kind_from_command_infers_dialect_for_custom_agents() {
+        // A custom configured agent that wraps claude (incl. a work-account env prefix) is Claude.
+        assert_eq!(
+            kind_from_command("claude --dangerously-skip-permissions"),
+            AgentKind::ClaudeCode
+        );
+        assert_eq!(
+            kind_from_command("CLAUDE_CONFIG_DIR=/h/.claude-work claude"),
+            AgentKind::ClaudeCode
+        );
+        // A full path resolves by basename.
+        assert_eq!(
+            kind_from_command("/opt/homebrew/bin/codex --full-auto"),
+            AgentKind::Codex
+        );
+        // An unrecognized wrapper stays Other (launch options are then ignored, never guessed).
+        assert_eq!(
+            kind_from_command("my-wrapper.sh"),
+            AgentKind::Other("my-wrapper.sh".into())
+        );
     }
 
     #[test]

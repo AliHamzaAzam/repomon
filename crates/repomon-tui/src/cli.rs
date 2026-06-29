@@ -142,6 +142,16 @@ pub enum LaneCmd {
         /// The task prompt. Use "-" or omit (when piped) to read the prompt from stdin.
         #[arg(long)]
         task: Option<String>,
+        /// Launch/permission mode (translated per agent kind; `default` emits nothing).
+        #[arg(long, value_enum, default_value_t = SpawnMode::Default)]
+        mode: SpawnMode,
+        /// Model override forwarded to the agent (e.g. opus).
+        #[arg(long)]
+        model: Option<String>,
+        /// Reasoning effort, translated per agent kind. Claude: low|medium|high|xhigh|max|ultracode;
+        /// codex: low|medium|high (higher levels clamp to high).
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// Type an instruction into a lane's agent and submit it (mirrors MCP `send_to_agent`).
     Send {
@@ -193,6 +203,26 @@ pub enum LaneCmd {
         #[arg(long, default_value_t = 12)]
         transcript_limit: usize,
     },
+}
+
+/// `lane spawn --mode`: a constrained launch mode so clap rejects bad values at parse time. The
+/// daemon translates it per agent kind; `Default` is sent as `"default"` and emits no flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum SpawnMode {
+    Default,
+    Auto,
+    Plan,
+}
+
+impl SpawnMode {
+    /// The lowercase wire value forwarded to the daemon's `agent.spawn`.
+    fn as_wire(self) -> &'static str {
+        match self {
+            SpawnMode::Default => "default",
+            SpawnMode::Auto => "auto",
+            SpawnMode::Plan => "plan",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -956,9 +986,17 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
                 .await?;
             println!("deleted lane {} (id={})", lane, target.id);
         }
-        LaneCmd::Spawn { lane, agent, task } => {
+        LaneCmd::Spawn {
+            lane,
+            agent,
+            task,
+            mode,
+            model,
+            effort,
+        } => {
             // Mirror the MCP `spawn_agent` tool: resolve the agent (configured default when
-            // omitted) and issue the same `agent.spawn` daemon request.
+            // omitted) and issue the same `agent.spawn` daemon request. The daemon translates
+            // mode/model/effort per agent kind (`default` mode emits nothing).
             let task = read_task(task)?;
             let agent = match agent {
                 Some(name) => name,
@@ -967,7 +1005,14 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
             let resp = client
                 .call(
                     "agent.spawn",
-                    Some(json!({ "lane_id": lane, "agent": agent, "task": task })),
+                    Some(json!({
+                        "lane_id": lane,
+                        "agent": agent,
+                        "task": task,
+                        "mode": mode.as_wire(),
+                        "model": model,
+                        "effort": effort,
+                    })),
                 )
                 .await?;
             // The daemon echoes back the tmux window it launched the agent into.
@@ -1021,7 +1066,7 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
                     "warning: this lane is on a DECISION, not a routine permission — make sure \
                      you mean to answer it for the human."
                 ),
-                Attention::EndOfTurn => eprintln!(
+                Attention::EndOfTurn | Attention::DoneCandidate => eprintln!(
                     "warning: the agent ended its turn (no open dialog) — your keypress will go \
                      to the prompt. Consider `lane send` instead."
                 ),
@@ -1382,7 +1427,10 @@ mod tests {
         .expect("lane spawn should parse");
         match cli.command {
             Some(super::Command::Lane {
-                cmd: super::LaneCmd::Spawn { lane, agent, task },
+                cmd:
+                    super::LaneCmd::Spawn {
+                        lane, agent, task, ..
+                    },
             }) => {
                 assert_eq!(lane, 6465124);
                 assert_eq!(agent.as_deref(), Some("codex"));
@@ -1399,14 +1447,65 @@ mod tests {
             .expect("lane spawn without --agent/--task should parse");
         match cli.command {
             Some(super::Command::Lane {
-                cmd: super::LaneCmd::Spawn { lane, agent, task },
+                cmd:
+                    super::LaneCmd::Spawn {
+                        lane,
+                        agent,
+                        task,
+                        mode,
+                        model,
+                        effort,
+                    },
             }) => {
                 assert_eq!(lane, 42);
                 assert!(agent.is_none());
                 assert!(task.is_none());
+                // Mode defaults to Default; the other launch options are unset.
+                assert_eq!(mode, super::SpawnMode::Default);
+                assert!(model.is_none());
+                assert!(effort.is_none());
             }
             _ => panic!("expected `lane spawn`"),
         }
+    }
+
+    #[test]
+    fn lane_spawn_launch_options_bind() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon", "lane", "spawn", "--lane", "42", "--mode", "plan", "--model", "opus",
+            "--effort", "high",
+        ])
+        .expect("lane spawn with launch options should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Spawn {
+                        mode,
+                        model,
+                        effort,
+                        ..
+                    },
+            }) => {
+                assert_eq!(mode, super::SpawnMode::Plan);
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_rejects_bogus_mode() {
+        use clap::Parser;
+        // The ValueEnum constrains --mode to default|auto|plan, rejected at parse time.
+        assert!(
+            crate::Cli::try_parse_from([
+                "repomon", "lane", "spawn", "--lane", "1", "--mode", "bogus"
+            ])
+            .is_err(),
+            "`--mode bogus` must be rejected by the ValueEnum"
+        );
     }
 
     #[test]
