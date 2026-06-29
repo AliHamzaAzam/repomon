@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
-use repomon_core::model::{Lane, Repo};
+use repomon_core::model::{AgentChoice, Lane, LaneId, Repo};
 use repomon_core::{Config, config, service};
 use serde_json::{Value, json};
 
@@ -127,6 +127,18 @@ pub enum LaneCmd {
         lane: String,
         #[arg(long)]
         delete_branch: bool,
+    },
+    /// Spawn an agent into a lane with a task (mirrors the MCP `spawn_agent` tool).
+    Spawn {
+        /// The lane (worktree) id to work in.
+        #[arg(long)]
+        lane: LaneId,
+        /// Agent kind/name (e.g. claude-code, codex). Defaults to the configured default agent.
+        #[arg(long)]
+        agent: Option<String>,
+        /// The task prompt. Use "-" or omit (when piped) to read the prompt from stdin.
+        #[arg(long)]
+        task: Option<String>,
     },
 }
 
@@ -891,8 +903,65 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
                 .await?;
             println!("deleted lane {} (id={})", lane, target.id);
         }
+        LaneCmd::Spawn { lane, agent, task } => {
+            // Mirror the MCP `spawn_agent` tool: resolve the agent (configured default when
+            // omitted) and issue the same `agent.spawn` daemon request.
+            let task = read_task(task)?;
+            let agent = match agent {
+                Some(name) => name,
+                None => default_agent(&client).await,
+            };
+            let resp = client
+                .call(
+                    "agent.spawn",
+                    Some(json!({ "lane_id": lane, "agent": agent, "task": task })),
+                )
+                .await?;
+            // The daemon echoes back the tmux window it launched the agent into.
+            match resp.get("window").and_then(Value::as_str) {
+                Some(window) => println!("spawned {agent} in lane {lane} (window {window})"),
+                None => println!("spawned {agent} in lane {lane}"),
+            }
+        }
     }
     Ok(())
+}
+
+/// The configured default agent kind, mirroring the MCP server: ask the daemon to detect agents
+/// and pick the one flagged default, falling back to `claude-code` if detection fails.
+async fn default_agent(client: &DaemonClient) -> String {
+    match client
+        .call_typed::<Vec<AgentChoice>>("agent.detect", None)
+        .await
+    {
+        Ok(choices) => choices
+            .into_iter()
+            .find(|c| c.default)
+            .map(|c| c.name)
+            .unwrap_or_else(|| "claude-code".into()),
+        Err(_) => "claude-code".into(),
+    }
+}
+
+/// Resolve the spawn task prompt. `--task <text>` is used verbatim; `--task -` always reads the
+/// prompt from stdin; omitting `--task` reads stdin when it is piped, or leaves the task unset on
+/// an interactive terminal.
+fn read_task(task: Option<String>) -> Result<Option<String>> {
+    use std::io::{IsTerminal, Read};
+    let from_stdin = match task.as_deref() {
+        Some("-") => true,
+        None => !std::io::stdin().is_terminal(),
+        Some(_) => false,
+    };
+    if !from_stdin {
+        return Ok(task);
+    }
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| anyhow!("failed to read task from stdin: {e}"))?;
+    let trimmed = buf.trim().to_string();
+    Ok((!trimmed.is_empty()).then_some(trimmed))
 }
 
 /// The socket a `daemon` subcommand should target: the CLI `--socket` flag when given, else
@@ -1101,6 +1170,59 @@ mod tests {
                 "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
             );
         }
+    }
+
+    #[test]
+    fn lane_spawn_binds_args() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "lane",
+            "spawn",
+            "--lane",
+            "6465124",
+            "--agent",
+            "codex",
+            "--task",
+            "do the thing",
+        ])
+        .expect("lane spawn should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Spawn { lane, agent, task },
+            }) => {
+                assert_eq!(lane, 6465124);
+                assert_eq!(agent.as_deref(), Some("codex"));
+                assert_eq!(task.as_deref(), Some("do the thing"));
+            }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_agent_optional() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--lane", "42"])
+            .expect("lane spawn without --agent/--task should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Spawn { lane, agent, task },
+            }) => {
+                assert_eq!(lane, 42);
+                assert!(agent.is_none());
+                assert!(task.is_none());
+            }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_requires_lane() {
+        use clap::Parser;
+        assert!(
+            crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--task", "hi"]).is_err(),
+            "`lane spawn` must require --lane"
+        );
     }
 
     #[test]
