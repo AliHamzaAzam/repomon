@@ -265,8 +265,14 @@ impl TmuxRuntime {
             .expect("unbounded slot range");
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
+            // `-d`: create the window WITHOUT making it the session's active window. tmux's default
+            // `new-window` selects the new window, which yanks any attached `tmux attach` client
+            // (a human "all the way in" on another agent) over to it, then yanks back when it's
+            // killed. Spawning detached keeps the human's focused window put. See the usage-probe
+            // flap (`spawn_named`) for the worst case.
             self.run(&[
                 "new-window",
+                "-d",
                 "-t",
                 &self.session,
                 "-n",
@@ -485,7 +491,18 @@ impl TmuxRuntime {
     pub fn open_named(&self, name: &str, cwd: &Path) -> Result<String> {
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
-            self.run(&["new-window", "-t", &self.session, "-n", name, "-c", &cwd])?;
+            // `-d`: spawn out of the way so opening a terminal never steals an attached client's
+            // active window (see `spawn`).
+            self.run(&[
+                "new-window",
+                "-d",
+                "-t",
+                &self.session,
+                "-n",
+                name,
+                "-c",
+                &cwd,
+            ])?;
         } else {
             self.run(&[
                 "new-session",
@@ -513,8 +530,13 @@ impl TmuxRuntime {
     pub fn spawn_named(&self, name: &str, cwd: &Path, command: &str) -> Result<String> {
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
+            // `-d`: spawn detached. This is the usage probe's path; it spawns then kills a
+            // throwaway `usage-probe-…` window every few minutes. Without `-d`, each spawn yanks an
+            // attached client to the probe and each kill yanks it back, replaying every window's
+            // pane as a flip-book in macOS fullscreen focus (the flap this fixes). See `spawn`.
             self.run(&[
                 "new-window",
+                "-d",
                 "-t",
                 &self.session,
                 "-n",
@@ -708,6 +730,75 @@ mod tests {
         assert!(
             rt.claim_or_verify_owner("daemon-A"),
             "owner still owns after B's attempt"
+        );
+
+        let _ = Command::new("tmux")
+            .args(["-L", rt.session(), "kill-server"])
+            .output();
+    }
+
+    /// The session's currently-active window name (the one an attached `tmux attach` client
+    /// displays). `None` if the server is gone.
+    fn active_window(rt: &TmuxRuntime) -> Option<String> {
+        // Use the runtime's own helper (same dedicated `-L` socket + benign-absence handling as
+        // production) rather than shelling out to tmux directly.
+        rt.run_allow_absent(&[
+            "list-windows",
+            "-t",
+            rt.session(),
+            "-F",
+            "#{window_active} #{window_name}",
+        ])
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("1 ").map(str::to_string))
+    }
+
+    #[test]
+    fn spawning_a_window_does_not_steal_the_active_window() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-activetest-{}", std::process::id()));
+        let cwd = std::env::temp_dir();
+
+        // The window a human is "attached" to (their focused agent).
+        rt.spawn(1, &cwd, "sh -c 'sleep 30'").unwrap();
+        assert_eq!(active_window(&rt).as_deref(), Some("lane-1"));
+
+        // Spawning a side-by-side lane agent must leave lane-1 active, so an attached client is
+        // not yanked to the new window.
+        rt.spawn(2, &cwd, "sh -c 'sleep 30'").unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "a freshly spawned lane window stole the session's active window"
+        );
+
+        // The usage-probe path (`spawn_named`) is the real flap trigger: it spawns then kills a
+        // throwaway window every few minutes. Neither the spawn nor the kill may move the active
+        // window, or the attached client replays the probe's pane (the fullscreen flip-book).
+        rt.spawn_named("usage-probe-work", &cwd, "sh -c 'sleep 30'")
+            .unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "a usage-probe window stole the session's active window"
+        );
+        rt.kill_named("usage-probe-work").unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "killing the usage-probe window moved the active window"
+        );
+
+        // A plain terminal window (`open_named`) must also spawn out of the way.
+        rt.open_named("term-1", &cwd).unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "a terminal window stole the session's active window"
         );
 
         let _ = Command::new("tmux")
