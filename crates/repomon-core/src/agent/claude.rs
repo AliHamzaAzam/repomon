@@ -146,32 +146,50 @@ fn config_bases_uncached() -> Vec<PathBuf> {
     bases
 }
 
+/// The launch command for the Claude account rooted at `base`, immune to a leaked
+/// `CLAUDE_CONFIG_DIR` in the daemon's own environment (the daemon is commonly started from a
+/// `claude-work` shell, so it may carry `CLAUDE_CONFIG_DIR=~/.claude-work`; a bare `claude` would
+/// silently inherit that, making "claude-code" and "claude-work" launch the *same* account).
+///
+/// - **Default account (`~/.claude`):** `env -u CLAUDE_CONFIG_DIR claude` — *unset* the variable.
+///   Claude Code reads the default profile from `~/.claude.json` (HOME) **only when the variable
+///   is unset**; `CLAUDE_CONFIG_DIR=~/.claude` instead points at the vestigial
+///   `~/.claude/.claude.json` stub (no account → onboarding), so we must strip the var, not pin it.
+/// - **Variant account:** `CLAUDE_CONFIG_DIR=<dir> claude` — pin it explicitly (shell-quoted, since
+///   this runs via `sh -c` from tmux `new-window`).
+///
+/// Account identity is unchanged: `account_key`/`account_label` stay keyed on the `config_dir`
+/// option, `command_account` reads the default (no `CLAUDE_CONFIG_DIR=`) back as `None`, and
+/// `program_of` sees through the `env -u …` prefix to the `claude` program.
+pub fn launch_command(base: &Path) -> String {
+    if canonical(base) == canonical(&default_config_base()) {
+        "env -u CLAUDE_CONFIG_DIR claude".to_string()
+    } else {
+        format!(
+            "CLAUDE_CONFIG_DIR={} claude",
+            super::shell_quote(&base.display().to_string())
+        )
+    }
+}
+
 /// Spawnable Claude agents, one per detected config dir: `(name, launch command)`. The default
-/// account is `("claude-code", "claude")`; a `~/.claude-work` dir becomes
-/// `("claude-work", "CLAUDE_CONFIG_DIR=/…/.claude-work claude")`.
+/// account is `("claude-code", "env -u CLAUDE_CONFIG_DIR claude")`; a `~/.claude-work` dir becomes
+/// `("claude-work", "CLAUDE_CONFIG_DIR=/…/.claude-work claude")`. Each command is immune to a
+/// daemon's own leaked `CLAUDE_CONFIG_DIR` (see [`launch_command`]).
 pub fn agent_variants() -> Vec<(String, String)> {
     let default = default_config_base();
     config_bases()
         .into_iter()
         .map(|base| {
-            if base == default {
-                ("claude-code".to_string(), "claude".to_string())
+            let name = if base == default {
+                "claude-code".to_string()
             } else {
-                let label = base
-                    .file_name()
+                base.file_name()
                     .and_then(|s| s.to_str())
                     .map(|n| n.trim_start_matches('.').to_string())
-                    .unwrap_or_else(|| "claude".to_string());
-                (
-                    label,
-                    // Runs via `sh -c` (tmux new-window), so quote the path — a config dir with a
-                    // space or shell metacharacter must not break the `VAR=val cmd` parse or inject.
-                    format!(
-                        "CLAUDE_CONFIG_DIR={} claude",
-                        super::shell_quote(&base.display().to_string())
-                    ),
-                )
-            }
+                    .unwrap_or_else(|| "claude".to_string())
+            };
+            (name, launch_command(&base))
         })
         .collect()
 }
@@ -779,6 +797,34 @@ pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::Trans
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_variant_unsets_config_dir_against_env_leak() {
+        // The daemon is commonly launched from a `claude-work` shell, so its own environment may
+        // carry `CLAUDE_CONFIG_DIR=~/.claude-work`. A bare `claude` for the default account would
+        // inherit that and resolve to the wrong account (making "claude-code" and "claude-work"
+        // spawn the *same* account). The default account must UNSET the variable — not pin it to
+        // `~/.claude`, which reads the vestigial `~/.claude/.claude.json` stub (no account →
+        // onboarding) instead of the real default profile at `~/.claude.json`.
+        let variants = agent_variants();
+        let (_, cmd) = variants
+            .iter()
+            .find(|(n, _)| n == "claude-code")
+            .expect("default claude-code variant is always present");
+        assert_ne!(
+            cmd, "claude",
+            "bare `claude` would inherit a leaked CLAUDE_CONFIG_DIR"
+        );
+        assert!(
+            !cmd.contains("CLAUDE_CONFIG_DIR="),
+            "default must not PIN a config dir (that reads the ~/.claude stub), got: {cmd}"
+        );
+        assert!(
+            cmd.contains("env -u CLAUDE_CONFIG_DIR"),
+            "default must UNSET CLAUDE_CONFIG_DIR so it reads ~/.claude.json, got: {cmd}"
+        );
+        assert!(cmd.ends_with("claude"), "still launches claude, got: {cmd}");
+    }
 
     #[test]
     fn encodes_cwd_like_claude_code() {
