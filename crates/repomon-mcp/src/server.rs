@@ -373,6 +373,16 @@ impl Server {
     /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
     async fn delete_lane(&self, args: Value) -> Result<Value, String> {
         let a: DeleteLaneArgs = parse(args)?;
+        // Defense-in-depth on top of the two-phase confirm below: gate on the same
+        // structural-autonomy check create_lane/merge_lane use, checked before either phase so
+        // supervised/read-only mode refuses early — before a token is ever minted.
+        if !self.policy.autonomy.allows_structural() {
+            return Err(
+                "deleting a lane needs the human's go-ahead at this autonomy level. Ask them \
+                 to confirm the delete, then proceed (or relaunch with --autonomy autonomous)."
+                    .into(),
+            );
+        }
         let delete_branch = a.delete_branch.unwrap_or(false);
         // The discriminator a token is bound to: a token minted for delete_branch=false must not
         // confirm a delete_branch=true call on the same lane, or vice versa.

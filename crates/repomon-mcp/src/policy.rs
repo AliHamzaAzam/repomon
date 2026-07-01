@@ -141,6 +141,10 @@ impl Policy {
             .pending_confirms
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Opportunistic cleanup: sweep any expired tokens while we hold the lock, same as
+        // take_confirm does — otherwise a caller that only ever runs phase 1 (mints an impact
+        // summary but never confirms) can grow pending_confirms unbounded over a long session.
+        m.retain(|_, p| p.minted.elapsed() < self.confirm_ttl);
         m.insert(
             token.clone(),
             PendingConfirm {
@@ -249,6 +253,18 @@ mod tests {
         assert!(policy(Autonomy::ReadOnly, 100).record_mutation().is_err());
     }
 
+    /// create_lane, merge_lane, and delete_lane all gate on `allows_structural()` — the single
+    /// source of truth their handlers share in server.rs. Handler-level tests for that gate
+    /// aren't feasible without a running daemon, so this exercises the shared predicate directly
+    /// for every autonomy level, standing in for all three call sites (including delete_lane's,
+    /// which was added as defense-in-depth on top of its two-phase confirm).
+    #[test]
+    fn structural_gate_covers_create_merge_and_delete_lane() {
+        assert!(!Autonomy::ReadOnly.allows_structural());
+        assert!(!Autonomy::Supervised.allows_structural());
+        assert!(Autonomy::Autonomous.allows_structural());
+    }
+
     #[test]
     fn action_cap_is_a_backstop() {
         let p = policy(Autonomy::Autonomous, 2);
@@ -340,5 +356,22 @@ mod tests {
         let p = policy_with_ttl(Duration::from_secs(600));
         let token = p.mint_confirm(1, "x");
         assert!(p.take_confirm(&token, 1, "x").is_ok());
+    }
+
+    #[test]
+    fn mint_confirm_sweeps_expired_entries() {
+        // A caller that only ever runs delete_lane's phase 1 (mints an impact summary, never
+        // confirms — e.g. a confused orchestrator looping) must not grow pending_confirms
+        // unbounded. mint_confirm sweeps expired entries opportunistically, same as take_confirm.
+        let p = policy_with_ttl(Duration::from_millis(20));
+        let _stale = p.mint_confirm(1, "delete_branch=false");
+        std::thread::sleep(Duration::from_millis(60));
+        // This mint should sweep the now-expired entry above rather than let it linger forever.
+        let _fresh = p.mint_confirm(2, "delete_branch=false");
+        let m = p
+            .pending_confirms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(m.len(), 1, "expired entry should have been swept on mint");
     }
 }
