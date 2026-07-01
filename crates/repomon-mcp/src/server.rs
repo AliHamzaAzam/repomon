@@ -2,11 +2,12 @@
 //!
 //! These tools are a *translation layer*, not new business logic — each maps to one or two
 //! existing daemon RPCs. They are deliberately token-economical (compact digests, capped
-//! transcripts, never the raw pane) so the orchestrator can stay oriented without drowning its
-//! context in worker output. Guardrails (autonomy, caps, dedupe) are enforced here in
-//! [`crate::policy`], not merely asked for in the persona.
+//! transcripts, the raw pane only on request and even then capped) so the orchestrator can stay
+//! oriented without drowning its context in worker output. Guardrails (autonomy, caps, dedupe)
+//! are enforced here in [`crate::policy`], not merely asked for in the persona.
 
 use chrono::Utc;
+use repomon_core::agent::text::strip_ansi;
 use repomon_core::client::DaemonClient;
 use repomon_core::model::{AgentChoice, AgentSession, Lane, Repo, TranscriptItem};
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,7 @@ impl ToolHandler for Server {
             "send_to_agent" => self.send_to_agent(args).await,
             "approve_agent" => self.approve_agent(args).await,
             "interrupt_agent" => self.interrupt_agent(args).await,
+            "stop_agent" => self.stop_agent(args).await,
             "create_lane" => self.create_lane(args).await,
             "list_repos" => self.list_repos(args).await,
             "wait_for_change" => self.wait_for_change(args).await,
@@ -75,7 +77,8 @@ impl Server {
 
     async fn read_agent(&self, args: Value) -> Result<Value, String> {
         let a: ReadAgentArgs = parse(args)?;
-        let limit = a.transcript_limit.unwrap_or(12);
+        let limit = clamp_transcript_limit(a.transcript_limit);
+        let max_chars = clamp_max_chars(a.max_chars);
         let lane: Lane = self
             .client
             .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
@@ -94,19 +97,53 @@ impl Server {
             )
             .await
             .unwrap_or_default();
+        // Truncate each item first, then enforce the total budget by dropping the oldest
+        // (transcript items arrive oldest-first) until the remainder fits.
+        let truncated: Vec<String> = transcript
+            .iter()
+            .map(|t| truncate(&t.text, max_chars))
+            .collect();
+        let lens: Vec<usize> = truncated.iter().map(|s| s.chars().count()).collect();
+        let drop = drop_oldest_for_budget(&lens, TRANSCRIPT_BUDGET_CHARS);
         let tail: Vec<Value> = transcript
             .iter()
-            .map(|t| json!({ "role": t.role, "text": truncate(&t.text, 500), "at": t.at }))
+            .zip(truncated.iter())
+            .skip(drop)
+            .map(|(t, text)| json!({ "role": t.role, "text": text, "at": t.at }))
             .collect();
+
+        let pane = if a.include_pane.unwrap_or(false) {
+            let window = target_window(primary, None)?;
+            let cap: CaptureResult = self
+                .client
+                .call_typed(
+                    "agent.capture",
+                    Some(json!({ "lane_id": a.lane_id, "window": window, "lines": 40 })),
+                )
+                .await
+                .map_err(rpc_err)?;
+            Some(last_lines(&strip_ansi(&cap.content), 40, 4000))
+        } else {
+            None
+        };
 
         Ok(json!({
             "lane_id": a.lane_id,
             "repo": digest.repo,
             "branch": digest.branch,
             "dirty": digest.dirty,
+            "ahead": lane.state.ahead,
+            "behind": lane.state.behind,
+            "upstream": lane.state.upstream,
+            "dirty_counts": {
+                "staged": lane.state.dirty.staged,
+                "unstaged": lane.state.dirty.unstaged,
+                "untracked": lane.state.dirty.untracked,
+            },
             "agent": digest.agent,
             "pending_prompt": pending_prompt,
             "transcript_tail": tail,
+            "pane": pane,
         }))
     }
 
@@ -247,6 +284,28 @@ impl Server {
                 .await
                 .map_err(rpc_err)?;
         }
+        Ok(json!({ "ok": true }))
+    }
+
+    async fn stop_agent(&self, args: Value) -> Result<Value, String> {
+        let a: StopAgentArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        // Target the session the orchestrator reasons about (the primary), same as
+        // send_to_agent — killing the daemon's default (first) window in a multi-agent lane
+        // could end the wrong session.
+        let lane: Lane = self
+            .client
+            .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+            .map_err(rpc_err)?;
+        let window = target_window(fleet::primary_agent(&lane), a.window)?;
+        self.client
+            .call(
+                "agent.stop",
+                Some(json!({ "lane_id": a.lane_id, "window": window })),
+            )
+            .await
+            .map_err(rpc_err)?;
         Ok(json!({ "ok": true }))
     }
 
@@ -392,6 +451,12 @@ struct ReadAgentArgs {
     lane_id: i64,
     #[serde(default)]
     transcript_limit: Option<usize>,
+    /// Per-item truncation in chars. Defaults to 500, clamped to 100-2000.
+    #[serde(default)]
+    max_chars: Option<usize>,
+    /// Include the last ~40 lines of the live terminal pane (default false).
+    #[serde(default)]
+    include_pane: Option<bool>,
 }
 #[derive(Deserialize)]
 struct SpawnAgentArgs {
@@ -429,6 +494,14 @@ struct InterruptAgentArgs {
     hard: Option<bool>,
 }
 #[derive(Deserialize)]
+struct StopAgentArgs {
+    lane_id: i64,
+    /// Target a specific agent window in a multi-agent lane. Defaults to the lane's primary
+    /// (most-attention-worthy) managed session.
+    #[serde(default)]
+    window: Option<String>,
+}
+#[derive(Deserialize)]
 struct CreateLaneArgs {
     repo: String,
     branch: String,
@@ -446,6 +519,12 @@ struct WaitForChangeArgs {
 }
 
 // ---- helpers ----
+
+/// The daemon's `agent.capture` response.
+#[derive(Deserialize)]
+struct CaptureResult {
+    content: String,
+}
 
 #[derive(Serialize)]
 struct Delta {
@@ -616,6 +695,49 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// The default transcript item count, clamped to a sane range so a caller can't ask for zero
+/// items or a pathologically deep (and expensive) history.
+fn clamp_transcript_limit(n: Option<usize>) -> usize {
+    n.unwrap_or(12).clamp(1, 50)
+}
+
+/// The default per-item truncation, clamped so `max_chars` can't be set so low it mangles
+/// output or so high it defeats the point of truncating at all.
+fn clamp_max_chars(n: Option<usize>) -> usize {
+    n.unwrap_or(500).clamp(100, 2000)
+}
+
+/// Server-side ceiling on the total transcript payload `read_agent` returns, regardless of how
+/// many items/chars-per-item the caller asked for.
+const TRANSCRIPT_BUDGET_CHARS: usize = 24_000;
+
+/// Given each (already per-item-truncated) transcript item's char length, oldest first, return
+/// how many of the oldest items must be dropped so the remaining total fits within `budget`.
+/// Never drops past the end of the slice, even if every item is individually over budget.
+fn drop_oldest_for_budget(lens: &[usize], budget: usize) -> usize {
+    let mut total: usize = lens.iter().sum();
+    let mut drop = 0;
+    while total > budget && drop < lens.len() {
+        total -= lens[drop];
+        drop += 1;
+    }
+    drop
+}
+
+/// The last `max_lines` lines of (already ANSI-stripped) pane text, further capped to
+/// `max_chars` — keeping the *end* of the text when it must be trimmed, since a pane capture is
+/// read for its most recent state.
+fn last_lines(s: &str, max_lines: usize, max_chars: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    let joined = lines[start..].join("\n");
+    if joined.chars().count() <= max_chars {
+        return joined;
+    }
+    let skip = joined.chars().count() - max_chars;
+    joined.chars().skip(skip).collect()
+}
+
 // ---- tool catalog (schemas) ----
 
 fn obj(props: Value, required: &[&str]) -> Value {
@@ -648,11 +770,14 @@ fn tool_catalog() -> Vec<ToolDef> {
             description: "Deep-dive one lane: fresh status, attention, the open dialog \
                 (pending_prompt), the agent's last message, dirty state, and a capped transcript \
                 tail. Use before answering a permission (to see the proposed command) or when an \
-                agent is stuck.",
+                agent is stuck. Defaults are cheap. When debugging a stuck worker, raise \
+                transcript_limit/max_chars, or set include_pane to see the live terminal.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane to inspect." },
-                    "transcript_limit": { "type": "integer", "description": "Transcript items to include (default 12)." }
+                    "transcript_limit": { "type": "integer", "description": "Transcript items to include, 1-50 (default 12)." },
+                    "max_chars": { "type": "integer", "description": "Per-item truncation in chars, 100-2000 (default 500)." },
+                    "include_pane": { "type": "boolean", "description": "Include the last ~40 lines of the live terminal pane (default false)." }
                 }),
                 &["lane_id"],
             ),
@@ -708,6 +833,20 @@ fn tool_catalog() -> Vec<ToolDef> {
                 json!({
                     "lane_id": { "type": "integer" },
                     "hard": { "type": "boolean", "description": "Ctrl-C instead of Escape." }
+                }),
+                &["lane_id"],
+            ),
+        },
+        ToolDef {
+            name: "stop_agent",
+            description: "End an agent's session by closing its terminal window. Use for a \
+                finished or hung agent. The lane, its worktree files, and the conversation \
+                transcript all survive — only the live process ends. If the lane is dirty (see \
+                fleet_status/read_agent), mention the uncommitted work when you report.",
+            input_schema: obj(
+                json!({
+                    "lane_id": { "type": "integer" },
+                    "window": { "type": "string", "description": "Target a specific agent window in a multi-agent lane (default: the lane's primary session)." }
                 }),
                 &["lane_id"],
             ),
@@ -869,5 +1008,59 @@ mod tests {
         assert_eq!(t["needs_you"], 2);
         assert_eq!(t["permission"], 1);
         assert_eq!(t["decision"], 1);
+    }
+
+    #[test]
+    fn transcript_limit_clamps_to_1_and_50() {
+        assert_eq!(clamp_transcript_limit(None), 12); // default
+        assert_eq!(clamp_transcript_limit(Some(0)), 1);
+        assert_eq!(clamp_transcript_limit(Some(999)), 50);
+        assert_eq!(clamp_transcript_limit(Some(30)), 30);
+    }
+
+    #[test]
+    fn max_chars_clamps_to_100_and_2000() {
+        assert_eq!(clamp_max_chars(None), 500); // default
+        assert_eq!(clamp_max_chars(Some(1)), 100);
+        assert_eq!(clamp_max_chars(Some(50_000)), 2000);
+        assert_eq!(clamp_max_chars(Some(750)), 750);
+    }
+
+    #[test]
+    fn budget_drop_keeps_everything_under_budget() {
+        assert_eq!(drop_oldest_for_budget(&[100, 200, 300], 24_000), 0);
+        assert_eq!(drop_oldest_for_budget(&[], 24_000), 0);
+    }
+
+    #[test]
+    fn budget_drop_removes_oldest_items_first() {
+        // Three 10_000-char items (oldest first) exceed a 24_000 budget; the oldest one item
+        // must go, leaving the two newest (20_000 <= 24_000).
+        let lens = [10_000, 10_000, 10_000];
+        assert_eq!(drop_oldest_for_budget(&lens, 24_000), 1);
+    }
+
+    #[test]
+    fn budget_drop_never_underflows_past_the_last_item() {
+        // Even if every item is oversized, we stop once nothing is left to drop rather than
+        // underflowing the running total.
+        let lens = [50_000, 50_000];
+        assert_eq!(drop_oldest_for_budget(&lens, 24_000), 2);
+    }
+
+    #[test]
+    fn last_lines_keeps_only_the_tail() {
+        let s = "1\n2\n3\n4\n5";
+        assert_eq!(last_lines(s, 3, 100), "3\n4\n5");
+        // Fewer lines than requested: keep them all.
+        assert_eq!(last_lines(s, 100, 100), s);
+    }
+
+    #[test]
+    fn last_lines_caps_chars_keeping_the_most_recent_tail() {
+        let s = "aaaa\nbbbb\ncccc";
+        let capped = last_lines(s, 10, 5);
+        assert_eq!(capped.chars().count(), 5);
+        assert!(capped.ends_with("cccc"));
     }
 }
