@@ -112,19 +112,14 @@ impl Server {
             .map(|(t, text)| json!({ "role": t.role, "text": text, "at": t.at }))
             .collect();
 
-        let pane = if a.include_pane.unwrap_or(false) {
-            let window = target_window(primary, None)?;
-            let cap: CaptureResult = self
-                .client
-                .call_typed(
-                    "agent.capture",
-                    Some(json!({ "lane_id": a.lane_id, "window": window, "lines": 40 })),
-                )
-                .await
-                .map_err(rpc_err)?;
-            Some(last_lines(&strip_ansi(&cap.content), 40, 4000))
+        // Pane enrichment is best-effort: a gone/crashed window is exactly the crash-debugging
+        // case a caller reaches for include_pane in, so a resolution or capture failure here
+        // must not discard the transcript/git-state that *are* available. Failures degrade to
+        // pane: null + a one-line pane_error instead of failing the whole call.
+        let (pane, pane_error) = if a.include_pane.unwrap_or(false) {
+            shape_pane(self.capture_pane(a.lane_id, primary).await)
         } else {
-            None
+            (None, None)
         };
 
         Ok(json!({
@@ -144,7 +139,28 @@ impl Server {
             "pending_prompt": pending_prompt,
             "transcript_tail": tail,
             "pane": pane,
+            "pane_error": pane_error,
         }))
+    }
+
+    /// Fetch the live terminal pane for `read_agent`'s `include_pane` option. Read-only, so
+    /// callers should treat failure as "no pane available", not a reason to fail the response —
+    /// see the call site.
+    async fn capture_pane(
+        &self,
+        lane_id: i64,
+        primary: Option<&AgentSession>,
+    ) -> Result<String, String> {
+        let window = target_window(primary, None)?;
+        let cap: CaptureResult = self
+            .client
+            .call_typed(
+                "agent.capture",
+                Some(json!({ "lane_id": lane_id, "window": window, "lines": 40 })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        Ok(last_lines(&strip_ansi(&cap.content), 40, 4000))
     }
 
     async fn spawn_agent(&self, args: Value) -> Result<Value, String> {
@@ -738,6 +754,16 @@ fn last_lines(s: &str, max_lines: usize, max_chars: usize) -> String {
     joined.chars().skip(skip).collect()
 }
 
+/// Shape a best-effort pane-fetch outcome into the two fields `read_agent` returns: on success,
+/// the pane text with no error; on any failure (unresolvable window, capture RPC error), no
+/// pane text plus the one-line reason, so the caller still gets the rest of the response.
+fn shape_pane(result: Result<String, String>) -> (Option<String>, Option<String>) {
+    match result {
+        Ok(text) => (Some(text), None),
+        Err(e) => (None, Some(e)),
+    }
+}
+
 // ---- tool catalog (schemas) ----
 
 fn obj(props: Value, required: &[&str]) -> Value {
@@ -777,7 +803,7 @@ fn tool_catalog() -> Vec<ToolDef> {
                     "lane_id": { "type": "integer", "description": "The lane to inspect." },
                     "transcript_limit": { "type": "integer", "description": "Transcript items to include, 1-50 (default 12)." },
                     "max_chars": { "type": "integer", "description": "Per-item truncation in chars, 100-2000 (default 500)." },
-                    "include_pane": { "type": "boolean", "description": "Include the last ~40 lines of the live terminal pane (default false)." }
+                    "include_pane": { "type": "boolean", "description": "Best-effort: include the last ~40 lines of the live terminal pane (default false). If the window can't be resolved or captured (e.g. it crashed or closed), the rest of the response is still returned with pane: null and a pane_error explaining why." }
                 }),
                 &["lane_id"],
             ),
@@ -1062,5 +1088,26 @@ mod tests {
         let capped = last_lines(s, 10, 5);
         assert_eq!(capped.chars().count(), 5);
         assert!(capped.ends_with("cccc"));
+    }
+
+    #[test]
+    fn shape_pane_returns_text_with_no_error_on_success() {
+        let (pane, pane_error) = shape_pane(Ok("last 40 lines".into()));
+        assert_eq!(pane, Some("last 40 lines".into()));
+        assert_eq!(pane_error, None);
+    }
+
+    #[test]
+    fn shape_pane_degrades_to_null_pane_and_a_reason_on_failure() {
+        // The crash-debugging case this finding is about: the window is gone, but the caller
+        // should still get pane: null + why, not lose the whole read_agent response over it.
+        let (pane, pane_error) = shape_pane(Err(
+            "the lane's active session has no tmux window to target".into(),
+        ));
+        assert_eq!(pane, None);
+        assert_eq!(
+            pane_error,
+            Some("the lane's active session has no tmux window to target".into())
+        );
     }
 }
