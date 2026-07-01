@@ -50,6 +50,8 @@ impl ToolHandler for Server {
             "interrupt_agent" => self.interrupt_agent(args).await,
             "stop_agent" => self.stop_agent(args).await,
             "create_lane" => self.create_lane(args).await,
+            "delete_lane" => self.delete_lane(args).await,
+            "merge_lane" => self.merge_lane(args).await,
             "list_repos" => self.list_repos(args).await,
             "wait_for_change" => self.wait_for_change(args).await,
             other => Err(format!("unknown tool: {other}")),
@@ -328,7 +330,7 @@ impl Server {
     async fn create_lane(&self, args: Value) -> Result<Value, String> {
         let a: CreateLaneArgs = parse(args)?;
         self.policy.record_mutation()?;
-        if !self.policy.autonomy.allows_create_lane() {
+        if !self.policy.autonomy.allows_structural() {
             return Err(
                 "creating a lane needs the human's go-ahead at this autonomy level. Ask \
                  them to confirm the repo + branch, then proceed (or relaunch with \
@@ -364,6 +366,102 @@ impl Server {
             "branch": a.branch,
             "repo": repo.name,
         }))
+    }
+
+    /// Two-phase destructive delete: no `confirm` mints an impact summary + token (a normal,
+    /// non-error tool result — the point is to hand the orchestrator something to relay to the
+    /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
+    async fn delete_lane(&self, args: Value) -> Result<Value, String> {
+        let a: DeleteLaneArgs = parse(args)?;
+        let delete_branch = a.delete_branch.unwrap_or(false);
+        // The discriminator a token is bound to: a token minted for delete_branch=false must not
+        // confirm a delete_branch=true call on the same lane, or vice versa.
+        let flags = format!("delete_branch={delete_branch}");
+
+        match a.confirm {
+            None => {
+                let lane: Lane = self
+                    .client
+                    .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+                    .await
+                    .map_err(rpc_err)?;
+                let primary = fleet::primary_agent(&lane);
+                let impact = json!({
+                    "lane_id": a.lane_id,
+                    "repo": lane.repo.name,
+                    "branch": lane.state.branch.clone().unwrap_or_else(|| "(detached)".into()),
+                    "worktree_path": lane.worktree.path,
+                    "dirty_counts": {
+                        "staged": lane.state.dirty.staged,
+                        "unstaged": lane.state.dirty.unstaged,
+                        "untracked": lane.state.dirty.untracked,
+                    },
+                    "ahead": lane.state.ahead,
+                    "behind": lane.state.behind,
+                    "active_agent": primary.map(|s| json!({
+                        "kind": format!("{:?}", s.agent),
+                        "status": format!("{:?}", s.status),
+                    })),
+                    "delete_branch": delete_branch,
+                });
+                let token = self.policy.mint_confirm(a.lane_id, &flags);
+                Ok(json!({
+                    "confirmation_required": true,
+                    "impact": impact,
+                    "token": token,
+                    "instructions": "Show this impact to the human verbatim. Only after they \
+                        explicitly approve, call delete_lane again with confirm=<token>.",
+                }))
+            }
+            Some(token) => {
+                self.policy.take_confirm(&token, a.lane_id, &flags)?;
+                self.policy.record_mutation()?;
+                self.client
+                    .call(
+                        "lane.delete",
+                        Some(json!({
+                            "lane_id": a.lane_id,
+                            "also_delete_branch": delete_branch,
+                        })),
+                    )
+                    .await
+                    .map_err(rpc_err)?;
+                Ok(json!({ "ok": true, "lane_id": a.lane_id, "delete_branch": delete_branch }))
+            }
+        }
+    }
+
+    async fn merge_lane(&self, args: Value) -> Result<Value, String> {
+        let a: MergeLaneArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        if !self.policy.autonomy.allows_structural() {
+            return Err(
+                "merging a lane needs the human's go-ahead at this autonomy level. Ask them \
+                 to confirm the merge, then proceed (or relaunch with --autonomy autonomous)."
+                    .into(),
+            );
+        }
+        let lane: Lane = self
+            .client
+            .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+            .map_err(rpc_err)?;
+        if !lane.state.dirty.is_clean() {
+            return Err(
+                "the worker has uncommitted changes that would NOT be merged — have it commit \
+                 first (send_to_agent), then merge."
+                    .into(),
+            );
+        }
+        let res: Value = self
+            .client
+            .call(
+                "lane.merge",
+                Some(json!({ "lane_id": a.lane_id, "into": a.into })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        Ok(res)
     }
 
     async fn list_repos(&self, _args: Value) -> Result<Value, String> {
@@ -523,6 +621,22 @@ struct CreateLaneArgs {
     branch: String,
     #[serde(default)]
     source_branch: Option<String>,
+}
+#[derive(Deserialize)]
+struct DeleteLaneArgs {
+    lane_id: i64,
+    #[serde(default)]
+    delete_branch: Option<bool>,
+    /// The token from a prior no-`confirm` call. Absent (phase 1) returns an impact summary and
+    /// mints a token instead of deleting anything.
+    #[serde(default)]
+    confirm: Option<String>,
+}
+#[derive(Deserialize)]
+struct MergeLaneArgs {
+    lane_id: i64,
+    #[serde(default)]
+    into: Option<String>,
 }
 #[derive(Deserialize)]
 struct WaitForChangeArgs {
@@ -888,6 +1002,36 @@ fn tool_catalog() -> Vec<ToolDef> {
                     "source_branch": { "type": "string", "description": "Branch to fork from (optional)." }
                 }),
                 &["repo", "branch"],
+            ),
+        },
+        ToolDef {
+            name: "delete_lane",
+            description: "Delete a lane (its worktree; with delete_branch also its branch — a \
+                force delete). DESTRUCTIVE: requires explicit human approval. First call returns \
+                an impact summary and a confirmation token; relay the impact to the human and \
+                re-call with confirm=<token> only after they say yes. Refuses dirty worktrees.",
+            input_schema: obj(
+                json!({
+                    "lane_id": { "type": "integer", "description": "The lane to delete." },
+                    "delete_branch": { "type": "boolean", "description": "Also force-delete the lane's branch (default false)." },
+                    "confirm": { "type": "string", "description": "The token from a prior call without confirm. Omit to get the impact summary + token first." }
+                }),
+                &["lane_id"],
+            ),
+        },
+        ToolDef {
+            name: "merge_lane",
+            description: "Merge a lane's branch into the repo's main checkout (a normal, \
+                no-force git merge; conflicts abort cleanly and are reported as an error). The \
+                main checkout must be clean and already on the target branch. Verify the work \
+                first (read_agent, and lane_diff once available) and make sure the worker \
+                committed everything. On conflict, stop and tell the human.",
+            input_schema: obj(
+                json!({
+                    "lane_id": { "type": "integer", "description": "The lane whose branch to merge." },
+                    "into": { "type": "string", "description": "Target branch the main checkout must already be on (optional)." }
+                }),
+                &["lane_id"],
             ),
         },
         ToolDef {
