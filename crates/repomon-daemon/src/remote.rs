@@ -65,12 +65,12 @@ fn remote_method_allowed(method: &str) -> bool {
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
         | "agent.target" | "agent.resize"
         // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
-        // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — exposed so
-        // the companion's command center can run it; a remote-token holder can thus start/stop
-        // repomind (drop these two for a stricter stance, mirroring how agent.spawn/stop stay local).
+        // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
+        // process-spawn with caller-chosen autonomy/max_agents/prompt, so strictly higher privilege
+        // than the already-blocked agent.spawn. Remote tokens may chat with a running repomind but
+        // cannot start or stop it.
         | "orchestrator.status" | "orchestrator.transcript"
         | "orchestrator.send_input" | "orchestrator.key"
-        | "orchestrator.start" | "orchestrator.stop"
         // benign metadata
         | "agent.pin" | "session.rename"
         // companion self-registration for push
@@ -289,8 +289,6 @@ mod tests {
             "orchestrator.transcript",
             "orchestrator.send_input",
             "orchestrator.key",
-            "orchestrator.start",
-            "orchestrator.stop",
         ] {
             assert!(remote_method_allowed(m), "{m} should be allowed");
         }
@@ -317,6 +315,8 @@ mod tests {
             "watcher.park",
             "orchestrator.watch",
             "orchestrator.resize",
+            "orchestrator.start",
+            "orchestrator.stop",
             "some.future.method",
         ] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
