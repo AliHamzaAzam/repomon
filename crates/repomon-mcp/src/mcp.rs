@@ -69,7 +69,7 @@ pub async fn run_stdio<H: ToolHandler>(
 
     // One writer task owns stdout so concurrent tool tasks can't interleave bytes mid-line.
     let (tx, mut rx) = mpsc::channel::<String>(64);
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         let mut out = tokio::io::stdout();
         while let Some(msg) = rx.recv().await {
             if out.write_all(msg.as_bytes()).await.is_err() || out.write_all(b"\n").await.is_err() {
@@ -83,7 +83,13 @@ pub async fn run_stdio<H: ToolHandler>(
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
+        let n = tokio::select! {
+            n = reader.read_line(&mut line) => n?,
+            _ = &mut writer => {
+                tracing::warn!("mcp: stdout closed; exiting instead of zombie-ing");
+                return Ok(());
+            }
+        };
         if n == 0 {
             break; // EOF: the orchestrator's claude process closed the server.
         }
