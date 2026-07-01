@@ -851,3 +851,57 @@ async fn commit_recent_returns_latest_even_when_none_today() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+// No orchestrator is ever started here, so `reconcile_orchestrator` returns false on its
+// first check (no tracked session) without touching tmux — this doesn't need a live tmux server.
+#[tokio::test]
+async fn orchestrator_input_errors_loudly_when_not_running() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-orch-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Typing to a dead orchestrator must fail loudly instead of silently no-op'ing at the tmux
+    // layer.
+    let r = call(
+        &mut stream,
+        1,
+        "orchestrator.send_input",
+        Some(json!({ "text": "hello", "enter": false })),
+    )
+    .await;
+    assert!(r.result.is_none());
+    let err = r
+        .error
+        .expect("send_input to a dead orchestrator should error");
+    assert!(
+        err.message.contains("repomind isn't running"),
+        "unexpected message: {}",
+        err.message
+    );
+
+    // Same reconcile-first guard applies to `orchestrator.key`.
+    let r = call(
+        &mut stream,
+        2,
+        "orchestrator.key",
+        Some(json!({ "key": "Enter", "literal": false })),
+    )
+    .await;
+    assert!(r.error.is_some(), "key to a dead orchestrator should error");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

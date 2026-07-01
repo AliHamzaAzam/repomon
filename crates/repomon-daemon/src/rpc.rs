@@ -1383,6 +1383,13 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
         "orchestrator.send_input" => {
             let p: OrchestratorInput = parse(params)?;
+            // A window killed externally would otherwise still read as running; reconcile first,
+            // and refuse to type into a corpse instead of silently no-op'ing at the tmux layer.
+            if !reconcile_orchestrator(ctx).await {
+                return Err(RpcError::invalid_params(
+                    "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
+                ));
+            }
             let tmux = ctx.tmux.clone();
             let (text, enter) = (p.text, p.enter);
             tokio::task::spawn_blocking(move || {
@@ -1402,6 +1409,13 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
         "orchestrator.key" => {
             let p: OrchestratorKey = parse(params)?;
+            // Same reconcile-first guard as `orchestrator.send_input`: a dead window must not read
+            // as a successful keystroke.
+            if !reconcile_orchestrator(ctx).await {
+                return Err(RpcError::invalid_params(
+                    "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
+                ));
+            }
             let tmux = ctx.tmux.clone();
             let (key, literal) = (p.key, p.literal);
             tokio::task::spawn_blocking(move || {

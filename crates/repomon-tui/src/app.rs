@@ -2973,13 +2973,16 @@ impl App {
         }
         // A control key: send any buffered text first so order holds, then the key.
         self.flush_pending_input().await;
-        let _ = self
+        if let Err(e) = self
             .client
             .call(
                 "orchestrator.key",
                 Some(json!({ "key": spec, "literal": false })),
             )
-            .await;
+            .await
+        {
+            self.status = format!("repomind: {e}");
+        }
     }
 
     /// Resolve the orchestrator's tmux target and queue a full `tmux attach` (reuses the generic
@@ -3080,13 +3083,16 @@ impl App {
         // The command-center, or the Split preview while typing to repomind (`orch_insert`), targets
         // the orchestrator window rather than a lane.
         if self.view == View::Orchestrator || self.orch_insert {
-            let _ = self
+            if let Err(e) = self
                 .client
                 .call(
                     "orchestrator.send_input",
                     Some(json!({ "text": text, "enter": false })),
                 )
-                .await;
+                .await
+            {
+                self.status = format!("repomind: {e}");
+            }
             return;
         }
         let Some(id) = self.selected_lane().map(|l| l.id) else {
