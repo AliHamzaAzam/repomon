@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use repomon_core::agent::{self, shell_quote};
-use repomon_core::git::reader;
+use repomon_core::git::{diff, reader};
 use repomon_core::model::{
     AgentChoice, AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit,
     CreateLaneParams, Lane, RepoId, TimeRange,
@@ -28,6 +28,15 @@ fn parse<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcError> {
 
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
     serde_json::to_value(v).map_err(internal)
+}
+
+/// Truncate `s` to at most `max_chars` characters (char-boundary safe), returning the possibly
+/// truncated string and whether it was cut. Used to cap `lane.diff`'s patch text server-side.
+fn cap_chars(s: &str, max_chars: usize) -> (String, bool) {
+    if s.chars().count() <= max_chars {
+        return (s.to_string(), false);
+    }
+    (s.chars().take(max_chars).collect(), true)
 }
 
 /// The editable subset of the config exposed to the Settings view.
@@ -288,6 +297,19 @@ struct LaneMerge {
     into: Option<String>,
 }
 #[derive(Deserialize)]
+struct LaneDiffParams {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    include_patch: bool,
+    #[serde(default = "default_max_patch_chars")]
+    max_patch_chars: usize,
+}
+fn default_max_patch_chars() -> usize {
+    8000
+}
+/// Server-side cap: even a caller-supplied `max_patch_chars` can't force an unbounded patch.
+const MAX_PATCH_CHARS_CEILING: usize = 20_000;
+#[derive(Deserialize)]
 struct Search {
     query: String,
     #[serde(default = "default_limit")]
@@ -483,6 +505,55 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let p: LaneMerge = parse(params)?;
             let message = ctx.lanes.merge(p.lane_id, p.into).await.map_err(internal)?;
             Ok(json!({ "message": message }))
+        }
+        "lane.diff" => {
+            let p: LaneDiffParams = parse(params)?;
+            let max_patch_chars = p.max_patch_chars.min(MAX_PATCH_CHARS_CEILING);
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let repo_path = lane.repo.path.clone();
+            let wt_path = lane.worktree.path.clone();
+            let include_patch = p.include_patch;
+            let (d, patch) = tokio::task::spawn_blocking(move || -> Result<_, RpcError> {
+                // Base branch = the repo MAIN checkout's current branch, not the lane's.
+                let repo = reader::open(&repo_path).map_err(internal)?;
+                let hi = reader::head_info(&repo).map_err(internal)?;
+                let base = hi.branch.ok_or_else(|| {
+                    RpcError::internal(format!(
+                        "repo's main checkout ({}) has no current branch to diff against \
+                         (detached HEAD)",
+                        repo_path.display()
+                    ))
+                })?;
+                let d = diff::lane_diff(&wt_path, &base).map_err(internal)?;
+                let patch = if include_patch {
+                    Some(diff::diff_patch(&wt_path).map_err(internal)?)
+                } else {
+                    None
+                };
+                Ok((d, patch))
+            })
+            .await
+            .map_err(internal)??;
+
+            let mut result = json!({
+                "base": d.base,
+                "merge_base": d.merge_base,
+                "commits": d.commits,
+                "committed_stat": d.committed_stat,
+                "uncommitted_stat": d.uncommitted_stat,
+                "untracked": lane.state.dirty.untracked,
+            });
+            if d.commits_truncated {
+                result["commits_truncated"] = json!(true);
+            }
+            if let Some(patch) = patch {
+                let (capped, truncated) = cap_chars(&patch, max_patch_chars);
+                result["patch"] = json!(capped);
+                if truncated {
+                    result["patch_truncated"] = json!(true);
+                }
+            }
+            Ok(result)
         }
 
         // ---- commits (computed live via gix) ----

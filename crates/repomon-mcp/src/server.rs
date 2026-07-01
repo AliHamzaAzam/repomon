@@ -52,6 +52,7 @@ impl ToolHandler for Server {
             "create_lane" => self.create_lane(args).await,
             "delete_lane" => self.delete_lane(args).await,
             "merge_lane" => self.merge_lane(args).await,
+            "lane_diff" => self.lane_diff(args).await,
             "list_repos" => self.list_repos(args).await,
             "wait_for_change" => self.wait_for_change(args).await,
             other => Err(format!("unknown tool: {other}")),
@@ -474,6 +475,24 @@ impl Server {
         Ok(res)
     }
 
+    /// Read-only: no `record_mutation()` — this only inspects the lane, it changes nothing.
+    async fn lane_diff(&self, args: Value) -> Result<Value, String> {
+        let a: LaneDiffArgs = parse(args)?;
+        let res: Value = self
+            .client
+            .call(
+                "lane.diff",
+                Some(json!({
+                    "lane_id": a.lane_id,
+                    "include_patch": a.include_patch,
+                    "max_patch_chars": a.max_patch_chars,
+                })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        Ok(res)
+    }
+
     async fn list_repos(&self, _args: Value) -> Result<Value, String> {
         let repos: Vec<Repo> = self
             .client
@@ -647,6 +666,17 @@ struct MergeLaneArgs {
     lane_id: i64,
     #[serde(default)]
     into: Option<String>,
+}
+#[derive(Deserialize)]
+struct LaneDiffArgs {
+    lane_id: i64,
+    #[serde(default)]
+    include_patch: bool,
+    #[serde(default = "default_max_patch_chars")]
+    max_patch_chars: usize,
+}
+fn default_max_patch_chars() -> usize {
+    8000
 }
 #[derive(Deserialize)]
 struct WaitForChangeArgs {
@@ -1034,12 +1064,27 @@ fn tool_catalog() -> Vec<ToolDef> {
             description: "Merge a lane's branch into the repo's main checkout (a normal, \
                 no-force git merge; conflicts abort cleanly and are reported as an error). The \
                 main checkout must be clean and already on the target branch. Verify the work \
-                first (read_agent, and lane_diff once available) and make sure the worker \
-                committed everything. On conflict, stop and tell the human.",
+                first (read_agent, lane_diff) and make sure the worker committed everything. On \
+                conflict, stop and tell the human.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane whose branch to merge." },
                     "into": { "type": "string", "description": "Target branch the main checkout must already be on (optional)." }
+                }),
+                &["lane_id"],
+            ),
+        },
+        ToolDef {
+            name: "lane_diff",
+            description: "See what a lane actually produced: commits ahead of the repo's base \
+                branch (with diffstat), plus uncommitted changes. Use to verify a worker's claim \
+                of 'done' before merge_lane, or to check for work worth keeping before \
+                stop_agent/delete_lane. Set include_patch for the actual (capped) diff text.",
+            input_schema: obj(
+                json!({
+                    "lane_id": { "type": "integer", "description": "The lane to inspect." },
+                    "include_patch": { "type": "boolean", "description": "Include the actual diff text, capped at max_patch_chars (default false)." },
+                    "max_patch_chars": { "type": "integer", "description": "Cap on the patch text in characters, up to 20000 (default 8000)." }
                 }),
                 &["lane_id"],
             ),

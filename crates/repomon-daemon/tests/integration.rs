@@ -905,3 +905,113 @@ async fn orchestrator_input_errors_loudly_when_not_running() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-diff-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // A repo with one commit on main.
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "init"]);
+    let r = call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let repo_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    // A lane branched off main.
+    let wt_parent = tempfile::tempdir().unwrap();
+    let wt_path = wt_parent.path().join("feat");
+    let r = call(
+        &mut stream,
+        2,
+        "lane.create",
+        Some(json!({
+            "repo_id": repo_id,
+            "branch": "feat/thing",
+            "source_branch": "main",
+            "path": wt_path.to_string_lossy(),
+        })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.create errored: {:?}", r.error);
+    let lane_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    // One commit ahead of main...
+    std::fs::write(wt_path.join("a.txt"), "a\n").unwrap();
+    git(&wt_path, &["add", "a.txt"]);
+    git(&wt_path, &["commit", "-m", "feat: add a"]);
+    // ...plus an uncommitted (unstaged) change and an untracked file.
+    std::fs::write(wt_path.join("README.md"), "changed\n").unwrap();
+    std::fs::write(wt_path.join("scratch.txt"), "scratch\n").unwrap();
+    // No file watcher runs against this bare `Ctx` (that's wired up in `main.rs`), so the cached
+    // clean state from `lane.create`'s listing needs an explicit nudge to re-walk — same as
+    // `repomon_core::lane::tests::worktree_file_activity_is_detected`.
+    ctx.lanes.invalidate_state(&wt_path);
+
+    let r = call(
+        &mut stream,
+        3,
+        "lane.diff",
+        Some(json!({ "lane_id": lane_id })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.diff errored: {:?}", r.error);
+    let d = r.result.unwrap();
+    assert_eq!(d["base"], json!("main"));
+    assert!(d["merge_base"].as_str().unwrap_or_default().len() >= 7);
+    let commits = d["commits"].as_str().unwrap();
+    assert!(commits.contains("feat: add a"), "commits was: {commits:?}");
+    assert!(d.get("commits_truncated").is_none());
+    let committed_stat = d["committed_stat"].as_str().unwrap();
+    assert!(
+        committed_stat.contains("a.txt"),
+        "committed_stat was: {committed_stat:?}"
+    );
+    let uncommitted_stat = d["uncommitted_stat"].as_str().unwrap();
+    assert!(
+        uncommitted_stat.contains("README.md"),
+        "uncommitted_stat was: {uncommitted_stat:?}"
+    );
+    assert_eq!(d["untracked"], json!(1));
+    // No patch without include_patch.
+    assert!(d.get("patch").is_none());
+
+    // include_patch=true honors a tiny max_patch_chars cap.
+    let r = call(
+        &mut stream,
+        4,
+        "lane.diff",
+        Some(json!({ "lane_id": lane_id, "include_patch": true, "max_patch_chars": 10 })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.diff errored: {:?}", r.error);
+    let d = r.result.unwrap();
+    let patch = d["patch"].as_str().unwrap();
+    assert_eq!(patch.chars().count(), 10, "patch was: {patch:?}");
+    assert_eq!(d["patch_truncated"], json!(true));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

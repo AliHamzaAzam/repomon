@@ -1,8 +1,11 @@
-//! The git layer: gix-backed reads ([`reader`]) and worktree CRUD ([`worktree`]).
+//! The git layer: gix-backed reads ([`reader`]), worktree CRUD ([`worktree`]), and lane-vs-base
+//! diffing ([`diff`]).
 
+pub mod diff;
 pub mod reader;
 pub mod worktree;
 
+pub use diff::{LaneDiff, diff_patch, lane_diff};
 pub use reader::{
     HeadInfo, ahead_behind, commits_in_range, dirty_state, head_info, open, read_commits_in_range,
     read_state,
