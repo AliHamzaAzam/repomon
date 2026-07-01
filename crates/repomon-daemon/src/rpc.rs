@@ -2028,17 +2028,76 @@ fn adopt_base_command(
     candidates.extend(agent::claude::agent_variants().into_iter().map(|(_, c)| c));
     candidates.extend(customs.values().cloned());
 
-    pick_for_account(&candidates, &want).unwrap_or_else(|| match config_dir {
-        Some(d) => format!("CLAUDE_CONFIG_DIR={} claude", d.display()),
-        None => "claude".to_string(),
+    pick_for_account(&candidates, &want).unwrap_or_else(|| {
+        // Build via `launch_command` so the fallback is immune to the daemon's own
+        // CLAUDE_CONFIG_DIR: the default account unsets it (`env -u …`), variants pin their dir.
+        let default = agent::claude::default_config_base();
+        agent::claude::launch_command(config_dir.as_deref().unwrap_or(&default))
     })
 }
 
 /// The account (CLAUDE_CONFIG_DIR, canonicalized) a command targets, or `None` for the default.
+///
+/// Variant accounts launch with an explicit, shell-quoted `CLAUDE_CONFIG_DIR=…` (see
+/// [`agent::claude::launch_command`]); the default account launches as `env -u CLAUDE_CONFIG_DIR
+/// claude` (no assignment). So this is `None` when the assignment is absent, parses the value
+/// honoring shell quoting (a config dir may contain spaces), and normalizes the *default* base back
+/// to `None` so the default account keeps its `None`/`"default"` identity regardless of spelling.
 fn command_account(cmd: &str) -> Option<PathBuf> {
-    cmd.split_whitespace()
-        .find_map(|t| t.strip_prefix("CLAUDE_CONFIG_DIR=").map(PathBuf::from))
-        .map(|p| p.canonicalize().unwrap_or(p))
+    let dir = PathBuf::from(config_dir_arg(cmd)?);
+    let dir = dir.canonicalize().unwrap_or(dir);
+    let default = agent::claude::default_config_base();
+    let default = default.canonicalize().unwrap_or(default);
+    (dir != default).then_some(dir)
+}
+
+/// The `CLAUDE_CONFIG_DIR=` value from a command's leading env assignment, shell-unquoted, or
+/// `None` if absent. Honors the single-quote grouping [`shell_quote`] emits, so a config dir
+/// containing spaces (`CLAUDE_CONFIG_DIR='/a b/.claude' claude`) parses as one whole path rather
+/// than being split on the inner space.
+fn config_dir_arg(cmd: &str) -> Option<String> {
+    const KEY: &str = "CLAUDE_CONFIG_DIR=";
+    let mut from = 0;
+    loop {
+        let at = from + cmd[from..].find(KEY)?;
+        // Only a real leading assignment (start of command, or right after whitespace).
+        if at == 0 || cmd.as_bytes()[at - 1].is_ascii_whitespace() {
+            return Some(unquote_shell_word(&cmd[at + KEY.len()..]));
+        }
+        from = at + KEY.len();
+    }
+}
+
+/// Read and unquote one shell word from the front of `s`, honoring the single-quote grouping and
+/// `'\''` escaping [`shell_quote`] emits; an unquoted word ends at the first whitespace.
+fn unquote_shell_word(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            c if c.is_whitespace() => break,
+            '\'' => {
+                chars.next(); // opening quote
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break; // closing quote
+                    }
+                    out.push(c);
+                }
+            }
+            '\\' => {
+                chars.next(); // escape: next char is literal
+                if let Some(c) = chars.next() {
+                    out.push(c);
+                }
+            }
+            _ => {
+                out.push(c);
+                chars.next();
+            }
+        }
+    }
+    out
 }
 
 /// The first claude command from `candidates` whose account matches `want`.
@@ -2057,10 +2116,29 @@ fn is_env_assignment(tok: &str) -> bool {
     }
 }
 
-/// The program a command runs, skipping leading env assignments so commands like
-/// `CLAUDE_CONFIG_DIR=~/.claude-work claude` resolve to `claude`.
+/// The program a command runs, skipping a leading env prefix so both `CLAUDE_CONFIG_DIR=… claude`
+/// and `env -u CLAUDE_CONFIG_DIR claude` (the default account's launch, which *unsets* the var)
+/// resolve to `claude`.
 fn program_of(command: &str) -> Option<&str> {
-    command.split_whitespace().find(|t| !is_env_assignment(t))
+    let mut toks = command.split_whitespace().peekable();
+    // A leading `env [-i] [-u NAME]… [NAME=val]… program` — skip `env` and its options/
+    // assignments (note `-u` takes a NAME argument) so the real program surfaces.
+    if toks.peek() == Some(&"env") {
+        toks.next();
+        while let Some(&t) = toks.peek() {
+            if t == "-u" {
+                toks.next(); // the flag
+                toks.next(); // its NAME argument
+            } else if t.starts_with('-') || is_env_assignment(t) {
+                toks.next();
+            } else {
+                break;
+            }
+        }
+        return toks.next();
+    }
+    // Otherwise skip leading `VAR=val` assignments.
+    toks.find(|t| !is_env_assignment(t))
 }
 
 /// The agent kind repomon last spawned in a lane (from its persisted meta), defaulting to Claude
@@ -2626,6 +2704,11 @@ mod tests {
             Some("claude")
         );
         assert_eq!(program_of("FOO=1 BAR=2 aider --model x"), Some("aider"));
+        // The default account's launch UNSETS the var via `env -u` — still resolves to claude.
+        assert_eq!(
+            program_of("env -u CLAUDE_CONFIG_DIR claude"),
+            Some("claude")
+        );
         assert_eq!(program_of(""), None);
         assert!(is_env_assignment("CLAUDE_CONFIG_DIR=/x/.claude-work"));
         assert!(!is_env_assignment("claude"));
@@ -2658,6 +2741,36 @@ mod tests {
             Some(PathBuf::from("/x"))
         );
         assert_eq!(command_account("claude"), None);
+    }
+
+    #[test]
+    fn command_account_normalizes_pinned_default_and_strips_quotes() {
+        // The default account launches with `env -u CLAUDE_CONFIG_DIR claude` (no `CLAUDE_CONFIG_DIR=`
+        // prefix), so it reads back as the *default* account (None).
+        assert_eq!(command_account("env -u CLAUDE_CONFIG_DIR claude"), None);
+        // A hand-written pin to the default base also normalizes to the default account (defensive).
+        let default = agent::claude::default_config_base();
+        assert_eq!(
+            command_account(&format!("CLAUDE_CONFIG_DIR={} claude", default.display())),
+            None
+        );
+        // shell_quote wraps the path in single quotes; the parse must see through them — both for
+        // a variant account...
+        assert_eq!(
+            command_account("CLAUDE_CONFIG_DIR='/h/.claude-work' claude"),
+            Some(PathBuf::from("/h/.claude-work"))
+        );
+        // ...and for a quoted default base (still the default account).
+        assert_eq!(
+            command_account(&format!("CLAUDE_CONFIG_DIR='{}' claude", default.display())),
+            None
+        );
+        // A shell-quoted config dir containing spaces must parse as one whole path, not split on
+        // the inner space (shell_quote wraps it, so command_account must honor the quoting).
+        assert_eq!(
+            command_account("CLAUDE_CONFIG_DIR='/h/with a space/.claude-work' claude"),
+            Some(PathBuf::from("/h/with a space/.claude-work"))
+        );
     }
 
     #[test]
