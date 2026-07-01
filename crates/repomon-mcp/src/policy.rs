@@ -76,7 +76,10 @@ impl Policy {
                  Report what you see and let the human decide."
                 .into());
         }
-        let mut a = self.actions.lock().unwrap();
+        let mut a = self
+            .actions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *a >= self.max_actions {
             return Err(format!(
                 "action cap reached ({} actions this session). Pausing for safety — \
@@ -91,7 +94,10 @@ impl Policy {
     /// Suppress an identical `send_to_agent` to the same lane within a short window — the
     /// cheapest defense against an infinite re-prompt / handoff loop.
     pub fn check_send_dedupe(&self, lane: i64, text: &str) -> Result<(), String> {
-        let mut m = self.last_send.lock().unwrap();
+        let mut m = self
+            .last_send
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((prev, when)) = m.get(&lane) {
             if prev == text && when.elapsed() < Duration::from_secs(15) {
                 return Err("duplicate message suppressed (identical text to this lane within 15s). \
