@@ -1323,7 +1323,12 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             // A window killed externally would otherwise still read as running; reconcile first.
             reconcile_orchestrator(ctx).await;
             let orch = ctx.orchestrator.lock().await;
-            Ok(orchestrator_status_value(orch.as_ref()))
+            let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
+            Ok(orchestrator_status_value(
+                orch.as_ref(),
+                &attention,
+                headline.as_deref(),
+            ))
         }
         // Repomind's conversation as structured TranscriptItems, so a client (the iOS app) can render
         // it as a chat instead of mirroring the raw pane. The orchestrator is the actively-used Claude
@@ -1338,17 +1343,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 Ok(json!([]))
             } else {
                 let items = tokio::task::spawn_blocking(move || {
-                    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-                    let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
-                    let summaries =
-                        agent::claude::summaries_for(&home, within, MAX_SESSIONS_PER_LANE);
-                    // summaries_for sorts newest-first; take the newest with message/tool activity
-                    // (skips the content-less usage-probe sessions), falling back to the newest.
-                    let pick = summaries
-                        .iter()
-                        .find(|s| s.last_message.is_some() || s.tool_call_count > 0)
-                        .or_else(|| summaries.first());
-                    pick.map(|s| agent::claude::transcript_tail(&s.manifest_path, p.limit))
+                    pick_orchestrator_transcript()
+                        .map(|s| agent::claude::transcript_tail(&s.manifest_path, p.limit))
                         .unwrap_or_default()
                 })
                 .await
@@ -1365,7 +1361,12 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             {
                 let orch = ctx.orchestrator.lock().await;
                 if orch.is_some() {
-                    return Ok(orchestrator_status_value(orch.as_ref()));
+                    let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
+                    return Ok(orchestrator_status_value(
+                        orch.as_ref(),
+                        &attention,
+                        headline.as_deref(),
+                    ));
                 }
             }
             // Resolve agent/model: explicit param wins, then the persisted config default.
@@ -1395,7 +1396,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     };
                     *ctx.orchestrator.lock().await = Some(session);
                     let orch = ctx.orchestrator.lock().await;
-                    let status = orchestrator_status_value(orch.as_ref());
+                    let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
+                    let status =
+                        orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
                     ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
                     return Ok(status);
                 }
@@ -1425,7 +1428,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             };
             *ctx.orchestrator.lock().await = Some(session);
             let orch = ctx.orchestrator.lock().await;
-            let status = orchestrator_status_value(orch.as_ref());
+            let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
+            let status = orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
             Ok(status)
         }
@@ -1433,7 +1437,8 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let tmux = ctx.tmux.clone();
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(ORCHESTRATOR_WINDOW)).await;
             *ctx.orchestrator.lock().await = None;
-            let status = orchestrator_status_value(None);
+            *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
+            let status = orchestrator_status_value(None, "none", None);
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
             Ok(status)
         }
@@ -2533,30 +2538,72 @@ async fn commits_in_range(
 /// so it stays invisible to the lane overlay/reaper and never shows in `lane.list`.
 const ORCHESTRATOR_WINDOW: &str = "orchestrator";
 
-/// The `{running, agent, model, window}` status JSON for the orchestrator (shared by
-/// `orchestrator.status` and the `event.orchestrator.status` broadcast).
-fn orchestrator_status_value(orch: Option<&crate::OrchestratorSession>) -> Value {
+/// The `{running, agent, model, window, attention, headline}` status JSON for the orchestrator
+/// (shared by `orchestrator.status` and the `event.orchestrator.status` broadcast). `attention` is
+/// one of `"none"`, `"permission"`, `"decision"`, `"end_of_turn"` — see
+/// [`notify_watch::check_orchestrator_attention`](crate::notify_watch); `headline` is a short
+/// "why" (the pending dialog's question, or a tail of repomind's last message) or `null`.
+pub(crate) fn orchestrator_status_value(
+    orch: Option<&crate::OrchestratorSession>,
+    attention: &str,
+    headline: Option<&str>,
+) -> Value {
     match orch {
         Some(s) => json!({
             "running": true,
             "agent": s.agent,
             "model": s.model,
             "window": s.window,
+            "attention": attention,
+            "headline": headline,
         }),
         None => json!({
             "running": false,
             "agent": Value::Null,
             "model": Value::Null,
             "window": Value::Null,
+            "attention": attention,
+            "headline": headline,
         }),
     }
+}
+
+/// Pick the orchestrator's active transcript out of an already-scanned, newest-first session list:
+/// the newest with real message/tool activity (skips the content-less usage-probe sessions),
+/// falling back to the newest overall. Pure — split out of [`pick_orchestrator_transcript`] so the
+/// selection rule itself is unit-testable without touching the filesystem.
+fn pick_orchestrator_transcript_from(
+    mut summaries: Vec<agent::TranscriptSummary>,
+) -> Option<agent::TranscriptSummary> {
+    if summaries.is_empty() {
+        return None;
+    }
+    let idx = summaries
+        .iter()
+        .position(|s| s.last_message.is_some() || s.tool_call_count > 0)
+        .unwrap_or(0);
+    Some(summaries.swap_remove(idx))
+}
+
+/// The orchestrator's chosen transcript: the newest `$HOME` Claude session with real content
+/// across accounts, falling back to the newest overall (see
+/// [`pick_orchestrator_transcript_from`]). Shared by `orchestrator.transcript` (the iOS chat view)
+/// and the notify-watch end-of-turn attention check — the tracked `agent` can be stale after a
+/// restart+adopt (it reflects config, not the running window's actual `CLAUDE_CONFIG_DIR`), and the
+/// ~empty usage-probe sessions also run in `$HOME`, so neither the account nor plain recency is a
+/// reliable selector on its own. Blocking (scans `$HOME`) — call from `spawn_blocking`.
+pub(crate) fn pick_orchestrator_transcript() -> Option<agent::TranscriptSummary> {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
+    let summaries = agent::claude::summaries_for(&home, within, MAX_SESSIONS_PER_LANE);
+    pick_orchestrator_transcript_from(summaries)
 }
 
 /// Drop a stale orchestrator session: if we think one is running but its tmux window is gone (killed
 /// externally, or it `/exit`ed), clear the tracked session and broadcast the stopped status, so
 /// `orchestrator.status` reads accurately and `orchestrator.start` re-spawns rather than no-op on a
 /// corpse. Returns whether a session is still tracked afterward.
-async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
+pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
     if ctx.orchestrator.lock().await.is_none() {
         return false;
     }
@@ -2569,9 +2616,10 @@ async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
         return true;
     }
     *ctx.orchestrator.lock().await = None;
+    *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
     ctx.broadcast(
         crate::pubsub::topic::ORCHESTRATOR_STATUS,
-        orchestrator_status_value(None),
+        orchestrator_status_value(None, "none", None),
     );
     false
 }
@@ -2919,20 +2967,55 @@ mod tests {
 
     #[test]
     fn orchestrator_status_shapes() {
-        // Running session reports its fields.
+        // Running session reports its fields, plus the attention/headline passed in.
         let s = crate::OrchestratorSession {
             agent: Some("claude-work".into()),
             model: Some("opus".into()),
             window: "orchestrator".into(),
         };
-        let v = orchestrator_status_value(Some(&s));
+        let v = orchestrator_status_value(Some(&s), "decision", Some("Which auth method?"));
         assert_eq!(v["running"], json!(true));
         assert_eq!(v["agent"], json!("claude-work"));
         assert_eq!(v["model"], json!("opus"));
         assert_eq!(v["window"], json!("orchestrator"));
-        // No session: running=false with null fields.
-        let v = orchestrator_status_value(None);
+        assert_eq!(v["attention"], json!("decision"));
+        assert_eq!(v["headline"], json!("Which auth method?"));
+        // No session: running=false with null fields; attention/headline still pass through.
+        let v = orchestrator_status_value(None, "none", None);
         assert_eq!(v["running"], json!(false));
         assert_eq!(v["agent"], Value::Null);
+        assert_eq!(v["attention"], json!("none"));
+        assert_eq!(v["headline"], Value::Null);
+    }
+
+    #[test]
+    fn picks_newest_transcript_with_content_else_newest_overall() {
+        fn stub(last_message: Option<&str>, tool_calls: u32) -> agent::TranscriptSummary {
+            agent::TranscriptSummary {
+                kind: repomon_core::model::AgentKind::ClaudeCode,
+                manifest_path: PathBuf::from("/tmp/x.jsonl"),
+                cwd: None,
+                last_activity: chrono::Utc::now(),
+                tool_call_count: tool_calls,
+                status: repomon_core::model::AgentStatus::Idle,
+                title: None,
+                last_message: last_message.map(str::to_string),
+                config_dir: None,
+                session_id: None,
+            }
+        }
+        // The newest (first) entry is a content-less usage-probe session; skip it for the next
+        // one that actually has a message.
+        let picked =
+            pick_orchestrator_transcript_from(vec![stub(None, 0), stub(Some("hi"), 0)]).unwrap();
+        assert_eq!(picked.last_message.as_deref(), Some("hi"));
+        // A tool call with no message still counts as "real content".
+        let picked = pick_orchestrator_transcript_from(vec![stub(None, 0), stub(None, 3)]).unwrap();
+        assert_eq!(picked.tool_call_count, 3);
+        // Nothing has content: fall back to the newest (first) overall.
+        let picked = pick_orchestrator_transcript_from(vec![stub(None, 0), stub(None, 0)]).unwrap();
+        assert!(picked.last_message.is_none());
+        // No sessions at all: None.
+        assert!(pick_orchestrator_transcript_from(vec![]).is_none());
     }
 }

@@ -140,6 +140,12 @@ pub struct Ctx {
     /// `stream_orchestrator` captures it at frame-rate while you type to repomind, the same
     /// keystroke-echo speedup `input_seen` gives a focused lane. Goes quiet on its own.
     pub orchestrator_input_seen: Mutex<Option<Instant>>,
+    /// The repomind orchestrator's current attention word (`"none"`, `"permission"`,
+    /// `"decision"`, or `"end_of_turn"`) plus an optional headline — computed every
+    /// `notify_watch` tick (even while notifications are disabled, so the TUI's pinned row and
+    /// command-center header stay live) and folded into `orchestrator_status_value`'s payload on
+    /// change. See `notify_watch::check_orchestrator_attention`.
+    pub orchestrator_attention: Mutex<(String, Option<String>)>,
     pub shutdown: Notify,
 }
 
@@ -195,6 +201,7 @@ impl Ctx {
             orchestrator: Mutex::new(None),
             orchestrator_watched: Mutex::new(false),
             orchestrator_input_seen: Mutex::new(None),
+            orchestrator_attention: Mutex::new(("none".to_string(), None)),
             shutdown: Notify::new(),
         })
     }

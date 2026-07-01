@@ -304,6 +304,55 @@ async fn renders_fleet_with_a_registered_repo() {
         "split right column must show the off/start hint when repomind isn't running:\n{split_off}"
     );
 
+    // repomind attention (B4: the human<->repomind escalation loop): the pinned fleet row wears
+    // the needs-you wording when repomind is asking the human something, and the command-center
+    // header shows the attention word plus a headline.
+    app.orch_running = true;
+    app.orch_attention = Some("decision".into());
+    app.orch_headline = Some("which auth method?".into());
+    app.selected = 0; // the pinned repomind row is always row 0 of the fleet
+    app.view = View::Fleet;
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        fleet.contains("repomind · question for you"),
+        "pinned row must show the question wording for a decision:\n{fleet}"
+    );
+
+    app.orch_attention = Some("permission".into());
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        fleet.contains("repomind · question for you"),
+        "pinned row must show the question wording for a permission ask too:\n{fleet}"
+    );
+
+    app.orch_attention = Some("end_of_turn".into());
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        fleet.contains("repomind · waiting for you"),
+        "pinned row must show the waiting wording for end_of_turn:\n{fleet}"
+    );
+
+    app.view = View::Orchestrator;
+    let center = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        center.contains("end of turn"),
+        "command-center header must show the attention word:\n{center}"
+    );
+    assert!(
+        center.contains("which auth method?"),
+        "command-center header must show the headline:\n{center}"
+    );
+
+    // Back to no attention: the pinned row reverts to the plain chatting/idle/off wording.
+    app.orch_attention = None;
+    app.orch_headline = None;
+    app.view = View::Fleet;
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        !fleet.contains("question for you") && !fleet.contains("waiting for you"),
+        "pinned row must not show needs-you wording once attention clears:\n{fleet}"
+    );
+
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }

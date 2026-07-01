@@ -915,13 +915,32 @@ fn orch_status_word(app: &App) -> &'static str {
 /// are unaffected); any terminal width disagreement only touches this line's own trailing text.
 const BRAIN: &str = "🧠 ";
 
-/// The pinned "repomind" fleet row (rendered at the top of Fleet and the Split sidebar).
+/// The pinned "repomind" fleet row's label when repomind is asking the human something: a
+/// permission/decision dialog reads as a question, an end-of-turn reads as waiting.
+fn orch_attention_label(attention: &str) -> &'static str {
+    match attention {
+        "permission" | "decision" => "repomind · question for you",
+        _ => "repomind · waiting for you", // "end_of_turn" and any future word
+    }
+}
+
+/// The pinned "repomind" fleet row (rendered at the top of Fleet and the Split sidebar). Wears the
+/// `needs_you` styling and wording whenever repomind has raised a dialog or ended its turn
+/// (`app.orch_attention`), the same treatment a lane gets when its agent needs you.
 fn orch_row_line(app: &App, selected: bool) -> Line<'static> {
-    let word = orch_status_word(app);
+    let label = match app.orch_attention.as_deref() {
+        Some(attention) => orch_attention_label(attention).to_string(),
+        None => format!("repomind · {}", orch_status_word(app)),
+    };
     if selected {
         Line::from(Span::styled(
-            format!("{BRAIN}repomind · {word}"),
+            format!("{BRAIN}{label}"),
             app.theme.selected(),
+        ))
+    } else if app.orch_attention.is_some() {
+        Line::from(Span::styled(
+            format!("{BRAIN}{label}"),
+            app.theme.needs_you(),
         ))
     } else {
         let brain_style = if app.orch_running {
@@ -932,7 +951,7 @@ fn orch_row_line(app: &App, selected: bool) -> Line<'static> {
         Line::from(vec![
             Span::styled(BRAIN.to_string(), brain_style),
             Span::raw("repomind "),
-            Span::styled(format!("· {word}"), app.theme.muted()),
+            Span::styled(format!("· {}", orch_status_word(app)), app.theme.muted()),
         ])
     }
 }
@@ -1069,23 +1088,36 @@ fn orch_summary_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<(usize,
     } else {
         app.theme.needs_you()
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("{BRAIN}REPOMIND · {}", orch_status_word(app)),
-            app.theme.header_style(),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(format!("  {running} running"), app.theme.accented()),
-            Span::styled(" · ".to_string(), app.theme.muted()),
-            Span::styled(format!("{} need you", needs.len()), needs_style),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "NEEDS YOU".to_string(),
-            app.theme.header_style(),
-        )),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        format!("{BRAIN}REPOMIND · {}", orch_status_word(app)),
+        app.theme.header_style(),
+    ))];
+    // repomind is asking the human something: the attention word plus a one-line "why", right
+    // under the header so it's the first thing you see opening the command-center.
+    if let Some(attention) = app.orch_attention.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", attention.replace('_', " ")),
+            app.theme.needs_you(),
+        )));
+        if let Some(headline) = app.orch_headline.as_deref().filter(|h| !h.is_empty()) {
+            let cap = (width as usize).saturating_sub(4).max(8);
+            lines.push(Line::from(Span::styled(
+                format!("  {}", trunc(headline, cap)),
+                app.theme.muted(),
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {running} running"), app.theme.accented()),
+        Span::styled(" · ".to_string(), app.theme.muted()),
+        Span::styled(format!("{} need you", needs.len()), needs_style),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "NEEDS YOU".to_string(),
+        app.theme.header_style(),
+    )));
     let mut hits = Vec::new();
     if needs.is_empty() {
         lines.push(Line::from(Span::styled(

@@ -376,6 +376,14 @@ pub struct App {
     /// The orchestrator's resolved agent (Claude account) and model, for the pinned row's label.
     pub orch_agent: Option<String>,
     pub orch_model: Option<String>,
+    /// repomind's current attention (from `orchestrator.status`'s `attention` field):
+    /// `"permission"`, `"decision"`, or `"end_of_turn"` when it's asking the human something;
+    /// `None` (mapped from the wire's `"none"`) otherwise. Drives the pinned row's needs-you
+    /// styling and the command-center header.
+    pub orch_attention: Option<String>,
+    /// A short "why" for `orch_attention` (the pending dialog's question, or a tail of
+    /// repomind's last message), from `orchestrator.status`'s `headline` field.
+    pub orch_headline: Option<String>,
     /// Last time the orchestrator pane changed; drives the "chatting" vs "idle" pinned-row state.
     pub orch_last_output: Option<Instant>,
     /// INSERT mode in the command-center view: keystrokes forward to `orchestrator.send_input`.
@@ -516,6 +524,8 @@ impl App {
             orch_running: false,
             orch_agent: None,
             orch_model: None,
+            orch_attention: None,
+            orch_headline: None,
             orch_last_output: None,
             orch_insert: false,
             orch_watched: false,
@@ -551,7 +561,12 @@ impl App {
         }
     }
 
-    /// Update the pinned-row state from an `orchestrator.status` shape (`{running, agent, model}`).
+    /// Update the pinned-row/command-center state from an `orchestrator.status` shape
+    /// (`{running, agent, model, window, attention, headline}`). On the none→needs-attention edge —
+    /// repomind just raised a dialog or finished a turn — fires the same native popup an agent's
+    /// NeedsYou gets (mirrors [`fire_notification`](Self::fire_notification)), unless the user is
+    /// already looking at the command-center (its row/header already show it) or notifications are
+    /// off.
     fn apply_orchestrator_status(&mut self, v: &serde_json::Value) {
         self.orch_running = v.get("running").and_then(|b| b.as_bool()).unwrap_or(false);
         self.orch_agent = v
@@ -562,6 +577,32 @@ impl App {
             .get("model")
             .and_then(|m| m.as_str())
             .map(|s| s.to_string());
+        let had_attention = self.orch_attention.is_some();
+        self.orch_attention = v
+            .get("attention")
+            .and_then(|a| a.as_str())
+            .filter(|a| *a != "none")
+            .map(|s| s.to_string());
+        self.orch_headline = v
+            .get("headline")
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string());
+        if !had_attention
+            && self.orch_attention.is_some()
+            && self.view != View::Orchestrator
+            && self.settings.notify_enabled
+            && self.settings.notify_needs_you
+        {
+            let title = "repomind needs you";
+            let body = self.orch_headline.clone().unwrap_or_default();
+            notify::send_native(
+                title,
+                &body,
+                self.settings.notify_sound,
+                self.settings.notify_click_focus,
+            );
+            self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        }
     }
 
     /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick — usage moves
@@ -4977,5 +5018,106 @@ mod tests {
         // A plain 'o' is a literal char for the agent; Ctrl-O would be C-o if forwarded.
         assert_eq!(translate_key(&plain_o), Some(("o".to_string(), true)));
         assert_eq!(translate_key(&ctrl_o), Some(("C-o".to_string(), false)));
+    }
+
+    /// `apply_orchestrator_status` doesn't touch the network — it just needs *a* connected
+    /// `DaemonClient` to build an `App` around (`App::new` has no other constructor). A listener
+    /// that accepts once and goes quiet is enough; no daemon RPC is exercised.
+    async fn app_with_dummy_client() -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+            // Keep the accepted stream alive for the test's duration instead of dropping it
+            // immediately, so the client doesn't see an instant EOF/reconnect churn.
+            std::future::pending::<()>().await;
+        });
+        let client = DaemonClient::connect(&sock).await.expect("connect");
+        App::new(client)
+    }
+
+    #[tokio::test]
+    async fn apply_orchestrator_status_parses_attention_and_headline() {
+        let mut app = app_with_dummy_client().await;
+        // Notifications must not fire real OS popups from a unit test.
+        app.settings.notify_enabled = false;
+
+        app.apply_orchestrator_status(&json!({
+            "running": true,
+            "agent": "claude-work",
+            "model": "opus",
+            "window": "orchestrator",
+            "attention": "permission",
+            "headline": "Do you want to proceed?",
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("permission"));
+        assert_eq!(
+            app.orch_headline.as_deref(),
+            Some("Do you want to proceed?")
+        );
+
+        app.apply_orchestrator_status(&json!({
+            "running": true,
+            "agent": "claude-work",
+            "model": "opus",
+            "window": "orchestrator",
+            "attention": "end_of_turn",
+            "headline": null,
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("end_of_turn"));
+        assert_eq!(app.orch_headline, None);
+
+        // "none" on the wire clears both fields — not `Some("none")`.
+        app.apply_orchestrator_status(&json!({
+            "running": true,
+            "agent": "claude-work",
+            "model": "opus",
+            "window": "orchestrator",
+            "attention": "none",
+            "headline": null,
+        }));
+        assert_eq!(app.orch_attention, None);
+        assert_eq!(app.orch_headline, None);
+
+        // A payload missing the fields entirely (an older daemon) also reads as no attention.
+        app.apply_orchestrator_status(&json!({ "running": false }));
+        assert_eq!(app.orch_attention, None);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_attention_edge_is_suppressed_by_view_and_settings() {
+        // Deliberately never flips both `notify_enabled` and `notify_needs_you` on together here:
+        // that combination reaches `notify::send_native`, which shells out to a real OS
+        // notification on this platform — not something a unit test should trigger. The two gates
+        // are instead verified independently, each suppressing on its own.
+        let mut app = app_with_dummy_client().await;
+
+        // Gate 1: already looking at the command-center — its row/header cover it, so the
+        // none→attention edge must not bank a popup banner even with notifications on.
+        app.settings.notify_enabled = true;
+        app.settings.notify_needs_you = true;
+        app.view = View::Orchestrator;
+        app.apply_orchestrator_status(&json!({
+            "running": true, "attention": "decision", "headline": "pick one"
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("decision"));
+        assert!(
+            app.notif_banner.is_none(),
+            "must not banner while already on the Orchestrator view"
+        );
+
+        // Gate 2: elsewhere in the TUI, but notifications are off — still no banner.
+        app.orch_attention = None; // reset to none so the next call is a real edge
+        app.settings.notify_enabled = false;
+        app.view = View::Fleet;
+        app.apply_orchestrator_status(&json!({
+            "running": true, "attention": "permission", "headline": "proceed?"
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("permission"));
+        assert!(
+            app.notif_banner.is_none(),
+            "must not banner while notifications are disabled"
+        );
     }
 }
