@@ -214,14 +214,58 @@ async fn daemon_spawns_and_drives_an_agent() {
         "captured pane was: {content:?}"
     );
 
+    // Force an overlay computation while the agent is still running, so the daemon's tmux-window
+    // cache (`last_good_windows`) is populated with the live window — the precondition for the
+    // regression checked below (the total-vanish debounce only has something stale to fall back
+    // on once it has seen the window at least once).
+    let lanes = call(&mut stream, 6, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane = lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_i64() == Some(lane_id))
+        .expect("spawned lane");
+    assert!(
+        lane["agent_sessions"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "expected a live agent session before stop: {lane:?}"
+    );
+
     // Stop the agent.
     call(
         &mut stream,
-        6,
+        7,
         "agent.stop",
         Some(json!({ "lane_id": lane_id })),
     )
     .await;
+
+    // Regression check: immediately after `agent.stop` returns — no sleep, no poll — the lane
+    // must report no agent. This is the bug: `agent.stop` kills the tmux window but used to leave
+    // the daemon's window-liveness caches stale, so `resolve_windows`'s `EMPTY_WINDOWS_CONFIRM`
+    // debounce (meant to ride out a *transient* tmux-server bounce) misread our own deliberate
+    // kill as one of those and held the dead window in `last_good_windows` for one more tick —
+    // long enough for an immediately-following read (e.g. `delete_lane`'s impact summary) to see
+    // the just-stopped agent as still live.
+    let lanes = call(&mut stream, 8, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane = lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_i64() == Some(lane_id))
+        .expect("lane still present after stop");
+    assert_eq!(
+        lane["agent_sessions"],
+        json!([]),
+        "agent session should be gone immediately after stop (no polling): {lane:?}"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

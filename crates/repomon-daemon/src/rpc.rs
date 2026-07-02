@@ -1018,11 +1018,15 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
         "agent.stop" => {
             let p: AgentStop = parse(params)?;
-            let tmux = ctx.tmux.clone();
             let lane = p.lane_id;
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            // Kill the window and reconcile the window-liveness caches synchronously (the same
+            // helper the orphan reaper uses), so an immediately-following `lane.get` can never
+            // read this agent back as still live while waiting out `resolve_windows`'s
+            // total-vanish debounce. See `reap::kill_and_forget`.
+            crate::reap::kill_and_forget(ctx, &window).await;
+            let tmux = ctx.tmux.clone();
             let remaining = tokio::task::spawn_blocking(move || {
-                let _ = tmux.kill_named(&window);
                 tmux.windows_for(lane).unwrap_or_default().len()
             })
             .await
@@ -1034,7 +1038,6 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 crate::pubsub::topic::AGENT_STATUS,
                 json!({ "lane_id": p.lane_id, "status": "ended" }),
             );
-            ctx.invalidate_overlay().await;
             Ok(Value::Null)
         }
         "agent.pin" => {
@@ -2816,6 +2819,24 @@ mod tests {
         assert!(last.is_empty());
         // A subsequent successful probe resets the counter.
         resolve_windows(Ok(vec!["lane-9".into()]), &mut last, &mut misses);
+        assert_eq!(misses, 0);
+    }
+
+    #[test]
+    fn resolve_windows_accepts_empty_immediately_once_last_good_is_reconciled() {
+        // This is the effect `reap::kill_and_forget` buys `agent.stop`: proactively dropping the
+        // just-killed window from `last_good` (rather than waiting for the reaper/next probe to
+        // notice on its own) means the very next genuinely-empty probe isn't mistaken for the
+        // total-vanish-debounce case in `resolve_windows_rides_out_a_one_tick_total_vanish`
+        // above — it's accepted at once, so a stopped agent's window can't be read back as still
+        // live for even one extra tick.
+        let mut last: Vec<String> = vec!["lane-1".into()];
+        let mut misses = 0u8;
+        last.retain(|w| w != "lane-1"); // what `kill_and_forget` does synchronously on kill
+        assert_eq!(
+            resolve_windows(Ok(vec![]), &mut last, &mut misses),
+            Vec::<String>::new()
+        );
         assert_eq!(misses, 0);
     }
 
