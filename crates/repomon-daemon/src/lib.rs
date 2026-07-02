@@ -42,14 +42,24 @@ pub struct OverlaySession {
     pub worktree: PathBuf,
 }
 
+/// The dedicated tmux window the repomind orchestrator runs in. Deliberately NOT a `lane-*` name,
+/// so it stays invisible to the lane overlay/reaper and never shows in `lane.list`. Shared by
+/// `rpc` (the RPC dispatch), `notify_watch` (the attention/pane watcher), and this module's own
+/// pane-streaming loop, so a rename can't desync them.
+pub(crate) const ORCHESTRATOR_WINDOW: &str = "orchestrator";
+
 /// The daemon-owned repomind orchestrator: a single `claude` session in a dedicated tmux window
 /// named `orchestrator` (deliberately NOT `lane-*`, so it stays out of the lane overlay/reaper and
 /// never pollutes the fleet `lane.list`). `agent`/`model` record what it was launched with.
+/// `autonomy` is the autonomy level it was started with (`REPOMON_MCP_AUTONOMY`); `None` when the
+/// session was adopted from a tmux window that survived a daemon restart, whose actual autonomy
+/// is unknown to this process.
 #[derive(Clone)]
 pub struct OrchestratorSession {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub window: String,
+    pub autonomy: Option<String>,
 }
 
 /// Everything a request handler needs. Cheap to share via `Arc`.
@@ -465,17 +475,18 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         }
         last_cap = now;
         let tmux = ctx.tmux.clone();
-        let content =
-            match tokio::task::spawn_blocking(move || tmux.capture_named("orchestrator", None))
-                .await
-            {
-                Ok(Ok(c)) => c,
-                _ => continue,
-            };
+        let content = match tokio::task::spawn_blocking(move || {
+            tmux.capture_named(ORCHESTRATOR_WINDOW, None)
+        })
+        .await
+        {
+            Ok(Ok(c)) => c,
+            _ => continue,
+        };
         // Carry repomind's real cursor so the mediated pane draws it where you're typing (mirrors
         // the focused-lane path in `stream_output`). One extra tmux fork on the single pane.
         let tmux = ctx.tmux.clone();
-        let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named("orchestrator"))
+        let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named(ORCHESTRATOR_WINDOW))
             .await
             .ok()
             .flatten();

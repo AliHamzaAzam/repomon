@@ -22,7 +22,7 @@ use repomon_core::notify::{
 };
 use serde_json::json;
 
-use crate::{Ctx, push, rpc};
+use crate::{Ctx, ORCHESTRATOR_WINDOW, push, rpc};
 
 /// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
 /// the overlay, but the overlay's own caches absorb most of the cost: the composite snapshot is
@@ -289,7 +289,7 @@ async fn check_orchestrator_attention(
     } else {
         let tmux = ctx.tmux.clone();
         let pane = tokio::task::spawn_blocking(move || {
-            tmux.capture_named("orchestrator", Some(ORCH_CAPTURE_LINES))
+            tmux.capture_named(ORCHESTRATOR_WINDOW, Some(ORCH_CAPTURE_LINES))
         })
         .await
         .ok()

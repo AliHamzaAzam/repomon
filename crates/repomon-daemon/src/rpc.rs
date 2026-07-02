@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::Ctx;
+use crate::{Ctx, ORCHESTRATOR_WINDOW};
 
 fn internal<E: std::fmt::Display>(e: E) -> RpcError {
     RpcError::internal(e.to_string())
@@ -1389,10 +1389,15 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                         .await
                         .map_err(internal)?;
                 if exists {
+                    // Adopting a window from a previous daemon lifetime: we don't know what
+                    // autonomy it was actually launched with (that lived in the prior process's
+                    // request, not anywhere persisted), so record it as unknown rather than
+                    // asserting the caller's (possibly different) requested value.
                     let session = crate::OrchestratorSession {
                         agent: agent.clone(),
                         model: model.clone(),
                         window: ORCHESTRATOR_WINDOW.to_string(),
+                        autonomy: None,
                     };
                     *ctx.orchestrator.lock().await = Some(session);
                     let orch = ctx.orchestrator.lock().await;
@@ -1425,6 +1430,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 agent,
                 model,
                 window: ORCHESTRATOR_WINDOW.to_string(),
+                autonomy: Some(p.autonomy),
             };
             *ctx.orchestrator.lock().await = Some(session);
             let orch = ctx.orchestrator.lock().await;
@@ -2534,13 +2540,11 @@ async fn commits_in_range(
     Ok(out)
 }
 
-/// The dedicated tmux window the repomind orchestrator runs in. Deliberately NOT a `lane-*` name,
-/// so it stays invisible to the lane overlay/reaper and never shows in `lane.list`.
-const ORCHESTRATOR_WINDOW: &str = "orchestrator";
-
-/// The `{running, agent, model, window, attention, headline}` status JSON for the orchestrator
-/// (shared by `orchestrator.status` and the `event.orchestrator.status` broadcast). `attention` is
-/// one of `"none"`, `"permission"`, `"decision"`, `"end_of_turn"` — see
+/// The `{running, agent, model, window, autonomy, attention, headline}` status JSON for the
+/// orchestrator (shared by `orchestrator.status` and the `event.orchestrator.status` broadcast).
+/// `autonomy` is the level the session was started with, or `null` if it was adopted from a
+/// surviving tmux window and is therefore unknown. `attention` is one of `"none"`,
+/// `"permission"`, `"decision"`, `"end_of_turn"` — see
 /// [`notify_watch::check_orchestrator_attention`](crate::notify_watch); `headline` is a short
 /// "why" (the pending dialog's question, or a tail of repomind's last message) or `null`.
 pub(crate) fn orchestrator_status_value(
@@ -2554,6 +2558,7 @@ pub(crate) fn orchestrator_status_value(
             "agent": s.agent,
             "model": s.model,
             "window": s.window,
+            "autonomy": s.autonomy,
             "attention": attention,
             "headline": headline,
         }),
@@ -2562,6 +2567,7 @@ pub(crate) fn orchestrator_status_value(
             "agent": Value::Null,
             "model": Value::Null,
             "window": Value::Null,
+            "autonomy": Value::Null,
             "attention": attention,
             "headline": headline,
         }),
@@ -2972,18 +2978,30 @@ mod tests {
             agent: Some("claude-work".into()),
             model: Some("opus".into()),
             window: "orchestrator".into(),
+            autonomy: Some("autonomous".into()),
         };
         let v = orchestrator_status_value(Some(&s), "decision", Some("Which auth method?"));
         assert_eq!(v["running"], json!(true));
         assert_eq!(v["agent"], json!("claude-work"));
         assert_eq!(v["model"], json!("opus"));
         assert_eq!(v["window"], json!("orchestrator"));
+        assert_eq!(v["autonomy"], json!("autonomous"));
         assert_eq!(v["attention"], json!("decision"));
         assert_eq!(v["headline"], json!("Which auth method?"));
+        // An adopted session's autonomy is unknown.
+        let adopted = crate::OrchestratorSession {
+            agent: None,
+            model: None,
+            window: "orchestrator".into(),
+            autonomy: None,
+        };
+        let v = orchestrator_status_value(Some(&adopted), "none", None);
+        assert_eq!(v["autonomy"], Value::Null);
         // No session: running=false with null fields; attention/headline still pass through.
         let v = orchestrator_status_value(None, "none", None);
         assert_eq!(v["running"], json!(false));
         assert_eq!(v["agent"], Value::Null);
+        assert_eq!(v["autonomy"], Value::Null);
         assert_eq!(v["attention"], json!("none"));
         assert_eq!(v["headline"], Value::Null);
     }

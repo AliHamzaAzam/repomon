@@ -300,10 +300,33 @@ async fn handle_orchestrate(
     model: Option<String>,
     prompt: Option<String>,
 ) -> Result<()> {
-    eprintln!("repomind: orchestrating the fleet (autonomy: {autonomy}). Talk to it below.\n");
-
     // Make sure a daemon is running, then drive it (it owns the orchestrator window).
     let client = crate::ensure_daemon(config, socket).await?;
+
+    // `orchestrator.start` below is idempotent — a no-op if a session is already running (e.g.
+    // the TUI auto-started repomind at its own default autonomy when the command-center opened).
+    // Check first so we never assert an autonomy that isn't actually in force: only print the
+    // "starting at {autonomy}" banner when this call is the one that actually launches it.
+    let status = client
+        .call("orchestrator.status", None)
+        .await
+        .map_err(|e| anyhow!("failed to query the orchestrator: {e}"))?;
+    let already_running = status
+        .get("running")
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false);
+    if already_running {
+        let actual = status
+            .get("autonomy")
+            .and_then(|a| a.as_str())
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown (adopted session)".to_string());
+        eprintln!(
+            "repomind is already running (autonomy: {actual}) — attaching. Stop it first (orchestrator.stop / TUI) to relaunch with different settings.\n"
+        );
+    } else {
+        eprintln!("repomind: orchestrating the fleet (autonomy: {autonomy}). Talk to it below.\n");
+    }
 
     // Start (or adopt) the orchestrator session. Idempotent: a no-op if one is already running.
     let mut start = serde_json::Map::new();

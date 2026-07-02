@@ -1077,13 +1077,16 @@ fn tool_catalog() -> Vec<ToolDef> {
         ToolDef {
             name: "lane_diff",
             description: "See what a lane actually produced: commits ahead of the repo's base \
-                branch (with diffstat), plus uncommitted changes. Use to verify a worker's claim \
-                of 'done' before merge_lane, or to check for work worth keeping before \
-                stop_agent/delete_lane. Set include_patch for the actual (capped) diff text.",
+                branch (with diffstat, via commits/committed_stat), plus uncommitted changes \
+                (uncommitted_stat). Use to verify a worker's claim of 'done' before merge_lane, \
+                or to check for work worth keeping before stop_agent/delete_lane. Set \
+                include_patch for the actual diff text, capped — but that patch covers \
+                uncommitted changes only ('git diff HEAD'); committed work is visible via \
+                commits/committed_stat, not in the patch text.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane to inspect." },
-                    "include_patch": { "type": "boolean", "description": "Include the actual diff text, capped at max_patch_chars (default false)." },
+                    "include_patch": { "type": "boolean", "description": "Include the diff text for uncommitted changes only ('git diff HEAD'), capped at max_patch_chars (default false). Committed work is NOT in this text — see commits/committed_stat." },
                     "max_patch_chars": { "type": "integer", "description": "Cap on the patch text in characters, up to 20000 (default 8000)." }
                 }),
                 &["lane_id"],

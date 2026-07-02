@@ -304,6 +304,7 @@ mod tests {
             "lane.delete",
             "lane.merge",
             "lane.focus",
+            "lane.diff",
             "config.get",
             "config.set",
             "terminal.open",
