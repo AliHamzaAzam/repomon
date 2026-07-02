@@ -85,11 +85,12 @@ repomon earns its keep once you're running agents across **several** projects at
 
 A background daemon (`repomond`) owns SQLite, file watchers, the git layer, and the
 tmux-backed agent runtime, exposing a JSON-RPC API over a Unix socket. The TUI (`repomon`)
-is a thin client. Three crates:
+is a thin client. Four crates:
 
 - `repomon-core`: data model, gix git layer, SQLite store, watchers, agent runtime.
 - `repomon-daemon`: the `repomond` socket server and background services.
 - `repomon-tui`: the `repomon` terminal UI.
+- `repomon-mcp`: repomind's MCP server (`repomond mcp`), exposing the fleet to an orchestrator agent over stdio.
 
 ## Install
 
@@ -150,6 +151,39 @@ force in-process always, or manage the daemon with
 > **Building from source?** After a rebuild, run `repomon daemon restart` so the new code is
 > served (the daemon outlives the UI). The dev build runs from `./target/debug/repomon`.
 
+## repomind — fleet orchestrator
+
+repomind is an orchestrator agent for the fleet: a `claude` session wired to repomon's own
+MCP server, so it can read every lane's status and act on your behalf — spawn workers, answer
+their permission prompts, and merge finished work — while you supervise or check in only when
+it needs you.
+
+```sh
+repomon orchestrate [--autonomy read-only|supervised|autonomous] [--max-agents N] [--model m] [prompt]
+```
+
+This makes sure the daemon is up, starts (or reuses) the single daemon-owned `orchestrator`
+tmux window running `claude`, and attaches you to it. `prompt` is an optional initial goal.
+
+**TUI command-center** (`O` key, or `6`): a pinned fleet row plus a dashboard for repomind,
+reachable like any other zoom level. The row and header escalate the moment repomind needs
+you — a permission/decision dialog, or an end-of-turn wait — and fire a "repomind needs you"
+desktop notification when the TUI isn't already looking at it. Press `i` to type straight to
+repomind without leaving the view (mediated `send-keys`); `↵`/`→` attaches to its real tmux
+pane instead.
+
+**Guardrails.** By product decision, `--autonomy` defaults to `autonomous` — repomind may
+create, merge, and delete lanes and run a goal end-to-end without asking first — bounded by a
+few hard caps enforced server-side (not just requested in the prompt): a per-session action
+cap (100 actions by default), a concurrent-agent cap (`--max-agents`, default 4), a 15s dedupe
+on sending the same text to the same lane twice in a row, and a two-phase human-confirmation
+flow for lane deletion (the first call only returns an impact summary and a token; the delete
+only happens once that token comes back). Pass `--autonomy supervised` to have it propose lane
+creation for you to confirm instead, or `--autonomy read-only` to keep it to observing.
+
+Before merging a lane's work, repomind is expected to verify it: `lane_diff` (commits ahead of
+base with diffstat, plus uncommitted changes) before `merge_lane` lands them.
+
 ## Shell integration (cd-on-exit)
 
 Pressing `c` on a lane exits repomon and changes your shell into that worktree. repomon
@@ -196,10 +230,11 @@ Manage it with `repomon remote status` (shows the bind and a masked token),
 The fleet view (lanes/today), the agent multiplexer (spawn, live output, input, attach,
 babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/search),
 per-session notifications (pane-sniffed permission-dialog detection, fired as desktop popups
-even when the TUI is closed or parked full-screen in an agent), and the remote access layer
-(WebSocket bridge + APNs + pairing) are all in. The iOS companion app is built and ships once
-an Apple Developer account is in place. Deferred: an embedded PTY renderer (vs the tmux pivot),
-a web dashboard, and Windows support.
+even when the TUI is closed or parked full-screen in an agent), the remote access layer
+(WebSocket bridge + APNs + pairing), and repomind (the MCP-driven fleet orchestrator —
+`repomon orchestrate` and the TUI command-center) are all in. The iOS companion app is built
+and ships once an Apple Developer account is in place. Deferred: an embedded PTY renderer (vs
+the tmux pivot), a web dashboard, and Windows support.
 
 ---
 

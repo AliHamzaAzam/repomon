@@ -1015,8 +1015,9 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
         .map(|_| Line::from(Span::styled(theme::VLIGHT.to_string(), app.theme.muted())))
         .collect();
     f.render_widget(Paragraph::new(divider), body[1]);
-    // Record the pane size (the daemon has no orchestrator.resize yet, so this is informational;
-    // sync_pane_size only resizes Split/Focus lane windows) and the rect for mouse focus/attach.
+    // Record the pane size and the rect for mouse focus/attach. The event loop's
+    // sync_orchestrator_size reads focus_pane_dims each tick and calls orchestrator.resize so
+    // the daemon reflows repomind's tmux window to fit (mirrors sync_pane_size for lane windows).
     app.focus_pane_dims
         .set(Some((body[2].width, body[2].height)));
     app.orch_pane_zone.set(Some(body[2]));
