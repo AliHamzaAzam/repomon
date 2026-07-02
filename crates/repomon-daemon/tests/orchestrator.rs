@@ -77,8 +77,9 @@ async fn orchestrator_adopts_a_surviving_window() {
     // `claude` — this is a dev machine running Claude Code, so `claude` is almost certainly on
     // PATH, and we do NOT want a test to launch a real autonomous session wired to the fleet MCP
     // tools. `build_orchestrator_command` always appends `--mcp-config ... --append-system-prompt
-    // ... --allowedTools ...`; `true` ignores all arguments and exits 0, so it exercises the real
-    // `orchestrator_base_command`/`build_orchestrator_command`/`tmux.spawn_named` path safely.
+    // ... --allowedTools ... --session-id ...`; `true` ignores all arguments and exits 0, so it
+    // exercises the real `orchestrator_base_command`/`build_orchestrator_command`/
+    // `tmux.spawn_named` path safely.
     {
         let mut cfg = ctx.config.write().await;
         cfg.agents.insert("noop".to_string(), "true".to_string());
@@ -109,6 +110,17 @@ async fn orchestrator_adopts_a_surviving_window() {
     let status = r.result.unwrap();
     assert_eq!(status["running"], json!(true), "status: {status}");
     assert_eq!(status["autonomy"], json!("supervised"), "status: {status}");
+    // A genuine spawn always mints and pins a `--session-id`, appended to `true`'s command line
+    // (which — deliberately — ignores it, exiting 0 regardless); the daemon still records it so
+    // the transcript picker can pin to this exact session instead of guessing by recency.
+    let session_id = status["session_id"]
+        .as_str()
+        .expect("genuine spawn must record a non-null session_id");
+    assert_eq!(
+        session_id.len(),
+        36,
+        "session_id must be UUID-shaped: {session_id}"
+    );
 
     // Tear it down so the adopt scenario below starts from a clean slate.
     let r = call(&mut stream, 3, "orchestrator.stop", None).await;
@@ -148,6 +160,11 @@ async fn orchestrator_adopts_a_surviving_window() {
     assert!(
         status["autonomy"].is_null(),
         "adopted session's autonomy should be unknown: {status}"
+    );
+    assert!(
+        status["session_id"].is_null(),
+        "adopted session's session_id should be unknown (this process never captured the prior \
+         process's --session-id): {status}"
     );
     let windows = ctx.tmux.list_windows().unwrap();
     let orchestrator_windows = windows.iter().filter(|w| *w == "orchestrator").count();

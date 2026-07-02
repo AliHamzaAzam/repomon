@@ -610,6 +610,34 @@ pub fn config_base_for_session(cwd: &Path, session_id: &str) -> Option<Option<Pa
     None
 }
 
+/// Locate one specific Claude session's transcript by id — the direct-lookup counterpart to
+/// [`summaries_for`]'s "newest with content" scan. A caller that already knows exactly which
+/// session it wants (e.g. the repomind orchestrator, whose `claude` was launched with
+/// `--session-id <id>`) can look the file up straight off its known path
+/// (`<config-base>/projects/<encoded-cwd>/<session-id>.jsonl`) instead of scanning and ranking by
+/// recency — so it is never misattributed to some *other* active Claude session on the machine,
+/// however much more recently that one happened to touch its own transcript.
+pub fn transcript_for_session(cwd: &Path, session_id: &str) -> Option<TranscriptSummary> {
+    let encoded = encode_project_dir(cwd);
+    let file = format!("{session_id}.jsonl");
+
+    // Test override: a single projects dir, treated as the default account (mirrors `summary_for`).
+    if let Ok(p) = std::env::var("REPOMON_CLAUDE_PROJECTS") {
+        let path = PathBuf::from(p).join(&encoded).join(&file);
+        return parse_transcript(&path);
+    }
+
+    let default = default_config_base();
+    for base in config_bases() {
+        let path = base.join("projects").join(&encoded).join(&file);
+        if let Some(mut s) = parse_transcript(&path) {
+            s.config_dir = (base != default).then_some(base);
+            return Some(s);
+        }
+    }
+    None
+}
+
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
@@ -960,6 +988,34 @@ mod tests {
         // The cap is honored, and the single-session helper still works.
         assert_eq!(capped.len(), 2);
         assert!(single.is_some());
+    }
+
+    #[test]
+    fn transcript_for_session_finds_its_file_regardless_of_recency() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/code/pinned");
+        let dir = root.path().join(encode_project_dir(cwd));
+        let line = r#"{"type":"user","cwd":"/code/pinned","message":{"content":"hi"}}"#;
+        // Write the "pinned" session first (older mtime), then an unrelated one that touches its
+        // transcript later (newer mtime) — the scenario that misattributes under a
+        // newest-transcript heuristic but must not under a direct id lookup.
+        write_transcript(&dir, "pinned-session-id.jsonl", &[line]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_transcript(&dir, "unrelated-newer.jsonl", &[line]);
+
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path()) };
+        let found = transcript_for_session(cwd, "pinned-session-id");
+        let missing = transcript_for_session(cwd, "no-such-session");
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::remove_var("REPOMON_CLAUDE_PROJECTS") };
+
+        let found = found.expect("the pinned session's transcript is found by id");
+        assert_eq!(found.session_id.as_deref(), Some("pinned-session-id"));
+        assert!(
+            missing.is_none(),
+            "an id with no matching file must not fall back to some other transcript"
+        );
     }
 
     #[test]

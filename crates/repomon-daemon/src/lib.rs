@@ -60,6 +60,15 @@ pub struct OrchestratorSession {
     pub model: Option<String>,
     pub window: String,
     pub autonomy: Option<String>,
+    /// The `--session-id` UUID this session's `claude` was launched with (minted at spawn time —
+    /// see `rpc::mint_session_id`), so the transcript picker
+    /// (`rpc::pick_orchestrator_transcript`) can pin `orchestrator.transcript` and the end-of-turn
+    /// attention check to *this* session's own transcript file instead of guessing "the newest
+    /// $HOME transcript" — a guess that misattributes any other active Claude session on the
+    /// machine as repomind's. `None` — same "unknown" semantics as `autonomy` — when the session
+    /// was adopted from a tmux window that survived a daemon restart: this process never captured
+    /// the prior one's session id, so the picker falls back to the old recency heuristic.
+    pub session_id: Option<String>,
 }
 
 /// Everything a request handler needs. Cheap to share via `Arc`.

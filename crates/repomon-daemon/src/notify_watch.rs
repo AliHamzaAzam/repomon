@@ -287,6 +287,16 @@ async fn check_orchestrator_attention(
         *transcript_cache = None; // no session: drop any stale cached transcript status
         ("none", None)
     } else {
+        // Pin the transcript scan to the orchestrator's own session id (captured at spawn via
+        // `--session-id`) — the `ctx.orchestrator` state `reconcile_orchestrator` just confirmed
+        // is alive — so it never picks up some other active Claude session's transcript. See
+        // `rpc::pick_orchestrator_transcript`.
+        let session_id = ctx
+            .orchestrator
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|o| o.session_id.clone());
         let tmux = ctx.tmux.clone();
         let pane = tokio::task::spawn_blocking(move || {
             tmux.capture_named(ORCHESTRATOR_WINDOW, Some(ORCH_CAPTURE_LINES))
@@ -300,11 +310,13 @@ async fn check_orchestrator_attention(
 
         *scan_transcript = !*scan_transcript;
         if dialog.is_none() && *scan_transcript {
-            *transcript_cache = tokio::task::spawn_blocking(rpc::pick_orchestrator_transcript)
-                .await
-                .ok()
-                .flatten()
-                .map(|s| (s.status, s.last_message));
+            *transcript_cache = tokio::task::spawn_blocking(move || {
+                rpc::pick_orchestrator_transcript(session_id.as_deref())
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|s| (s.status, s.last_message));
         }
         derive_attention(dialog.as_deref(), transcript_cache.clone())
     };

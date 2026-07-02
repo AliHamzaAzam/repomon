@@ -1334,26 +1334,27 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             ))
         }
         // Repomind's conversation as structured TranscriptItems, so a client (the iOS app) can render
-        // it as a chat instead of mirroring the raw pane. The orchestrator is the actively-used Claude
-        // session in $HOME; pick the newest $HOME transcript with real content across accounts. The
-        // tracked `agent` can be stale after a restart+adopt (it reflects config, not the running
-        // window's actual CLAUDE_CONFIG_DIR), and the ~empty usage-probe sessions also run in $HOME,
-        // so neither the account nor plain recency is a reliable selector on its own.
+        // it as a chat instead of mirroring the raw pane. Pinned to the orchestrator's own
+        // `session_id` when known (captured at spawn via `--session-id`); an adopted session (whose
+        // id this process never captured) falls back to the newest $HOME transcript with real
+        // content across accounts — see `pick_orchestrator_transcript_in`.
         "orchestrator.transcript" => {
             let p: OrchestratorTranscript = parse(params)?;
             reconcile_orchestrator(ctx).await;
-            if ctx.orchestrator.lock().await.is_none() {
-                Ok(json!([]))
-            } else {
-                let items = tokio::task::spawn_blocking(move || {
-                    pick_orchestrator_transcript()
-                        .map(|s| agent::claude::transcript_tail(&s.manifest_path, p.limit))
-                        .unwrap_or_default()
-                })
-                .await
-                .unwrap_or_default();
-                to_value(items)
-            }
+            let orch = ctx.orchestrator.lock().await;
+            let Some(session) = orch.as_ref() else {
+                return Ok(json!([]));
+            };
+            let session_id = session.session_id.clone();
+            drop(orch);
+            let items = tokio::task::spawn_blocking(move || {
+                pick_orchestrator_transcript(session_id.as_deref())
+                    .map(|s| agent::claude::transcript_tail(&s.manifest_path, p.limit))
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            to_value(items)
         }
         "orchestrator.start" => {
             let p: OrchestratorStart = parse(params)?;
@@ -1393,14 +1394,16 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                         .map_err(internal)?;
                 if exists {
                     // Adopting a window from a previous daemon lifetime: we don't know what
-                    // autonomy it was actually launched with (that lived in the prior process's
-                    // request, not anywhere persisted), so record it as unknown rather than
-                    // asserting the caller's (possibly different) requested value.
+                    // autonomy — or session id — it was actually launched with (that lived in the
+                    // prior process's memory, not anywhere persisted), so record both as unknown
+                    // rather than asserting the caller's (possibly different) requested value or a
+                    // freshly-minted id that isn't actually this window's.
                     let session = crate::OrchestratorSession {
                         agent: agent.clone(),
                         model: model.clone(),
                         window: ORCHESTRATOR_WINDOW.to_string(),
                         autonomy: None,
+                        session_id: None,
                     };
                     *ctx.orchestrator.lock().await = Some(session);
                     let orch = ctx.orchestrator.lock().await;
@@ -1417,7 +1420,11 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let mcp_path = write_orchestrator_mcp_config(&socket, &p.autonomy, p.max_agents)
                 .map_err(internal)?;
             let base = orchestrator_base_command(&agent, &customs);
-            let command = build_orchestrator_command(&base, &mcp_path, &model, &p.prompt);
+            // Minted fresh for this genuine spawn (never for adopt — see above) so the transcript
+            // picker can pin `orchestrator.transcript`/the end-of-turn check to this exact session.
+            let session_id = mint_session_id();
+            let command =
+                build_orchestrator_command(&base, &mcp_path, &model, &p.prompt, &session_id);
             // cwd = $HOME, so repomind starts from the user's home rather than the daemon's cwd.
             let home = std::env::var("HOME")
                 .map(PathBuf::from)
@@ -1434,6 +1441,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 model,
                 window: ORCHESTRATOR_WINDOW.to_string(),
                 autonomy: Some(p.autonomy),
+                session_id: Some(session_id),
             };
             *ctx.orchestrator.lock().await = Some(session);
             let orch = ctx.orchestrator.lock().await;
@@ -2543,13 +2551,15 @@ async fn commits_in_range(
     Ok(out)
 }
 
-/// The `{running, agent, model, window, autonomy, attention, headline}` status JSON for the
-/// orchestrator (shared by `orchestrator.status` and the `event.orchestrator.status` broadcast).
-/// `autonomy` is the level the session was started with, or `null` if it was adopted from a
-/// surviving tmux window and is therefore unknown. `attention` is one of `"none"`,
-/// `"permission"`, `"decision"`, `"end_of_turn"` — see
-/// [`notify_watch::check_orchestrator_attention`](crate::notify_watch); `headline` is a short
-/// "why" (the pending dialog's question, or a tail of repomind's last message) or `null`.
+/// The `{running, agent, model, window, autonomy, session_id, attention, headline}` status JSON
+/// for the orchestrator (shared by `orchestrator.status` and the `event.orchestrator.status`
+/// broadcast). `autonomy` is the level the session was started with, or `null` if it was adopted
+/// from a surviving tmux window and is therefore unknown. `session_id` is the `--session-id` UUID
+/// it was launched with (see `mint_session_id`) — same "unknown → null" semantics as `autonomy`
+/// for an adopted window. `attention` is one of `"none"`, `"permission"`, `"decision"`,
+/// `"end_of_turn"` — see [`notify_watch::check_orchestrator_attention`](crate::notify_watch);
+/// `headline` is a short "why" (the pending dialog's question, or a tail of repomind's last
+/// message) or `null`.
 pub(crate) fn orchestrator_status_value(
     orch: Option<&crate::OrchestratorSession>,
     attention: &str,
@@ -2562,6 +2572,7 @@ pub(crate) fn orchestrator_status_value(
             "model": s.model,
             "window": s.window,
             "autonomy": s.autonomy,
+            "session_id": s.session_id,
             "attention": attention,
             "headline": headline,
         }),
@@ -2571,6 +2582,7 @@ pub(crate) fn orchestrator_status_value(
             "model": Value::Null,
             "window": Value::Null,
             "autonomy": Value::Null,
+            "session_id": Value::Null,
             "attention": attention,
             "headline": headline,
         }),
@@ -2580,7 +2592,8 @@ pub(crate) fn orchestrator_status_value(
 /// Pick the orchestrator's active transcript out of an already-scanned, newest-first session list:
 /// the newest with real message/tool activity (skips the content-less usage-probe sessions),
 /// falling back to the newest overall. Pure — split out of [`pick_orchestrator_transcript`] so the
-/// selection rule itself is unit-testable without touching the filesystem.
+/// selection rule itself is unit-testable without touching the filesystem. Used only as the
+/// unknown-session-id fallback (an adopted window) — see [`pick_orchestrator_transcript_in`].
 fn pick_orchestrator_transcript_from(
     mut summaries: Vec<agent::TranscriptSummary>,
 ) -> Option<agent::TranscriptSummary> {
@@ -2594,18 +2607,39 @@ fn pick_orchestrator_transcript_from(
     Some(summaries.swap_remove(idx))
 }
 
-/// The orchestrator's chosen transcript: the newest `$HOME` Claude session with real content
-/// across accounts, falling back to the newest overall (see
-/// [`pick_orchestrator_transcript_from`]). Shared by `orchestrator.transcript` (the iOS chat view)
-/// and the notify-watch end-of-turn attention check — the tracked `agent` can be stale after a
-/// restart+adopt (it reflects config, not the running window's actual `CLAUDE_CONFIG_DIR`), and the
-/// ~empty usage-probe sessions also run in `$HOME`, so neither the account nor plain recency is a
-/// reliable selector on its own. Blocking (scans `$HOME`) — call from `spawn_blocking`.
-pub(crate) fn pick_orchestrator_transcript() -> Option<agent::TranscriptSummary> {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+/// The orchestrator's chosen transcript, given its own `session_id` (if known) and its `$HOME`.
+/// `Some(id)`: a direct lookup of *that* session's transcript file
+/// ([`agent::claude::transcript_for_session`]) — pinned regardless of what else is running on the
+/// machine, so another active Claude session can never be misattributed as repomind's, however
+/// much more recently it touched its own transcript. `None` (a window adopted from a prior daemon
+/// lifetime whose session id this process never captured): falls back to the previous "newest
+/// $HOME session with content across accounts" heuristic (see
+/// [`pick_orchestrator_transcript_from`]) — the tracked `agent` can be stale after a restart+adopt
+/// (it reflects config, not the running window's actual `CLAUDE_CONFIG_DIR`), and the ~empty
+/// usage-probe sessions also run in `$HOME`, so neither the account nor plain recency is a
+/// reliable selector on its own there. Split out from [`pick_orchestrator_transcript`] so tests can
+/// drive it against a fixture `home` without mutating the process-global `HOME` env var.
+fn pick_orchestrator_transcript_in(
+    home: &Path,
+    session_id: Option<&str>,
+) -> Option<agent::TranscriptSummary> {
+    if let Some(id) = session_id {
+        return agent::claude::transcript_for_session(home, id);
+    }
     let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
-    let summaries = agent::claude::summaries_for(&home, within, MAX_SESSIONS_PER_LANE);
+    let summaries = agent::claude::summaries_for(home, within, MAX_SESSIONS_PER_LANE);
     pick_orchestrator_transcript_from(summaries)
+}
+
+/// The orchestrator's chosen transcript for the real `$HOME` — see
+/// [`pick_orchestrator_transcript_in`] for the selection rule. Shared by `orchestrator.transcript`
+/// (the iOS chat view) and the notify-watch end-of-turn attention check. Blocking (reads/scans
+/// `$HOME`) — call from `spawn_blocking`.
+pub(crate) fn pick_orchestrator_transcript(
+    session_id: Option<&str>,
+) -> Option<agent::TranscriptSummary> {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    pick_orchestrator_transcript_in(&home, session_id)
 }
 
 /// Drop a stale orchestrator session: if we think one is running but its tmux window is gone (killed
@@ -2659,11 +2693,15 @@ fn orchestrator_base_command(agent: &Option<String>, customs: &HashMap<String, S
 /// the window command through a shell). `--mcp-config` *adds* the repomon fleet server; the user's
 /// own basic-memory (mnemind) server still loads from their Claude config, so we don't redeclare
 /// it. The fleet + memory tools are pre-approved so routine orchestration doesn't prompt.
+/// `session_id` pins the launched session's id (`--session-id <uuid>`, verified against `claude
+/// --help` to exist) so the transcript picker can find *this* session's transcript directly
+/// instead of guessing by recency — see [`pick_orchestrator_transcript_in`].
 fn build_orchestrator_command(
     base: &str,
     mcp_config_path: &Path,
     model: &Option<String>,
     prompt: &Option<String>,
+    session_id: &str,
 ) -> String {
     let mut command = base.to_string();
     command.push_str(" --mcp-config ");
@@ -2671,6 +2709,8 @@ fn build_orchestrator_command(
     command.push_str(" --append-system-prompt ");
     command.push_str(&shell_quote(repomon_mcp::PERSONA));
     command.push_str(" --allowedTools mcp__repomon,mcp__basic-memory");
+    command.push_str(" --session-id ");
+    command.push_str(&shell_quote(session_id));
     if let Some(model) = model {
         command.push_str(" --model ");
         command.push_str(&shell_quote(model));
@@ -2680,6 +2720,44 @@ fn build_orchestrator_command(
         command.push_str(&shell_quote(prompt));
     }
     command
+}
+
+/// Mint a fresh v4-shaped UUID for `--session-id`, without pulling in the `uuid` crate (no crate
+/// in this workspace depends on it — see `Cargo.lock`). Mirrors the entropy pattern
+/// `repomon_mcp::policy`'s `mint_confirm`/`random_token` use for its confirmation tokens: this
+/// doesn't need to be cryptographically random, only fresh and correctly shaped — `claude
+/// --session-id` merely needs a valid, presumably-unused UUID to key the orchestrator's own
+/// transcript by.
+fn mint_session_id() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    // Two independent hasher draws give the 128 bits a UUID needs; each seeds from a fresh
+    // per-process `RandomState` plus the nanos/counter so two calls in the same nanosecond still
+    // diverge.
+    let mut h1 = RandomState::new().build_hasher();
+    h1.write_u64(nanos ^ counter);
+    let a = h1.finish();
+    let mut h2 = RandomState::new().build_hasher();
+    h2.write_u64(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ nanos.rotate_left(17));
+    let b = h2.finish();
+
+    // Force the version (4) and variant (RFC 4122, `10xx`) nibbles so this always parses as a
+    // well-formed UUID even though it isn't cryptographically random.
+    let time_low = (a >> 32) as u32;
+    let time_mid = (a >> 16) as u16;
+    let time_hi_and_version = ((a as u16) & 0x0FFF) | 0x4000;
+    let clock_seq = (((b >> 48) as u16) & 0x3FFF) | 0x8000;
+    let node = b & 0xFFFF_FFFF_FFFF;
+    format!("{time_low:08x}-{time_mid:04x}-{time_hi_and_version:04x}-{clock_seq:04x}-{node:012x}")
 }
 
 /// Write the orchestrator's `--mcp-config` file (registering the `repomon` stdio server pointed at
@@ -2965,14 +3043,17 @@ mod tests {
     #[test]
     fn orchestrator_command_wires_mcp_persona_and_tools() {
         let path = PathBuf::from("/tmp/repomind-mcp.json");
+        let sid = "11111111-1111-4111-8111-111111111111";
         // No model, no prompt: the core wiring is always present.
-        let cmd = build_orchestrator_command("claude", &path, &None, &None);
+        let cmd = build_orchestrator_command("claude", &path, &None, &None, sid);
         assert!(cmd.starts_with("claude --mcp-config "));
         assert!(cmd.contains("/tmp/repomind-mcp.json"));
         assert!(cmd.contains("--append-system-prompt"));
         assert!(cmd.contains("--allowedTools mcp__repomon,mcp__basic-memory"));
         // The persona is appended (a recognizable line from it survives the quoting).
         assert!(cmd.contains("repomind"));
+        // The session id is always pinned.
+        assert!(cmd.contains(&format!("--session-id '{sid}'")));
         // No model flag when none is requested.
         assert!(!cmd.contains("--model"));
 
@@ -2982,14 +3063,57 @@ mod tests {
             &path,
             &Some("opus".into()),
             &Some("what needs me?".into()),
+            sid,
         );
         assert!(cmd.starts_with("CLAUDE_CONFIG_DIR=/h/.claude-work claude "));
         assert!(cmd.contains("--model 'opus'"));
         assert!(cmd.contains("'what needs me?'"));
+        assert!(cmd.contains(&format!("--session-id '{sid}'")));
 
         // An empty prompt is dropped (not quoted as an empty arg).
-        let cmd = build_orchestrator_command("claude", &path, &None, &Some(String::new()));
+        let cmd = build_orchestrator_command("claude", &path, &None, &Some(String::new()), sid);
         assert!(!cmd.trim_end().ends_with("''"));
+    }
+
+    #[test]
+    fn mint_session_id_is_a_well_formed_v4_uuid() {
+        // `claude --session-id` rejects anything that isn't a valid UUID (verified live against
+        // `claude --help`, which documents the flag) — so the minted id must always parse as one:
+        // 8-4-4-4-12 hex groups, version nibble `4`, variant nibble in `8..=b`. Two draws must
+        // also differ (a repeated id would collide with a still-live session's transcript file).
+        let a = mint_session_id();
+        let b = mint_session_id();
+        assert_ne!(a, b, "two mints must not collide");
+        for id in [&a, &b] {
+            let parts: Vec<&str> = id.split('-').collect();
+            assert_eq!(parts.len(), 5, "not 5 hyphen groups: {id}");
+            assert_eq!(
+                [
+                    parts[0].len(),
+                    parts[1].len(),
+                    parts[2].len(),
+                    parts[3].len(),
+                    parts[4].len()
+                ],
+                [8, 4, 4, 4, 12],
+                "wrong group lengths: {id}"
+            );
+            assert!(
+                parts
+                    .iter()
+                    .all(|p| p.chars().all(|c| c.is_ascii_hexdigit())),
+                "non-hex digit: {id}"
+            );
+            assert_eq!(
+                parts[2].chars().next(),
+                Some('4'),
+                "version nibble must be 4: {id}"
+            );
+            assert!(
+                matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+                "variant nibble must be 8..=b: {id}"
+            );
+        }
     }
 
     #[test]
@@ -3000,6 +3124,7 @@ mod tests {
             model: Some("opus".into()),
             window: "orchestrator".into(),
             autonomy: Some("autonomous".into()),
+            session_id: Some("11111111-1111-4111-8111-111111111111".into()),
         };
         let v = orchestrator_status_value(Some(&s), "decision", Some("Which auth method?"));
         assert_eq!(v["running"], json!(true));
@@ -3007,22 +3132,29 @@ mod tests {
         assert_eq!(v["model"], json!("opus"));
         assert_eq!(v["window"], json!("orchestrator"));
         assert_eq!(v["autonomy"], json!("autonomous"));
+        assert_eq!(
+            v["session_id"],
+            json!("11111111-1111-4111-8111-111111111111")
+        );
         assert_eq!(v["attention"], json!("decision"));
         assert_eq!(v["headline"], json!("Which auth method?"));
-        // An adopted session's autonomy is unknown.
+        // An adopted session's autonomy AND session id are both unknown.
         let adopted = crate::OrchestratorSession {
             agent: None,
             model: None,
             window: "orchestrator".into(),
             autonomy: None,
+            session_id: None,
         };
         let v = orchestrator_status_value(Some(&adopted), "none", None);
         assert_eq!(v["autonomy"], Value::Null);
+        assert_eq!(v["session_id"], Value::Null);
         // No session: running=false with null fields; attention/headline still pass through.
         let v = orchestrator_status_value(None, "none", None);
         assert_eq!(v["running"], json!(false));
         assert_eq!(v["agent"], Value::Null);
         assert_eq!(v["autonomy"], Value::Null);
+        assert_eq!(v["session_id"], Value::Null);
         assert_eq!(v["attention"], json!("none"));
         assert_eq!(v["headline"], Value::Null);
     }
@@ -3056,5 +3188,62 @@ mod tests {
         assert!(picked.last_message.is_none());
         // No sessions at all: None.
         assert!(pick_orchestrator_transcript_from(vec![]).is_none());
+    }
+
+    #[test]
+    fn pick_orchestrator_transcript_in_pins_to_session_id_else_falls_back_to_newest() {
+        // Reproduces the live-verified misattribution: an "unrelated" Claude session (some other
+        // active session on the machine) touches its transcript AFTER the orchestrator's own,
+        // making it the newest — a recency-only picker would return the wrong one. `Some(id)` must
+        // still pick the orchestrator's own (older) transcript by id; only `None` (an adopted
+        // window with no known id) falls back to the old newest-wins heuristic.
+        let root = tempfile::tempdir().unwrap();
+        let home = PathBuf::from("/Users/fixture-home");
+        let dir = root.path().join(agent::claude::encode_project_dir(&home));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |text: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            )
+        };
+
+        // The orchestrator's own session, written first (older mtime).
+        std::fs::write(
+            dir.join("orchestrator-session-id.jsonl"),
+            line("repomind's own turn"),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // An unrelated Claude session, written after — newer mtime, so a pure recency scan would
+        // wrongly prefer it.
+        std::fs::write(
+            dir.join("unrelated-session-id.jsonl"),
+            line("some other session's turn"),
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path()) };
+        let pinned = pick_orchestrator_transcript_in(&home, Some("orchestrator-session-id"));
+        let fallback = pick_orchestrator_transcript_in(&home, None);
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::remove_var("REPOMON_CLAUDE_PROJECTS") };
+
+        assert_eq!(
+            pinned
+                .expect("orchestrator's own transcript is found by id")
+                .session_id
+                .as_deref(),
+            Some("orchestrator-session-id"),
+            "Some(id) must pick the orchestrator's own transcript, not the newer unrelated one"
+        );
+        assert_eq!(
+            fallback
+                .expect("newest-overall fallback still finds a transcript")
+                .session_id
+                .as_deref(),
+            Some("unrelated-session-id"),
+            "None (adopted, unknown id) must keep the existing newest-wins behavior"
+        );
     }
 }

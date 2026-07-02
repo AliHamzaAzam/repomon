@@ -94,9 +94,9 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
 | `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
-| `orchestrator.status` | — | `{ running, agent?, model?, window?, autonomy?, attention, headline? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
-| `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; picks the newest `$HOME` Claude transcript with real content, across accounts) |
-| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, window?, autonomy?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window running `claude` wired to the repomon MCP server; idempotent; re-spawns if the prior window died) |
+| `orchestrator.status` | — | `{ running, agent?, model?, window?, autonomy?, session_id?, attention, headline? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
+| `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts) |
+| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, window?, autonomy?, session_id?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window running `claude` wired to the repomon MCP server; idempotent; re-spawns if the prior window died) |
 | `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (kill the orchestrator window) |
 | `orchestrator.target` | — | `{ target, available }` (attach target for the orchestrator window; resets it to follow the attaching client's size) |
 | `orchestrator.send_input` | `{ text, enter=true }` | `null` (type an instruction to repomind, then Enter unless `enter=false`) |
@@ -115,6 +115,14 @@ last message, when cheaply available); always `null` when `attention` is `"none"
 defaulted by, `orchestrator.start`). It is `null` when the daemon *adopted* a window that
 survived a restart of a previous daemon process — the adopting process has no record of what
 autonomy that window was originally launched with, so it reports unknown rather than guessing.
+
+`session_id` is the UUID the running session's `claude` was launched with (`--session-id`,
+minted fresh by the daemon at spawn time), which pins `orchestrator.transcript` and the
+end-of-turn attention check to *this* session's own transcript file — instead of guessing "the
+newest `$HOME` transcript", which misattributes any other active Claude session on the machine as
+repomind's. Like `autonomy`, it is `null` when the daemon *adopted* a surviving window: the prior
+process's session id lived only in its own memory, so an adopted session falls back to the old
+newest-with-content heuristic.
 
 **Remote bridge:** of the orchestrator methods above, `status`/`transcript`/`send_input`/`key`
 are allowed over the WebSocket bridge (read + interact, like their `agent.*` equivalents);
@@ -158,6 +166,6 @@ when readable (a partial parse still returns what it could).
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`; `prompt` is the agent's pending question verbatim). Emitted only while `[remote]` is enabled; the same alert goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
 | `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
-| `event.orchestrator.status` | `{ running, agent?, model?, window?, autonomy?, attention, headline? }` — broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
+| `event.orchestrator.status` | `{ running, agent?, model?, window?, autonomy?, session_id?, attention, headline? }` — broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.
