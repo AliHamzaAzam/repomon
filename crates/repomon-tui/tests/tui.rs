@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::{Config, Store};
-use repomon_daemon::{serve, Ctx};
+use repomon_daemon::{Ctx, serve};
 use repomon_tui::app::App;
 use repomon_tui::client::DaemonClient;
 use repomon_tui::render_to_string;
@@ -255,6 +255,103 @@ async fn renders_fleet_with_a_registered_repo() {
     let template = val_col("worktree template", "~/code");
     assert_eq!(amber, agent, "value column misaligned (agent row):\n{st}");
     assert_eq!(amber, template, "value column misaligned (template):\n{st}");
+
+    // Split view with the pinned repomind row selected (selected == 0): the right column must
+    // render repomind's live pane (not blank, not "(no lane selected)").
+    app.orch_running = true;
+    let orch_raw =
+        "REPOMIND_PANE_SENTINEL hello from repomind\nsecond line of the chat".to_string();
+    let orch_lines = repomon_tui::view::parse_pane(&orch_raw);
+    app.orch_output = Some(repomon_tui::app::Pane {
+        raw: orch_raw,
+        lines: orch_lines,
+        cursor: None,
+    });
+    app.selected = 0; // the pinned repomind row is always row 0 of the fleet
+    app.view = View::Split;
+    assert!(
+        app.orchestrator_selected(),
+        "row 0 must be the pinned repomind row"
+    );
+    let split = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        split.contains("REPOMIND_PANE_SENTINEL"),
+        "split right column must show repomind's pane when the pinned row is selected:\n{split}"
+    );
+    // The pinned row offers the same quick-type entry as a selected lane, plus opening the view.
+    assert!(
+        split.contains("i type to repomind"),
+        "split mode line must offer typing to repomind:\n{split}"
+    );
+    assert!(
+        split.contains("open the full command-center"),
+        "split mode line must still offer opening the command-center:\n{split}"
+    );
+    // While typing to repomind the mode line flips to INSERT (keys forward to repomind).
+    app.orch_insert = true;
+    let split_insert = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        split_insert.contains("keys go to repomind"),
+        "split insert mode line must show keys going to repomind:\n{split_insert}"
+    );
+    app.orch_insert = false;
+    // And when repomind is off, the right column shows the start hint, not a blank.
+    app.orch_output = None;
+    app.orch_running = false;
+    let split_off = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        split_off.contains("repomind is off"),
+        "split right column must show the off/start hint when repomind isn't running:\n{split_off}"
+    );
+
+    // repomind attention (B4: the human<->repomind escalation loop): the pinned fleet row wears
+    // the needs-you wording when repomind is asking the human something, and the command-center
+    // header shows the attention word plus a headline.
+    app.orch_running = true;
+    app.orch_attention = Some("decision".into());
+    app.orch_headline = Some("which auth method?".into());
+    app.selected = 0; // the pinned repomind row is always row 0 of the fleet
+    app.view = View::Fleet;
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        fleet.contains("repomind · question for you"),
+        "pinned row must show the question wording for a decision:\n{fleet}"
+    );
+
+    app.orch_attention = Some("permission".into());
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        fleet.contains("repomind · question for you"),
+        "pinned row must show the question wording for a permission ask too:\n{fleet}"
+    );
+
+    app.orch_attention = Some("end_of_turn".into());
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        fleet.contains("repomind · waiting for you"),
+        "pinned row must show the waiting wording for end_of_turn:\n{fleet}"
+    );
+
+    app.view = View::Orchestrator;
+    let center = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        center.contains("end of turn"),
+        "command-center header must show the attention word:\n{center}"
+    );
+    assert!(
+        center.contains("which auth method?"),
+        "command-center header must show the headline:\n{center}"
+    );
+
+    // Back to no attention: the pinned row reverts to the plain chatting/idle/off wording.
+    app.orch_attention = None;
+    app.orch_headline = None;
+    app.view = View::Fleet;
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        !fleet.contains("question for you") && !fleet.contains("waiting for you"),
+        "pinned row must not show needs-you wording once attention clears:\n{fleet}"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

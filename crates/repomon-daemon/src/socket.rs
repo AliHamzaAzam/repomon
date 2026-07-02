@@ -15,7 +15,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
-use crate::{rpc, Ctx};
+use crate::{Ctx, rpc};
 
 /// How long the reader will wait on a silent socket before tearing itself down. A half-open client
 /// (gone away but still holding the fd) otherwise parks the reader task forever, leaking one task

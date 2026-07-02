@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{serve, Ctx};
+use repomon_daemon::{Ctx, serve};
 use serde_json::json;
 use tokio::net::UnixStream;
 
@@ -214,14 +214,58 @@ async fn daemon_spawns_and_drives_an_agent() {
         "captured pane was: {content:?}"
     );
 
+    // Force an overlay computation while the agent is still running, so the daemon's tmux-window
+    // cache (`last_good_windows`) is populated with the live window — the precondition for the
+    // regression checked below (the total-vanish debounce only has something stale to fall back
+    // on once it has seen the window at least once).
+    let lanes = call(&mut stream, 6, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane = lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_i64() == Some(lane_id))
+        .expect("spawned lane");
+    assert!(
+        lane["agent_sessions"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "expected a live agent session before stop: {lane:?}"
+    );
+
     // Stop the agent.
     call(
         &mut stream,
-        6,
+        7,
         "agent.stop",
         Some(json!({ "lane_id": lane_id })),
     )
     .await;
+
+    // Regression check: immediately after `agent.stop` returns — no sleep, no poll — the lane
+    // must report no agent. This is the bug: `agent.stop` kills the tmux window but used to leave
+    // the daemon's window-liveness caches stale, so `resolve_windows`'s `EMPTY_WINDOWS_CONFIRM`
+    // debounce (meant to ride out a *transient* tmux-server bounce) misread our own deliberate
+    // kill as one of those and held the dead window in `last_good_windows` for one more tick —
+    // long enough for an immediately-following read (e.g. `delete_lane`'s impact summary) to see
+    // the just-stopped agent as still live.
+    let lanes = call(&mut stream, 8, "lane.list", None)
+        .await
+        .result
+        .unwrap();
+    let lane = lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_i64() == Some(lane_id))
+        .expect("lane still present after stop");
+    assert_eq!(
+        lane["agent_sessions"],
+        json!([]),
+        "agent session should be gone immediately after stop (no polling): {lane:?}"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
@@ -722,9 +766,11 @@ async fn agent_manager_add_set_default_and_remove() {
         .find(|c| c["name"] == "yolo")
         .unwrap();
     assert_eq!(yolo["default"], json!(true));
-    assert!(std::fs::read_to_string(&cfg_path)
-        .unwrap()
-        .contains("default_agent"));
+    assert!(
+        std::fs::read_to_string(&cfg_path)
+            .unwrap()
+            .contains("default_agent")
+    );
 
     // A built-in can also be the default.
     let r = call(
@@ -845,6 +891,170 @@ async fn commit_recent_returns_latest_even_when_none_today() {
     assert_eq!(arr.len(), 2, "recent commits: {recent}");
     assert_eq!(arr[0]["summary"], json!("old two")); // newest first
     assert_eq!(arr[1]["summary"], json!("old one"));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+// No orchestrator is ever started here, so `reconcile_orchestrator` returns false on its
+// first check (no tracked session) without touching tmux — this doesn't need a live tmux server.
+#[tokio::test]
+async fn orchestrator_input_errors_loudly_when_not_running() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-orch-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Typing to a dead orchestrator must fail loudly instead of silently no-op'ing at the tmux
+    // layer.
+    let r = call(
+        &mut stream,
+        1,
+        "orchestrator.send_input",
+        Some(json!({ "text": "hello", "enter": false })),
+    )
+    .await;
+    assert!(r.result.is_none());
+    let err = r
+        .error
+        .expect("send_input to a dead orchestrator should error");
+    assert!(
+        err.message.contains("repomind isn't running"),
+        "unexpected message: {}",
+        err.message
+    );
+
+    // Same reconcile-first guard applies to `orchestrator.key`.
+    let r = call(
+        &mut stream,
+        2,
+        "orchestrator.key",
+        Some(json!({ "key": "Enter", "literal": false })),
+    )
+    .await;
+    assert!(r.error.is_some(), "key to a dead orchestrator should error");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-diff-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // A repo with one commit on main.
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "init"]);
+    let r = call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let repo_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    // A lane branched off main.
+    let wt_parent = tempfile::tempdir().unwrap();
+    let wt_path = wt_parent.path().join("feat");
+    let r = call(
+        &mut stream,
+        2,
+        "lane.create",
+        Some(json!({
+            "repo_id": repo_id,
+            "branch": "feat/thing",
+            "source_branch": "main",
+            "path": wt_path.to_string_lossy(),
+        })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.create errored: {:?}", r.error);
+    let lane_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    // One commit ahead of main...
+    std::fs::write(wt_path.join("a.txt"), "a\n").unwrap();
+    git(&wt_path, &["add", "a.txt"]);
+    git(&wt_path, &["commit", "-m", "feat: add a"]);
+    // ...plus an uncommitted (unstaged) change and an untracked file.
+    std::fs::write(wt_path.join("README.md"), "changed\n").unwrap();
+    std::fs::write(wt_path.join("scratch.txt"), "scratch\n").unwrap();
+    // No file watcher runs against this bare `Ctx` (that's wired up in `main.rs`), so the cached
+    // clean state from `lane.create`'s listing needs an explicit nudge to re-walk — same as
+    // `repomon_core::lane::tests::worktree_file_activity_is_detected`.
+    ctx.lanes.invalidate_state(&wt_path);
+
+    let r = call(
+        &mut stream,
+        3,
+        "lane.diff",
+        Some(json!({ "lane_id": lane_id })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.diff errored: {:?}", r.error);
+    let d = r.result.unwrap();
+    assert_eq!(d["base"], json!("main"));
+    assert!(d["merge_base"].as_str().unwrap_or_default().len() >= 7);
+    let commits = d["commits"].as_str().unwrap();
+    assert!(commits.contains("feat: add a"), "commits was: {commits:?}");
+    assert!(d.get("commits_truncated").is_none());
+    let committed_stat = d["committed_stat"].as_str().unwrap();
+    assert!(
+        committed_stat.contains("a.txt"),
+        "committed_stat was: {committed_stat:?}"
+    );
+    let uncommitted_stat = d["uncommitted_stat"].as_str().unwrap();
+    assert!(
+        uncommitted_stat.contains("README.md"),
+        "uncommitted_stat was: {uncommitted_stat:?}"
+    );
+    assert_eq!(d["untracked"], json!(1));
+    // No patch without include_patch.
+    assert!(d.get("patch").is_none());
+
+    // include_patch=true honors a tiny max_patch_chars cap.
+    let r = call(
+        &mut stream,
+        4,
+        "lane.diff",
+        Some(json!({ "lane_id": lane_id, "include_patch": true, "max_patch_chars": 10 })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.diff errored: {:?}", r.error);
+    let d = r.result.unwrap();
+    let patch = d["patch"].as_str().unwrap();
+    assert_eq!(patch.chars().count(), 10, "patch was: {patch:?}");
+    assert_eq!(d["patch_truncated"], json!(true));
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

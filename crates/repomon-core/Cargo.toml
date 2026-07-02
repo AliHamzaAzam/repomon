@@ -19,6 +19,7 @@ gix = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+anyhow = { workspace = true }
 async-trait = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }

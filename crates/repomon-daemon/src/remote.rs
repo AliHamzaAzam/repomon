@@ -7,20 +7,20 @@
 //! connection state. Bind this to a private address — typically the machine's Tailscale IP —
 //! never the open internet.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{SinkExt, StreamExt};
-use repomon_core::protocol::{Request, Response, RpcError, MAX_FRAME_BYTES};
+use repomon_core::protocol::{MAX_FRAME_BYTES, Request, Response, RpcError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HsRequest, Response as HsResponse,
 };
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::Message;
 
-use crate::{rpc, Ctx};
+use crate::{Ctx, rpc};
 
 /// Max concurrent remote connections — a coarse DoS backstop (auth precedes the upgrade, so this
 /// only bounds authenticated clients/reconnect churn).
@@ -64,6 +64,13 @@ fn remote_method_allowed(method: &str) -> bool {
         // drive an existing agent
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
         | "agent.target" | "agent.resize"
+        // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
+        // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
+        // process-spawn with caller-chosen autonomy/max_agents/prompt, so strictly higher privilege
+        // than the already-blocked agent.spawn. Remote tokens may chat with a running repomind but
+        // cannot start or stop it.
+        | "orchestrator.status" | "orchestrator.transcript"
+        | "orchestrator.send_input" | "orchestrator.key"
         // benign metadata
         | "agent.pin" | "session.rename"
         // companion self-registration for push
@@ -257,20 +264,61 @@ mod tests {
     fn remote_allowlist_permits_read_and_interaction_only() {
         // Read + interaction with existing agents, and the companion's own push registration.
         for m in [
-            "ping", "repo.list",
-            "lane.list", "lane.get", "commit.recent", "agent.capture", "agent.transcript",
-            "agent.send_input", "agent.signal", "agent.key", "agent.scroll", "agent.target",
-            "agent.resize", "agent.pin", "subscribe", "viewport.set", "usage.get",
-            "daemon.status", "push.register", "push.unregister", "session.rename",
+            "ping",
+            "repo.list",
+            "lane.list",
+            "lane.get",
+            "commit.recent",
+            "agent.capture",
+            "agent.transcript",
+            "agent.send_input",
+            "agent.signal",
+            "agent.key",
+            "agent.scroll",
+            "agent.target",
+            "agent.resize",
+            "agent.pin",
+            "subscribe",
+            "viewport.set",
+            "usage.get",
+            "daemon.status",
+            "push.register",
+            "push.unregister",
+            "session.rename",
+            "orchestrator.status",
+            "orchestrator.transcript",
+            "orchestrator.send_input",
+            "orchestrator.key",
         ] {
             assert!(remote_method_allowed(m), "{m} should be allowed");
         }
         // Host-management, dangerous, and secret-exposing methods are blocked over the bridge.
         for m in [
-            "agent.adopt", "agent.spawn", "agent.stop", "repo.add", "repo.remove", "repo.discover",
-            "lane.create", "lane.delete", "lane.merge", "lane.focus", "config.get", "config.set",
-            "terminal.open", "fs.browse", "daemon.shutdown", "agent.add", "agent.remove",
-            "agent.detect", "watcher.park", "some.future.method",
+            "agent.adopt",
+            "agent.spawn",
+            "agent.stop",
+            "repo.add",
+            "repo.remove",
+            "repo.discover",
+            "lane.create",
+            "lane.delete",
+            "lane.merge",
+            "lane.focus",
+            "lane.diff",
+            "config.get",
+            "config.set",
+            "terminal.open",
+            "fs.browse",
+            "daemon.shutdown",
+            "agent.add",
+            "agent.remove",
+            "agent.detect",
+            "watcher.park",
+            "orchestrator.watch",
+            "orchestrator.resize",
+            "orchestrator.start",
+            "orchestrator.stop",
+            "some.future.method",
         ] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
         }

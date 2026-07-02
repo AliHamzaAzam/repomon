@@ -14,7 +14,7 @@ pub(crate) const GRACE_PAST_HOURS: i64 = 6;
 
 /// Drop ANSI CSI/OSC escape sequences (pane captures use `-e`, so lines carry color and
 /// inverse-video escapes that would break per-line parsing).
-pub(crate) fn strip_ansi(s: &str) -> String {
+pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {

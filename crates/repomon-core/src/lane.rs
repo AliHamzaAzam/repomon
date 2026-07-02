@@ -91,7 +91,10 @@ impl Lanes {
         let mut repo_entries: Vec<(Repo, Vec<worktree::WorktreeEntry>)> = Vec::new();
         let mut wt_misses: Vec<Repo> = Vec::new();
         {
-            let cache = self.worktrees_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = self
+                .worktrees_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for repo in repos {
                 match cache.get(&repo.path) {
                     Some((t, entries)) if t.elapsed() < WORKTREES_TTL => {
@@ -113,7 +116,10 @@ impl Lanes {
             wt_fresh.push(h.await.map_err(join_err)?);
         }
         {
-            let mut cache = self.worktrees_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = self
+                .worktrees_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for (repo, entries_res) in wt_misses.into_iter().zip(wt_fresh) {
                 // A repo that's gone missing on disk shouldn't sink the whole fleet view.
                 if let Ok(entries) = entries_res {
@@ -172,8 +178,9 @@ impl Lanes {
         // keep their slightly-stale state and refresh on a later list. Walks run in parallel.
         // (Agent transcript writes touch no worktree, so they never invalidate a cached state.)
         const WALK_CAP: usize = 2;
-        let mut states: Vec<Option<Result<WorktreeState>>> =
-            std::iter::repeat_with(|| None).take(pending.len()).collect();
+        let mut states: Vec<Option<Result<WorktreeState>>> = std::iter::repeat_with(|| None)
+            .take(pending.len())
+            .collect();
         let mut must_walk: Vec<usize> = Vec::new(); // first-seen or watcher-invalidated
         let mut stale: Vec<(usize, Instant)> = Vec::new(); // clean but past the TTL (reusable)
         {
@@ -535,6 +542,17 @@ fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<St
         .output()
         .map_err(Error::Io)?;
     if !out.status.success() {
+        // Best-effort: a failed merge (typically a conflict) otherwise leaves the human's main
+        // checkout stuck mid-merge (MERGE_HEAD + conflict markers). This is not a force merge —
+        // we're not discarding any of the lane's or the main checkout's committed work, just
+        // undoing the in-progress merge attempt itself — so aborting here is safe to do
+        // unconditionally. Ignore the abort's own result: if it also fails there's nothing more
+        // we can do from here, and the original merge error is what the caller needs to see.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["merge", "--abort"])
+            .output();
         return Err(Error::Git(format!(
             "merge {branch}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -758,5 +776,45 @@ mod tests {
         let lanes = Lanes::new(store, cfg);
         let main = lanes.list().await.unwrap().into_iter().next().unwrap();
         assert!(lanes.delete(main.id, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn merge_conflict_leaves_no_stranded_merge_state() {
+        let (dir, store, cfg) = repo_with_commit().await;
+        let reg = Registry::new(store.clone());
+        let repo = reg.add(dir.path()).await.unwrap();
+        let lanes = Lanes::new(store.clone(), cfg.clone());
+
+        let wt_parent = tempfile::tempdir().unwrap();
+        let wt_path = wt_parent.path().join("feat");
+        let lane = lanes
+            .create(CreateLaneParams {
+                repo_id: repo.id,
+                branch: "feat/conflict".into(),
+                source_branch: Some("main".into()),
+                path: Some(wt_path.clone()),
+                copy_files: vec![],
+            })
+            .await
+            .unwrap();
+
+        // Diverge the same line of the same file on both sides so the merge conflicts.
+        std::fs::write(lane.worktree.path.join("README.md"), "lane change\n").unwrap();
+        git(&lane.worktree.path, &["add", "."]);
+        git(&lane.worktree.path, &["commit", "-m", "lane edit"]);
+
+        std::fs::write(dir.path().join("README.md"), "main change\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "main edit"]);
+
+        let result = lanes.merge(lane.id, None).await;
+        assert!(
+            result.is_err(),
+            "a conflicting merge must surface as an error, not silently succeed"
+        );
+        assert!(
+            !dir.path().join(".git").join("MERGE_HEAD").exists(),
+            "a failed merge must not strand the main checkout mid-merge (MERGE_HEAD left behind)"
+        );
     }
 }

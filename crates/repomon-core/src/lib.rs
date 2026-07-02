@@ -1,12 +1,14 @@
 //! `repomon-core` — the engine behind repomon.
 //!
 //! This crate holds the data model, the gix-backed git layer, the SQLite store, the file
-//! watchers, and the tmux-backed agent runtime. It contains no UI, no socket code, and no
-//! daemon wiring — those live in `repomon-daemon` and `repomon-tui`, which both build on
-//! the traits and types defined here.
+//! watchers, the tmux-backed agent runtime, and the shared [`client::DaemonClient`] every
+//! out-of-process consumer uses to reach the daemon's socket. It contains no UI and no daemon
+//! wiring — those live in `repomon-daemon` and `repomon-tui`, which both build on the traits
+//! and types defined here.
 
 pub mod agent;
 pub mod analytics;
+pub mod client;
 pub mod config;
 pub mod error;
 pub mod git;

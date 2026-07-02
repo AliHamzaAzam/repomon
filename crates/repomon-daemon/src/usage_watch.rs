@@ -15,12 +15,12 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use repomon_core::agent::{self, parse_codex_status, parse_usage, UsageReport};
 use repomon_core::TmuxRuntime;
+use repomon_core::agent::{self, UsageReport, parse_codex_status, parse_usage};
 
 use crate::Ctx;
 
@@ -119,7 +119,10 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
                     // blocking thread to stop at its next checkpoint, so abandoned probes don't pile
                     // up driving tmux. Keep this account's last reading and carry on.
                     cancel.abort();
-                    tracing::warn!("usage probe for {} timed out; skipping this round", acct.key);
+                    tracing::warn!(
+                        "usage probe for {} timed out; skipping this round",
+                        acct.key
+                    );
                     None
                 }
             };
@@ -199,10 +202,12 @@ fn accounts() -> Vec<Account> {
         .filter(|base| base.join("projects").is_dir())
         .map(|base| {
             let cfg_dir = (base != default).then(|| base.clone());
-            let command = match &cfg_dir {
-                None => "claude".to_string(),
-                Some(p) => format!("CLAUDE_CONFIG_DIR={} claude", p.display()),
-            };
+            // `launch_command` is immune to the daemon's own env: the default account unsets
+            // CLAUDE_CONFIG_DIR (`env -u …`) while variants pin their dir. A bare `claude` here
+            // would instead inherit the daemon's CLAUDE_CONFIG_DIR (it's started from a claude-work
+            // shell) and probe the wrong account, making two accounts read as one.
+            // `account_key`/`account_label` stay keyed on `cfg_dir`, so identity is intact.
+            let command = agent::claude::launch_command(&base);
             Account {
                 key: agent::claude::account_key(cfg_dir.as_deref()),
                 label: agent::claude::account_label(cfg_dir.as_deref()),

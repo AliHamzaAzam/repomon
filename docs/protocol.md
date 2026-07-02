@@ -57,6 +57,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `lane.delete` | `{ lane_id, also_delete_branch=false }` | `null` |
 | `lane.focus` | `{ lane_id }` | `{ path }` |
 | `lane.merge` | `{ lane_id, into? }` | `{ message }` |
+| `lane.diff` | `{ lane_id, include_patch=false, max_patch_chars=8000 }` | `LaneDiff` — commits ahead of the repo's base branch (with diffstat) plus uncommitted state; see below |
 | `commit.today` | — | `[Commit]` (live, all repos) |
 | `commit.range` | `{ from_iso, to_iso, repo_ids? }` | `[Commit]` |
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
@@ -93,8 +94,56 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |
 | `daemon.shutdown` | — | `null` |
 | `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
+| `orchestrator.status` | — | `{ running, agent?, model?, window?, autonomy?, session_id?, attention, headline? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
+| `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts) |
+| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, window?, autonomy?, session_id?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window running `claude` wired to the repomon MCP server; idempotent; re-spawns if the prior window died) |
+| `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (kill the orchestrator window) |
+| `orchestrator.target` | — | `{ target, available }` (attach target for the orchestrator window; resets it to follow the attaching client's size) |
+| `orchestrator.send_input` | `{ text, enter=true }` | `null` (type an instruction to repomind, then Enter unless `enter=false`) |
+| `orchestrator.key` | `{ key, literal=false }` | `null` (one keystroke to repomind: literal char or key name) |
+| `orchestrator.watch` | `{ on }` | `null` (gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
+| `orchestrator.resize` | `{ cols, rows }` | `null` (size the orchestrator window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
+
+The `orchestrator` window is deliberately not a `lane-*` name, so it never appears in `lane.list` / the lane overlay / the reaper. It is the in-daemon backing for `repomon orchestrate` and the TUI's command-center view.
+
+`attention` on the orchestrator payloads above is always present: one of `"none"`,
+`"permission"`, `"decision"`, `"end_of_turn"`. `headline` is non-null only alongside
+`permission`/`decision` (the open dialog's question) or `end_of_turn` (a tail of repomind's
+last message, when cheaply available); always `null` when `attention` is `"none"`.
+
+`autonomy` is the level the running session was actually started with (the value passed to, or
+defaulted by, `orchestrator.start`). It is `null` when the daemon *adopted* a window that
+survived a restart of a previous daemon process — the adopting process has no record of what
+autonomy that window was originally launched with, so it reports unknown rather than guessing.
+
+`session_id` is the UUID the running session's `claude` was launched with (`--session-id`,
+minted fresh by the daemon at spawn time), which pins `orchestrator.transcript` and the
+end-of-turn attention check to *this* session's own transcript file — instead of guessing "the
+newest `$HOME` transcript", which misattributes any other active Claude session on the machine as
+repomind's. Like `autonomy`, it is `null` when the daemon *adopted* a surviving window: the prior
+process's session id lived only in its own memory, so an adopted session falls back to the old
+newest-with-content heuristic.
+
+**Remote bridge:** of the orchestrator methods above, `status`/`transcript`/`send_input`/`key`
+are allowed over the WebSocket bridge (read + interact, like their `agent.*` equivalents);
+`start`/`stop`/`watch`/`resize` are Unix-socket only — spawning or killing repomind, and its
+pane-geometry plumbing, stay local.
 
 `CreateLaneParams`: `{ repo_id, branch, source_branch?, path?, copy_files? }`.
+
+`LaneDiff` (the result of `lane.diff`): `{ base, merge_base, commits, commits_truncated?,
+committed_stat, uncommitted_stat, untracked, patch?, patch_truncated? }`. `base` is the repo's
+main checkout's current branch name; `merge_base` a short hash of `git merge-base HEAD <base>`;
+`commits` is `git log --oneline <merge_base>..HEAD`, newline-joined and capped at 20 lines
+(`commits_truncated: true` present only when there were more). `committed_stat` is `git diff
+--stat <merge_base>..HEAD`; `uncommitted_stat` is `git diff HEAD --stat` (staged + unstaged).
+`untracked` is the lane's untracked-file *count* only — untracked file **contents** never
+appear in `patch` or either `*_stat` field. `patch` (`git diff HEAD` text, capped at
+`max_patch_chars`, char-boundary safe) and `patch_truncated: true` are present only when
+`include_patch: true` and the patch was actually cut; `max_patch_chars` is server-clamped to a
+ceiling of 20000. Errors (`-32000`) when the base branch shares no common history with `HEAD`,
+or the repo's main checkout has no current branch (detached HEAD). Local Unix socket only — not
+on the remote bridge allowlist.
 
 `AccountUsage`: `{ key, label, report: UsageReport, age_secs }` — `key` is how a client attributes
 usage to the focused agent: a Claude agent's config dir (`"default"` for `~/.claude`), or `"codex"`.
@@ -116,5 +165,7 @@ when readable (a partial parse still returns what it could).
 | `event.agent.output` | `{ lane_id, content, cursor? }` (`cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused lane when its cursor is visible; `null`/absent otherwise) |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`; `prompt` is the agent's pending question verbatim). Emitted only while `[remote]` is enabled; the same alert goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
+| `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
+| `event.orchestrator.status` | `{ running, agent?, model?, window?, autonomy?, session_id?, attention, headline? }` — broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.

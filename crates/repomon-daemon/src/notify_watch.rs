@@ -13,15 +13,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use repomon_core::Config;
+use repomon_core::agent;
 use repomon_core::model::{AgentStatus, LaneId};
 use repomon_core::notify::{
-    activity_allows_refire, compose, diff_session_transitions, session_by_key, session_statuses,
-    slot_by_key, NotifKind, SessKey,
+    NotifKind, SessKey, activity_allows_refire, compose, diff_session_transitions, session_by_key,
+    session_statuses, slot_by_key,
 };
-use repomon_core::Config;
 use serde_json::json;
 
-use crate::{push, rpc, Ctx};
+use crate::{Ctx, ORCHESTRATOR_WINDOW, push, rpc};
 
 /// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
 /// the overlay, but the overlay's own caches absorb most of the cost: the composite snapshot is
@@ -58,10 +59,36 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     // the set of tracked keys changes wholesale (inferred sessions appear/vanish), so we re-seed
     // rather than diff — otherwise toggling it off would fire a spurious Idle for every subagent.
     let mut prev_subagents = false;
+    // Orchestrator attention state, carried across ticks (see `check_orchestrator_attention`):
+    // toggles the $HOME transcript scan to every other tick, caches its last result for the
+    // skipped tick, and debounces the orchestrator's own "needs you" desktop popup.
+    let mut orch_scan_tick = false;
+    let mut orch_transcript: Option<(AgentStatus, Option<String>)> = None;
+    let mut orch_popup_fired: Option<Instant> = None;
 
     loop {
         tick.tick().await;
         let cfg = ctx.config.read().await.clone();
+        // The TUI fires its own desktop popups while it's actively watching; the daemon takes over
+        // local desktop delivery only when the TUI has parked in an attach or closed — i.e. its
+        // ~1s lane.list heartbeat has gone stale. Remote delivery is gated separately below.
+        let tui_active =
+            (*ctx.local_watcher_seen.lock().await).is_some_and(|t| t.elapsed() < LOCAL_TTL);
+
+        // Runs unconditionally — even with notifications disabled — because the TUI's pinned row
+        // and command-center header need repomind's attention live regardless; only the desktop
+        // popup inside this call is gated on `cfg.notify_enabled`. Must stay ABOVE the
+        // notify_enabled early-continue below.
+        check_orchestrator_attention(
+            &ctx,
+            &cfg,
+            tui_active,
+            &mut orch_scan_tick,
+            &mut orch_transcript,
+            &mut orch_popup_fired,
+        )
+        .await;
+
         if !cfg.notify_enabled {
             // Drop state while disabled so re-enabling re-seeds instead of firing a backlog.
             prev.clear();
@@ -70,11 +97,6 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             latch.clear();
             continue;
         }
-        // The TUI fires its own desktop popups while it's actively watching; the daemon takes over
-        // local desktop delivery only when the TUI has parked in an attach or closed — i.e. its
-        // ~1s lane.list heartbeat has gone stale. Remote delivery is gated separately below.
-        let tui_active =
-            (*ctx.local_watcher_seen.lock().await).is_some_and(|t| t.elapsed() < LOCAL_TTL);
 
         // Always recompute (bypass the lane.list cache): edge detection must never reuse a stale
         // snapshot, and in a headless setup nothing else populates the cache.
@@ -228,5 +250,212 @@ fn kind_enabled(cfg: &Config, kind: NotifKind) -> bool {
         NotifKind::RateLimited => cfg.notify_rate_limited,
         NotifKind::Resumed => cfg.notify_resumed,
         NotifKind::Idle => cfg.notify_idle,
+    }
+}
+
+// ---- repomind orchestrator attention (B4: the human<->repomind escalation loop) ----
+
+/// Don't re-fire the orchestrator's own "needs you" desktop popup within this window — separate
+/// from the per-session `DEBOUNCE` above, since this is a single pane, not a fleet of sessions.
+const ORCH_POPUP_DEBOUNCE: Duration = Duration::from_secs(30);
+/// How far back to capture the orchestrator's pane for the pending-dialog sniff (mirrors the
+/// managed-agent prompt sniff in `rpc::overlay_agents`).
+const ORCH_CAPTURE_LINES: u32 = 45;
+/// Cap on the end-of-turn headline's length (a tail of repomind's last message).
+const ORCH_HEADLINE_LEN: usize = 140;
+
+/// Fold the repomind orchestrator's attention into this tick: a pending pane dialog (permission /
+/// decision) or an end-of-turn message beats "none". Runs on every tick regardless of
+/// `cfg.notify_enabled` — the TUI's pinned row and command-center header need it live even with
+/// notifications off — but the desktop popup fired on the none→attention edge below IS gated on
+/// `cfg.notify_enabled && cfg.notify_needs_you`, mirroring `kind_enabled`'s gating of the
+/// per-session NeedsYou popup above (this is the same escalation, just for the orchestrator's own
+/// pane rather than a managed agent's).
+///
+/// `scan_transcript`/`transcript_cache` throttle the `$HOME` transcript scan (a directory walk) to
+/// every other tick a dialog isn't already covering the answer; `popup_fired` debounces the popup.
+async fn check_orchestrator_attention(
+    ctx: &Ctx,
+    cfg: &Config,
+    tui_active: bool,
+    scan_transcript: &mut bool,
+    transcript_cache: &mut Option<(AgentStatus, Option<String>)>,
+    popup_fired: &mut Option<Instant>,
+) {
+    let alive = rpc::reconcile_orchestrator(ctx).await;
+    let (word, headline) = if !alive {
+        *transcript_cache = None; // no session: drop any stale cached transcript status
+        ("none", None)
+    } else {
+        // Pin the transcript scan to the orchestrator's own session id (captured at spawn via
+        // `--session-id`) — the `ctx.orchestrator` state `reconcile_orchestrator` just confirmed
+        // is alive — so it never picks up some other active Claude session's transcript. See
+        // `rpc::pick_orchestrator_transcript`.
+        let session_id = ctx
+            .orchestrator
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|o| o.session_id.clone());
+        let tmux = ctx.tmux.clone();
+        let pane = tokio::task::spawn_blocking(move || {
+            tmux.capture_named(ORCHESTRATOR_WINDOW, Some(ORCH_CAPTURE_LINES))
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+        let dialog = pane
+            .as_deref()
+            .and_then(agent::prompt::detect_pending_prompt);
+
+        *scan_transcript = !*scan_transcript;
+        if dialog.is_none() && *scan_transcript {
+            *transcript_cache = tokio::task::spawn_blocking(move || {
+                rpc::pick_orchestrator_transcript(session_id.as_deref())
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|s| (s.status, s.last_message));
+        }
+        derive_attention(dialog.as_deref(), transcript_cache.clone())
+    };
+
+    let mut slot = ctx.orchestrator_attention.lock().await;
+    if slot.0 == word && slot.1 == headline {
+        return;
+    }
+    let edge_to_attention = slot.0 == "none" && word != "none";
+    *slot = (word.to_string(), headline.clone());
+    drop(slot);
+
+    let orch = ctx.orchestrator.lock().await;
+    let status = rpc::orchestrator_status_value(orch.as_ref(), word, headline.as_deref());
+    drop(orch);
+    ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status);
+
+    if edge_to_attention && !tui_active && cfg.notify_enabled && cfg.notify_needs_you {
+        let due = popup_fired
+            .map(|t| t.elapsed() >= ORCH_POPUP_DEBOUNCE)
+            .unwrap_or(true);
+        if due {
+            *popup_fired = Some(Instant::now());
+            repomon_core::notify::send_native(
+                "repomind needs you",
+                headline.as_deref().unwrap_or(""),
+                cfg.notify_sound,
+                cfg.notify_click_focus,
+            );
+        }
+    }
+}
+
+/// Map the orchestrator's pane dialog (if any — already detected/classified by
+/// `repomon_core::agent::prompt`, which is fixture-tested there) and its transcript status to an
+/// attention word + headline. Pure, so *this* mapping — dialog → permission/decision, `Waiting` →
+/// end_of_turn, else none — is unit-testable without tmux or a real transcript.
+fn derive_attention(
+    dialog: Option<&str>,
+    transcript: Option<(AgentStatus, Option<String>)>,
+) -> (&'static str, Option<String>) {
+    if let Some(summary) = dialog {
+        let word = match agent::prompt::classify_prompt(summary) {
+            agent::prompt::PromptClass::Permission => "permission",
+            agent::prompt::PromptClass::Decision => "decision",
+        };
+        return (word, Some(summary.to_string()));
+    }
+    match transcript {
+        Some((AgentStatus::Waiting, last_message)) => (
+            "end_of_turn",
+            last_message.map(|m| tail(&m, ORCH_HEADLINE_LEN)),
+        ),
+        _ => ("none", None),
+    }
+}
+
+/// The tail of a message, trimmed and capped at `max` chars — likelier than the opening line to
+/// hold repomind's actual question when a turn ends on a long response.
+fn tail(s: &str, max: usize) -> String {
+    let s = s.trim();
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let start = count - max;
+    let clipped: String = s.chars().skip(start).collect();
+    format!("…{}", clipped.trim_start())
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+
+    #[test]
+    fn permission_dialog_maps_to_permission() {
+        let (word, headline) = derive_attention(Some("Do you want to proceed?"), None);
+        assert_eq!(word, "permission");
+        assert_eq!(headline.as_deref(), Some("Do you want to proceed?"));
+    }
+
+    #[test]
+    fn open_question_dialog_maps_to_decision() {
+        let (word, headline) = derive_attention(Some("Which auth method should we use?"), None);
+        assert_eq!(word, "decision");
+        assert_eq!(
+            headline.as_deref(),
+            Some("Which auth method should we use?")
+        );
+    }
+
+    #[test]
+    fn a_dialog_wins_even_over_a_waiting_transcript() {
+        // The pane dialog is the more precise signal — it beats a stale/lagging transcript scan.
+        let (word, _) = derive_attention(
+            Some("Do you trust the files in this folder?"),
+            Some((AgentStatus::Waiting, Some("some prior message".into()))),
+        );
+        assert_eq!(word, "permission");
+    }
+
+    #[test]
+    fn waiting_transcript_with_no_dialog_maps_to_end_of_turn() {
+        let (word, headline) =
+            derive_attention(None, Some((AgentStatus::Waiting, Some("all done!".into()))));
+        assert_eq!(word, "end_of_turn");
+        assert_eq!(headline.as_deref(), Some("all done!"));
+    }
+
+    #[test]
+    fn waiting_transcript_with_no_message_has_no_headline() {
+        let (word, headline) = derive_attention(None, Some((AgentStatus::Waiting, None)));
+        assert_eq!(word, "end_of_turn");
+        assert_eq!(headline, None);
+    }
+
+    #[test]
+    fn running_or_idle_transcript_and_no_dialog_is_none() {
+        assert_eq!(
+            derive_attention(None, Some((AgentStatus::Running, Some("mid-turn".into())))).0,
+            "none"
+        );
+        assert_eq!(derive_attention(None, None).0, "none");
+    }
+
+    #[test]
+    fn long_headline_truncates_to_a_tail() {
+        let msg = format!("{}the important bit at the end", "x".repeat(200));
+        let (word, headline) = derive_attention(None, Some((AgentStatus::Waiting, Some(msg))));
+        assert_eq!(word, "end_of_turn");
+        let h = headline.unwrap();
+        assert!(h.ends_with("the important bit at the end"));
+        assert!(h.starts_with('…'));
+        assert!(h.chars().count() <= ORCH_HEADLINE_LEN + 1);
+    }
+
+    #[test]
+    fn short_message_tail_is_unchanged() {
+        assert_eq!(tail("hello", 140), "hello");
+        assert_eq!(tail("  padded  ", 140), "padded");
     }
 }

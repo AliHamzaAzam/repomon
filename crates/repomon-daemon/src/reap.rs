@@ -65,6 +65,39 @@ fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Kill a single managed tmux window and synchronously reconcile the daemon-side caches that
+/// remember it, so the *very next* overlay read reports it gone.
+///
+/// Left alone, a killed window's disappearance is normally caught within one overlay tick by
+/// `rpc::resolve_windows`'s `EMPTY_WINDOWS_CONFIRM` debounce — deliberately slow, because that
+/// debounce exists to ride out a *transient* tmux-server bounce (a fork/connection fault, or the
+/// user running `tmux kill-server`) rather than trust a sudden total-empty probe as every agent
+/// exiting at once. But the debounce can't tell a real bounce apart from a kill *we* just
+/// performed on purpose, so it holds the stale (now-dead) window in `last_good_windows` for one
+/// extra tick — long enough for an immediately-following `lane.get` (e.g. `delete_lane`'s impact
+/// summary) to read the just-stopped agent back as still live.
+///
+/// Since we already know this exact window is gone — we're the one who killed it — drop it from
+/// the caches proactively instead of waiting for the next probe to (eventually) notice:
+/// - `last_good_windows`, so `resolve_windows` can't mistake our kill for a bounce and reuse it.
+/// - `prompt_cache`, so a future window reusing this name never inherits a stale pane sniff.
+///
+/// `last_managed_windows` is deliberately left untouched: `overlay_agents`'s next-tick diff
+/// against it is what detects "a managed window vanished" and drops the stale
+/// `live_cwds`/`cwds_sticky` process counts — pre-updating it here would erase that signal.
+///
+/// Shared by the orphan sweep below (killing a stale `lane-<id>` window left by a renumbered
+/// worktree) and `rpc::agent.stop` (killing a live one on request) — same window-death
+/// bookkeeping either way, so a stopped agent's session can never be read back as still live.
+pub(crate) async fn kill_and_forget(ctx: &Ctx, window: &str) {
+    let tmux = ctx.tmux.clone();
+    let w = window.to_string();
+    let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&w)).await;
+    ctx.last_good_windows.lock().await.retain(|w| w != window);
+    ctx.prompt_cache.lock().await.remove(window);
+    ctx.invalidate_overlay().await;
+}
+
 /// Find and kill orphaned `lane-<id>` windows once, then drop the overlay cache so the phantom
 /// sessions they were propping up disappear on the next `lane.list`.
 pub async fn reap_orphan_windows(ctx: &Ctx) {
@@ -91,21 +124,54 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         })
         .collect();
 
+    // Nothing to own or reap on a server with no managed windows.
+    if windows.is_empty() {
+        return;
+    }
+
+    // Single-owner guard: claim/verify ownership of this tmux server every sweep — PROACTIVELY, so
+    // the live daemon stamps the server well before any stray could, not only once it has orphans —
+    // and never reap on a server another daemon owns. A second repomond sharing this session (e.g. a
+    // stray test instance that kept the default `tmux_session` while pointing at its own store)
+    // would otherwise mark every real `lane-<id>` window an orphan and kill it (the disappearing-
+    // sessions bug). The owner token is this daemon's db path: stable across restarts (so the real
+    // daemon reclaims its own stamp) and distinct per instance (so a stray never matches).
+    let me = owner_token(ctx);
+    let tmux_g = ctx.tmux.clone();
+    let me_g = me.clone();
+    let owns = tokio::task::spawn_blocking(move || tmux_g.claim_or_verify_owner(&me_g))
+        .await
+        .unwrap_or(false);
+
     let orphans = orphan_lane_windows(&windows, &lane_paths);
     if orphans.is_empty() {
         return;
     }
+    if !owns {
+        tracing::warn!(
+            ?orphans,
+            owner = %me,
+            session = ctx.tmux.session(),
+            "another repomond owns this tmux server; skipping reap (would kill its windows)"
+        );
+        return;
+    }
+
     tracing::info!(?orphans, "reaping orphaned agent windows");
 
-    let tmux = ctx.tmux.clone();
-    let to_kill = orphans.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        for w in &to_kill {
-            let _ = tmux.kill_named(w);
-        }
-    })
-    .await;
-    ctx.invalidate_overlay().await;
+    for w in &orphans {
+        kill_and_forget(ctx, w).await;
+    }
+}
+
+/// This daemon's identity for the tmux-server single-owner guard: its db path — stable across
+/// restarts (so the real daemon reclaims its own stamp) and distinct per instance (so a stray
+/// test daemon's path never matches). Falls back to the pid when storeless (embedded / tests).
+fn owner_token(ctx: &Ctx) -> String {
+    ctx.db_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("pid:{}", std::process::id()))
 }
 
 /// Periodic reaper task; the first sweep runs immediately (covers daemon startup).
@@ -141,21 +207,18 @@ mod tests {
         // lane 35) ends up with leftover windows named for ids it used to have — lane-81 (now no
         // lane at all) and lane-42 (that id has since been reused for a different worktree, /sxx).
         // Both are orphans; only windows whose id+cwd match a current lane are kept.
-        let lane_paths: HashMap<LaneId, PathBuf> = [
-            (1, p("/repo")),
-            (35, p("/aaa")),
-            (42, p("/sxx")),
-        ]
-        .into_iter()
-        .collect();
+        let lane_paths: HashMap<LaneId, PathBuf> =
+            [(1, p("/repo")), (35, p("/aaa")), (42, p("/sxx"))]
+                .into_iter()
+                .collect();
 
         let windows = vec![
-            idle("lane-81", "/aaa"),   // id 81: no such lane -> orphan
-            idle("lane-81-2", "/aaa"), // orphan
-            idle("lane-42", "/aaa"),   // id 42 is now /sxx, not /aaa -> cwd mismatch -> orphan
-            idle("lane-1", "/repo"),   // matches lane 1 -> keep
-            idle("lane-35", "/aaa"),   // matches lane 35 -> keep
-            idle("term-1", "/anywhere"),         // not a lane window -> ignored
+            idle("lane-81", "/aaa"),               // id 81: no such lane -> orphan
+            idle("lane-81-2", "/aaa"),             // orphan
+            idle("lane-42", "/aaa"), // id 42 is now /sxx, not /aaa -> cwd mismatch -> orphan
+            idle("lane-1", "/repo"), // matches lane 1 -> keep
+            idle("lane-35", "/aaa"), // matches lane 35 -> keep
+            idle("term-1", "/anywhere"), // not a lane window -> ignored
             idle("usage-probe-work", "/anywhere"), // not a lane window -> ignored
         ];
 

@@ -5,11 +5,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Subcommand;
 use repomon_core::model::{Lane, Repo};
-use repomon_core::{config, service, Config};
-use serde_json::json;
+use repomon_core::{Config, config, service};
+use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
@@ -42,6 +42,21 @@ pub enum Command {
     Remote {
         #[command(subcommand)]
         cmd: RemoteCmd,
+    },
+    /// Talk to repomind — an orchestrator agent that manages the fleet for you. Launches a
+    /// `claude` session wired to the repomon MCP server (and your mnemind memory, if present).
+    Orchestrate {
+        /// How autonomous repomind is: autonomous (default), supervised, or read-only.
+        #[arg(long, default_value = "autonomous")]
+        autonomy: String,
+        /// Cap on how many agents repomind may run at once (default 4).
+        #[arg(long)]
+        max_agents: Option<usize>,
+        /// Override the model for the orchestrator session (e.g. opus, sonnet).
+        #[arg(long)]
+        model: Option<String>,
+        /// An initial goal to start repomind with (optional).
+        prompt: Option<String>,
     },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
@@ -169,6 +184,12 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
         Command::Remote { cmd } => handle_remote(cmd)?,
+        Command::Orchestrate {
+            autonomy,
+            max_agents,
+            model,
+            prompt,
+        } => handle_orchestrate(config, socket, autonomy, max_agents, model, prompt).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
@@ -265,6 +286,109 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `repomon orchestrate` — talk to the repomind orchestrator. Ensure the daemon is up, ask it to
+/// start (or reuse) the single daemon-owned orchestrator session, then `tmux attach` to that
+/// durable window. The session-building (MCP config + `claude` invocation) now lives daemon-side
+/// in `orchestrator.start`, so the CLI and the TUI drive **one** shared orchestrator.
+async fn handle_orchestrate(
+    config: &Config,
+    socket: Option<PathBuf>,
+    autonomy: String,
+    max_agents: Option<usize>,
+    model: Option<String>,
+    prompt: Option<String>,
+) -> Result<()> {
+    // Make sure a daemon is running, then drive it (it owns the orchestrator window).
+    let client = crate::ensure_daemon(config, socket).await?;
+
+    // `orchestrator.start` below is idempotent — a no-op if a session is already running (e.g.
+    // the TUI auto-started repomind at its own default autonomy when the command-center opened).
+    // Check first so we never assert an autonomy that isn't actually in force: only print the
+    // "starting at {autonomy}" banner when this call is the one that actually launches it.
+    let status = client
+        .call("orchestrator.status", None)
+        .await
+        .map_err(|e| anyhow!("failed to query the orchestrator: {e}"))?;
+    let already_running = status
+        .get("running")
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false);
+    if already_running {
+        let actual = status
+            .get("autonomy")
+            .and_then(|a| a.as_str())
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown (adopted session)".to_string());
+        eprintln!(
+            "repomind is already running (autonomy: {actual}) — attaching. Stop it first (orchestrator.stop / TUI) to relaunch with different settings.\n"
+        );
+    } else {
+        eprintln!("repomind: orchestrating the fleet (autonomy: {autonomy}). Talk to it below.\n");
+    }
+
+    // Start (or adopt) the orchestrator session. Idempotent: a no-op if one is already running.
+    let mut start = serde_json::Map::new();
+    start.insert("autonomy".into(), json!(autonomy));
+    if let Some(model) = &model {
+        start.insert("model".into(), json!(model));
+    }
+    if let Some(n) = max_agents {
+        start.insert("max_agents".into(), json!(n));
+    }
+    if let Some(prompt) = &prompt {
+        start.insert("prompt".into(), json!(prompt));
+    }
+    client
+        .call("orchestrator.start", Some(Value::Object(start)))
+        .await
+        .map_err(|e| anyhow!("failed to start the orchestrator: {e}"))?;
+
+    // Resolve its attach target and attach to the durable tmux window.
+    let resp = client.call("orchestrator.target", None).await?;
+    let target = resp
+        .get("target")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let available = resp
+        .get("available")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false);
+    if !available || target.is_empty() {
+        return Err(anyhow!(
+            "the orchestrator session isn't available — is tmux installed and on PATH?"
+        ));
+    }
+
+    attach_tmux_target(&target)
+}
+
+/// Attach this process to a `session:window` target on repomon's dedicated tmux socket (the socket
+/// label is the session name). `$TMUX` is dropped so this works even from inside tmux. On unix we
+/// `exec` tmux so it owns the terminal directly (like a raw attach); detaching ends the command.
+fn attach_tmux_target(target: &str) -> Result<()> {
+    let socket_label = target.split(':').next().unwrap_or("repomon");
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args(["-L", socket_label, "attach", "-t", target])
+        .env_remove("TMUX");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec only returns on failure (otherwise this process is replaced by tmux).
+        let err = cmd.exec();
+        Err(anyhow!(
+            "failed to attach to the orchestrator ({err}). Is tmux installed and on PATH?"
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .map_err(|e| anyhow!("failed to attach to the orchestrator ({e})."))?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
 }
 
 /// A fresh 32-byte hex bearer token from the OS entropy pool (no extra deps).
@@ -468,7 +592,7 @@ pub fn shell_init(shell: clap_complete::Shell) -> Result<String> {
         other => {
             return Err(anyhow!(
                 "shell-init: unsupported shell '{other}'; use zsh, bash, or fish"
-            ))
+            ));
         }
     };
     Ok(snippet.to_string())
@@ -483,7 +607,10 @@ mod tests {
         let mut buf = Vec::new();
         clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "repomon", &mut buf);
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("repomon"), "completion script should mention repomon");
+        assert!(
+            out.contains("repomon"),
+            "completion script should mention repomon"
+        );
     }
 
     #[test]

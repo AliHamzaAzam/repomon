@@ -146,32 +146,50 @@ fn config_bases_uncached() -> Vec<PathBuf> {
     bases
 }
 
+/// The launch command for the Claude account rooted at `base`, immune to a leaked
+/// `CLAUDE_CONFIG_DIR` in the daemon's own environment (the daemon is commonly started from a
+/// `claude-work` shell, so it may carry `CLAUDE_CONFIG_DIR=~/.claude-work`; a bare `claude` would
+/// silently inherit that, making "claude-code" and "claude-work" launch the *same* account).
+///
+/// - **Default account (`~/.claude`):** `env -u CLAUDE_CONFIG_DIR claude` — *unset* the variable.
+///   Claude Code reads the default profile from `~/.claude.json` (HOME) **only when the variable
+///   is unset**; `CLAUDE_CONFIG_DIR=~/.claude` instead points at the vestigial
+///   `~/.claude/.claude.json` stub (no account → onboarding), so we must strip the var, not pin it.
+/// - **Variant account:** `CLAUDE_CONFIG_DIR=<dir> claude` — pin it explicitly (shell-quoted, since
+///   this runs via `sh -c` from tmux `new-window`).
+///
+/// Account identity is unchanged: `account_key`/`account_label` stay keyed on the `config_dir`
+/// option, `command_account` reads the default (no `CLAUDE_CONFIG_DIR=`) back as `None`, and
+/// `program_of` sees through the `env -u …` prefix to the `claude` program.
+pub fn launch_command(base: &Path) -> String {
+    if canonical(base) == canonical(&default_config_base()) {
+        "env -u CLAUDE_CONFIG_DIR claude".to_string()
+    } else {
+        format!(
+            "CLAUDE_CONFIG_DIR={} claude",
+            super::shell_quote(&base.display().to_string())
+        )
+    }
+}
+
 /// Spawnable Claude agents, one per detected config dir: `(name, launch command)`. The default
-/// account is `("claude-code", "claude")`; a `~/.claude-work` dir becomes
-/// `("claude-work", "CLAUDE_CONFIG_DIR=/…/.claude-work claude")`.
+/// account is `("claude-code", "env -u CLAUDE_CONFIG_DIR claude")`; a `~/.claude-work` dir becomes
+/// `("claude-work", "CLAUDE_CONFIG_DIR=/…/.claude-work claude")`. Each command is immune to a
+/// daemon's own leaked `CLAUDE_CONFIG_DIR` (see [`launch_command`]).
 pub fn agent_variants() -> Vec<(String, String)> {
     let default = default_config_base();
     config_bases()
         .into_iter()
         .map(|base| {
-            if base == default {
-                ("claude-code".to_string(), "claude".to_string())
+            let name = if base == default {
+                "claude-code".to_string()
             } else {
-                let label = base
-                    .file_name()
+                base.file_name()
                     .and_then(|s| s.to_str())
                     .map(|n| n.trim_start_matches('.').to_string())
-                    .unwrap_or_else(|| "claude".to_string());
-                (
-                    label,
-                    // Runs via `sh -c` (tmux new-window), so quote the path — a config dir with a
-                    // space or shell metacharacter must not break the `VAR=val cmd` parse or inject.
-                    format!(
-                        "CLAUDE_CONFIG_DIR={} claude",
-                        super::shell_quote(&base.display().to_string())
-                    ),
-                )
-            }
+                    .unwrap_or_else(|| "claude".to_string())
+            };
+            (name, launch_command(&base))
         })
         .collect()
 }
@@ -297,11 +315,7 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
             // single least-recently-used entry rather than clearing the whole map — a full clear
             // makes a fleet of >CACHE_CAP transcripts re-parse everything on every refresh.
             if c.len() >= CACHE_CAP && !c.contains_key(path) {
-                if let Some(oldest) = c
-                    .iter()
-                    .min_by_key(|(_, e)| e.seq)
-                    .map(|(p, _)| p.clone())
-                {
+                if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.seq).map(|(p, _)| p.clone()) {
                     c.remove(&oldest);
                 }
             }
@@ -596,6 +610,34 @@ pub fn config_base_for_session(cwd: &Path, session_id: &str) -> Option<Option<Pa
     None
 }
 
+/// Locate one specific Claude session's transcript by id — the direct-lookup counterpart to
+/// [`summaries_for`]'s "newest with content" scan. A caller that already knows exactly which
+/// session it wants (e.g. the repomind orchestrator, whose `claude` was launched with
+/// `--session-id <id>`) can look the file up straight off its known path
+/// (`<config-base>/projects/<encoded-cwd>/<session-id>.jsonl`) instead of scanning and ranking by
+/// recency — so it is never misattributed to some *other* active Claude session on the machine,
+/// however much more recently that one happened to touch its own transcript.
+pub fn transcript_for_session(cwd: &Path, session_id: &str) -> Option<TranscriptSummary> {
+    let encoded = encode_project_dir(cwd);
+    let file = format!("{session_id}.jsonl");
+
+    // Test override: a single projects dir, treated as the default account (mirrors `summary_for`).
+    if let Ok(p) = std::env::var("REPOMON_CLAUDE_PROJECTS") {
+        let path = PathBuf::from(p).join(&encoded).join(&file);
+        return parse_transcript(&path);
+    }
+
+    let default = default_config_base();
+    for base in config_bases() {
+        let path = base.join("projects").join(&encoded).join(&file);
+        if let Some(mut s) = parse_transcript(&path) {
+            s.config_dir = (base != default).then_some(base);
+            return Some(s);
+        }
+    }
+    None
+}
+
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
@@ -785,6 +827,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_variant_unsets_config_dir_against_env_leak() {
+        // The daemon is commonly launched from a `claude-work` shell, so its own environment may
+        // carry `CLAUDE_CONFIG_DIR=~/.claude-work`. A bare `claude` for the default account would
+        // inherit that and resolve to the wrong account (making "claude-code" and "claude-work"
+        // spawn the *same* account). The default account must UNSET the variable — not pin it to
+        // `~/.claude`, which reads the vestigial `~/.claude/.claude.json` stub (no account →
+        // onboarding) instead of the real default profile at `~/.claude.json`.
+        let variants = agent_variants();
+        let (_, cmd) = variants
+            .iter()
+            .find(|(n, _)| n == "claude-code")
+            .expect("default claude-code variant is always present");
+        assert_ne!(
+            cmd, "claude",
+            "bare `claude` would inherit a leaked CLAUDE_CONFIG_DIR"
+        );
+        assert!(
+            !cmd.contains("CLAUDE_CONFIG_DIR="),
+            "default must not PIN a config dir (that reads the ~/.claude stub), got: {cmd}"
+        );
+        assert!(
+            cmd.contains("env -u CLAUDE_CONFIG_DIR"),
+            "default must UNSET CLAUDE_CONFIG_DIR so it reads ~/.claude.json, got: {cmd}"
+        );
+        assert!(cmd.ends_with("claude"), "still launches claude, got: {cmd}");
+    }
+
+    #[test]
     fn encodes_cwd_like_claude_code() {
         assert_eq!(
             encode_project_dir(Path::new("/Users/azaleas/Developer/Claude/repomon")),
@@ -918,6 +988,34 @@ mod tests {
         // The cap is honored, and the single-session helper still works.
         assert_eq!(capped.len(), 2);
         assert!(single.is_some());
+    }
+
+    #[test]
+    fn transcript_for_session_finds_its_file_regardless_of_recency() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/code/pinned");
+        let dir = root.path().join(encode_project_dir(cwd));
+        let line = r#"{"type":"user","cwd":"/code/pinned","message":{"content":"hi"}}"#;
+        // Write the "pinned" session first (older mtime), then an unrelated one that touches its
+        // transcript later (newer mtime) — the scenario that misattributes under a
+        // newest-transcript heuristic but must not under a direct id lookup.
+        write_transcript(&dir, "pinned-session-id.jsonl", &[line]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_transcript(&dir, "unrelated-newer.jsonl", &[line]);
+
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path()) };
+        let found = transcript_for_session(cwd, "pinned-session-id");
+        let missing = transcript_for_session(cwd, "no-such-session");
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::remove_var("REPOMON_CLAUDE_PROJECTS") };
+
+        let found = found.expect("the pinned session's transcript is found by id");
+        assert_eq!(found.session_id.as_deref(), Some("pinned-session-id"));
+        assert!(
+            missing.is_none(),
+            "an id with no matching file must not fall back to some other transcript"
+        );
     }
 
     #[test]

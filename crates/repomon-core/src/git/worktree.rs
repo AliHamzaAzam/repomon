@@ -251,7 +251,15 @@ bare
         // `-b <branch>` is an option, so it precedes `--`; path/source follow.
         assert_eq!(
             add_args("/code/wt/foo", "feature/x", Some("origin/main"), true),
-            ["worktree", "add", "-b", "feature/x", "--", "/code/wt/foo", "origin/main"]
+            [
+                "worktree",
+                "add",
+                "-b",
+                "feature/x",
+                "--",
+                "/code/wt/foo",
+                "origin/main"
+            ]
         );
         // Without a source the trailing positional is simply omitted.
         assert_eq!(

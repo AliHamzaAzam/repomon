@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 repomon-core = { workspace = true }
 repomon-daemon = { workspace = true }
+repomon-mcp = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

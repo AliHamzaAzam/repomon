@@ -3,26 +3,26 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
-use ratatui::DefaultTerminal;
+use repomon_core::TmuxRuntime;
 use repomon_core::model::{
     AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
     RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
-    activity_allows_refire, diff_session_transitions, session_by_key, session_statuses, slot_by_key,
-    SessKey,
+    SessKey, activity_allows_refire, diff_session_transitions, session_by_key, session_statuses,
+    slot_by_key,
 };
 use repomon_core::protocol::Notification;
-use repomon_core::TmuxRuntime;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
@@ -106,6 +106,9 @@ pub struct FleetRow {
     pub lane_idx: usize,
     /// `Some(i)` = the lane's `i`-th agent sub-row; `None` = the lane header / single-agent row.
     pub session: Option<usize>,
+    /// The pinned "repomind" orchestrator row at the top of the fleet (always row 0). When set,
+    /// `lane_idx`/`session` are meaningless; the row targets [`View::Orchestrator`], not a lane.
+    pub orchestrator: bool,
 }
 
 /// Two left-clicks on the same lane within this window count as a double-click (→ open the real
@@ -143,6 +146,10 @@ pub struct Settings {
     pub notify_subagents: bool,
     pub usage_probe: bool,
     pub expand_agents: bool,
+    /// The Claude account that powers the repomind orchestrator (empty = bare `claude`).
+    pub orchestrator_agent: String,
+    /// The orchestrator's model override (empty = the account default; e.g. `opus`/`sonnet`).
+    pub orchestrator_model: String,
 }
 
 /// Accent choices the Settings view cycles through (`mono` = no color).
@@ -151,7 +158,10 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Number of editable rows in the Settings view.
-const SETTINGS_COUNT: usize = 18;
+const SETTINGS_COUNT: usize = 20;
+
+/// Model choices the orchestrator setting cycles through (empty = the account's default model).
+const ORCH_MODELS: &[&str] = &["", "opus", "sonnet"];
 
 pub struct App {
     pub client: DaemonClient,
@@ -218,6 +228,9 @@ pub struct App {
     /// The `(lane, window, cols, rows)` of the last `agent.resize` sent, so it fires only on a real
     /// size/focus change rather than every tick.
     last_resize: Option<(LaneId, String, u16, u16)>,
+    /// The `(cols, rows)` of the last `orchestrator.resize` sent, so it fires only on a real size
+    /// change. Cleared after an attach (which restores the window's client-follow size).
+    last_orch_resize: Option<(u16, u16)>,
     /// Clickable lane regions for the current frame, recorded during render and read by the mouse
     /// handler. Cleared and repopulated every render.
     pub click_zones: RefCell<Vec<ClickZone>>,
@@ -355,6 +368,42 @@ pub struct App {
     pub usage: Vec<repomon_core::agent::AccountUsage>,
     /// When `usage.get` was last fetched, to throttle the refresh well below the 1s tick.
     last_usage_fetch: Option<std::time::Instant>,
+    /// The repomind orchestrator's captured pane (parsed once per `event.orchestrator.output`),
+    /// rendered on the right of the command-center view. `None` until the first delta arrives.
+    pub orch_output: Option<Pane>,
+    /// Whether the orchestrator session is running (from `orchestrator.status` / its broadcast).
+    pub orch_running: bool,
+    /// The orchestrator's resolved agent (Claude account) and model, for the pinned row's label.
+    pub orch_agent: Option<String>,
+    pub orch_model: Option<String>,
+    /// repomind's current attention (from `orchestrator.status`'s `attention` field):
+    /// `"permission"`, `"decision"`, or `"end_of_turn"` when it's asking the human something;
+    /// `None` (mapped from the wire's `"none"`) otherwise. Drives the pinned row's needs-you
+    /// styling and the command-center header.
+    pub orch_attention: Option<String>,
+    /// A short "why" for `orch_attention` (the pending dialog's question, or a tail of
+    /// repomind's last message), from `orchestrator.status`'s `headline` field.
+    pub orch_headline: Option<String>,
+    /// True once `apply_orchestrator_status` has applied a first status (mirrors `notif_seeded`
+    /// for the lane path): gates the "repomind needs you" popup so a cold start where repomind is
+    /// already awaiting attention seeds `orch_attention` instead of reading it as a none→attention
+    /// edge and firing a spurious popup. Only the popup is seeded — the pinned row/header above
+    /// still reflect the real value on this first call.
+    orch_notif_seeded: bool,
+    /// Last time the orchestrator pane changed; drives the "chatting" vs "idle" pinned-row state.
+    pub orch_last_output: Option<Instant>,
+    /// INSERT mode in the command-center view: keystrokes forward to `orchestrator.send_input`.
+    pub orch_insert: bool,
+    /// The watch flag we last pushed to the daemon (`orchestrator.watch`), mirrored so `sync_viewport`
+    /// only toggles streaming on a real enter/leave of the view.
+    orch_watched: bool,
+    /// Screen rect of the pinned "repomind" row this frame, so a click on it selects + opens the view.
+    pub orch_click: std::cell::Cell<Option<Rect>>,
+    /// Screen rect of repomind's live pane this frame (the command-center's right column, and the
+    /// Split right column while the pinned row is selected), so a click can focus / open / attach it.
+    pub orch_pane_zone: std::cell::Cell<Option<Rect>>,
+    /// Last left-click on the command-center pane, for double-click-to-attach detection.
+    orch_pane_last_click: Option<Instant>,
 }
 
 impl App {
@@ -396,6 +445,7 @@ impl App {
             focus_geom: std::cell::Cell::new((0, 0, 0)),
             focus_pane_dims: std::cell::Cell::new(None),
             last_resize: None,
+            last_orch_resize: None,
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
             hover_lane: None,
@@ -476,6 +526,19 @@ impl App {
             reader_parked: Arc::new(AtomicBool::new(false)),
             usage: Vec::new(),
             last_usage_fetch: None,
+            orch_output: None,
+            orch_running: false,
+            orch_agent: None,
+            orch_model: None,
+            orch_attention: None,
+            orch_headline: None,
+            orch_notif_seeded: false,
+            orch_last_output: None,
+            orch_insert: false,
+            orch_watched: false,
+            orch_click: std::cell::Cell::new(None),
+            orch_pane_zone: std::cell::Cell::new(None),
+            orch_pane_last_click: None,
         }
     }
 
@@ -494,6 +557,75 @@ impl App {
         if let Ok(r) = self.client.call_typed::<Vec<Repo>>("repo.list", None).await {
             self.repos = r;
         }
+        self.refresh_orchestrator().await;
+    }
+
+    /// Pull the orchestrator's running state for the pinned "repomind" row. Cheap; the live
+    /// `event.orchestrator.status` broadcast keeps it fresh between refreshes.
+    pub async fn refresh_orchestrator(&mut self) {
+        if let Ok(v) = self.client.call("orchestrator.status", None).await {
+            self.apply_orchestrator_status(&v);
+        }
+    }
+
+    /// Update the pinned-row/command-center state from an `orchestrator.status` shape
+    /// (`{running, agent, model, window, attention, headline}`). On the none→needs-attention edge —
+    /// repomind just raised a dialog or finished a turn — fires the same native popup an agent's
+    /// NeedsYou gets (mirrors [`fire_notification`](Self::fire_notification)), unless the user is
+    /// already looking at the command-center (its row/header already show it) or notifications are
+    /// off. The first application only seeds `orch_attention` (see `orch_notif_seeded`): otherwise
+    /// a cold start where repomind is already awaiting attention would read `had_attention == false`
+    /// (this struct's fields start unset) as a genuine edge and fire a spurious startup popup — the
+    /// same problem `detect_notifications`' `notif_seeded` guard solves for the lane path.
+    fn apply_orchestrator_status(&mut self, v: &serde_json::Value) {
+        self.orch_running = v.get("running").and_then(|b| b.as_bool()).unwrap_or(false);
+        self.orch_agent = v
+            .get("agent")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
+        self.orch_model = v
+            .get("model")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string());
+        let had_attention = self.orch_attention.is_some();
+        self.orch_attention = v
+            .get("attention")
+            .and_then(|a| a.as_str())
+            .filter(|a| *a != "none")
+            .map(|s| s.to_string());
+        self.orch_headline = v
+            .get("headline")
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string());
+        let seeding = !self.orch_notif_seeded;
+        self.orch_notif_seeded = true;
+        if self.orch_popup_should_fire(seeding, had_attention) {
+            let title = "repomind needs you";
+            let body = self.orch_headline.clone().unwrap_or_default();
+            notify::send_native(
+                title,
+                &body,
+                self.settings.notify_sound,
+                self.settings.notify_click_focus,
+            );
+            self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
+        }
+    }
+
+    /// Whether `apply_orchestrator_status` should pop the "repomind needs you" notification for
+    /// the update just applied: `seeding` is `true` only on that call's first-ever application
+    /// (see `orch_notif_seeded`) — never fires, no matter how the other conditions read, since a
+    /// cold start where repomind is already awaiting attention isn't a real edge. Otherwise mirrors
+    /// [`Self::notif_enabled_for`]'s gating plus the command-center's own-coverage check. Split out
+    /// as a pure decision so it's unit-testable without invoking the real (OS-popping)
+    /// `notify::send_native`.
+    fn orch_popup_should_fire(&self, seeding: bool, had_attention: bool) -> bool {
+        !seeding
+            && !had_attention
+            && self.orch_attention.is_some()
+            && self.view != View::Orchestrator
+            && self.settings.notify_enabled
+            && self.settings.notify_needs_you
     }
 
     /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick — usage moves
@@ -545,7 +677,8 @@ impl App {
                         .selected_lane()
                         .map(|l| l.agent_sessions.iter().any(|s| !s.external))
                         .unwrap_or(false);
-                    self.focus_missing_ticks = next_focus_missing(present, self.focus_missing_ticks);
+                    self.focus_missing_ticks =
+                        next_focus_missing(present, self.focus_missing_ticks);
                 }
             }
             Err(e) => self.status = format!("lane.list failed: {e}"),
@@ -572,14 +705,8 @@ impl App {
         // key. Sorting by recent activity here made lanes bubble around on every agent output
         // (visible jumbling, worse with the expanded agent tree). Needs-you still floats up via
         // the `attention` bucket; only the within-bucket churn is removed.
-        self.lanes.sort_by_key(|l| {
-            (
-                repo_order[&l.repo.id],
-                !l.pinned,
-                attention[&l.id],
-                l.id,
-            )
-        });
+        self.lanes
+            .sort_by_key(|l| (repo_order[&l.repo.id], !l.pinned, attention[&l.id], l.id));
     }
 
     /// How urgently this lane needs the user (lower = more urgent), accounting for whether a
@@ -942,11 +1069,18 @@ impl App {
     /// indexes this list. Render and navigation BOTH go through here so they never drift.
     pub fn fleet_rows(&self) -> Vec<FleetRow> {
         let lanes = self.visible_lanes();
-        let mut rows = Vec::new();
+        // Row 0 is always the pinned "repomind" orchestrator row, so `selected == 0` selects it
+        // and real lane rows start at index 1; the selection math below indexes this list directly.
+        let mut rows = vec![FleetRow {
+            lane_idx: 0,
+            session: None,
+            orchestrator: true,
+        }];
         for (i, lane) in lanes.iter().enumerate() {
             rows.push(FleetRow {
                 lane_idx: i,
                 session: None,
+                orchestrator: false,
             });
             if self.settings.expand_agents && lane.agent_sessions.len() > 1 {
                 // Emit sub-rows in a STABLE order (by durable session identity), not the daemon's
@@ -956,11 +1090,17 @@ impl App {
                     rows.push(FleetRow {
                         lane_idx: i,
                         session: Some(s),
+                        orchestrator: false,
                     });
                 }
             }
         }
         rows
+    }
+
+    /// Whether the pinned "repomind" row is the current selection.
+    pub fn orchestrator_selected(&self) -> bool {
+        self.selected_row().map(|r| r.orchestrator).unwrap_or(false)
     }
 
     fn selected_row(&self) -> Option<FleetRow> {
@@ -973,6 +1113,9 @@ impl App {
 
     pub fn selected_lane(&self) -> Option<&Lane> {
         let row = self.fleet_rows().get(self.selected).copied()?;
+        if row.orchestrator {
+            return None; // the pinned repomind row targets no lane
+        }
         self.visible_lanes().into_iter().nth(row.lane_idx)
     }
 
@@ -998,12 +1141,14 @@ impl App {
             (lane_pos, want)
         };
         let rows = self.fleet_rows();
+        // Exclude the pinned repomind row (its `lane_idx` is a placeholder `0`) so lane 0 never
+        // resolves to it.
         let target = rows
             .iter()
-            .position(|r| r.lane_idx == lane_pos && r.session == want)
+            .position(|r| !r.orchestrator && r.lane_idx == lane_pos && r.session == want)
             .or_else(|| {
                 rows.iter()
-                    .position(|r| r.lane_idx == lane_pos && r.session.is_none())
+                    .position(|r| !r.orchestrator && r.lane_idx == lane_pos && r.session.is_none())
             });
         if let Some(t) = target {
             self.selected = t;
@@ -1052,7 +1197,8 @@ impl App {
             | View::Settings
             | View::Notifications
             | View::SpawnPick
-            | View::LaneJump => Vec::new(),
+            | View::LaneJump
+            | View::Orchestrator => Vec::new(),
         }
     }
 
@@ -1085,6 +1231,18 @@ impl App {
             self.last_viewport = live;
             self.last_viewport_focus = focus;
         }
+        // Stream the orchestrator pane while the command-center view is open, or while the pinned
+        // repomind row is selected in Split (its right column previews the live pane). Toggle the
+        // daemon's watch flag only on a real change (it gates `stream_orchestrator`).
+        let want_watch = self.view == View::Orchestrator
+            || (self.view == View::Split && self.orchestrator_selected());
+        if want_watch != self.orch_watched {
+            let _ = self
+                .client
+                .call("orchestrator.watch", Some(json!({ "on": want_watch })))
+                .await;
+            self.orch_watched = want_watch;
+        }
     }
 
     /// Resize the focused agent's tmux window to match the mediated view's pane, so it reflows to
@@ -1116,6 +1274,35 @@ impl App {
             )
             .await;
         self.last_resize = Some(key);
+    }
+
+    /// Size the orchestrator's tmux window to the right-pane area while it's being streamed (the
+    /// command-center, or the Split preview when the pinned row is selected), so the captured pane
+    /// fills the view exactly instead of overflowing (too wide) or rendering blank (too tall, so
+    /// `output_window` would slice off the trailing empty rows). Mirrors `sync_pane_size`.
+    async fn sync_orchestrator_size(&mut self) {
+        let streaming = self.view == View::Orchestrator
+            || (self.view == View::Split && self.orchestrator_selected());
+        if !streaming {
+            return;
+        }
+        let Some((cols, rows)) = self.focus_pane_dims.get() else {
+            return;
+        };
+        if cols < 4 || rows < 2 {
+            return;
+        }
+        if self.last_orch_resize == Some((cols, rows)) {
+            return;
+        }
+        let _ = self
+            .client
+            .call(
+                "orchestrator.resize",
+                Some(json!({ "cols": cols, "rows": rows })),
+            )
+            .await;
+        self.last_orch_resize = Some((cols, rows));
     }
 
     /// Load the selected lane's recent commits (its branch history) when the selection
@@ -1453,6 +1640,25 @@ impl App {
                     .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
                 self.output.insert(id, Pane { raw, lines, cursor });
             }
+        } else if note.method == "event.orchestrator.output" {
+            if let Some(content) = note.params.get("content").and_then(|v| v.as_str()) {
+                let raw = content.to_string();
+                let lines = view::parse_pane(&raw);
+                // repomind's real cursor `[col, row]` (parsed like the lane path), so the mediated
+                // pane can draw it where you're typing.
+                let cursor = note
+                    .params
+                    .get("cursor")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
+                let changed = self.orch_output.as_ref().map(|p| &p.raw) != Some(&raw);
+                if changed {
+                    self.orch_last_output = Some(Instant::now());
+                }
+                self.orch_output = Some(Pane { raw, lines, cursor });
+            }
+        } else if note.method == "event.orchestrator.status" {
+            self.apply_orchestrator_status(&note.params);
         } else {
             // Don't refresh inline — the event loop coalesces a burst of notifications into a
             // single refresh (each `refresh()` is a ~100ms lane.list, and bursts/exit-focus
@@ -1484,7 +1690,10 @@ impl App {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
                 // Remember the real pointer column from positioned events — wheel events report
                 // column 0 on many terminals, so this is how we know which pane the wheel is over.
-                if !matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                if !matches!(
+                    me.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
                     self.last_mouse_col = me.column;
                 }
                 // Bare movement just updates the hovered lane (highlighted on render).
@@ -1521,13 +1730,15 @@ impl App {
                     // navigates lanes. Wheel events report column 0 on many terminals, so fall back
                     // to the last positioned pointer column. A left-click focuses the clicked lane.
                     View::Split => {
-                        let col = if me.column > 0 { me.column } else { self.last_mouse_col };
+                        let col = if me.column > 0 {
+                            me.column
+                        } else {
+                            self.last_mouse_col
+                        };
                         let over_pane = col > 26;
                         match me.kind {
                             MouseEventKind::ScrollUp if over_pane => self.pane_scroll(true, 1),
-                            MouseEventKind::ScrollDown if over_pane => {
-                                self.pane_scroll(false, 1)
-                            }
+                            MouseEventKind::ScrollDown if over_pane => self.pane_scroll(false, 1),
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                                 self.handle_mouse(me)
                             }
@@ -1537,6 +1748,16 @@ impl App {
                             _ => {}
                         }
                     }
+                    // Command-center: the wheel scrolls repomind's pane; a left-click jumps to a
+                    // needs-you lane (left column) or focuses/attaches the pane (right column).
+                    View::Orchestrator => match me.kind {
+                        MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_add(3),
+                        MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.orchestrator_click(me.column, me.row).await
+                        }
+                        _ => {}
+                    },
                     // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
                     // terminal, a click on empty space blurs); the wheel still navigates.
                     _ => match me.kind {
@@ -1570,6 +1791,7 @@ impl App {
             View::Notifications => self.notifications_key(key),
             View::SpawnPick => self.spawn_pick_key(key).await,
             View::LaneJump => self.lane_jump_key(key),
+            View::Orchestrator => self.orchestrator_key(key).await,
             _ if self.filtering => self.filter_key(key),
             _ => {
                 // `R` renames the selected agent sub-row in the expanded fleet sidebar.
@@ -1589,6 +1811,7 @@ impl App {
         let Some(FleetRow {
             lane_idx,
             session: Some(s),
+            ..
         }) = self.selected_row()
         else {
             self.status =
@@ -1645,7 +1868,10 @@ impl App {
         };
         match self
             .client
-            .call("session.rename", Some(json!({ "session_id": session_id, "label": label_val })))
+            .call(
+                "session.rename",
+                Some(json!({ "session_id": session_id, "label": label_val })),
+            )
             .await
         {
             Ok(_) => {
@@ -1982,6 +2208,13 @@ impl App {
         if let Some(x) = b("expand_agents") {
             self.settings.expand_agents = x;
         }
+        // Orchestrator overrides are `Option<String>` daemon-side; a null/absent value clears them.
+        if let Some(a) = v.get("orchestrator_agent") {
+            self.settings.orchestrator_agent = s(a).unwrap_or_default();
+        }
+        if let Some(m) = v.get("orchestrator_model") {
+            self.settings.orchestrator_model = s(m).unwrap_or_default();
+        }
     }
 
     /// Persist the current settings to the daemon config and apply the accent live.
@@ -2010,6 +2243,9 @@ impl App {
             "notify_subagents": self.settings.notify_subagents,
             "usage_probe": self.settings.usage_probe,
             "expand_agents": self.settings.expand_agents,
+            // Empty string clears the override daemon-side (back to the account default).
+            "orchestrator_agent": self.settings.orchestrator_agent,
+            "orchestrator_model": self.settings.orchestrator_model,
         });
         match self.client.call("config.set", Some(params)).await {
             Ok(v) => self.apply_settings_value(&v),
@@ -2164,13 +2400,38 @@ impl App {
                     None => self.clamp_selection(),
                 }
             }
+            18 => {
+                // The orchestrator's Claude account: cycle "(default)" + claude variants + customs.
+                let mut options: Vec<String> = vec![String::new()];
+                options.extend(self.orchestrator_agent_choices());
+                let refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+                self.settings.orchestrator_agent =
+                    cycle(&refs, &self.settings.orchestrator_agent, forward);
+                self.save_settings().await;
+            }
+            19 => {
+                self.settings.orchestrator_model =
+                    cycle(ORCH_MODELS, &self.settings.orchestrator_model, forward);
+                self.save_settings().await;
+            }
             _ => {}
         }
     }
 
+    /// The agent names the orchestrator can run under: Claude account variants plus custom agents
+    /// (Codex/Aider are excluded; repomind is fundamentally a Claude session). Built from the
+    /// `agent.detect` list already loaded into `nl_agents`.
+    fn orchestrator_agent_choices(&self) -> Vec<String> {
+        self.nl_agents
+            .iter()
+            .filter(|a| a.custom || a.name.starts_with("claude"))
+            .map(|a| a.name.clone())
+            .collect()
+    }
+
     async fn activate_setting(&mut self) {
         match self.settings_idx {
-            0..=2 | 5..=17 => self.adjust_setting(true).await,
+            0..=2 | 5..=19 => self.adjust_setting(true).await,
             3..=4 => self.settings_editing = true,
             _ => {}
         }
@@ -2574,12 +2835,32 @@ impl App {
     /// inside one focuses that lane (single-click → type in place for interactive zones; another
     /// click within `DOUBLE_CLICK` → open its real terminal). A click on empty space blurs.
     async fn handle_click(&mut self, col: u16, row: u16) {
+        // The pinned "repomind" row isn't a lane click-zone; hit-test it first: a click selects it
+        // and opens the command-center view.
+        if let Some(rect) = self.orch_click.get() {
+            if rect.contains(Position { x: col, y: row }) {
+                self.selected = 0;
+                self.open_orchestrator().await;
+                return;
+            }
+        }
+        // In Split with the pinned row selected, the right column previews repomind; a click there
+        // opens the full command-center.
+        if let Some(rect) = self.orch_pane_zone.get() {
+            if rect.contains(Position { x: col, y: row }) {
+                self.open_orchestrator().await;
+                return;
+            }
+        }
         let hit = self
             .click_zones
             .borrow()
             .iter()
             .find(|z| z.rect.contains(Position { x: col, y: row }))
             .copied();
+        // Clicking a lane (or the gutter) leaves any repomind insert mode, since the selection is
+        // moving off the pinned row.
+        self.orch_insert = false;
         match hit {
             Some(z) => {
                 let now = std::time::Instant::now();
@@ -2668,6 +2949,165 @@ impl App {
         }
     }
 
+    /// Auto-start the orchestrator session (idempotent) and begin watching its pane when entering
+    /// the command-center view. `sync_viewport` flips the daemon's watch flag the same loop.
+    async fn load_orchestrator(&mut self) {
+        self.reset_scroll();
+        self.orch_insert = false;
+        match self
+            .client
+            .call("orchestrator.start", Some(json!({})))
+            .await
+        {
+            Ok(v) => self.apply_orchestrator_status(&v),
+            Err(e) => self.status = format!("repomind start failed: {e}"),
+        }
+    }
+
+    /// Open the command-center view (used by the pinned-row click). The keyboard path goes through
+    /// `apply(Action::Goto)`.
+    async fn open_orchestrator(&mut self) {
+        self.view = View::Orchestrator;
+        self.load_orchestrator().await;
+    }
+
+    /// Leave the command-center view back to Fleet; `sync_viewport` stops the pane stream.
+    async fn leave_orchestrator(&mut self) {
+        self.reset_scroll();
+        self.orch_insert = false;
+        self.view = View::Fleet;
+    }
+
+    /// Key handling in the command-center view: INSERT forwards to the orchestrator (mirrors
+    /// `focus_key`/`split_key`); `↵`/`→` attaches into its real tmux pane; `i` types in place.
+    async fn orchestrator_key(&mut self, key: KeyEvent) {
+        if self.orch_insert {
+            if leaves_insert(&key) {
+                self.orch_insert = false;
+                return;
+            }
+            // PgUp/PgDn scroll the captured pane even while typing (always reach repomon).
+            match key.code {
+                KeyCode::PageUp => {
+                    self.scroll = self.scroll.saturating_add(8);
+                    return;
+                }
+                KeyCode::PageDown => {
+                    self.scroll = self.scroll.saturating_sub(8);
+                    return;
+                }
+                _ => {}
+            }
+            if self.scroll > 0 {
+                self.reset_scroll();
+            }
+            self.send_orch_key(key).await;
+            return;
+        }
+        match key.code {
+            // ↵ / → "go all the way in" = attach to repomind's real tmux pane.
+            KeyCode::Enter | KeyCode::Right => {
+                self.reset_scroll();
+                self.attach_orchestrator().await;
+            }
+            // `i` types straight to repomind without leaving the view (mediated send-keys).
+            KeyCode::Char('i') => {
+                self.reset_scroll();
+                self.orch_insert = true;
+            }
+            KeyCode::PageUp | KeyCode::Up => self.scroll = self.scroll.saturating_add(8),
+            KeyCode::PageDown | KeyCode::Down => self.scroll = self.scroll.saturating_sub(8),
+            KeyCode::Esc | KeyCode::Left if self.scroll > 0 => self.reset_scroll(),
+            KeyCode::Esc | KeyCode::Left => self.leave_orchestrator().await,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    /// Forward one keystroke to the orchestrator window (mirrors `send_agent_key`, but the
+    /// orchestrator is a singleton so there's no lane/window to target).
+    async fn send_orch_key(&mut self, key: KeyEvent) {
+        let Some((spec, literal)) = translate_key(&key) else {
+            return;
+        };
+        if literal {
+            // Buffer printables; the event loop flushes the run as one `orchestrator.send_input`.
+            self.pending_input.push_str(&spec);
+            return;
+        }
+        // A control key: send any buffered text first so order holds, then the key.
+        self.flush_pending_input().await;
+        if let Err(e) = self
+            .client
+            .call(
+                "orchestrator.key",
+                Some(json!({ "key": spec, "literal": false })),
+            )
+            .await
+        {
+            self.status = format!("repomind: {e}");
+        }
+    }
+
+    /// Resolve the orchestrator's tmux target and queue a full `tmux attach` (reuses the generic
+    /// `do_attach_target` suspend/reinit path).
+    async fn attach_orchestrator(&mut self) {
+        self.flush_pending_input().await;
+        match self.client.call("orchestrator.target", None).await {
+            Ok(v) => {
+                let target = v
+                    .get("target")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let available = v
+                    .get("available")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
+                if available && !target.is_empty() {
+                    self.attach_target = Some(target);
+                } else {
+                    self.status = "repomind isn't running yet".into();
+                }
+            }
+            Err(e) => self.status = format!("attach failed: {e}"),
+        }
+    }
+
+    /// A left-click in the command-center view: a needs-you lane in the left summary jumps to that
+    /// lane (Focus); the right column focuses repomind for typing, and a double-click attaches into
+    /// its real terminal. The click rects are registered each frame by `render_orchestrator`.
+    async fn orchestrator_click(&mut self, col: u16, row: u16) {
+        let pos = Position { x: col, y: row };
+        let lane = self
+            .click_zones
+            .borrow()
+            .iter()
+            .find(|z| z.rect.contains(pos))
+            .map(|z| z.lane);
+        if let Some(id) = lane {
+            self.jump_to_lane(id); // selects the lane and opens it in Focus
+            return;
+        }
+        if let Some(rect) = self.orch_pane_zone.get() {
+            if rect.contains(pos) {
+                let now = std::time::Instant::now();
+                let dbl = self
+                    .orch_pane_last_click
+                    .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK);
+                self.orch_pane_last_click = Some(now);
+                if dbl {
+                    self.orch_insert = false;
+                    self.attach_orchestrator().await; // double-click → full attach
+                } else {
+                    self.orch_insert = true; // single-click → type to repomind
+                }
+                return;
+            }
+        }
+        self.orch_insert = false; // clicked the gutter → blur
+    }
+
     /// Forward one keystroke live to the selected lane's agent (insert-mode passthrough),
     /// so its own UI works (Shift+Tab cycles modes, arrows navigate menus, Ctrl-C interrupts).
     async fn send_agent_key(&mut self, key: KeyEvent) {
@@ -2704,6 +3144,21 @@ impl App {
             return;
         }
         let text = std::mem::take(&mut self.pending_input);
+        // The command-center, or the Split preview while typing to repomind (`orch_insert`), targets
+        // the orchestrator window rather than a lane.
+        if self.view == View::Orchestrator || self.orch_insert {
+            if let Err(e) = self
+                .client
+                .call(
+                    "orchestrator.send_input",
+                    Some(json!({ "text": text, "enter": false })),
+                )
+                .await
+            {
+                self.status = format!("repomind: {e}");
+            }
+            return;
+        }
         let Some(id) = self.selected_lane().map(|l| l.id) else {
             return;
         };
@@ -2725,6 +3180,16 @@ impl App {
     /// Focus, `i` enters insert mode to type straight to the agent here (esc returns); ↵/→
     /// still zooms into full-screen Focus.
     async fn split_key(&mut self, key: KeyEvent) {
+        // Typing to repomind from the Split preview (the pinned row is selected): mirror a lane's
+        // insert mode, but forward keystrokes to the orchestrator. `^O` leaves insert.
+        if self.orch_insert {
+            if leaves_insert(&key) {
+                self.orch_insert = false;
+                return;
+            }
+            self.send_orch_key(key).await;
+            return;
+        }
         if self.focus_insert {
             if leaves_insert(&key) {
                 self.focus_insert = false;
@@ -2746,6 +3211,22 @@ impl App {
         if self.filtering {
             self.filter_key(key);
             return;
+        }
+        // The pinned repomind row has no lane: `i` quick-types to repomind (exactly like `i` on a
+        // selected lane), and `↵`/`→` open the full command-center.
+        if self.orchestrator_selected() {
+            match key.code {
+                KeyCode::Char('i') => {
+                    self.reset_scroll();
+                    self.orch_insert = true;
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Right => {
+                    self.open_orchestrator().await;
+                    return;
+                }
+                _ => {}
+            }
         }
         // esc returns to the live tail before it would zoom out.
         if key.code == KeyCode::Esc && self.scroll > 0 {
@@ -3296,6 +3777,7 @@ impl App {
         if let Some(FleetRow {
             lane_idx,
             session: Some(s),
+            ..
         }) = self.selected_row()
         {
             let windowless = self
@@ -3403,15 +3885,22 @@ impl App {
             }
             Action::ZoomIn => {
                 self.focus_insert = false; // don't carry click-focus typing across screens
-                self.view = match self.view {
-                    View::Fleet => View::Split,
-                    View::Split => View::Focus,
-                    View::Grid => View::Focus,
-                    other => other,
+                self.orch_insert = false;
+                // ↵/→ on the pinned repomind row opens the command-center instead of zooming a lane.
+                if self.orchestrator_selected() && matches!(self.view, View::Fleet | View::Split) {
+                    self.open_orchestrator().await;
+                } else {
+                    self.view = match self.view {
+                        View::Fleet => View::Split,
+                        View::Split => View::Focus,
+                        View::Grid => View::Focus,
+                        other => other,
+                    }
                 }
             }
             Action::ZoomOut => {
                 self.focus_insert = false;
+                self.orch_insert = false;
                 match self.view {
                     View::Focus => self.view = View::Split,
                     View::Split => self.view = View::Fleet,
@@ -3425,7 +3914,8 @@ impl App {
                     | View::Settings
                     | View::Notifications
                     | View::SpawnPick
-                    | View::LaneJump => self.view = View::Fleet,
+                    | View::LaneJump
+                    | View::Orchestrator => self.view = View::Fleet,
                     // Esc in Fleet clears the urgent filter first (like the text filter), then
                     // quits.
                     View::Fleet if self.urgent_only => {
@@ -3458,6 +3948,10 @@ impl App {
                         for ev in self.notifications.iter_mut() {
                             ev.read = true;
                         }
+                    }
+                    View::Orchestrator => {
+                        self.selected = 0; // highlight the pinned row on return to Fleet
+                        self.load_orchestrator().await;
                     }
                     _ => {}
                 }
@@ -3492,8 +3986,9 @@ impl App {
                 // Unregister the selected lane's whole repo (all its lanes), with a two-press
                 // confirm. Unregister only: the daemon drops the registry row and stops watching
                 // the tree, but worktree files and running agents are left untouched.
-                let Some((repo_id, name)) =
-                    self.selected_lane().map(|l| (l.repo.id, l.repo.name.clone()))
+                let Some((repo_id, name)) = self
+                    .selected_lane()
+                    .map(|l| (l.repo.id, l.repo.name.clone()))
                 else {
                     return;
                 };
@@ -3641,6 +4136,13 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     });
 
     let outcome = event_loop(&mut terminal, &mut app, &mut in_rx, &mut events).await;
+    // Stop the orchestrator pane stream on exit so the daemon doesn't keep capturing for a gone TUI.
+    if app.orch_watched {
+        let _ = app
+            .client
+            .call("orchestrator.watch", Some(json!({ "on": false })))
+            .await;
+    }
     disable_mouse();
     ratatui::restore();
     // Hand the title back to the shell (most shells re-set it at the next prompt anyway).
@@ -3814,6 +4316,7 @@ async fn event_loop(
         app.sync_viewport().await;
         let t_viewport = sync_t.elapsed();
         app.sync_pane_size().await;
+        app.sync_orchestrator_size().await;
         let t_panesize = sync_t.elapsed();
         app.sync_recent_commits().await;
         let t_commits = sync_t.elapsed();
@@ -3837,7 +4340,7 @@ async fn event_loop(
                 app.notif_banner = None;
             }
         }
-        if app.view != View::Focus && app.scroll != 0 {
+        if !matches!(app.view, View::Focus | View::Orchestrator) && app.scroll != 0 {
             app.reset_scroll();
         }
         terminal.draw(|f| view::render(f, app))?;
@@ -4029,6 +4532,9 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     drain_pending_input();
     app.input_suspended.store(false, Ordering::Relaxed);
     app.last_viewport.clear();
+    // The attach restored the orchestrator window's client-follow (full-terminal) size, so force a
+    // re-fit to the mediated pane on the next tick.
+    app.last_orch_resize = None;
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
     // Re-seed notification edge-detection — the daemon owned popups while we were parked.
@@ -4334,7 +4840,10 @@ mod tests {
             Some(SessionRef::Transcript("uuid-2".into()))
         );
         // An inferred file-activity placeholder (no window, no id) has no stable handle.
-        assert_eq!(agent_session_ref(&sess(None, AgentStatus::Idle, true)), None);
+        assert_eq!(
+            agent_session_ref(&sess(None, AgentStatus::Idle, true)),
+            None
+        );
     }
 
     #[test]
@@ -4532,5 +5041,151 @@ mod tests {
         // A plain 'o' is a literal char for the agent; Ctrl-O would be C-o if forwarded.
         assert_eq!(translate_key(&plain_o), Some(("o".to_string(), true)));
         assert_eq!(translate_key(&ctrl_o), Some(("C-o".to_string(), false)));
+    }
+
+    /// `apply_orchestrator_status` doesn't touch the network — it just needs *a* connected
+    /// `DaemonClient` to build an `App` around (`App::new` has no other constructor). A listener
+    /// that accepts once and goes quiet is enough; no daemon RPC is exercised.
+    async fn app_with_dummy_client() -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+            // Keep the accepted stream alive for the test's duration instead of dropping it
+            // immediately, so the client doesn't see an instant EOF/reconnect churn.
+            std::future::pending::<()>().await;
+        });
+        let client = DaemonClient::connect(&sock).await.expect("connect");
+        App::new(client)
+    }
+
+    #[tokio::test]
+    async fn apply_orchestrator_status_parses_attention_and_headline() {
+        let mut app = app_with_dummy_client().await;
+        // Notifications must not fire real OS popups from a unit test.
+        app.settings.notify_enabled = false;
+
+        app.apply_orchestrator_status(&json!({
+            "running": true,
+            "agent": "claude-work",
+            "model": "opus",
+            "window": "orchestrator",
+            "attention": "permission",
+            "headline": "Do you want to proceed?",
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("permission"));
+        assert_eq!(
+            app.orch_headline.as_deref(),
+            Some("Do you want to proceed?")
+        );
+
+        app.apply_orchestrator_status(&json!({
+            "running": true,
+            "agent": "claude-work",
+            "model": "opus",
+            "window": "orchestrator",
+            "attention": "end_of_turn",
+            "headline": null,
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("end_of_turn"));
+        assert_eq!(app.orch_headline, None);
+
+        // "none" on the wire clears both fields — not `Some("none")`.
+        app.apply_orchestrator_status(&json!({
+            "running": true,
+            "agent": "claude-work",
+            "model": "opus",
+            "window": "orchestrator",
+            "attention": "none",
+            "headline": null,
+        }));
+        assert_eq!(app.orch_attention, None);
+        assert_eq!(app.orch_headline, None);
+
+        // A payload missing the fields entirely (an older daemon) also reads as no attention.
+        app.apply_orchestrator_status(&json!({ "running": false }));
+        assert_eq!(app.orch_attention, None);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_attention_edge_is_suppressed_by_view_and_settings() {
+        // Deliberately never flips both `notify_enabled` and `notify_needs_you` on together here:
+        // that combination reaches `notify::send_native`, which shells out to a real OS
+        // notification on this platform — not something a unit test should trigger. The two gates
+        // are instead verified independently, each suppressing on its own.
+        let mut app = app_with_dummy_client().await;
+        // Seed first (a no-attention application, matching a real cold start with nothing
+        // pending): otherwise the fresh app's very first `apply_orchestrator_status` call below
+        // would itself be the seed call and pass for the wrong reason, masking whether the view/
+        // settings gates below actually suppress anything.
+        app.apply_orchestrator_status(&json!({ "running": true, "attention": "none" }));
+        assert_eq!(app.orch_attention, None);
+
+        // Gate 1: already looking at the command-center — its row/header cover it, so the
+        // none→attention edge must not bank a popup banner even with notifications on.
+        app.settings.notify_enabled = true;
+        app.settings.notify_needs_you = true;
+        app.view = View::Orchestrator;
+        app.apply_orchestrator_status(&json!({
+            "running": true, "attention": "decision", "headline": "pick one"
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("decision"));
+        assert!(
+            app.notif_banner.is_none(),
+            "must not banner while already on the Orchestrator view"
+        );
+
+        // Gate 2: elsewhere in the TUI, but notifications are off — still no banner.
+        app.orch_attention = None; // reset to none so the next call is a real edge
+        app.settings.notify_enabled = false;
+        app.view = View::Fleet;
+        app.apply_orchestrator_status(&json!({
+            "running": true, "attention": "permission", "headline": "proceed?"
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("permission"));
+        assert!(
+            app.notif_banner.is_none(),
+            "must not banner while notifications are disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_popup_is_seeded_not_fired_on_first_application() {
+        // Cold start: repomind is already awaiting attention (e.g. it raised a permission dialog
+        // before the TUI attached). The very first `apply_orchestrator_status` call must seed
+        // `orch_attention` from this value rather than read the jump from the struct's default
+        // `None` as a genuine none→attention edge — mirrors `detect_notifications`'s
+        // `notif_seeded` guard for the lane path (see the `orch_notif_seeded` field doc).
+        //
+        // Both notify gates are deliberately on here (unlike the suppression test above): if
+        // seeding didn't short-circuit before the gate check, this would reach the real
+        // (OS-popping) `notify::send_native`, so a clean `notif_banner.is_none()` here is what
+        // actually proves the seed path was taken — not just that some other gate happened to be
+        // closed.
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = true;
+        app.settings.notify_needs_you = true;
+        app.view = View::Fleet;
+
+        app.apply_orchestrator_status(&json!({
+            "running": true, "attention": "permission", "headline": "already pending"
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("permission"));
+        assert!(
+            app.notif_banner.is_none(),
+            "must not banner on the first (seed) status application"
+        );
+
+        // A subsequent genuine none→attention edge, after seeding, does fire. Checked through the
+        // pure `orch_popup_should_fire` predicate rather than by feeding another payload through
+        // `apply_orchestrator_status` — with both gates on, a real edge there would reach the
+        // actual (OS-popping) `notify::send_native`, exactly what this module avoids in tests.
+        assert!(
+            app.orch_popup_should_fire(false, false),
+            "a genuine none->attention edge after seeding must fire"
+        );
+        // The seed call itself must never fire, regardless of what a genuine edge would do.
+        assert!(!app.orch_popup_should_fire(true, false));
     }
 }

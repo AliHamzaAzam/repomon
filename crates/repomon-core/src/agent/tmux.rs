@@ -186,6 +186,31 @@ impl TmuxRuntime {
         self.ok(&["has-session", "-t", &self.session])
     }
 
+    /// Cooperative single-owner guard for this tmux server (`tmux -L <session>`). Two `repomond`s
+    /// aimed at the same session — e.g. a stray test daemon that kept the default `tmux_session`
+    /// while using its own socket+store — must never run destructive sweeps against each other's
+    /// windows: the second daemon's store doesn't know the first's lanes, so its reaper would mark
+    /// every real `lane-<id>` window an orphan and kill it (the disappearing-sessions bug). The
+    /// first daemon to call this stamps `@repomon-owner` with its identity (`me`, its db path);
+    /// later daemons read a different value and back off. Returns true iff `me` owns the server.
+    pub fn claim_or_verify_owner(&self, me: &str) -> bool {
+        match self.server_owner() {
+            Some(owner) => owner == me,
+            None => {
+                // Claim it, then re-read: if another daemon set it concurrently we lose and back off.
+                let _ = self.ok(&["set-option", "-s", "@repomon-owner", me]);
+                self.server_owner().as_deref() == Some(me)
+            }
+        }
+    }
+
+    /// The identity the owning daemon stamped on this server, if any (unset/empty → `None`).
+    fn server_owner(&self) -> Option<String> {
+        let out = self.run(&["show-options", "-sv", "@repomon-owner"]).ok()?;
+        let s = out.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
     /// Window names currently in the session.
     pub fn list_windows(&self) -> Result<Vec<String>> {
         // No `has-session` preflight — `run_allow_absent` turns "no server / can't find session"
@@ -214,7 +239,10 @@ impl TmuxRuntime {
                 let mut it = l.splitn(3, '\t');
                 let name = it.next()?.to_string();
                 let path = PathBuf::from(it.next()?);
-                let activity = it.next().and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0);
+                let activity = it
+                    .next()
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or(0);
                 Some((name, path, activity))
             })
             .collect())
@@ -237,8 +265,14 @@ impl TmuxRuntime {
             .expect("unbounded slot range");
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
+            // `-d`: create the window WITHOUT making it the session's active window. tmux's default
+            // `new-window` selects the new window, which yanks any attached `tmux attach` client
+            // (a human "all the way in" on another agent) over to it, then yanks back when it's
+            // killed. Spawning detached keeps the human's focused window put. See the usage-probe
+            // flap (`spawn_named`) for the worst case.
             self.run(&[
                 "new-window",
+                "-d",
                 "-t",
                 &self.session,
                 "-n",
@@ -333,9 +367,16 @@ impl TmuxRuntime {
     /// that owns its own scrollback. `false` for a plain shell (whose scrollback lives in tmux).
     pub fn alternate_on_named(&self, window: &str) -> bool {
         let target = self.exact_target(window);
-        self.run_allow_absent(&["display-message", "-p", "-t", &target, "-F", "#{alternate_on}"])
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false)
+        self.run_allow_absent(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "-F",
+            "#{alternate_on}",
+        ])
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
     }
 
     /// Forward `ticks` mouse-wheel scroll events to `window`'s app, so a full-screen agent scrolls
@@ -358,6 +399,7 @@ impl TmuxRuntime {
     }
 
     pub fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-literal", text = %text.chars().take(60).collect::<String>(), "tmux write");
         self.run(&["send-keys", "-t", &self.exact_target(window), "-l", text])?;
         Ok(())
     }
@@ -368,6 +410,7 @@ impl TmuxRuntime {
     }
 
     pub fn send_text_named(&self, window: &str, text: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-text", text = %text.chars().take(60).collect::<String>(), "tmux write");
         let target = self.exact_target(window);
         self.run(&["send-keys", "-t", &target, "-l", text])?;
         self.run(&["send-keys", "-t", &target, "Enter"])?;
@@ -380,6 +423,7 @@ impl TmuxRuntime {
     }
 
     pub fn send_key_named(&self, window: &str, key: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-key", key = %key, "tmux write");
         self.run(&["send-keys", "-t", &self.exact_target(window), key])?;
         Ok(())
     }
@@ -447,7 +491,18 @@ impl TmuxRuntime {
     pub fn open_named(&self, name: &str, cwd: &Path) -> Result<String> {
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
-            self.run(&["new-window", "-t", &self.session, "-n", name, "-c", &cwd])?;
+            // `-d`: spawn out of the way so opening a terminal never steals an attached client's
+            // active window (see `spawn`).
+            self.run(&[
+                "new-window",
+                "-d",
+                "-t",
+                &self.session,
+                "-n",
+                name,
+                "-c",
+                &cwd,
+            ])?;
         } else {
             self.run(&[
                 "new-session",
@@ -475,8 +530,13 @@ impl TmuxRuntime {
     pub fn spawn_named(&self, name: &str, cwd: &Path, command: &str) -> Result<String> {
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
+            // `-d`: spawn detached. This is the usage probe's path; it spawns then kills a
+            // throwaway `usage-probe-…` window every few minutes. Without `-d`, each spawn yanks an
+            // attached client to the probe and each kill yanks it back, replaying every window's
+            // pane as a flip-book in macOS fullscreen focus (the flap this fixes). See `spawn`.
             self.run(&[
                 "new-window",
+                "-d",
                 "-t",
                 &self.session,
                 "-n",
@@ -509,6 +569,7 @@ impl TmuxRuntime {
     /// Terminate a named window (an agent slot or a terminal). Exact-match target, so killing
     /// `lane-1` can't take out `lane-1-2`.
     pub fn kill_named(&self, name: &str) -> Result<()> {
+        tracing::debug!(target: "repomon::tmuxwrite", window = %name, op = "kill-window", "tmux write");
         self.run(&["kill-window", "-t", &self.exact_target(name)])?;
         Ok(())
     }
@@ -637,6 +698,111 @@ mod tests {
         // Tear down the test session.
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", rt.session()])
+            .output();
+    }
+
+    #[test]
+    fn single_owner_guard_claims_then_blocks_others() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-ownertest-{}", std::process::id()));
+        // A server must exist before server options can be set — spawn a throwaway window.
+        rt.spawn(1, &std::env::temp_dir(), "sh -c 'sleep 30'")
+            .unwrap();
+
+        // First caller claims the server and keeps verifying true on re-check (restart-safe).
+        assert!(
+            rt.claim_or_verify_owner("daemon-A"),
+            "first claim should win"
+        );
+        assert!(
+            rt.claim_or_verify_owner("daemon-A"),
+            "owner re-verifies true"
+        );
+        // A different daemon sharing the server (a stray test instance) is locked out of reaping.
+        assert!(
+            !rt.claim_or_verify_owner("daemon-B"),
+            "non-owner must back off"
+        );
+        // The original owner is unaffected by the other's attempt.
+        assert!(
+            rt.claim_or_verify_owner("daemon-A"),
+            "owner still owns after B's attempt"
+        );
+
+        let _ = Command::new("tmux")
+            .args(["-L", rt.session(), "kill-server"])
+            .output();
+    }
+
+    /// The session's currently-active window name (the one an attached `tmux attach` client
+    /// displays). `None` if the server is gone.
+    fn active_window(rt: &TmuxRuntime) -> Option<String> {
+        // Use the runtime's own helper (same dedicated `-L` socket + benign-absence handling as
+        // production) rather than shelling out to tmux directly.
+        rt.run_allow_absent(&[
+            "list-windows",
+            "-t",
+            rt.session(),
+            "-F",
+            "#{window_active} #{window_name}",
+        ])
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("1 ").map(str::to_string))
+    }
+
+    #[test]
+    fn spawning_a_window_does_not_steal_the_active_window() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-activetest-{}", std::process::id()));
+        let cwd = std::env::temp_dir();
+
+        // The window a human is "attached" to (their focused agent).
+        rt.spawn(1, &cwd, "sh -c 'sleep 30'").unwrap();
+        assert_eq!(active_window(&rt).as_deref(), Some("lane-1"));
+
+        // Spawning a side-by-side lane agent must leave lane-1 active, so an attached client is
+        // not yanked to the new window.
+        rt.spawn(2, &cwd, "sh -c 'sleep 30'").unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "a freshly spawned lane window stole the session's active window"
+        );
+
+        // The usage-probe path (`spawn_named`) is the real flap trigger: it spawns then kills a
+        // throwaway window every few minutes. Neither the spawn nor the kill may move the active
+        // window, or the attached client replays the probe's pane (the fullscreen flip-book).
+        rt.spawn_named("usage-probe-work", &cwd, "sh -c 'sleep 30'")
+            .unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "a usage-probe window stole the session's active window"
+        );
+        rt.kill_named("usage-probe-work").unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "killing the usage-probe window moved the active window"
+        );
+
+        // A plain terminal window (`open_named`) must also spawn out of the way.
+        rt.open_named("term-1", &cwd).unwrap();
+        assert_eq!(
+            active_window(&rt).as_deref(),
+            Some("lane-1"),
+            "a terminal window stole the session's active window"
+        );
+
+        let _ = Command::new("tmux")
+            .args(["-L", rt.session(), "kill-server"])
             .output();
     }
 }

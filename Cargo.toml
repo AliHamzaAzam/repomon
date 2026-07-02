@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/repomon-core",
     "crates/repomon-daemon",
+    "crates/repomon-mcp",
     "crates/repomon-tui",
 ]
 
@@ -64,6 +65,7 @@ insta = "1"
 # --- internal ---
 repomon-core = { path = "crates/repomon-core" }
 repomon-daemon = { path = "crates/repomon-daemon" }
+repomon-mcp = { path = "crates/repomon-mcp" }
 
 [profile.release]
 lto = "thin"

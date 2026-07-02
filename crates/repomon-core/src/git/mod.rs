@@ -1,13 +1,16 @@
-//! The git layer: gix-backed reads ([`reader`]) and worktree CRUD ([`worktree`]).
+//! The git layer: gix-backed reads ([`reader`]), worktree CRUD ([`worktree`]), and lane-vs-base
+//! diffing ([`diff`]).
 
+pub mod diff;
 pub mod reader;
 pub mod worktree;
 
+pub use diff::{LaneDiff, diff_patch, lane_diff};
 pub use reader::{
-    ahead_behind, commits_in_range, dirty_state, head_info, open, read_commits_in_range,
-    read_state, HeadInfo,
+    HeadInfo, ahead_behind, commits_in_range, dirty_state, head_info, open, read_commits_in_range,
+    read_state,
 };
-pub use worktree::{parse_porcelain, WorktreeEntry};
+pub use worktree::{WorktreeEntry, parse_porcelain};
 
 #[cfg(test)]
 mod tests {
@@ -108,9 +111,11 @@ mod tests {
 
         let after = worktree::list(p).unwrap();
         assert_eq!(after.len(), 2);
-        assert!(after
-            .iter()
-            .any(|w| w.branch.as_deref() == Some("feat/thing")));
+        assert!(
+            after
+                .iter()
+                .any(|w| w.branch.as_deref() == Some("feat/thing"))
+        );
 
         worktree::remove(p, &wt_path, false).unwrap();
         assert_eq!(worktree::list(p).unwrap().len(), 1);

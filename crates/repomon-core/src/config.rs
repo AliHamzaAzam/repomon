@@ -21,7 +21,9 @@ pub const DEFAULT_TMUX_SESSION: &str = "repomon";
 /// `:`, `=`, whitespace, or other metachar would corrupt target resolution (`exact_target` builds
 /// `{session}:={window}`). Empty is invalid.
 pub fn valid_tmux_session(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 pub const DEFAULT_TIME_FORMAT: &str = "%H:%M %a %d %b %Y";
 
@@ -100,6 +102,13 @@ pub struct Config {
     /// In the sidebars, expand a lane running several agents into one row per agent (a tree under
     /// the lane) instead of a single row with an `×N` badge. Off by default.
     pub expand_agents: bool,
+    /// Which agent (Claude account) powers the repomind orchestrator session — a built-in Claude
+    /// variant (e.g. `claude-work`) or a custom agent name. `None` falls back to bare `claude`.
+    /// An explicit override on `orchestrator.start` takes precedence over this.
+    pub orchestrator_agent: Option<String>,
+    /// The model the orchestrator session runs (e.g. `opus`, `sonnet`). `None` lets `claude` pick
+    /// its default. An explicit override on `orchestrator.start` takes precedence.
+    pub orchestrator_model: Option<String>,
 }
 
 impl Default for Config {
@@ -130,6 +139,8 @@ impl Default for Config {
             push: PushConfig::default(),
             usage_probe: false,
             expand_agents: false,
+            orchestrator_agent: None,
+            orchestrator_model: None,
         }
     }
 }
@@ -184,7 +195,8 @@ impl Config {
     pub fn load_from(path: &std::path::Path) -> Result<Config> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
-                let mut cfg: Config = toml::from_str(&s).map_err(|e| Error::Config(e.to_string()))?;
+                let mut cfg: Config =
+                    toml::from_str(&s).map_err(|e| Error::Config(e.to_string()))?;
                 // A malformed tmux session name would corrupt every tmux target it's spliced into;
                 // reset to the default rather than fail the daemon over a bad config char.
                 if !valid_tmux_session(&cfg.tmux_session) {

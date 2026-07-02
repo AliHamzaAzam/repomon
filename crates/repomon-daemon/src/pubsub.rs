@@ -20,4 +20,8 @@ pub mod topic {
     pub const AGENT_STATUS: &str = "event.agent.status";
     /// A custom agent was added/removed, or the default changed (config mutated).
     pub const AGENT_CHANGED: &str = "event.agent.changed";
+    /// The repomind orchestrator's pane changed (streamed text capture).
+    pub const ORCHESTRATOR_OUTPUT: &str = "event.orchestrator.output";
+    /// The repomind orchestrator started/stopped (its `{running, agent, model, window}` status).
+    pub const ORCHESTRATOR_STATUS: &str = "event.orchestrator.status";
 }

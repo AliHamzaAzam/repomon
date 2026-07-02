@@ -14,10 +14,10 @@ pub mod view;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use client::DaemonClient;
-use repomon_core::{config, Config};
+use repomon_core::{Config, config};
 
 #[derive(Parser)]
 #[command(
@@ -180,7 +180,7 @@ pub struct EmbeddedGuard {
 
 async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
     use repomon_core::{Store, Watcher};
-    use repomon_daemon::{serve, Ctx};
+    use repomon_daemon::{Ctx, serve};
 
     let db = config::db_path();
     let store = Store::open(&db).with_context(|| format!("opening store at {}", db.display()))?;
@@ -211,6 +211,7 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
     }
 
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
+    tokio::spawn(repomon_daemon::stream_orchestrator(ctx.clone()));
 
     {
         let indexer = repomon_core::Indexer::new(ctx.store.clone(), ctx.registry.clone());

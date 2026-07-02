@@ -68,6 +68,20 @@ alert still reaches you when you're heads-down in an agent pane.
 **History.** On startup and after `repo.add`, the indexer walks HEAD history into SQLite, so
 `timeline`, `sessions`, and `commit.search` work over history rather than just live HEAD.
 
+**repomind.** The orchestrator is a daemon-owned `claude` session running in its own
+`orchestrator` tmux window (`orchestrator.start`/`.stop`), reachable like any other window
+(`.target`/`.send_input`/`.key`/`.resize`). `repomon-mcp` (invoked as `repomond mcp`) is a
+stdio MCP server the orchestrator's `claude` launches as a subprocess and wires up as a tool
+server; it connects back to the same daemon socket as an ordinary client and keeps a fleet
+snapshot refreshed by poll-and-diff (`lane.list` on a ~1.5s cadence, woken early on a
+structural event — a lane created/deleted). Because that `claude` session pre-approves its own
+fleet tool calls (no permission dialog to intercept, unlike a worker agent), the MCP server's
+own policy layer — autonomy level, a per-session action cap, a send-dedupe window, two-phase
+confirm tokens for destructive actions — is the *sole* gate on what repomind can do. The
+daemon's `notify_watch` tick, the same one that fires desktop alerts for lane agents, also
+classifies repomind's own attention (a pending dialog, or an idle end-of-turn) each pass and
+broadcasts it as `event.orchestrator.status`.
+
 ## Performance posture
 
 - All git and tmux work runs in `spawn_blocking`; the reactor never blocks.

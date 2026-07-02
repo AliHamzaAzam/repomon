@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use repomon_core::{Config, Store};
-use repomon_daemon::{remote, Ctx};
-use serde_json::{json, Value};
+use repomon_daemon::{Ctx, remote};
+use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 /// A free localhost port (bind :0, read it back, release).

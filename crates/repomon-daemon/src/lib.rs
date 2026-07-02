@@ -21,11 +21,55 @@ use std::time::Instant;
 
 use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
-use repomon_core::{config, Config, Lanes, Registry, Store, TmuxRuntime, Watcher};
+use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
 use serde_json::Value;
-use tokio::sync::{broadcast, Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
 pub use socket::serve;
+
+/// A session as the overlay last surfaced it, kept per lane so a session that vanishes on the
+/// next overlay can be attributed to a cause (the disappearing-sessions diagnostic). Keyed by
+/// `key`: the transcript session id, or `win:<window>` / `inferred:<wt>` when there is none.
+#[derive(Clone)]
+pub struct OverlaySession {
+    pub key: String,
+    pub external: bool,
+    pub inferred: bool,
+    pub window: Option<String>,
+    /// The transcript file this came from (empty for inferred / window-only placeholders).
+    pub manifest: PathBuf,
+    /// The lane's worktree path, for the live-process attribution.
+    pub worktree: PathBuf,
+}
+
+/// The dedicated tmux window the repomind orchestrator runs in. Deliberately NOT a `lane-*` name,
+/// so it stays invisible to the lane overlay/reaper and never shows in `lane.list`. Shared by
+/// `rpc` (the RPC dispatch), `notify_watch` (the attention/pane watcher), and this module's own
+/// pane-streaming loop, so a rename can't desync them.
+pub(crate) const ORCHESTRATOR_WINDOW: &str = "orchestrator";
+
+/// The daemon-owned repomind orchestrator: a single `claude` session in a dedicated tmux window
+/// named `orchestrator` (deliberately NOT `lane-*`, so it stays out of the lane overlay/reaper and
+/// never pollutes the fleet `lane.list`). `agent`/`model` record what it was launched with.
+/// `autonomy` is the autonomy level it was started with (`REPOMON_MCP_AUTONOMY`); `None` when the
+/// session was adopted from a tmux window that survived a daemon restart, whose actual autonomy
+/// is unknown to this process.
+#[derive(Clone)]
+pub struct OrchestratorSession {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub window: String,
+    pub autonomy: Option<String>,
+    /// The `--session-id` UUID this session's `claude` was launched with (minted at spawn time —
+    /// see `rpc::mint_session_id`), so the transcript picker
+    /// (`rpc::pick_orchestrator_transcript`) can pin `orchestrator.transcript` and the end-of-turn
+    /// attention check to *this* session's own transcript file instead of guessing "the newest
+    /// $HOME transcript" — a guess that misattributes any other active Claude session on the
+    /// machine as repomind's. `None` — same "unknown" semantics as `autonomy` — when the session
+    /// was adopted from a tmux window that survived a daemon restart: this process never captured
+    /// the prior one's session id, so the picker falls back to the old recency heuristic.
+    pub session_id: Option<String>,
+}
 
 /// Everything a request handler needs. Cheap to share via `Arc`.
 pub struct Ctx {
@@ -100,6 +144,27 @@ pub struct Ctx {
     /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
     /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
     pub last_good_sessions: Mutex<HashMap<PathBuf, Vec<repomon_core::agent::TranscriptSummary>>>,
+    /// What the overlay surfaced per lane on the previous tick, so a session that vanishes this
+    /// tick is logged with an attributed reason (idle-drop diagnostic). See
+    /// `rpc::diagnose_vanished_sessions`.
+    pub last_overlay_sessions: Mutex<HashMap<LaneId, Vec<OverlaySession>>>,
+    /// The single daemon-owned repomind orchestrator session, if one is running. `None` until
+    /// `orchestrator.start` spawns it; cleared by `orchestrator.stop`.
+    pub orchestrator: Mutex<Option<OrchestratorSession>>,
+    /// Whether a client (the TUI's command-center view) currently wants the orchestrator pane
+    /// streamed. Gates `stream_orchestrator` so capturing the pane costs nothing when nobody's
+    /// watching.
+    pub orchestrator_watched: Mutex<bool>,
+    /// When the orchestrator pane was last typed into (any `orchestrator.send_input`/`key`), so
+    /// `stream_orchestrator` captures it at frame-rate while you type to repomind, the same
+    /// keystroke-echo speedup `input_seen` gives a focused lane. Goes quiet on its own.
+    pub orchestrator_input_seen: Mutex<Option<Instant>>,
+    /// The repomind orchestrator's current attention word (`"none"`, `"permission"`,
+    /// `"decision"`, or `"end_of_turn"`) plus an optional headline — computed every
+    /// `notify_watch` tick (even while notifications are disabled, so the TUI's pinned row and
+    /// command-center header stay live) and folded into `orchestrator_status_value`'s payload on
+    /// change. See `notify_watch::check_orchestrator_attention`.
+    pub orchestrator_attention: Mutex<(String, Option<String>)>,
     pub shutdown: Notify,
 }
 
@@ -151,6 +216,11 @@ impl Ctx {
             last_good_windows: Mutex::new(Vec::new()),
             window_empty_misses: Mutex::new(0),
             last_good_sessions: Mutex::new(HashMap::new()),
+            last_overlay_sessions: Mutex::new(HashMap::new()),
+            orchestrator: Mutex::new(None),
+            orchestrator_watched: Mutex::new(false),
+            orchestrator_input_seen: Mutex::new(None),
+            orchestrator_attention: Mutex::new(("none".to_string(), None)),
             shutdown: Notify::new(),
         })
     }
@@ -328,7 +398,11 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 is_focused && state.get(&lane).map(|s| s.cursor != cursor).unwrap_or(true);
             let changed = content_changed || cursor_changed;
             // Reset to the floor on any change; otherwise double the (clamped) interval toward cap.
-            let backoff = if changed { floor } else { (interval * 2).min(cap) };
+            let backoff = if changed {
+                floor
+            } else {
+                (interval * 2).min(cap)
+            };
             if changed {
                 ctx.broadcast(
                     pubsub::topic::AGENT_OUTPUT,
@@ -341,8 +415,109 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             }
             state.insert(
                 lane,
-                St { window, content, backoff, last_cap: now, cursor },
+                St {
+                    window,
+                    content,
+                    backoff,
+                    last_cap: now,
+                    cursor,
+                },
             );
+        }
+    }
+}
+
+/// Stream the repomind orchestrator's pane to subscribed clients. While a session is running AND a
+/// client has asked to watch it (`orchestrator_watched`), capture the `orchestrator` window and
+/// broadcast `event.orchestrator.output` whenever the pane text or cursor changes. Idle (no session
+/// or nobody watching) it does nothing but a cheap flag check.
+///
+/// Cadence mirrors the focused-lane regime in [`stream_output`], for this single pane: while you are
+/// typing to repomind (within `TYPING_WINDOW` of the last `orchestrator.send_input`/`key`) it
+/// captures at frame-rate so keystroke echo feels instant; once typing goes quiet it relaxes to a
+/// focused cadence and backs off toward a cap while the pane is unchanged. The old flat 200ms tick
+/// made typing in repomind echo at ~5fps versus a lane's ~30Hz.
+pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
+    use std::time::{Duration, Instant};
+
+    const TYPING_FLOOR: Duration = Duration::from_millis(30);
+    const TYPING_CAP: Duration = Duration::from_millis(60);
+    const TYPING_WINDOW: Duration = Duration::from_millis(400);
+    const WATCH_FLOOR: Duration = Duration::from_millis(150);
+    const WATCH_CAP: Duration = Duration::from_millis(600);
+
+    let mut last: Option<String> = None;
+    let mut last_cursor: Option<(u16, u16)> = None;
+    let mut backoff = WATCH_FLOOR;
+    let mut last_cap = Instant::now();
+    // Wake at the tightest regime; the due-check below keeps a quiet pane at its slower cadence, so
+    // the extra wakeups are cheap no-ops (no capture) when nothing is being typed.
+    let mut tick = tokio::time::interval(TYPING_FLOOR);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let watched = *ctx.orchestrator_watched.lock().await;
+        let running = ctx.orchestrator.lock().await.is_some();
+        if !watched || !running {
+            last = None;
+            last_cursor = None;
+            backoff = WATCH_FLOOR;
+            continue;
+        }
+        let now = Instant::now();
+        // Frame-rate while typing to repomind, else the watched-but-quiet focused cadence.
+        let typing = ctx
+            .orchestrator_input_seen
+            .lock()
+            .await
+            .is_some_and(|t| now.saturating_duration_since(t) < TYPING_WINDOW);
+        let (floor, cap) = if typing {
+            (TYPING_FLOOR, TYPING_CAP)
+        } else {
+            (WATCH_FLOOR, WATCH_CAP)
+        };
+        // Re-clamped each tick, so the first keystroke shrinks a stale 150ms wait to <=60ms and the
+        // pane captures on the next tick (prompt first-key echo); not due yet otherwise.
+        let interval = backoff.clamp(floor, cap);
+        if now < last_cap + interval {
+            continue;
+        }
+        last_cap = now;
+        let tmux = ctx.tmux.clone();
+        let content = match tokio::task::spawn_blocking(move || {
+            tmux.capture_named(ORCHESTRATOR_WINDOW, None)
+        })
+        .await
+        {
+            Ok(Ok(c)) => c,
+            _ => continue,
+        };
+        // Carry repomind's real cursor so the mediated pane draws it where you're typing (mirrors
+        // the focused-lane path in `stream_output`). One extra tmux fork on the single pane.
+        let tmux = ctx.tmux.clone();
+        let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named(ORCHESTRATOR_WINDOW))
+            .await
+            .ok()
+            .flatten();
+        // Re-push on a cursor-only move (arrowing within repomind's input box) so the rendered cursor
+        // tracks even when the text is unchanged. Reset to the floor on any change; otherwise double
+        // the (clamped) interval toward the cap so a settled pane stops being re-captured.
+        let changed = last.as_deref() != Some(content.as_str()) || last_cursor != cursor;
+        backoff = if changed {
+            floor
+        } else {
+            (interval * 2).min(cap)
+        };
+        if changed {
+            ctx.broadcast(
+                pubsub::topic::ORCHESTRATOR_OUTPUT,
+                serde_json::json!({
+                    "content": content.clone(),
+                    "cursor": cursor.map(|(x, y)| [x, y]),
+                }),
+            );
+            last = Some(content);
+            last_cursor = cursor;
         }
     }
 }
