@@ -268,7 +268,9 @@ const ORCH_HEADLINE_LEN: usize = 140;
 /// decision) or an end-of-turn message beats "none". Runs on every tick regardless of
 /// `cfg.notify_enabled` — the TUI's pinned row and command-center header need it live even with
 /// notifications off — but the desktop popup fired on the none→attention edge below IS gated on
-/// it, mirroring the rest of this module's local-delivery gating.
+/// `cfg.notify_enabled && cfg.notify_needs_you`, mirroring `kind_enabled`'s gating of the
+/// per-session NeedsYou popup above (this is the same escalation, just for the orchestrator's own
+/// pane rather than a managed agent's).
 ///
 /// `scan_transcript`/`transcript_cache` throttle the `$HOME` transcript scan (a directory walk) to
 /// every other tick a dialog isn't already covering the answer; `popup_fired` debounces the popup.
@@ -320,7 +322,7 @@ async fn check_orchestrator_attention(
     drop(orch);
     ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status);
 
-    if edge_to_attention && !tui_active && cfg.notify_enabled {
+    if edge_to_attention && !tui_active && cfg.notify_enabled && cfg.notify_needs_you {
         let due = popup_fired
             .map(|t| t.elapsed() >= ORCH_POPUP_DEBOUNCE)
             .unwrap_or(true);

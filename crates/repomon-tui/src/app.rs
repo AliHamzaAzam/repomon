@@ -384,6 +384,12 @@ pub struct App {
     /// A short "why" for `orch_attention` (the pending dialog's question, or a tail of
     /// repomind's last message), from `orchestrator.status`'s `headline` field.
     pub orch_headline: Option<String>,
+    /// True once `apply_orchestrator_status` has applied a first status (mirrors `notif_seeded`
+    /// for the lane path): gates the "repomind needs you" popup so a cold start where repomind is
+    /// already awaiting attention seeds `orch_attention` instead of reading it as a none→attention
+    /// edge and firing a spurious popup. Only the popup is seeded — the pinned row/header above
+    /// still reflect the real value on this first call.
+    orch_notif_seeded: bool,
     /// Last time the orchestrator pane changed; drives the "chatting" vs "idle" pinned-row state.
     pub orch_last_output: Option<Instant>,
     /// INSERT mode in the command-center view: keystrokes forward to `orchestrator.send_input`.
@@ -526,6 +532,7 @@ impl App {
             orch_model: None,
             orch_attention: None,
             orch_headline: None,
+            orch_notif_seeded: false,
             orch_last_output: None,
             orch_insert: false,
             orch_watched: false,
@@ -566,7 +573,10 @@ impl App {
     /// repomind just raised a dialog or finished a turn — fires the same native popup an agent's
     /// NeedsYou gets (mirrors [`fire_notification`](Self::fire_notification)), unless the user is
     /// already looking at the command-center (its row/header already show it) or notifications are
-    /// off.
+    /// off. The first application only seeds `orch_attention` (see `orch_notif_seeded`): otherwise
+    /// a cold start where repomind is already awaiting attention would read `had_attention == false`
+    /// (this struct's fields start unset) as a genuine edge and fire a spurious startup popup — the
+    /// same problem `detect_notifications`' `notif_seeded` guard solves for the lane path.
     fn apply_orchestrator_status(&mut self, v: &serde_json::Value) {
         self.orch_running = v.get("running").and_then(|b| b.as_bool()).unwrap_or(false);
         self.orch_agent = v
@@ -587,12 +597,9 @@ impl App {
             .get("headline")
             .and_then(|h| h.as_str())
             .map(|s| s.to_string());
-        if !had_attention
-            && self.orch_attention.is_some()
-            && self.view != View::Orchestrator
-            && self.settings.notify_enabled
-            && self.settings.notify_needs_you
-        {
+        let seeding = !self.orch_notif_seeded;
+        self.orch_notif_seeded = true;
+        if self.orch_popup_should_fire(seeding, had_attention) {
             let title = "repomind needs you";
             let body = self.orch_headline.clone().unwrap_or_default();
             notify::send_native(
@@ -603,6 +610,22 @@ impl App {
             );
             self.notif_banner = Some((format!("{title}  ·  {body}"), Instant::now()));
         }
+    }
+
+    /// Whether `apply_orchestrator_status` should pop the "repomind needs you" notification for
+    /// the update just applied: `seeding` is `true` only on that call's first-ever application
+    /// (see `orch_notif_seeded`) — never fires, no matter how the other conditions read, since a
+    /// cold start where repomind is already awaiting attention isn't a real edge. Otherwise mirrors
+    /// [`Self::notif_enabled_for`]'s gating plus the command-center's own-coverage check. Split out
+    /// as a pure decision so it's unit-testable without invoking the real (OS-popping)
+    /// `notify::send_native`.
+    fn orch_popup_should_fire(&self, seeding: bool, had_attention: bool) -> bool {
+        !seeding
+            && !had_attention
+            && self.orch_attention.is_some()
+            && self.view != View::Orchestrator
+            && self.settings.notify_enabled
+            && self.settings.notify_needs_you
     }
 
     /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick — usage moves
@@ -5092,6 +5115,12 @@ mod tests {
         // notification on this platform — not something a unit test should trigger. The two gates
         // are instead verified independently, each suppressing on its own.
         let mut app = app_with_dummy_client().await;
+        // Seed first (a no-attention application, matching a real cold start with nothing
+        // pending): otherwise the fresh app's very first `apply_orchestrator_status` call below
+        // would itself be the seed call and pass for the wrong reason, masking whether the view/
+        // settings gates below actually suppress anything.
+        app.apply_orchestrator_status(&json!({ "running": true, "attention": "none" }));
+        assert_eq!(app.orch_attention, None);
 
         // Gate 1: already looking at the command-center — its row/header cover it, so the
         // none→attention edge must not bank a popup banner even with notifications on.
@@ -5119,5 +5148,44 @@ mod tests {
             app.notif_banner.is_none(),
             "must not banner while notifications are disabled"
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_popup_is_seeded_not_fired_on_first_application() {
+        // Cold start: repomind is already awaiting attention (e.g. it raised a permission dialog
+        // before the TUI attached). The very first `apply_orchestrator_status` call must seed
+        // `orch_attention` from this value rather than read the jump from the struct's default
+        // `None` as a genuine none→attention edge — mirrors `detect_notifications`'s
+        // `notif_seeded` guard for the lane path (see the `orch_notif_seeded` field doc).
+        //
+        // Both notify gates are deliberately on here (unlike the suppression test above): if
+        // seeding didn't short-circuit before the gate check, this would reach the real
+        // (OS-popping) `notify::send_native`, so a clean `notif_banner.is_none()` here is what
+        // actually proves the seed path was taken — not just that some other gate happened to be
+        // closed.
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = true;
+        app.settings.notify_needs_you = true;
+        app.view = View::Fleet;
+
+        app.apply_orchestrator_status(&json!({
+            "running": true, "attention": "permission", "headline": "already pending"
+        }));
+        assert_eq!(app.orch_attention.as_deref(), Some("permission"));
+        assert!(
+            app.notif_banner.is_none(),
+            "must not banner on the first (seed) status application"
+        );
+
+        // A subsequent genuine none→attention edge, after seeding, does fire. Checked through the
+        // pure `orch_popup_should_fire` predicate rather than by feeding another payload through
+        // `apply_orchestrator_status` — with both gates on, a real edge there would reach the
+        // actual (OS-popping) `notify::send_native`, exactly what this module avoids in tests.
+        assert!(
+            app.orch_popup_should_fire(false, false),
+            "a genuine none->attention edge after seeding must fire"
+        );
+        // The seed call itself must never fire, regardless of what a genuine edge would do.
+        assert!(!app.orch_popup_should_fire(true, false));
     }
 }
