@@ -172,6 +172,10 @@ pub fn classify_prompt(summary: &str) -> PromptClass {
         // has already explicitly registered with repomon, so trusting the folder is routine
         // housekeeping, not a decision-class ask — safe for an orchestrator to auto-answer.
         "do you trust",
+        // Codex's MCP tool-call approval ("Allow the repomon MCP server to run tool
+        // \"fleet_status\"?" — live fixture in the tests below): the same routine
+        // own-next-tool-call ask as Claude's "do you want to run".
+        "mcp server to run tool",
     ];
     if PERMISSION_MARKERS.iter().any(|m| l.contains(m)) {
         PromptClass::Permission
@@ -270,6 +274,27 @@ mod tests {
         // not enough evidence, so this must not match (guards against loosening detection).
         let pane = "Security guide\n\n❯ 1. Yes, I trust this folder\n  2. No, exit";
         assert_eq!(detect_pending_prompt(pane), None);
+    }
+
+    #[test]
+    fn detects_codex_mcp_tool_approval_dialog() {
+        // Ground-truth pane capture from a live codex orchestrator in supervised mode
+        // (`-a on-request`) hitting its MCP tool-call approval. Codex draws its selection
+        // cursor as `›` (U+203A), not Claude's `❯` (U+276F) — this dialog was invisible to the
+        // detector until `parse_option_line` learned the glyph.
+        let pane = "  Field 1/1\n\
+              Allow the repomon MCP server to run tool \"fleet_status\"?\n\
+              › 1. Allow                   Run the tool and continue.\n\
+                2. Allow for this session  Run the tool and remember this choice for this session.\n\
+                3. Always allow            Run the tool and remember this choice for future tool calls.\n\
+                4. Cancel                  Cancel this tool call\n\
+              enter to submit | esc to cancel";
+        let summary = detect_pending_prompt(pane);
+        assert_eq!(
+            summary.as_deref(),
+            Some("Allow the repomon MCP server to run tool \"fleet_status\"?")
+        );
+        assert_eq!(classify_prompt(&summary.unwrap()), PromptClass::Permission);
     }
 
     #[test]
