@@ -268,7 +268,11 @@ fn render_settings(f: &mut Frame, app: &App) {
             onoff(s.expand_agents),
             "per-agent sidebar rows · space toggles",
         ),
-        ("repomind account", orch_agent, "←/→ cycle · Claude account"),
+        (
+            "repomind agent",
+            orch_agent,
+            "←/→ cycle · Claude account or codex",
+        ),
         (
             "repomind model",
             orch_model,

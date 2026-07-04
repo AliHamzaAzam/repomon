@@ -102,9 +102,12 @@ pub struct Config {
     /// In the sidebars, expand a lane running several agents into one row per agent (a tree under
     /// the lane) instead of a single row with an `×N` badge. Off by default.
     pub expand_agents: bool,
-    /// Which agent (Claude account) powers the repomind orchestrator session — a built-in Claude
-    /// variant (e.g. `claude-work`) or a custom agent name. `None` falls back to bare `claude`.
-    /// An explicit override on `orchestrator.start` takes precedence over this.
+    /// Which agent powers the repomind orchestrator session — a built-in Claude variant (e.g.
+    /// `claude-work`), a custom agent name, or `codex` (the one non-Claude CLI with the MCP
+    /// client repomind needs; it runs with pane-only monitoring — no transcript chat view or
+    /// end-of-turn detection). Custom agents are composed with Claude-shaped flags, so their
+    /// commands must be `claude`-based. `None` falls back to bare `claude`. An explicit override
+    /// on `orchestrator.start` takes precedence over this.
     pub orchestrator_agent: Option<String>,
     /// The model the orchestrator session runs (e.g. `opus`, `sonnet`). `None` lets `claude` pick
     /// its default. An explicit override on `orchestrator.start` takes precedence.

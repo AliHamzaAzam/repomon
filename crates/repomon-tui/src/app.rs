@@ -2418,13 +2418,14 @@ impl App {
         }
     }
 
-    /// The agent names the orchestrator can run under: Claude account variants plus custom agents
-    /// (Codex/Aider are excluded; repomind is fundamentally a Claude session). Built from the
-    /// `agent.detect` list already loaded into `nl_agents`.
+    /// The agent names the orchestrator can run under: Claude account variants, custom agents,
+    /// and `codex` — the MCP-capable CLIs. Aider stays excluded (no MCP client, so it can't
+    /// drive the fleet tools; the daemon would reject it anyway). Built from the `agent.detect`
+    /// list already loaded into `nl_agents`.
     fn orchestrator_agent_choices(&self) -> Vec<String> {
         self.nl_agents
             .iter()
-            .filter(|a| a.custom || a.name.starts_with("claude"))
+            .filter(|a| a.custom || a.name.starts_with("claude") || a.name == "codex")
             .map(|a| a.name.clone())
             .collect()
     }
