@@ -394,6 +394,9 @@ pub struct App {
     pub orch_last_output: Option<Instant>,
     /// INSERT mode in the command-center view: keystrokes forward to `orchestrator.send_input`.
     pub orch_insert: bool,
+    /// Two-press confirm for restarting repomind (`r r`) in the command-center — a restart kills
+    /// the live session, so a single stray keypress must not do it. Any other key disarms.
+    pub orch_restart_armed: bool,
     /// The watch flag we last pushed to the daemon (`orchestrator.watch`), mirrored so `sync_viewport`
     /// only toggles streaming on a real enter/leave of the view.
     orch_watched: bool,
@@ -535,6 +538,7 @@ impl App {
             orch_notif_seeded: false,
             orch_last_output: None,
             orch_insert: false,
+            orch_restart_armed: false,
             orch_watched: false,
             orch_click: std::cell::Cell::new(None),
             orch_pane_zone: std::cell::Cell::new(None),
@@ -2955,6 +2959,7 @@ impl App {
     async fn load_orchestrator(&mut self) {
         self.reset_scroll();
         self.orch_insert = false;
+        self.orch_restart_armed = false;
         match self
             .client
             .call("orchestrator.start", Some(json!({})))
@@ -2976,7 +2981,36 @@ impl App {
     async fn leave_orchestrator(&mut self) {
         self.reset_scroll();
         self.orch_insert = false;
+        self.orch_restart_armed = false;
         self.view = View::Fleet;
+    }
+
+    /// Restart repomind with the saved settings: stop the live session, then start fresh — so a
+    /// changed `repomind agent` (backend) / model applies without leaving the TUI. Autonomy
+    /// resets to the default, exactly like the view's idempotent auto-start (`load_orchestrator`)
+    /// — the daemon's `orchestrator.start` re-reads `orchestrator_agent`/`orchestrator_model`
+    /// from config on a genuine spawn.
+    async fn restart_orchestrator(&mut self) {
+        self.orch_restart_armed = false;
+        if let Err(e) = self.client.call("orchestrator.stop", None).await {
+            self.status = format!("repomind stop failed: {e}");
+            return;
+        }
+        match self
+            .client
+            .call("orchestrator.start", Some(json!({})))
+            .await
+        {
+            Ok(v) => {
+                self.apply_orchestrator_status(&v);
+                let agent = v
+                    .get("agent")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("claude (default)");
+                self.status = format!("repomind restarted · agent: {agent}");
+            }
+            Err(e) => self.status = format!("repomind restart failed: {e}"),
+        }
     }
 
     /// Key handling in the command-center view: INSERT forwards to the orchestrator (mirrors
@@ -3005,6 +3039,9 @@ impl App {
             self.send_orch_key(key).await;
             return;
         }
+        // Any key other than the confirming second `r` disarms a pending restart (mirrors the
+        // Fleet view's `X X` repo-removal confirm).
+        let restart_armed = std::mem::take(&mut self.orch_restart_armed);
         match key.code {
             // ↵ / → "go all the way in" = attach to repomind's real tmux pane.
             KeyCode::Enter | KeyCode::Right => {
@@ -3015,6 +3052,16 @@ impl App {
             KeyCode::Char('i') => {
                 self.reset_scroll();
                 self.orch_insert = true;
+            }
+            // `r r` restarts repomind with the saved settings — how a `repomind agent` (backend)
+            // or model change in Settings gets applied to a live session without leaving the TUI.
+            KeyCode::Char('r') if restart_armed => self.restart_orchestrator().await,
+            KeyCode::Char('r') => {
+                self.orch_restart_armed = true;
+                self.status =
+                    "restart repomind with saved settings? it ends the live session — press r \
+                     again to confirm"
+                        .to_string();
             }
             KeyCode::PageUp | KeyCode::Up => self.scroll = self.scroll.saturating_add(8),
             KeyCode::PageDown | KeyCode::Down => self.scroll = self.scroll.saturating_sub(8),

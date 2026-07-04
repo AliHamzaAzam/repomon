@@ -895,7 +895,7 @@ fn render_fleet(f: &mut Frame, app: &App) {
     f.render_widget(footer(FLEET_KEYS, app, rows[1].width), rows[1]);
 }
 
-const ORCH_KEYS: &str = "i message repomind · ↵/→ attach (full terminal) · ↑↓/PgUp/wheel scroll · click lane to jump  ·  ←/esc back · q quit";
+const ORCH_KEYS: &str = "i message repomind · ↵/→ attach (full terminal) · r r restart (saved settings) · ↑↓/PgUp/wheel scroll · click lane to jump  ·  ←/esc back · q quit";
 const ORCH_INSERT_KEYS: &str =
     "type to repomind · ↵ send · ^O leave insert · PgUp/PgDn scroll · esc/^C → repomind";
 
