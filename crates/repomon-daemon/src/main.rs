@@ -50,9 +50,17 @@ async fn main() {
         )
         .init();
 
-    let config = Config::load().unwrap_or_default();
+    let mut config = Config::load().unwrap_or_default();
+    // Reflect a `--socket` override into the in-memory config: everything that later derives the
+    // socket from config — most importantly the orchestrator spawn path, which points the fleet
+    // MCP server (`repomond mcp`) back at the daemon via `REPOMON_MCP_SOCKET` — must name the
+    // socket this process actually binds, or repomind's MCP server connects to a socket nobody
+    // is listening on and dies during its initialize handshake.
+    if let Some(sock) = &args.socket {
+        config.socket_path = Some(sock.clone());
+    }
     let db = args.data.unwrap_or_else(config::db_path);
-    let socket = args.socket.unwrap_or_else(|| config::socket_path(&config));
+    let socket = config::socket_path(&config);
 
     let store = match Store::open(&db) {
         Ok(s) => s,
