@@ -48,18 +48,59 @@ pub struct OverlaySession {
 /// pane-streaming loop, so a rename can't desync them.
 pub(crate) const ORCHESTRATOR_WINDOW: &str = "orchestrator";
 
-/// The daemon-owned repomind orchestrator: a single `claude` session in a dedicated tmux window
-/// named `orchestrator` (deliberately NOT `lane-*`, so it stays out of the lane overlay/reaper and
-/// never pollutes the fleet `lane.list`). `agent`/`model` record what it was launched with.
-/// `autonomy` is the autonomy level it was started with (`REPOMON_MCP_AUTONOMY`); `None` when the
-/// session was adopted from a tmux window that survived a daemon restart, whose actual autonomy
-/// is unknown to this process.
+/// Which agent CLI powers the orchestrator session. This is the seam every backend-specific
+/// capability routes through: command construction lives in one
+/// `rpc::build_{claude,codex}_orchestrator_command` per variant, and everything else asks the
+/// predicates here. A future backend is a new variant — the compiler then walks you to every
+/// match site that needs an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrchestratorBackend {
+    /// Claude Code — the default, and the only backend with full monitoring: its `~/.claude`
+    /// JSONL transcript is parseable and `--session-id` pins it at spawn.
+    Claude,
+    /// Codex CLI — MCP-capable, so it can drive the fleet tools, but monitored best-effort only:
+    /// its on-disk session format is unstable (same reason core's `CodexMonitor` reads nothing),
+    /// so no transcript chat view, no end-of-turn attention, no session pinning — pane-based
+    /// dialog detection only.
+    Codex,
+}
+
+impl OrchestratorBackend {
+    /// The wire word for the `backend` field of `orchestrator.status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// Whether this backend has a parseable on-disk transcript the daemon may read
+    /// (`orchestrator.transcript`, the end-of-turn attention check). When false, callers must
+    /// skip the transcript path entirely — NOT fall through to the "newest `~/.claude` transcript
+    /// with content" recency heuristic, which would misattribute some other live Claude session's
+    /// chat as this orchestrator's.
+    pub fn has_transcript(self) -> bool {
+        matches!(self, Self::Claude)
+    }
+}
+
+/// The daemon-owned repomind orchestrator: a single agent session (`backend` says which CLI) in a
+/// dedicated tmux window named `orchestrator` (deliberately NOT `lane-*`, so it stays out of the
+/// lane overlay/reaper and never pollutes the fleet `lane.list`). `agent`/`model` record what it
+/// was launched with. `autonomy` is the autonomy level it was started with
+/// (`REPOMON_MCP_AUTONOMY`); `None` when the session was adopted from a tmux window that survived
+/// a daemon restart, whose actual autonomy is unknown to this process.
 #[derive(Clone)]
 pub struct OrchestratorSession {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub window: String,
     pub autonomy: Option<String>,
+    /// Which agent CLI this session runs — see [`OrchestratorBackend`]. For an adopted window
+    /// this is derived from the current request/config, not from the surviving window itself
+    /// (best-effort, the same caveat as `agent`): a wrong guess degrades to an empty transcript
+    /// or the recency-heuristic fallback, never an error.
+    pub backend: OrchestratorBackend,
     /// The `--session-id` UUID this session's `claude` was launched with (minted at spawn time —
     /// see `rpc::mint_session_id`), so the transcript picker
     /// (`rpc::pick_orchestrator_transcript`) can pin `orchestrator.transcript` and the end-of-turn
