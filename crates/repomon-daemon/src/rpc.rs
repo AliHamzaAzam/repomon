@@ -1361,17 +1361,27 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             // Clear a session whose window died externally so a restart actually re-spawns instead
             // of no-op'ing on a corpse.
             reconcile_orchestrator(ctx).await;
+            // Hold the session lock across the ENTIRE check → adopt/spawn → record sequence.
+            // Releasing it between the is-running check and the record (as this handler once did)
+            // let two concurrent starts — a real scenario: the TUI's command-center auto-start and
+            // `repomon orchestrate` both fire at startup on separate connections — both observe
+            // "not running" and race the spawn: the loser then either failed its own `new-session`
+            // outright, spawned a duplicate `orchestrator` window (tmux allows duplicate names),
+            // or took the adopt branch on the winner's fresh window and overwrote its
+            // just-recorded session id/autonomy. Holding a tokio Mutex across the awaits below is
+            // fine — it merely serializes concurrent start/stop/status for the ~tens of ms a tmux
+            // spawn takes. Nothing in this region re-locks `ctx.orchestrator` (the audit:
+            // `reconcile_orchestrator` runs above, before the guard; config is a separate RwLock;
+            // `orchestrator_attention` is only ever taken after — never while holding — it).
+            let mut orch = ctx.orchestrator.lock().await;
             // Already tracking a live session: idempotent no-op (don't spawn a second window).
-            {
-                let orch = ctx.orchestrator.lock().await;
-                if orch.is_some() {
-                    let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
-                    return Ok(orchestrator_status_value(
-                        orch.as_ref(),
-                        &attention,
-                        headline.as_deref(),
-                    ));
-                }
+            if orch.is_some() {
+                let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
+                return Ok(orchestrator_status_value(
+                    orch.as_ref(),
+                    &attention,
+                    headline.as_deref(),
+                ));
             }
             // Resolve agent/model: explicit param wins, then the persisted config default.
             let (cfg_agent, cfg_model, customs) = {
@@ -1405,8 +1415,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                         autonomy: None,
                         session_id: None,
                     };
-                    *ctx.orchestrator.lock().await = Some(session);
-                    let orch = ctx.orchestrator.lock().await;
+                    *orch = Some(session);
                     let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
                     let status =
                         orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
@@ -1443,17 +1452,31 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 autonomy: Some(p.autonomy),
                 session_id: Some(session_id),
             };
-            *ctx.orchestrator.lock().await = Some(session);
-            let orch = ctx.orchestrator.lock().await;
+            *orch = Some(session);
             let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
             let status = orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
             Ok(status)
         }
         "orchestrator.stop" => {
+            // Take the session lock BEFORE the kill so a stop can't interleave with a concurrent
+            // `orchestrator.start` (which holds this lock across its spawn): stop either runs
+            // first against nothing, or kills the fully-recorded window — never a window that a
+            // mid-flight start is about to record (which would leave an untracked orphan running).
+            let mut orch = ctx.orchestrator.lock().await;
             let tmux = ctx.tmux.clone();
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(ORCHESTRATOR_WINDOW)).await;
-            *ctx.orchestrator.lock().await = None;
+            // Unlike `agent.stop` (see `reap::kill_and_forget`), no cache reconciliation is needed
+            // after this kill: `prompt_cache` only ever holds lane-window sniffs (`overlay_agents`
+            // keys it by lane candidates, which the orchestrator window deliberately isn't), and
+            // while `last_good_windows` does carry `orchestrator`, every consumer of the resolved
+            // list filters to `lane-*` and orchestrator liveness is always probed directly via
+            // `has_named`. Dropping the entry anyway is cheap hygiene, not correctness.
+            ctx.last_good_windows
+                .lock()
+                .await
+                .retain(|w| w != ORCHESTRATOR_WINDOW);
+            *orch = None;
             *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
             let status = orchestrator_status_value(None, "none", None);
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
