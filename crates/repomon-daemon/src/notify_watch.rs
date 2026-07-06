@@ -204,6 +204,10 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 session_id.as_deref().unwrap_or("-"),
                 kind.slug(),
             );
+            // Finer-than-kind taxonomy for clients: permission / decision / end_of_turn / none.
+            let attention = sess
+                .map(|s| repomon_core::agent::attention::agent_attention(s).as_str())
+                .unwrap_or("none");
             let payload = json!({
                 "id": dedup_id,
                 "lane_id": lane_id,
@@ -212,6 +216,8 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 "title": title,
                 "body": body,
                 "prompt": prompt,
+                "attention": attention,
+                "dialog": sess.and_then(|s| s.pending_dialog.clone()),
             });
             // Remote clients (the iOS companion): event.notification + APNs — only when the bridge
             // is enabled.

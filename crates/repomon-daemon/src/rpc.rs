@@ -30,6 +30,22 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
     serde_json::to_value(v).map_err(internal)
 }
 
+/// `agent.answer` found the pane in a different state than the client expected (dialog gone or
+/// replaced). `error.data.dialog` carries what's actually there now (possibly null) so the
+/// client can re-render instead of re-fetching.
+const DIALOG_CHANGED: i64 = -32010;
+
+/// Record that input reached a lane window: stamp `input_seen` (quiets the notification
+/// engine) and drop the window's sniff-cache entry, so an answered dialog can't be
+/// re-advertised by `lane.list` for the rest of its TTL.
+async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
+    ctx.input_seen
+        .lock()
+        .await
+        .insert(lane, std::time::Instant::now());
+    ctx.prompt_cache.lock().await.remove(window);
+}
+
 /// Truncate `s` to at most `max_chars` characters (char-boundary safe), returning the possibly
 /// truncated string and whether it was cut. Used to cap `lane.diff`'s patch text server-side.
 fn cap_chars(s: &str, max_chars: usize) -> (String, bool) {
@@ -143,6 +159,24 @@ struct AgentCapture {
     lines: Option<u32>,
     #[serde(default)]
     window: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentPrompt {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentAnswer {
+    lane_id: repomon_core::model::LaneId,
+    /// 0-based index into the dialog's options.
+    choice: usize,
+    #[serde(default)]
+    window: Option<String>,
+    /// When set, the answer is sent only if the pane's current dialog still summarizes to
+    /// this exact string — the client's stale-view guard.
+    #[serde(default)]
+    expect_summary: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentStop {
@@ -965,20 +999,18 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let tmux = ctx.tmux.clone();
             let (lane, text, enter) = (p.lane_id, p.text, p.enter);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            let win = window.clone();
             tokio::task::spawn_blocking(move || {
                 if enter {
-                    tmux.send_text_named(&window, &text)
+                    tmux.send_text_named(&win, &text)
                 } else {
-                    tmux.send_literal_named(&window, &text)
+                    tmux.send_literal_named(&win, &text)
                 }
             })
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            ctx.input_seen
-                .lock()
-                .await
-                .insert(lane, std::time::Instant::now());
+            mark_input(ctx, lane, &window).await;
             Ok(Value::Null)
         }
         "agent.signal" => {
@@ -986,14 +1018,12 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let tmux = ctx.tmux.clone();
             let (lane, key) = (p.lane_id, p.key);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
-            tokio::task::spawn_blocking(move || tmux.send_key_named(&window, &key))
+            let win = window.clone();
+            tokio::task::spawn_blocking(move || tmux.send_key_named(&win, &key))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
-            ctx.input_seen
-                .lock()
-                .await
-                .insert(lane, std::time::Instant::now());
+            mark_input(ctx, lane, &window).await;
             Ok(Value::Null)
         }
         "agent.key" => {
@@ -1001,21 +1031,108 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let tmux = ctx.tmux.clone();
             let (lane, key, literal) = (p.lane_id, p.key, p.literal);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            let win = window.clone();
             tokio::task::spawn_blocking(move || {
                 if literal {
-                    tmux.send_literal_named(&window, &key)
+                    tmux.send_literal_named(&win, &key)
                 } else {
-                    tmux.send_key_named(&window, &key)
+                    tmux.send_key_named(&win, &key)
                 }
             })
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            ctx.input_seen
+            mark_input(ctx, lane, &window).await;
+            Ok(Value::Null)
+        }
+        "agent.prompt" => {
+            let p: AgentPrompt = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            let win = window.clone();
+            // A fresh capture, not the sniff cache: the popup must show what's on the pane NOW.
+            let dialog = tokio::task::spawn_blocking(move || {
+                tmux.capture_named(&win, Some(45))
+                    .map(|pane| agent::prompt::detect_dialog(&pane))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            ctx.prompt_cache
                 .lock()
                 .await
-                .insert(lane, std::time::Instant::now());
-            Ok(Value::Null)
+                .insert(window, (std::time::Instant::now(), dialog.clone()));
+            Ok(json!({ "dialog": dialog }))
+        }
+        "agent.answer" => {
+            let p: AgentAnswer = parse(params)?;
+            let tmux = ctx.tmux.clone();
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            // Re-capture and verify before sending anything: the dialog the client saw may have
+            // been answered, replaced, or scrolled away since. Never steer a pane blind.
+            let win = window.clone();
+            let cap_tmux = tmux.clone();
+            let dialog = tokio::task::spawn_blocking(move || {
+                cap_tmux
+                    .capture_named(&win, Some(45))
+                    .map(|pane| agent::prompt::detect_dialog(&pane))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            let Some(dialog) = dialog else {
+                // Record the no-dialog result so `lane.list` stops advertising the ghost.
+                ctx.prompt_cache
+                    .lock()
+                    .await
+                    .insert(window, (std::time::Instant::now(), None));
+                return Err(RpcError {
+                    code: DIALOG_CHANGED,
+                    message: "no pending dialog".into(),
+                    data: Some(json!({ "dialog": Value::Null })),
+                });
+            };
+            if let Some(expect) = &p.expect_summary {
+                if *expect != dialog.summary() {
+                    ctx.prompt_cache
+                        .lock()
+                        .await
+                        .insert(window, (std::time::Instant::now(), Some(dialog.clone())));
+                    return Err(RpcError {
+                        code: DIALOG_CHANGED,
+                        message: "dialog changed".into(),
+                        data: Some(json!({ "dialog": dialog })),
+                    });
+                }
+            }
+            if p.choice >= dialog.options.len() {
+                return Err(RpcError::invalid_params(format!(
+                    "choice {} out of range (dialog has {} options)",
+                    p.choice,
+                    dialog.options.len()
+                )));
+            }
+            let keys = agent::prompt::dialog_select_keys(&dialog, p.choice);
+            let win = window.clone();
+            let send_keys = keys.clone();
+            tokio::task::spawn_blocking(move || {
+                send_keys
+                    .iter()
+                    .try_for_each(|k| tmux.send_key_named(&win, k))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            mark_input(ctx, p.lane_id, &window).await;
+            ctx.invalidate_overlay().await;
+            Ok(json!({
+                "answered": dialog.options[p.choice].text,
+                "sent": keys,
+            }))
         }
         "agent.stop" => {
             let p: AgentStop = parse(params)?;
@@ -1913,7 +2030,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // is actively Running — and the notification engine's activity latch absorbs any added
         // flap from sniffing more often.
         const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-        let mut prompts: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+        let mut prompts: Vec<Option<agent::prompt::PendingDialog>> =
+            Vec::with_capacity(candidates.len());
         let mut misses: Vec<usize> = Vec::new();
         {
             let cache = ctx.prompt_cache.lock().await;
@@ -1941,7 +2059,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     .map(|w| {
                         tmux.capture_named(w, Some(45))
                             .ok()
-                            .and_then(|p| agent::prompt::detect_pending_prompt(&p))
+                            .and_then(|p| agent::prompt::detect_dialog(&p))
                     })
                     .collect::<Vec<_>>()
             })
@@ -1966,11 +2084,13 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
         }
         for ((li, si, _, _), found) in candidates.into_iter().zip(prompts) {
-            if let Some(summary) = found {
+            if let Some(dialog) = found {
                 let s = &mut lanes[li].agent_sessions[si];
                 s.status = AgentStatus::Waiting;
+                let summary = dialog.summary();
                 s.last_message = Some(summary.clone());
                 s.pending_prompt = Some(summary);
+                s.pending_dialog = Some(dialog);
             }
         }
     }

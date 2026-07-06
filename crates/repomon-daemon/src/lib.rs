@@ -145,8 +145,10 @@ pub struct Ctx {
     pub overlay_cache: Mutex<Option<(Instant, Vec<Lane>)>>,
     /// Cache of the pending-prompt pane sniff per tmux window — a `capture-pane` per Running/Waiting
     /// session is the bulk of the overlay's subprocess cost. Short TTL: a dialog appearing is seen
-    /// within it; until then the session reads as it last did. Keyed by window name.
-    pub prompt_cache: Mutex<HashMap<String, (Instant, Option<String>)>>,
+    /// within it; until then the session reads as it last did. Keyed by window name. Any input sent
+    /// to a window drops its entry, so an answered dialog can't ride out the TTL as a ghost.
+    pub prompt_cache:
+        Mutex<HashMap<String, (Instant, Option<repomon_core::agent::prompt::PendingDialog>)>>,
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
