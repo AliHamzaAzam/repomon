@@ -14,6 +14,8 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use repomon_core::TmuxRuntime;
+use repomon_core::agent::attention::primary_agent;
+use repomon_core::agent::prompt::PendingDialog;
 use repomon_core::model::{
     AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
     RepoId, TimelineData, WorkSession,
@@ -111,6 +113,24 @@ pub struct FleetRow {
     pub orchestrator: bool,
 }
 
+/// The prompt-peek popup's state (`v`): which lane/agent it shows and the dialog as last read.
+#[derive(Debug, Clone)]
+pub struct PeekState {
+    pub lane_id: LaneId,
+    /// The agent window the answer routes to (`None` = the lane's first slot).
+    pub window: Option<String>,
+    /// The lane's repo name, for the popup title.
+    pub repo: String,
+    /// The parsed dialog; `None` when the pane shows no dialog (a plain end-of-turn, or the
+    /// agent moved on since the last snapshot).
+    pub dialog: Option<PendingDialog>,
+    /// The locally-steered option cursor (index into the dialog's options).
+    pub sel: usize,
+    /// 1-based position in the triage queue, and the queue's length ("2/5").
+    pub queue_pos: usize,
+    pub queue_len: usize,
+}
+
 /// Two left-clicks on the same lane within this window count as a double-click (→ open the real
 /// terminal). A single click focuses the lane for typing in place.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -179,6 +199,11 @@ pub struct App {
     pub renaming: bool,
     pub rename_buf: String,
     rename_target: Option<String>,
+    /// The prompt-peek popup (`v`): the waiting agent's parsed dialog, answerable in place.
+    /// An overlay, not a `View` — the underlying view stays rendered beneath it.
+    pub peek: Option<PeekState>,
+    /// The `?` help overlay: the current view's key hints, expanded. Any key closes it.
+    pub help_open: bool,
     pub status: String,
     pub nl_repo_idx: usize,
     pub nl_branch: String,
@@ -424,6 +449,8 @@ impl App {
             renaming: false,
             rename_buf: String::new(),
             rename_target: None,
+            peek: None,
+            help_open: false,
             status: String::new(),
             nl_repo_idx: 0,
             nl_branch: String::new(),
@@ -720,10 +747,11 @@ impl App {
         attention_rank(&lane.agent_sessions, armed)
     }
 
-    /// Whether this lane is blocked on the user: an agent waiting for input, or rate-limited
-    /// with no auto-continue coming.
+    /// Whether this lane is blocked on the user: an agent waiting for input (any of the
+    /// decision / permission / end-of-turn buckets), or rate-limited with no auto-continue
+    /// coming. The threshold tracks `attention_rank`'s scale.
     fn lane_needs_attention(&self, lane: &Lane) -> bool {
-        self.lane_attention(lane) <= 1
+        self.lane_attention(lane) <= 3
     }
 
     /// Cycle the selection through the lanes blocked on the user, wrapping past the end. While
@@ -795,6 +823,180 @@ impl App {
             self.select_session(lane_id, sid.as_deref());
         }
         self.attach_request = Some(lane_id);
+    }
+
+    /// The lanes blocked on the user, in display order — the queue the prompt-peek popup walks.
+    fn triage_queue(&self) -> Vec<LaneId> {
+        self.visible_lanes()
+            .into_iter()
+            .filter(|l| self.lane_needs_attention(l))
+            .map(|l| l.id)
+            .collect()
+    }
+
+    /// `v`: open the prompt-peek popup — on the selected lane when it's blocked on the user,
+    /// else on the first lane in the triage queue.
+    pub async fn open_peek(&mut self) {
+        let queue = self.triage_queue();
+        if queue.is_empty() {
+            self.status = "no prompts waiting".into();
+            return;
+        }
+        let target = self
+            .selected_lane()
+            .map(|l| l.id)
+            .filter(|id| queue.contains(id))
+            .unwrap_or(queue[0]);
+        self.show_peek(target, &queue).await;
+    }
+
+    /// Point the popup at `lane_id`: seed instantly from the last `lane.list` snapshot, then
+    /// refresh from a live pane capture (best-effort — the seed already renders, and the reply
+    /// is ignored if the popup moved on meanwhile).
+    async fn show_peek(&mut self, lane_id: LaneId, queue: &[LaneId]) {
+        let Some(lane) = self.lanes.iter().find(|l| l.id == lane_id) else {
+            return;
+        };
+        let repo = lane.repo.name.clone();
+        let (window, dialog) = match primary_agent(lane) {
+            Some(s) => (s.tmux_window.clone(), s.pending_dialog.clone()),
+            None => (None, None),
+        };
+        let sel = dialog.as_ref().and_then(|d| d.selected).unwrap_or(0);
+        let queue_pos = queue
+            .iter()
+            .position(|&id| id == lane_id)
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        self.peek = Some(PeekState {
+            lane_id,
+            window: window.clone(),
+            repo,
+            dialog,
+            sel,
+            queue_pos,
+            queue_len: queue.len(),
+        });
+        let mut params = json!({ "lane_id": lane_id });
+        if let Some(w) = &window {
+            params["window"] = json!(w);
+        }
+        if let Ok(v) = self.client.call("agent.prompt", Some(params)).await {
+            let fresh: Option<PendingDialog> = v
+                .get("dialog")
+                .cloned()
+                .and_then(|d| serde_json::from_value(d).ok());
+            if let Some(p) = &mut self.peek {
+                if p.lane_id == lane_id {
+                    p.sel = fresh.as_ref().and_then(|d| d.selected).unwrap_or(0);
+                    p.dialog = fresh;
+                }
+            }
+        }
+    }
+
+    /// Keys while the prompt-peek popup is open (modal): digits or ↑↓+↵ answer, tab/n skips to
+    /// the next waiting lane, esc/q/v closes.
+    pub async fn peek_key(&mut self, key: KeyEvent) {
+        if self.peek.is_none() {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => self.peek = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(p) = &mut self.peek {
+                    p.sel = p.sel.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(p) = &mut self.peek {
+                    let max = p
+                        .dialog
+                        .as_ref()
+                        .map(|d| d.options.len().saturating_sub(1))
+                        .unwrap_or(0);
+                    p.sel = (p.sel + 1).min(max);
+                }
+            }
+            KeyCode::Tab | KeyCode::Char('n') => self.peek_advance().await,
+            KeyCode::Enter => {
+                let sel = self.peek.as_ref().map(|p| p.sel).unwrap_or(0);
+                self.peek_answer(sel).await;
+            }
+            KeyCode::Char(c) if ('1'..='9').contains(&c) => {
+                self.peek_answer((c as u8 - b'1') as usize).await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Send the chosen option to the peeked agent via `agent.answer`, guarded by the summary
+    /// the popup is showing — the daemon re-captures and refuses if the pane moved on.
+    async fn peek_answer(&mut self, choice: usize) {
+        let Some(p) = &self.peek else { return };
+        let Some(dialog) = &p.dialog else {
+            self.status = "no dialog to answer — tab for next, esc to close".into();
+            return;
+        };
+        if choice >= dialog.options.len() {
+            return;
+        }
+        let (lane_id, window) = (p.lane_id, p.window.clone());
+        let option_text = dialog.options[choice].text.clone();
+        let mut params = json!({
+            "lane_id": lane_id,
+            "choice": choice,
+            "expect_summary": dialog.summary(),
+        });
+        if let Some(w) = &window {
+            params["window"] = json!(w);
+        }
+        match self.client.call("agent.answer", Some(params)).await {
+            Ok(_) => {
+                // Flip the local snapshot now so the badge and queue drop the lane at once;
+                // the next 1s refresh confirms from the daemon.
+                if let Some(lane) = self.lanes.iter_mut().find(|l| l.id == lane_id) {
+                    for s in &mut lane.agent_sessions {
+                        if window.is_none() || s.tmux_window == window {
+                            s.pending_prompt = None;
+                            s.pending_dialog = None;
+                            s.status = AgentStatus::Running;
+                        }
+                    }
+                }
+                let short: String = option_text.chars().take(40).collect();
+                self.status = format!("answered “{short}”");
+                self.peek_advance().await;
+            }
+            // -32010 = the pane changed under us (dialog gone or replaced). Re-read it and
+            // re-render rather than guessing; nothing was sent.
+            Err(e) if e.to_string().contains("-32010") => {
+                let queue = self.triage_queue();
+                self.show_peek(lane_id, &queue).await;
+                self.status = "dialog changed — re-read the pane".into();
+            }
+            Err(e) => self.status = format!("answer failed: {e}"),
+        }
+    }
+
+    /// Move the popup to the next lane in the triage queue (wrapping); close with a note when
+    /// nothing is left waiting.
+    async fn peek_advance(&mut self) {
+        let Some(cur) = self.peek.as_ref().map(|p| p.lane_id) else {
+            return;
+        };
+        let queue = self.triage_queue();
+        if queue.is_empty() {
+            self.peek = None;
+            self.status = "all prompts cleared".into();
+            return;
+        }
+        let next = queue
+            .iter()
+            .position(|&id| id == cur)
+            .map(|i| queue[(i + 1) % queue.len()])
+            .unwrap_or(queue[0]);
+        self.show_peek(next, &queue).await;
     }
 
     /// Open the fuzzy lane switcher, remembering where to return on cancel.
@@ -1782,6 +1984,10 @@ impl App {
         match self.view {
             // Inline session rename is modal: while active it swallows every key, in any view.
             _ if self.renaming => self.rename_key(key).await,
+            // So is the prompt-peek popup — it answers/steers/closes, whatever the view below.
+            _ if self.peek.is_some() => self.peek_key(key).await,
+            // The help overlay reads until any key dismisses it.
+            _ if self.help_open => self.help_open = false,
             View::NewLane => self.new_lane_key(key).await,
             View::Split => self.split_key(key).await,
             View::Focus => self.focus_key(key).await,
@@ -4085,6 +4291,8 @@ impl App {
             Action::JumpNeedsYou => self.jump_attention(),
             Action::AttachNeedsYou => self.jump_attention_attach(),
             Action::FindLane => self.enter_lane_jump(),
+            Action::PeekPrompt => self.open_peek().await,
+            Action::Help => self.help_open = true,
             Action::ToggleUrgent => {
                 self.urgent_only = !self.urgent_only;
                 self.status = if self.urgent_only {
@@ -4204,22 +4412,29 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     Ok(app.cd_target)
 }
 
-/// How urgently a lane's sessions need the user: 0 = waiting on you, 1 = rate-limited with no
-/// auto-continue coming, 2 = working, 3 = nothing actionable. Inferred file-activity
-/// placeholders never rank — they can't be acted on.
+/// How urgently a lane's sessions need the user: 0 = waiting on a decision-question, 1 =
+/// waiting on a permission ask, 2 = waiting at end-of-turn, 3 = rate-limited with no
+/// auto-continue coming, 4 = working, 5 = nothing actionable. Inferred file-activity
+/// placeholders never rank — they can't be acted on. `lane_needs_attention`'s threshold
+/// (`<= 3`) and this scale move together.
 fn attention_rank(sessions: &[AgentSession], auto_continue_armed: bool) -> u8 {
     use AgentStatus::*;
+    use repomon_core::agent::attention::{Attention, agent_attention};
     sessions
         .iter()
         .filter(|s| !s.inferred)
         .map(|s| match s.status {
-            Waiting => 0,
-            RateLimited if !auto_continue_armed => 1,
-            Running | RateLimited => 2,
-            Idle | Ended => 3,
+            Waiting => match agent_attention(s) {
+                Attention::Decision => 0,
+                Attention::Permission => 1,
+                _ => 2,
+            },
+            RateLimited if !auto_continue_armed => 3,
+            Running | RateLimited => 4,
+            Idle | Ended => 5,
         })
         .min()
-        .unwrap_or(3)
+        .unwrap_or(5)
 }
 
 /// A stable identity for one agent session within a lane, used to remember which agent a lane
@@ -4892,6 +5107,7 @@ mod tests {
             tmux_window: None,
             last_message: None,
             pending_prompt: None,
+            pending_dialog: None,
             config_dir: None,
             custom_label: None,
         }
@@ -4950,18 +5166,50 @@ mod tests {
     #[test]
     fn attention_rank_orders_urgency() {
         use AgentStatus::*;
-        // Waiting always tops; a rate-limited agent only needs you when nothing will resume it.
-        assert_eq!(attention_rank(&[sess(Some("a"), Waiting, false)], true), 0);
+        // Waiting tops, refined by what the wait is: a real question (decision) outranks a
+        // routine permission ask outranks a bare end-of-turn. A rate-limited agent only needs
+        // you when nothing will resume it.
+        let with_prompt = |mut s: AgentSession, p: &str| {
+            s.pending_prompt = Some(p.into());
+            s
+        };
+        assert_eq!(
+            attention_rank(
+                &[with_prompt(
+                    sess(Some("a"), Waiting, false),
+                    "Which auth method should we use?"
+                )],
+                true
+            ),
+            0,
+            "a decision-question is the most urgent"
+        );
+        assert_eq!(
+            attention_rank(
+                &[with_prompt(
+                    sess(Some("a"), Waiting, false),
+                    "Bash command — Do you want to proceed?"
+                )],
+                true
+            ),
+            1,
+            "a permission ask ranks below a decision"
+        );
+        assert_eq!(
+            attention_rank(&[sess(Some("a"), Waiting, false)], true),
+            2,
+            "a bare end-of-turn is the least urgent wait"
+        );
         assert_eq!(
             attention_rank(&[sess(Some("a"), RateLimited, false)], false),
-            1
+            3
         );
         assert_eq!(
             attention_rank(&[sess(Some("a"), RateLimited, false)], true),
-            2
+            4
         );
-        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 2);
-        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 3);
+        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 4);
+        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 5);
         // The most urgent session wins; inferred placeholders never rank.
         assert_eq!(
             attention_rank(
@@ -4971,10 +5219,10 @@ mod tests {
                 ],
                 true
             ),
-            0
+            2
         );
-        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 3);
-        assert_eq!(attention_rank(&[], true), 3);
+        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 5);
+        assert_eq!(attention_rank(&[], true), 5);
     }
 
     #[test]

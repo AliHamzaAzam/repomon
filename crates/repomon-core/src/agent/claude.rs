@@ -60,6 +60,7 @@ impl TranscriptSummary {
             title: self.title,
             last_message: self.last_message,
             pending_prompt: None, // set by the overlay's pane sniffer
+            pending_dialog: None,
             status: self.status,
             external: false, // overlay flips this based on tmux ownership
             session_id: self.session_id,

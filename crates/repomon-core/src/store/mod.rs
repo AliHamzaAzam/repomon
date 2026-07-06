@@ -698,6 +698,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
         tmux_window: None,
         last_message: None,
         pending_prompt: None,
+        pending_dialog: None,
         config_dir: None,
         custom_label: None,
     })
@@ -988,6 +989,7 @@ mod tests {
             tmux_window: None,
             last_message: None,
             pending_prompt: None,
+            pending_dialog: None,
             config_dir: None,
             custom_label: None,
         };

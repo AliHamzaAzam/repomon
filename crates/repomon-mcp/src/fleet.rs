@@ -14,49 +14,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use repomon_core::agent::prompt::{PromptClass, classify_prompt};
 use repomon_core::client::DaemonClient;
 use repomon_core::model::{AgentSession, AgentStatus, Lane};
 use repomon_core::protocol::Notification;
 use serde::Serialize;
 use tokio::sync::{Mutex, broadcast, watch};
 
-/// What an agent needs from a human/orchestrator, derived from status + `pending_prompt`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Attention {
-    /// Nothing — running, rate-limited (auto-continue handles it), idle, or ended.
-    None,
-    /// Finished its turn with no open dialog; awaiting the next instruction.
-    EndOfTurn,
-    /// Sitting on a routine permission dialog it raised about its own next tool call.
-    Permission,
-    /// Sitting on a real decision-question it is deferring to a human.
-    Decision,
-}
-
-impl Attention {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Attention::None => "none",
-            Attention::EndOfTurn => "end_of_turn",
-            Attention::Permission => "permission",
-            Attention::Decision => "decision",
-        }
-    }
-    /// Does this state want a human/orchestrator to act?
-    pub fn needs_you(self) -> bool {
-        !matches!(self, Attention::None)
-    }
-    fn priority(self) -> u8 {
-        match self {
-            Attention::None => 0,
-            Attention::EndOfTurn => 2,
-            Attention::Permission => 3,
-            Attention::Decision => 4,
-        }
-    }
-}
+// The attention taxonomy grew out of this module and now lives in core, shared with the TUI's
+// badges and the daemon's notifications; re-exported so orchestrator-side callers don't churn.
+pub use repomon_core::agent::attention::{Attention, agent_attention, primary_agent};
 
 /// A single agent session, projected to the fields an orchestrator reasons about.
 #[derive(Debug, Clone, Serialize)]
@@ -178,40 +144,6 @@ impl Fleet {
     pub fn watch(&self) -> watch::Receiver<u64> {
         self.gen_rx.clone()
     }
-}
-
-/// Pick the agent that most wants attention (waiting/decision first, then running, then idle),
-/// preferring managed sessions when otherwise tied.
-pub fn primary_agent(lane: &Lane) -> Option<&AgentSession> {
-    lane.agent_sessions.iter().max_by_key(|s| agent_rank(s))
-}
-
-/// Derive an agent's attention from its status and any open dialog.
-pub fn agent_attention(s: &AgentSession) -> Attention {
-    match s.status {
-        AgentStatus::Waiting => match s.pending_prompt.as_deref() {
-            Some(p) => match classify_prompt(p) {
-                PromptClass::Permission => Attention::Permission,
-                PromptClass::Decision => Attention::Decision,
-            },
-            None => Attention::EndOfTurn,
-        },
-        _ => Attention::None,
-    }
-}
-
-fn agent_rank(s: &AgentSession) -> (u8, u8, bool) {
-    let status_rank = match s.status {
-        AgentStatus::Waiting => 3,
-        AgentStatus::Running => 2,
-        AgentStatus::RateLimited => 1,
-        AgentStatus::Idle | AgentStatus::Ended => 0,
-    };
-    (
-        agent_attention(s).priority(),
-        status_rank,
-        s.tmux_window.is_some(),
-    )
 }
 
 /// Project a live `Lane` into its compact digest.
@@ -409,43 +341,14 @@ mod tests {
             tmux_window: Some("lane-1".into()),
             last_message: None,
             pending_prompt: pending.map(str::to_string),
+            pending_dialog: None,
             config_dir: None,
             custom_label: None,
         }
     }
 
-    #[test]
-    fn attention_reflects_status_and_prompt() {
-        assert_eq!(
-            agent_attention(&sess(AgentStatus::Running, None)),
-            Attention::None
-        );
-        assert_eq!(
-            agent_attention(&sess(AgentStatus::RateLimited, None)),
-            Attention::None
-        );
-        // Waiting with no dialog = ended its turn, awaiting next instruction.
-        assert_eq!(
-            agent_attention(&sess(AgentStatus::Waiting, None)),
-            Attention::EndOfTurn
-        );
-        // Waiting on a permission dialog = auto-answerable.
-        assert_eq!(
-            agent_attention(&sess(
-                AgentStatus::Waiting,
-                Some("Bash command — Do you want to proceed?")
-            )),
-            Attention::Permission
-        );
-        // Waiting on a real question = must escalate.
-        assert_eq!(
-            agent_attention(&sess(
-                AgentStatus::Waiting,
-                Some("Which auth method should we use?")
-            )),
-            Attention::Decision
-        );
-    }
+    // `agent_attention`'s own unit tests moved to core with the taxonomy
+    // (repomon_core::agent::attention); the tests here cover the fleet projection on top.
 
     #[test]
     fn permission_dialog_outranks_a_running_sibling() {

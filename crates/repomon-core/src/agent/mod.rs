@@ -6,6 +6,7 @@
 //! [`CodexMonitor`] are best-effort (see `docs/agents.md`). For any repomon-spawned agent the
 //! daemon also falls back to "is the tmux window alive?".
 
+pub mod attention;
 pub mod claude;
 pub mod limit;
 pub mod prompt;

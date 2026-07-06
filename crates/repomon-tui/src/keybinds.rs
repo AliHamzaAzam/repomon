@@ -71,6 +71,10 @@ pub enum Action {
     FindLane,
     /// Show only lanes needing attention (waiting / stuck on a limit).
     ToggleUrgent,
+    /// Peek at the waiting agent's dialog in a popup and answer it in place (`v`).
+    PeekPrompt,
+    /// Show the `?` help overlay (the current view's key hints, expanded).
+    Help,
     Goto(View),
 }
 
@@ -105,6 +109,8 @@ pub fn nav(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('C') => Some(Action::ToggleAutoContinue),
         KeyCode::Char('f') => Some(Action::FindLane),
         KeyCode::Char('!') => Some(Action::ToggleUrgent),
+        KeyCode::Char('v') => Some(Action::PeekPrompt),
+        KeyCode::Char('?') => Some(Action::Help),
         KeyCode::Char(' ') => Some(Action::ToggleBabysit),
         KeyCode::Char('1') => Some(Action::Goto(View::Fleet)),
         KeyCode::Char('2') => Some(Action::Goto(View::Timeline)),

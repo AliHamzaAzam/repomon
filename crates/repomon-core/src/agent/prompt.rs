@@ -8,6 +8,8 @@
 //! summary (dialog header + question) to use as the notification's "why". The daemon flips
 //! such sessions to `Waiting` during `lane.list`.
 
+use serde::{Deserialize, Serialize};
+
 use super::limit::parse_option_line;
 use super::text::strip_ansi;
 
@@ -25,6 +27,62 @@ const FOOTER_REACH: usize = 3;
 /// numbered lists without a selection cursor, and for the usage-limit menu (which is a
 /// rate-limit pause, not a permission ask — see [`super::limit`]).
 pub fn detect_pending_prompt(pane: &str) -> Option<String> {
+    detect_dialog(pane).map(|d| d.summary())
+}
+
+/// How many content lines of the dialog's body (the command being approved, the edit summary)
+/// [`detect_dialog`] keeps — enough for a peek popup, small enough to ride in `lane.list`.
+const BODY_MAX_LINES: usize = 8;
+
+/// A fully parsed interactive dialog: what the agent is asking and the choices it offers.
+/// [`detect_dialog`] extracts it from pane text; [`detect_pending_prompt`] remains the
+/// compact one-line view for callers that only need the "why".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDialog {
+    /// The dialog's box header naming the tool ("Bash command", "Edit file"); `None` for
+    /// boxless dialogs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The question line ("Do you want to proceed?"). For the folder-trust dialog whose
+    /// question can scroll out of the capture window, the synthetic "Do you trust this
+    /// folder?" stands in.
+    pub question: String,
+    /// Content lines between the header and the question, capped at [`BODY_MAX_LINES`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body: Vec<String>,
+    /// The selectable options, in screen order.
+    pub options: Vec<DialogOption>,
+    /// Index into `options` of the row the selection cursor sits on, if visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<usize>,
+}
+
+/// One selectable dialog row: its printed number (if any) and its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DialogOption {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u32>,
+    pub text: String,
+}
+
+impl PendingDialog {
+    /// The compact one-line summary — exactly what [`detect_pending_prompt`] returns.
+    pub fn summary(&self) -> String {
+        let s = match &self.title {
+            Some(t) => format!("{t} — {}", self.question),
+            None => self.question.clone(),
+        };
+        truncate(&s, 120)
+    }
+    /// Classify this dialog as a routine permission ask or a real decision.
+    pub fn class(&self) -> PromptClass {
+        classify_prompt(&self.summary())
+    }
+}
+
+/// Detect a pending interactive dialog and return it fully parsed: header, question, body,
+/// options, and cursor position. Same detection rules as [`detect_pending_prompt`].
+pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
     // Claude draws dialogs inside a box; strip ANSI and the `│` borders so option/question
     // lines parse the same whether boxed or bare.
     let stripped: Vec<String> = pane.lines().map(strip_ansi).collect();
@@ -53,17 +111,37 @@ pub fn detect_pending_prompt(pane: &str) -> Option<String> {
             {
                 return None;
             }
-            if let Some(s) = summarize(&stripped, &cleaned, start) {
-                return Some(s);
+            let opts: Vec<DialogOption> = block
+                .iter()
+                .map(|(_, n, t)| DialogOption {
+                    number: *n,
+                    text: t.clone(),
+                })
+                .collect();
+            let selected = block.iter().position(|(c, _, _)| *c);
+            if let Some((title, question, body)) = describe(&stripped, &cleaned, start) {
+                return Some(PendingDialog {
+                    title,
+                    question,
+                    body,
+                    options: opts,
+                    selected,
+                });
             }
             // Claude's folder-trust dialog ("Security guide" / "Yes, I trust this folder").
             // On a freshly spawned worker the question line ("Do you trust the files in this
-            // folder?") can be scrolled out of the capture window entirely, so `summarize`
+            // folder?") can be scrolled out of the capture window entirely, so `describe`
             // above finds no question and comes back empty. Recognize the dialog by its
             // distinctive first option plus its confirmation footer instead — see the live
             // fixture in the tests below.
             if is_trust_dialog(&block) && has_confirm_footer(&cleaned, block_end) {
-                return Some("Do you trust this folder?".to_string());
+                return Some(PendingDialog {
+                    title: None,
+                    question: "Do you trust this folder?".to_string(),
+                    body: Vec::new(),
+                    options: opts,
+                    selected,
+                });
             }
             return None;
         }
@@ -72,9 +150,35 @@ pub fn detect_pending_prompt(pane: &str) -> Option<String> {
     None
 }
 
-/// Build the summary for a menu starting at line `menu_start`: the question line just above
-/// it, prefixed with the dialog's header (the first content line under the box's `╭` border).
-fn summarize(stripped: &[String], cleaned: &[String], menu_start: usize) -> Option<String> {
+/// The keystrokes (tmux `send-keys` names) that select `target` (0-based option index):
+/// arrow from the visible cursor to the option's row, then Enter. Without a visible cursor,
+/// fall back to the option's printed number — digit selection confirms immediately; the
+/// trailing Enter then lands harmlessly on the empty input box. (Generalizes
+/// [`super::limit::menu_select_keys`], which steers only the usage-limit menu's wait option.)
+pub fn dialog_select_keys(dialog: &PendingDialog, target: usize) -> Vec<String> {
+    match dialog.selected {
+        Some(cur) => {
+            let (from, to) = (cur as i64, target as i64);
+            let arrow = if to > from { "Down" } else { "Up" };
+            let mut keys = vec![arrow.to_string(); (to - from).unsigned_abs() as usize];
+            keys.push("Enter".into());
+            keys
+        }
+        None => match dialog.options.get(target).and_then(|o| o.number) {
+            Some(n) => vec![n.to_string(), "Enter".into()],
+            None => vec!["Enter".into()],
+        },
+    }
+}
+
+/// Describe the dialog whose menu starts at line `menu_start`: the question line just above
+/// it, the header (the first content line under the box's `╭` border), and the body lines
+/// between header and question (capped at [`BODY_MAX_LINES`]).
+fn describe(
+    stripped: &[String],
+    cleaned: &[String],
+    menu_start: usize,
+) -> Option<(Option<String>, String, Vec<String>)> {
     let q_idx = (menu_start.saturating_sub(QUESTION_REACH)..menu_start)
         .rev()
         .find(|&i| is_question(&cleaned[i]))?;
@@ -82,21 +186,23 @@ fn summarize(stripped: &[String], cleaned: &[String], menu_start: usize) -> Opti
 
     // Walk up to the dialog's top border; the first content line below it names the tool
     // ("Bash command", "Edit file", …). Boxless dialogs simply get no header.
-    let header = (q_idx.saturating_sub(HEADER_REACH)..q_idx)
+    let header_idx = (q_idx.saturating_sub(HEADER_REACH)..q_idx)
         .rev()
         .find(|&i| stripped[i].trim_start().starts_with('╭'))
-        .and_then(|b| {
-            (b + 1..q_idx)
-                .map(|i| cleaned[i].trim())
-                .find(|l| !l.is_empty())
-        })
-        .filter(|h| *h != question);
+        .and_then(|b| (b + 1..q_idx).find(|&i| !cleaned[i].trim().is_empty()))
+        .filter(|&i| cleaned[i].trim() != question);
+    let title = header_idx.map(|i| cleaned[i].trim().to_string());
 
-    let summary = match header {
-        Some(h) => format!("{h} — {question}"),
-        None => question,
+    let body = match header_idx {
+        Some(h) => (h + 1..q_idx)
+            .map(|i| cleaned[i].trim())
+            .filter(|l| !l.is_empty())
+            .take(BODY_MAX_LINES)
+            .map(|l| truncate(l, 120))
+            .collect(),
+        None => Vec::new(),
     };
-    Some(truncate(&summary, 120))
+    Some((title, question, body))
 }
 
 /// A line that reads as the dialog's question: the explicit ask phrasings, or any line ending
@@ -142,7 +248,8 @@ fn has_confirm_footer(cleaned: &[String], block_end: usize) -> bool {
 ///
 /// An orchestrator may auto-answer a [`PromptClass::Permission`] in an autonomous posture, but
 /// must escalate a [`PromptClass::Decision`] to the human and never answer it itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptClass {
     /// The agent is asking to go ahead with an action it already proposed (yes/no/allow).
     Permission,
@@ -404,5 +511,171 @@ mod tests {
         ] {
             assert_eq!(classify_prompt(s), PromptClass::Decision, "{s}");
         }
+    }
+
+    #[test]
+    fn extracts_structured_dialog_from_boxed_permission() {
+        let pane = "● Running cargo test…\n\
+            ╭──────────────────────────────────────────────╮\n\
+            │ Bash command                                 │\n\
+            │                                              │\n\
+            │   cargo install --path crates/repomon-tui    │\n\
+            │   Install the repomon TUI                    │\n\
+            │                                              │\n\
+            │ Do you want to proceed?                      │\n\
+            │ ❯ 1. Yes                                     │\n\
+            │   2. Yes, and don't ask again for cargo      │\n\
+            │   3. No, and tell Claude what to do          │\n\
+            ╰──────────────────────────────────────────────╯";
+        let d = detect_dialog(pane).expect("dialog");
+        assert_eq!(d.title.as_deref(), Some("Bash command"));
+        assert_eq!(d.question, "Do you want to proceed?");
+        assert_eq!(
+            d.body,
+            vec![
+                "cargo install --path crates/repomon-tui".to_string(),
+                "Install the repomon TUI".to_string(),
+            ]
+        );
+        assert_eq!(
+            d.options,
+            vec![
+                DialogOption {
+                    number: Some(1),
+                    text: "Yes".into()
+                },
+                DialogOption {
+                    number: Some(2),
+                    text: "Yes, and don't ask again for cargo".into()
+                },
+                DialogOption {
+                    number: Some(3),
+                    text: "No, and tell Claude what to do".into()
+                },
+            ]
+        );
+        assert_eq!(d.selected, Some(0));
+        assert_eq!(d.summary(), "Bash command — Do you want to proceed?");
+        assert_eq!(d.class(), PromptClass::Permission);
+    }
+
+    #[test]
+    fn extracts_codex_dialog_without_box_header() {
+        // Codex's boxless MCP approval: no `╭` header → no title, no body; `›` cursor row 0.
+        let pane = "  Field 1/1\n\
+              Allow the repomon MCP server to run tool \"fleet_status\"?\n\
+              › 1. Allow                   Run the tool and continue.\n\
+                2. Allow for this session  Run the tool and remember this choice for this session.\n\
+                3. Always allow            Run the tool and remember this choice for future tool calls.\n\
+                4. Cancel                  Cancel this tool call\n\
+              enter to submit | esc to cancel";
+        let d = detect_dialog(pane).expect("dialog");
+        assert_eq!(d.title, None);
+        assert_eq!(
+            d.question,
+            "Allow the repomon MCP server to run tool \"fleet_status\"?"
+        );
+        assert!(d.body.is_empty());
+        assert_eq!(d.options.len(), 4);
+        assert_eq!(d.options[3].number, Some(4));
+        assert!(d.options[3].text.starts_with("Cancel"));
+        assert_eq!(d.selected, Some(0));
+        assert_eq!(d.class(), PromptClass::Permission);
+    }
+
+    #[test]
+    fn trust_dialog_without_question_gets_synthetic_question() {
+        let pane = " Security guide\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel";
+        let d = detect_dialog(pane).expect("dialog");
+        assert_eq!(d.title, None);
+        assert_eq!(d.question, "Do you trust this folder?");
+        assert_eq!(d.summary(), "Do you trust this folder?");
+        assert_eq!(d.options.len(), 2);
+        assert_eq!(d.selected, Some(0));
+    }
+
+    #[test]
+    fn dialog_matches_summary_on_every_detection() {
+        // The structured detector and the summary shim must never disagree.
+        for pane in [
+            "Do you want to make this edit to app.rs?\n❯ 1. Yes\n  2. No",
+            "Which auth method should we use?\n❯ 1. OAuth\n  2. API keys",
+        ] {
+            let d = detect_dialog(pane).expect("dialog");
+            assert_eq!(
+                detect_pending_prompt(pane).as_deref(),
+                Some(d.summary().as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_body_is_capped() {
+        let body: String = (1..=12).map(|i| format!("│ line {i}\n")).collect();
+        let pane = format!(
+            "╭────────────╮\n│ Bash command │\n{body}│ Do you want to proceed?  │\n│ ❯ 1. Yes │\n│   2. No  │\n╰────────────╯"
+        );
+        let d = detect_dialog(&pane).expect("dialog");
+        assert_eq!(d.body.len(), BODY_MAX_LINES);
+        assert_eq!(d.body[0], "line 1");
+    }
+
+    #[test]
+    fn dialog_select_keys_steers_from_cursor() {
+        let d = PendingDialog {
+            title: None,
+            question: "Do you want to proceed?".into(),
+            body: vec![],
+            options: vec![
+                DialogOption {
+                    number: Some(1),
+                    text: "Yes".into(),
+                },
+                DialogOption {
+                    number: Some(2),
+                    text: "Yes, always".into(),
+                },
+                DialogOption {
+                    number: Some(3),
+                    text: "No".into(),
+                },
+            ],
+            selected: Some(0),
+        };
+        assert_eq!(dialog_select_keys(&d, 2), vec!["Down", "Down", "Enter"]);
+        assert_eq!(dialog_select_keys(&d, 0), vec!["Enter"]);
+        let up = PendingDialog {
+            selected: Some(2),
+            ..d
+        };
+        assert_eq!(dialog_select_keys(&up, 0), vec!["Up", "Up", "Enter"]);
+    }
+
+    #[test]
+    fn dialog_select_keys_falls_back_to_number_without_cursor() {
+        let d = PendingDialog {
+            title: None,
+            question: "Do you want to proceed?".into(),
+            body: vec![],
+            options: vec![
+                DialogOption {
+                    number: Some(1),
+                    text: "Yes".into(),
+                },
+                DialogOption {
+                    number: Some(2),
+                    text: "No".into(),
+                },
+            ],
+            selected: None,
+        };
+        assert_eq!(dialog_select_keys(&d, 1), vec!["2", "Enter"]);
+    }
+
+    #[test]
+    fn pending_dialog_serde_round_trips() {
+        let d = detect_dialog("Do you want to proceed?\n❯ 1. Yes\n  2. No").expect("dialog");
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<PendingDialog>(&json).unwrap(), d);
     }
 }
