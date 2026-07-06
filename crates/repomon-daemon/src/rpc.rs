@@ -352,8 +352,9 @@ struct Browse {
 }
 #[derive(Deserialize, Default)]
 struct OrchestratorStart {
-    /// Override the orchestrator agent (Claude account); falls back to `orchestrator_agent` in
-    /// config, then bare `claude`.
+    /// Override the orchestrator agent — a Claude account (e.g. `claude-work`), a custom agent
+    /// name, or `codex`; falls back to `orchestrator_agent` in config, then bare `claude`.
+    /// Anything else (no MCP client → can't drive the fleet) is rejected with invalid_params.
     #[serde(default)]
     agent: Option<String>,
     /// Override the model (e.g. `opus`); falls back to `orchestrator_model` in config.
@@ -1345,6 +1346,13 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let Some(session) = orch.as_ref() else {
                 return Ok(json!([]));
             };
+            // A backend without a parseable transcript reads as an empty chat — deliberately NOT
+            // the recency-heuristic fallback below, which would misattribute some other live
+            // Claude session's transcript as this orchestrator's. Clients render the live pane
+            // stream (`event.orchestrator.output`) instead.
+            if !session.backend.has_transcript() {
+                return Ok(json!([]));
+            }
             let session_id = session.session_id.clone();
             drop(orch);
             let items = tokio::task::spawn_blocking(move || {
@@ -1361,17 +1369,27 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             // Clear a session whose window died externally so a restart actually re-spawns instead
             // of no-op'ing on a corpse.
             reconcile_orchestrator(ctx).await;
+            // Hold the session lock across the ENTIRE check → adopt/spawn → record sequence.
+            // Releasing it between the is-running check and the record (as this handler once did)
+            // let two concurrent starts — a real scenario: the TUI's command-center auto-start and
+            // `repomon orchestrate` both fire at startup on separate connections — both observe
+            // "not running" and race the spawn: the loser then either failed its own `new-session`
+            // outright, spawned a duplicate `orchestrator` window (tmux allows duplicate names),
+            // or took the adopt branch on the winner's fresh window and overwrote its
+            // just-recorded session id/autonomy. Holding a tokio Mutex across the awaits below is
+            // fine — it merely serializes concurrent start/stop/status for the ~tens of ms a tmux
+            // spawn takes. Nothing in this region re-locks `ctx.orchestrator` (the audit:
+            // `reconcile_orchestrator` runs above, before the guard; config is a separate RwLock;
+            // `orchestrator_attention` is only ever taken after — never while holding — it).
+            let mut orch = ctx.orchestrator.lock().await;
             // Already tracking a live session: idempotent no-op (don't spawn a second window).
-            {
-                let orch = ctx.orchestrator.lock().await;
-                if orch.is_some() {
-                    let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
-                    return Ok(orchestrator_status_value(
-                        orch.as_ref(),
-                        &attention,
-                        headline.as_deref(),
-                    ));
-                }
+            if orch.is_some() {
+                let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
+                return Ok(orchestrator_status_value(
+                    orch.as_ref(),
+                    &attention,
+                    headline.as_deref(),
+                ));
             }
             // Resolve agent/model: explicit param wins, then the persisted config default.
             let (cfg_agent, cfg_model, customs) = {
@@ -1384,6 +1402,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             };
             let agent = p.agent.or(cfg_agent);
             let model = p.model.or(cfg_model);
+            // Resolved once here, recorded on the session for BOTH the adopt and spawn paths, and
+            // consulted everywhere a Claude-only capability would otherwise be assumed. Errors out
+            // (guard drops, nothing recorded) on an agent that can't run the orchestrator at all.
+            let backend = resolve_orchestrator_backend(&agent, &customs)?;
             // A window may survive a daemon restart (tmux outlives us). Adopt it instead of
             // spawning a duplicate `orchestrator` window.
             {
@@ -1404,9 +1426,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                         window: ORCHESTRATOR_WINDOW.to_string(),
                         autonomy: None,
                         session_id: None,
+                        backend,
                     };
-                    *ctx.orchestrator.lock().await = Some(session);
-                    let orch = ctx.orchestrator.lock().await;
+                    *orch = Some(session);
                     let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
                     let status =
                         orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
@@ -1414,17 +1436,35 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     return Ok(status);
                 }
             }
-            // Build the MCP config that points the orchestrator's `claude` at `repomond mcp`. The
-            // server's env is authoritative for the socket + guardrails.
             let socket = repomon_core::config::socket_path(&*ctx.config.read().await);
-            let mcp_path = write_orchestrator_mcp_config(&socket, &p.autonomy, p.max_agents)
-                .map_err(internal)?;
             let base = orchestrator_base_command(&agent, &customs);
-            // Minted fresh for this genuine spawn (never for adopt — see above) so the transcript
-            // picker can pin `orchestrator.transcript`/the end-of-turn check to this exact session.
-            let session_id = mint_session_id();
-            let command =
-                build_orchestrator_command(&base, &mcp_path, &model, &p.prompt, &session_id);
+            let (command, session_id) = match backend {
+                crate::OrchestratorBackend::Claude => {
+                    // Build the MCP config file that points the orchestrator's `claude` at
+                    // `repomond mcp`. The server's env is authoritative for the socket +
+                    // guardrails.
+                    let mcp_path =
+                        write_orchestrator_mcp_config(&socket, &p.autonomy, p.max_agents)
+                            .map_err(internal)?;
+                    // Minted fresh for this genuine spawn (never for adopt — see above) so the
+                    // transcript picker can pin `orchestrator.transcript`/the end-of-turn check
+                    // to this exact session.
+                    let session_id = mint_session_id();
+                    let command = build_claude_orchestrator_command(
+                        &base, &mcp_path, &model, &p.prompt, &session_id,
+                    );
+                    (command, Some(session_id))
+                }
+                // Codex takes its MCP registration inline (`-c` overrides — no config file) and
+                // has no session pinning; the transcript/end-of-turn paths gate on
+                // `backend.has_transcript()` instead of a session id.
+                crate::OrchestratorBackend::Codex => (
+                    build_codex_orchestrator_command(
+                        &base, &socket, &p.autonomy, p.max_agents, &model, &p.prompt,
+                    ),
+                    None,
+                ),
+            };
             // cwd = $HOME, so repomind starts from the user's home rather than the daemon's cwd.
             let home = std::env::var("HOME")
                 .map(PathBuf::from)
@@ -1441,19 +1481,34 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 model,
                 window: ORCHESTRATOR_WINDOW.to_string(),
                 autonomy: Some(p.autonomy),
-                session_id: Some(session_id),
+                session_id,
+                backend,
             };
-            *ctx.orchestrator.lock().await = Some(session);
-            let orch = ctx.orchestrator.lock().await;
+            *orch = Some(session);
             let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
             let status = orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
             Ok(status)
         }
         "orchestrator.stop" => {
+            // Take the session lock BEFORE the kill so a stop can't interleave with a concurrent
+            // `orchestrator.start` (which holds this lock across its spawn): stop either runs
+            // first against nothing, or kills the fully-recorded window — never a window that a
+            // mid-flight start is about to record (which would leave an untracked orphan running).
+            let mut orch = ctx.orchestrator.lock().await;
             let tmux = ctx.tmux.clone();
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(ORCHESTRATOR_WINDOW)).await;
-            *ctx.orchestrator.lock().await = None;
+            // Unlike `agent.stop` (see `reap::kill_and_forget`), no cache reconciliation is needed
+            // after this kill: `prompt_cache` only ever holds lane-window sniffs (`overlay_agents`
+            // keys it by lane candidates, which the orchestrator window deliberately isn't), and
+            // while `last_good_windows` does carry `orchestrator`, every consumer of the resolved
+            // list filters to `lane-*` and orchestrator liveness is always probed directly via
+            // `has_named`. Dropping the entry anyway is cheap hygiene, not correctness.
+            ctx.last_good_windows
+                .lock()
+                .await
+                .retain(|w| w != ORCHESTRATOR_WINDOW);
+            *orch = None;
             *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
             let status = orchestrator_status_value(None, "none", None);
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
@@ -2551,15 +2606,19 @@ async fn commits_in_range(
     Ok(out)
 }
 
-/// The `{running, agent, model, window, autonomy, session_id, attention, headline}` status JSON
-/// for the orchestrator (shared by `orchestrator.status` and the `event.orchestrator.status`
-/// broadcast). `autonomy` is the level the session was started with, or `null` if it was adopted
-/// from a surviving tmux window and is therefore unknown. `session_id` is the `--session-id` UUID
-/// it was launched with (see `mint_session_id`) — same "unknown → null" semantics as `autonomy`
-/// for an adopted window. `attention` is one of `"none"`, `"permission"`, `"decision"`,
-/// `"end_of_turn"` — see [`notify_watch::check_orchestrator_attention`](crate::notify_watch);
-/// `headline` is a short "why" (the pending dialog's question, or a tail of repomind's last
-/// message) or `null`.
+/// The `{running, agent, model, backend, window, autonomy, session_id, attention, headline}`
+/// status JSON for the orchestrator (shared by `orchestrator.status` and the
+/// `event.orchestrator.status` broadcast). `agent` is the raw name the session was started with
+/// (`claude-work`, a custom, `codex`); `backend` is the normalized seam value
+/// (`"claude"`/`"codex"`) clients should switch rendering on — a codex-backed session has no
+/// transcript chat view, never reports `end_of_turn`, and always has a null `session_id`.
+/// `autonomy` is the level the session was started with, or `null` if it was adopted from a
+/// surviving tmux window and is therefore unknown. `session_id` is the `--session-id` UUID it was
+/// launched with (see `mint_session_id`) — same "unknown → null" semantics as `autonomy` for an
+/// adopted window, always null for codex. `attention` is one of `"none"`, `"permission"`,
+/// `"decision"`, `"end_of_turn"` — see
+/// [`notify_watch::check_orchestrator_attention`](crate::notify_watch); `headline` is a short
+/// "why" (the pending dialog's question, or a tail of repomind's last message) or `null`.
 pub(crate) fn orchestrator_status_value(
     orch: Option<&crate::OrchestratorSession>,
     attention: &str,
@@ -2570,6 +2629,7 @@ pub(crate) fn orchestrator_status_value(
             "running": true,
             "agent": s.agent,
             "model": s.model,
+            "backend": s.backend.as_str(),
             "window": s.window,
             "autonomy": s.autonomy,
             "session_id": s.session_id,
@@ -2580,6 +2640,7 @@ pub(crate) fn orchestrator_status_value(
             "running": false,
             "agent": Value::Null,
             "model": Value::Null,
+            "backend": Value::Null,
             "window": Value::Null,
             "autonomy": Value::Null,
             "session_id": Value::Null,
@@ -2667,10 +2728,44 @@ pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
     false
 }
 
+/// Which backend an orchestrator agent name runs on. `None` and Claude account variants are
+/// Claude; a config custom is Claude too — its command line gets the Claude-shaped flags
+/// [`build_claude_orchestrator_command`] appends, exactly as before backends existed (a
+/// codex-shaped custom is future work). `codex` is the one non-Claude backend that can actually
+/// drive the fleet (it has an MCP client). Anything else is a loud `invalid_params` — `aider`
+/// and `cursor-agent` can't speak MCP, and an unknown name has no command — instead of what this
+/// path used to do: silently spawn e.g. `aider --mcp-config …`, a broken window the user had to
+/// diagnose by hand.
+fn resolve_orchestrator_backend(
+    agent: &Option<String>,
+    customs: &HashMap<String, String>,
+) -> Result<crate::OrchestratorBackend, RpcError> {
+    use crate::OrchestratorBackend as B;
+    let Some(name) = agent else {
+        return Ok(B::Claude);
+    };
+    if customs.contains_key(name) {
+        return Ok(B::Claude);
+    }
+    // `claude` itself and account variants (`claude-work`, …) parse as Other but are Claude; the
+    // prefix test matches how the TUI's agent picker has always classified them.
+    if name.starts_with("claude") {
+        return Ok(B::Claude);
+    }
+    match AgentKind::from_kind_str(name) {
+        AgentKind::Codex => Ok(B::Codex),
+        _ => Err(RpcError::invalid_params(format!(
+            "agent '{name}' can't run the orchestrator: repomind needs an MCP-capable CLI \
+             (a claude account, codex, or a custom agent command)"
+        ))),
+    }
+}
+
 /// Resolve the orchestrator's base launch command from its agent name, mirroring `agent.spawn`: a
 /// config custom wins, then an autodetected Claude variant (e.g. `claude-work` →
-/// `CLAUDE_CONFIG_DIR=… claude`), else the kind's default binary. `None` (no agent chosen) is bare
-/// `claude` — the orchestrator is fundamentally a Claude session.
+/// `CLAUDE_CONFIG_DIR=… claude`), else the kind's default binary (`codex` — anything else was
+/// already rejected by [`resolve_orchestrator_backend`]). `None` (no agent chosen) is bare
+/// `claude`.
 fn orchestrator_base_command(agent: &Option<String>, customs: &HashMap<String, String>) -> String {
     match agent {
         Some(name) => {
@@ -2695,8 +2790,9 @@ fn orchestrator_base_command(agent: &Option<String>, customs: &HashMap<String, S
 /// it. The fleet + memory tools are pre-approved so routine orchestration doesn't prompt.
 /// `session_id` pins the launched session's id (`--session-id <uuid>`, verified against `claude
 /// --help` to exist) so the transcript picker can find *this* session's transcript directly
-/// instead of guessing by recency — see [`pick_orchestrator_transcript_in`].
-fn build_orchestrator_command(
+/// instead of guessing by recency — see [`pick_orchestrator_transcript_in`]. The Codex
+/// counterpart is [`build_codex_orchestrator_command`].
+fn build_claude_orchestrator_command(
     base: &str,
     mcp_config_path: &Path,
     model: &Option<String>,
@@ -2719,6 +2815,76 @@ fn build_orchestrator_command(
         command.push(' ');
         command.push_str(&shell_quote(prompt));
     }
+    command
+}
+
+/// Build the full `codex` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
+/// the window command through a shell). ALL Codex-CLI flag knowledge lives here (plus its unit
+/// test), so a codex release changing a flag is a one-function fix. Verified against codex-cli
+/// 0.142.3 (`codex --help`); where it diverges from the Claude arm:
+/// - No `--mcp-config` file: the repomon fleet server is registered inline via `-c key=value`
+///   dotted TOML overrides (`mcp_servers.repomon.*`; the value portion is parsed as TOML). The
+///   user's own `~/.codex/config.toml` servers (e.g. basic-memory) still load — not redeclared,
+///   mirroring the Claude arm's treatment.
+/// - No `--append-system-prompt`: the repomind persona is prepended to the initial positional
+///   prompt instead. Weaker than a real system prompt (visible in the chat, can fade over a very
+///   long session) — if codex stabilizes an instructions-file override, swap it in here.
+/// - No `--session-id` and no `--allowedTools`: codex can't pin its session file (and its
+///   on-disk format is unstable anyway — the caller records `session_id: None`, and the
+///   transcript/end-of-turn paths gate on `OrchestratorBackend::has_transcript`); tool
+///   pre-approval is expressed through the approval policy below instead of a per-tool list.
+/// - `autonomy` maps onto codex's approval/sandbox flags so routine MCP-driven orchestration
+///   never stalls on an interactive approval. The REAL guardrail is `REPOMON_MCP_AUTONOMY`,
+///   enforced server-side by `repomon_mcp::policy` from the env this hands the MCP server.
+fn build_codex_orchestrator_command(
+    base: &str,
+    socket: &Path,
+    autonomy: &str,
+    max_agents: Option<usize>,
+    model: &Option<String>,
+    prompt: &Option<String>,
+) -> String {
+    let repomond = repomon_core::service::repomond_path();
+    let mut command = base.to_string();
+    // Interpolated straight into TOML basic strings: the paths this carries (the repomond binary,
+    // the daemon socket) never contain quotes/backslashes on the platforms repomon ships for.
+    let mut env = format!(
+        "REPOMON_MCP_SOCKET = \"{}\", REPOMON_MCP_AUTONOMY = \"{autonomy}\"",
+        socket.to_string_lossy(),
+    );
+    if let Some(n) = max_agents {
+        env.push_str(&format!(", REPOMON_MCP_MAX_AGENTS = \"{n}\""));
+    }
+    for over in [
+        format!(
+            "mcp_servers.repomon.command=\"{}\"",
+            repomond.to_string_lossy()
+        ),
+        "mcp_servers.repomon.args=[\"mcp\"]".to_string(),
+        format!("mcp_servers.repomon.env={{ {env} }}"),
+    ] {
+        command.push_str(" -c ");
+        command.push_str(&shell_quote(&over));
+    }
+    command.push_str(match autonomy {
+        // Never stall on approvals; the sandbox still bounds what shell commands can touch.
+        "autonomous" => " -a never -s workspace-write",
+        // Codex decides when to ask; its dialogs surface through the pane attention sniff.
+        "supervised" => " -a on-request",
+        "read-only" => " -s read-only",
+        // An unknown level gets the middle road rather than full autonomy.
+        _ => " -a on-request",
+    });
+    if let Some(model) = model {
+        command.push_str(" -m ");
+        command.push_str(&shell_quote(model));
+    }
+    let goal = match prompt.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}\n\n{p}", repomon_mcp::PERSONA),
+        None => repomon_mcp::PERSONA.to_string(),
+    };
+    command.push(' ');
+    command.push_str(&shell_quote(&goal));
     command
 }
 
@@ -3026,14 +3192,16 @@ mod tests {
             "claude-yolo".to_string(),
             "claude --dangerously-skip-permissions".to_string(),
         );
-        // No agent chosen -> bare claude (the orchestrator is always a Claude session).
+        // No agent chosen -> bare claude (the default backend).
         assert_eq!(orchestrator_base_command(&None, &customs), "claude");
         // A custom agent resolves to its configured command (flags carried over).
         assert_eq!(
             orchestrator_base_command(&Some("claude-yolo".into()), &customs),
             "claude --dangerously-skip-permissions"
         );
-        // An unknown name falls through to the kind's default binary (mirrors agent.spawn).
+        // A kind name resolves to its default binary (mirrors agent.spawn); for the orchestrator
+        // only `codex` reaches here — anything non-MCP-capable is rejected upstream by
+        // `resolve_orchestrator_backend`.
         assert_eq!(
             orchestrator_base_command(&Some("codex".into()), &customs),
             "codex"
@@ -3041,11 +3209,96 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_backend_resolution() {
+        use crate::OrchestratorBackend as B;
+        let mut customs = HashMap::new();
+        customs.insert("my-yolo".to_string(), "claude --yolo".to_string());
+        // Default and every claude-ish name → Claude.
+        assert_eq!(resolve_orchestrator_backend(&None, &customs).unwrap(), B::Claude);
+        for name in ["claude", "claude-code", "claude-work"] {
+            assert_eq!(
+                resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap(),
+                B::Claude,
+                "{name}"
+            );
+        }
+        // A config custom is Claude-flag-shaped regardless of its name.
+        assert_eq!(
+            resolve_orchestrator_backend(&Some("my-yolo".into()), &customs).unwrap(),
+            B::Claude
+        );
+        // Codex is the one non-Claude backend.
+        assert_eq!(
+            resolve_orchestrator_backend(&Some("codex".into()), &customs).unwrap(),
+            B::Codex
+        );
+        // MCP-less agents and unknown names are loud errors, not broken spawns.
+        for name in ["aider", "cursor", "gemini"] {
+            let err = resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap_err();
+            assert!(
+                err.message.contains(name) && err.message.contains("orchestrator"),
+                "{name}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn codex_orchestrator_command_wires_mcp_and_persona() {
+        let socket = PathBuf::from("/tmp/repomon-test.sock");
+        // Autonomous: MCP registration inline, approvals off, sandboxed, persona as the prompt.
+        let cmd =
+            build_codex_orchestrator_command("codex", &socket, "autonomous", Some(4), &None, &None);
+        assert!(cmd.starts_with("codex "), "{cmd}");
+        // The three -c overrides registering the fleet MCP server.
+        assert!(cmd.contains("mcp_servers.repomon.command="), "{cmd}");
+        assert!(cmd.contains("mcp_servers.repomon.args=[\"mcp\"]"), "{cmd}");
+        assert!(
+            cmd.contains("REPOMON_MCP_SOCKET = \"/tmp/repomon-test.sock\""),
+            "{cmd}"
+        );
+        assert!(cmd.contains("REPOMON_MCP_AUTONOMY = \"autonomous\""), "{cmd}");
+        assert!(cmd.contains("REPOMON_MCP_MAX_AGENTS = \"4\""), "{cmd}");
+        assert!(cmd.contains(" -a never -s workspace-write"), "{cmd}");
+        // The persona rides in as the initial prompt (codex has no --append-system-prompt).
+        assert!(cmd.contains("repomind"), "{cmd}");
+        // None of the Claude-only flags may leak into a codex invocation.
+        for claude_flag in [
+            "--mcp-config",
+            "--append-system-prompt",
+            "--allowedTools",
+            "--session-id",
+            "--model",
+        ] {
+            assert!(!cmd.contains(claude_flag), "{claude_flag} leaked: {cmd}");
+        }
+
+        // Supervised + model + prompt: on-request approvals, -m, prompt appended to the persona.
+        let cmd = build_codex_orchestrator_command(
+            "codex",
+            &socket,
+            "supervised",
+            None,
+            &Some("gpt-5.2-codex".into()),
+            &Some("what needs me?".into()),
+        );
+        assert!(cmd.contains(" -a on-request"), "{cmd}");
+        assert!(!cmd.contains("REPOMON_MCP_MAX_AGENTS"), "{cmd}");
+        assert!(cmd.contains(" -m 'gpt-5.2-codex'"), "{cmd}");
+        assert!(cmd.contains("what needs me?"), "{cmd}");
+
+        // Read-only maps to codex's read-only sandbox.
+        let cmd =
+            build_codex_orchestrator_command("codex", &socket, "read-only", None, &None, &None);
+        assert!(cmd.contains(" -s read-only"), "{cmd}");
+    }
+
+    #[test]
     fn orchestrator_command_wires_mcp_persona_and_tools() {
         let path = PathBuf::from("/tmp/repomind-mcp.json");
         let sid = "11111111-1111-4111-8111-111111111111";
         // No model, no prompt: the core wiring is always present.
-        let cmd = build_orchestrator_command("claude", &path, &None, &None, sid);
+        let cmd = build_claude_orchestrator_command("claude", &path, &None, &None, sid);
         assert!(cmd.starts_with("claude --mcp-config "));
         assert!(cmd.contains("/tmp/repomind-mcp.json"));
         assert!(cmd.contains("--append-system-prompt"));
@@ -3058,7 +3311,7 @@ mod tests {
         assert!(!cmd.contains("--model"));
 
         // A model + a prompt are appended (shell-quoted).
-        let cmd = build_orchestrator_command(
+        let cmd = build_claude_orchestrator_command(
             "CLAUDE_CONFIG_DIR=/h/.claude-work claude",
             &path,
             &Some("opus".into()),
@@ -3071,7 +3324,8 @@ mod tests {
         assert!(cmd.contains(&format!("--session-id '{sid}'")));
 
         // An empty prompt is dropped (not quoted as an empty arg).
-        let cmd = build_orchestrator_command("claude", &path, &None, &Some(String::new()), sid);
+        let cmd =
+            build_claude_orchestrator_command("claude", &path, &None, &Some(String::new()), sid);
         assert!(!cmd.trim_end().ends_with("''"));
     }
 
@@ -3125,11 +3379,13 @@ mod tests {
             window: "orchestrator".into(),
             autonomy: Some("autonomous".into()),
             session_id: Some("11111111-1111-4111-8111-111111111111".into()),
+            backend: crate::OrchestratorBackend::Claude,
         };
         let v = orchestrator_status_value(Some(&s), "decision", Some("Which auth method?"));
         assert_eq!(v["running"], json!(true));
         assert_eq!(v["agent"], json!("claude-work"));
         assert_eq!(v["model"], json!("opus"));
+        assert_eq!(v["backend"], json!("claude"));
         assert_eq!(v["window"], json!("orchestrator"));
         assert_eq!(v["autonomy"], json!("autonomous"));
         assert_eq!(
@@ -3138,21 +3394,25 @@ mod tests {
         );
         assert_eq!(v["attention"], json!("decision"));
         assert_eq!(v["headline"], json!("Which auth method?"));
-        // An adopted session's autonomy AND session id are both unknown.
+        // An adopted session's autonomy AND session id are both unknown; a codex-backed session
+        // reports its backend so clients switch off the (empty) transcript chat view.
         let adopted = crate::OrchestratorSession {
-            agent: None,
+            agent: Some("codex".into()),
             model: None,
             window: "orchestrator".into(),
             autonomy: None,
             session_id: None,
+            backend: crate::OrchestratorBackend::Codex,
         };
         let v = orchestrator_status_value(Some(&adopted), "none", None);
         assert_eq!(v["autonomy"], Value::Null);
         assert_eq!(v["session_id"], Value::Null);
+        assert_eq!(v["backend"], json!("codex"));
         // No session: running=false with null fields; attention/headline still pass through.
         let v = orchestrator_status_value(None, "none", None);
         assert_eq!(v["running"], json!(false));
         assert_eq!(v["agent"], Value::Null);
+        assert_eq!(v["backend"], Value::Null);
         assert_eq!(v["autonomy"], Value::Null);
         assert_eq!(v["session_id"], Value::Null);
         assert_eq!(v["attention"], json!("none"));

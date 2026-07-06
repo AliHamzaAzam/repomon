@@ -43,9 +43,14 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
-    /// Talk to repomind — an orchestrator agent that manages the fleet for you. Launches a
-    /// `claude` session wired to the repomon MCP server (and your mnemind memory, if present).
+    /// Talk to repomind — an orchestrator agent that manages the fleet for you. Launches an
+    /// agent session (`claude` by default, `--agent codex` for Codex) wired to the repomon MCP
+    /// server (and your mnemind memory, if present).
     Orchestrate {
+        /// Which agent powers repomind: a Claude account (e.g. claude-work), a custom agent
+        /// name, or codex. Defaults to the `orchestrator_agent` config, then bare claude.
+        #[arg(long)]
+        agent: Option<String>,
         /// How autonomous repomind is: autonomous (default), supervised, or read-only.
         #[arg(long, default_value = "autonomous")]
         autonomy: String,
@@ -185,11 +190,12 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
         Command::Remote { cmd } => handle_remote(cmd)?,
         Command::Orchestrate {
+            agent,
             autonomy,
             max_agents,
             model,
             prompt,
-        } => handle_orchestrate(config, socket, autonomy, max_agents, model, prompt).await?,
+        } => handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
@@ -292,9 +298,11 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
 /// start (or reuse) the single daemon-owned orchestrator session, then `tmux attach` to that
 /// durable window. The session-building (MCP config + `claude` invocation) now lives daemon-side
 /// in `orchestrator.start`, so the CLI and the TUI drive **one** shared orchestrator.
+#[allow(clippy::too_many_arguments)]
 async fn handle_orchestrate(
     config: &Config,
     socket: Option<PathBuf>,
+    agent: Option<String>,
     autonomy: String,
     max_agents: Option<usize>,
     model: Option<String>,
@@ -331,6 +339,9 @@ async fn handle_orchestrate(
     // Start (or adopt) the orchestrator session. Idempotent: a no-op if one is already running.
     let mut start = serde_json::Map::new();
     start.insert("autonomy".into(), json!(autonomy));
+    if let Some(agent) = &agent {
+        start.insert("agent".into(), json!(agent));
+    }
     if let Some(model) = &model {
         start.insert("model".into(), json!(model));
     }

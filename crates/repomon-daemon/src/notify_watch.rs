@@ -290,13 +290,24 @@ async fn check_orchestrator_attention(
         // Pin the transcript scan to the orchestrator's own session id (captured at spawn via
         // `--session-id`) — the `ctx.orchestrator` state `reconcile_orchestrator` just confirmed
         // is alive — so it never picks up some other active Claude session's transcript. See
-        // `rpc::pick_orchestrator_transcript`.
-        let session_id = ctx
-            .orchestrator
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|o| o.session_id.clone());
+        // `rpc::pick_orchestrator_transcript`. `has_transcript` gates the scan entirely: a
+        // backend with no parseable transcript (codex) must NOT reach the picker at all — with
+        // its always-`None` session id the picker would fall back to the "newest `~/.claude`
+        // transcript with content" heuristic and misattribute another live Claude session.
+        let (session_id, has_transcript) = {
+            let orch = ctx.orchestrator.lock().await;
+            let o = orch.as_ref();
+            (
+                o.and_then(|o| o.session_id.clone()),
+                // `None` (stopped between the reconcile above and here) also means "don't scan".
+                o.is_some_and(|o| o.backend.has_transcript()),
+            )
+        };
+        if !has_transcript {
+            // Also drop any cached status a prior Claude-backed session left behind, so it can't
+            // leak an end_of_turn into this one.
+            *transcript_cache = None;
+        }
         let tmux = ctx.tmux.clone();
         let pane = tokio::task::spawn_blocking(move || {
             tmux.capture_named(ORCHESTRATOR_WINDOW, Some(ORCH_CAPTURE_LINES))
@@ -309,7 +320,7 @@ async fn check_orchestrator_attention(
             .and_then(agent::prompt::detect_pending_prompt);
 
         *scan_transcript = !*scan_transcript;
-        if dialog.is_none() && *scan_transcript {
+        if has_transcript && dialog.is_none() && *scan_transcript {
             *transcript_cache = tokio::task::spawn_blocking(move || {
                 rpc::pick_orchestrator_transcript(session_id.as_deref())
             })
