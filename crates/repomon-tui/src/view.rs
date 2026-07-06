@@ -1819,6 +1819,14 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
         .iter()
         .find(|s| s.status == AgentStatus::RateLimited);
     let stalled = sessions.iter().find(|s| !s.inferred && s.stale);
+    // The latest dxkit gate block for any session — worn while the loop repairs, cleared by
+    // the next gate run that passes.
+    let gate_tag = sessions
+        .iter()
+        .filter(|s| !s.inferred)
+        .find_map(repomon_core::agent::attention::gate_bounced)
+        .map(|n| format!(" · ⛔ gate {n}"))
+        .unwrap_or_default();
     if let Some(rl) = rate_limited {
         (
             format!("⏳ rate-limited · {}{count}{tag}", fmt_resume(rl.resume_at)),
@@ -1834,14 +1842,20 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
             Attention::DoneCandidate => ("✓", "review?"),
             _ => ("⏸", "done"),
         };
-        (format!("{glyph} {word}{count}{tag}"), app.theme.needs_you())
+        (
+            format!("{glyph} {word}{count}{tag}{gate_tag}"),
+            app.theme.needs_you(),
+        )
     } else if let Some(st) = stalled {
         (
             format!("⚠ stalled {}{count}{tag}", fmt_stall(st.stalled_since)),
             app.theme.needs_you(),
         )
     } else if running > 0 {
-        (format!("▶ running{count}{tag}"), app.theme.running())
+        (
+            format!("▶ running{count}{tag}{gate_tag}"),
+            app.theme.running(),
+        )
     } else {
         (format!("idle{count}{tag}"), app.theme.idle())
     }

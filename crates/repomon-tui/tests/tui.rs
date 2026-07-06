@@ -57,6 +57,7 @@ fn fake_session(
         stale: false,
         stalled_since: None,
         ended_turn: false,
+        gate: None,
         config_dir: None,
         custom_label: None,
     }
@@ -173,6 +174,45 @@ async fn waiting_badges_distinguish_attention() {
     let jump = render_to_string(&app, 100, 40).unwrap();
     assert!(jump.contains("✓ review?"), "review badge missing:\n{jump}");
     app.view = View::Fleet;
+
+    // A running agent bounced by the dxkit gate: the badge wears the block while it repairs.
+    let mut bounced = fake_session(AgentStatus::Running, None);
+    bounced.gate = Some(repomon_core::agent::gate::GateVerdict {
+        allowed: false,
+        net_new_findings: 2,
+        at: chrono::Utc::now(),
+        session_id: None,
+    });
+    app.lanes[0].agent_sessions = vec![bounced];
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    // (⛔ is double-width: the test backend dumps a filler cell after it, so match in parts.)
+    assert!(
+        jump.contains("▶ running · ⛔") && jump.contains("gate 2"),
+        "gate-bounce badge missing:\n{jump}"
+    );
+    app.view = View::Fleet;
+
+    // A fresh ALLOWED gate verdict grants the review hint even on a dirty lane — the gate ran
+    // the tests/scanners, which beats the git heuristic.
+    let mut passed = fake_session(AgentStatus::Waiting, None);
+    passed.gate = Some(repomon_core::agent::gate::GateVerdict {
+        allowed: true,
+        net_new_findings: 0,
+        at: chrono::Utc::now(),
+        session_id: None,
+    });
+    app.lanes[0].agent_sessions = vec![passed];
+    app.lanes[0].state.dirty.unstaged = 1;
+    app.lanes[0].state.last_commit_at = None;
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("✓ review?"),
+        "gate-verified review badge missing:\n{jump}"
+    );
+    app.view = View::Fleet;
+    app.lanes[0].state.dirty.unstaged = 0;
 
     // A stalled agent (alive but frozen mid-work): ⚠ on the row, duration in the badge.
     let mut stuck = fake_session(AgentStatus::Running, None);

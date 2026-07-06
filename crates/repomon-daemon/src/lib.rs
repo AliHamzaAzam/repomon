@@ -112,6 +112,12 @@ pub struct OrchestratorSession {
     pub session_id: Option<String>,
 }
 
+/// One `gate_cache` entry: the ledger's mtime when last read, and the verdict parsed then.
+pub type GateCacheEntry = (
+    Option<std::time::SystemTime>,
+    Option<repomon_core::agent::gate::GateVerdict>,
+);
+
 /// Everything a request handler needs. Cheap to share via `Arc`.
 pub struct Ctx {
     pub store: Store,
@@ -156,6 +162,9 @@ pub struct Ctx {
     /// detector's clock. Never TTL-pruned (its point is remembering how long a pane has sat
     /// still); entries drop only when their window vanishes.
     pub pane_seen: Mutex<HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>>,
+    /// Per worktree: the dxkit loop ledger's mtime and the verdict parsed from its tail, so
+    /// the overlay re-reads only when the gate actually ran again. Keyed by worktree path.
+    pub gate_cache: Mutex<HashMap<PathBuf, GateCacheEntry>>,
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
@@ -258,6 +267,7 @@ impl Ctx {
             overlay_cache: Mutex::new(None),
             prompt_cache: Mutex::new(HashMap::new()),
             pane_seen: Mutex::new(HashMap::new()),
+            gate_cache: Mutex::new(HashMap::new()),
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),

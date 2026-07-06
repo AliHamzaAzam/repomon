@@ -74,14 +74,53 @@ pub fn agent_attention(s: &AgentSession) -> Attention {
     }
 }
 
-/// [`agent_attention`] refined with the lane's git state: an end-of-turn whose work looks
-/// shippable — worktree clean and a commit landed with this turn — reads as
-/// [`Attention::DoneCandidate`] ("review?") instead of a bare end-of-turn.
+/// A gate verdict counts as "this turn's" when it ran no earlier than slightly before the
+/// agent's last words — the Stop hook fires right after the turn ends, so a fresh verdict's
+/// timestamp lands at/after `last_activity_at`; anything older belongs to a previous turn.
+const GATE_FRESH_SLACK: chrono::Duration = chrono::Duration::minutes(2);
+
+/// [`agent_attention`] refined with the lane's state: an end-of-turn whose work looks done
+/// reads as [`Attention::DoneCandidate`] ("review?") instead of a bare end-of-turn.
+///
+/// Done-ness comes from the strongest available signal: a fresh dxkit stop-gate verdict when
+/// the worktree runs one (`allowed` grants, a block VETOES — the gate explicitly said the
+/// work isn't done, whatever git looks like), else the git heuristic (clean worktree + a
+/// this-turn commit).
 pub fn agent_attention_in(lane: &Lane, s: &AgentSession) -> Attention {
     match agent_attention(s) {
-        Attention::EndOfTurn if work_ready(lane, s) => Attention::DoneCandidate,
+        Attention::EndOfTurn => match gate_this_turn(s) {
+            Some(g) if g.allowed => Attention::DoneCandidate,
+            Some(_) => Attention::EndOfTurn,
+            None if work_ready(lane, s) => Attention::DoneCandidate,
+            None => Attention::EndOfTurn,
+        },
         a => a,
     }
+}
+
+/// This session's gate verdict for the CURRENT turn, if any: same session (when both sides
+/// know their id) and timestamped within [`GATE_FRESH_SLACK`] of the agent's last words.
+fn gate_this_turn(s: &AgentSession) -> Option<&crate::agent::gate::GateVerdict> {
+    let g = gate_for_session(s)?;
+    (g.at >= s.last_activity_at - GATE_FRESH_SLACK).then_some(g)
+}
+
+/// The latest gate block for this session — however old, since the next gate run replaces
+/// it — as `Some(net_new_findings)`. Feeds the "⛔ gate N" badge while the agent repairs.
+pub fn gate_bounced(s: &AgentSession) -> Option<u32> {
+    let g = gate_for_session(s)?;
+    (!g.allowed).then_some(g.net_new_findings)
+}
+
+/// The session's gate verdict, dropping one that identifiably belongs to another session.
+fn gate_for_session(s: &AgentSession) -> Option<&crate::agent::gate::GateVerdict> {
+    let g = s.gate.as_ref()?;
+    if let (Some(gs), Some(ss)) = (&g.session_id, &s.session_id) {
+        if gs != ss {
+            return None;
+        }
+    }
+    Some(g)
 }
 
 /// The lane's work looks shippable: nothing uncommitted, and the last commit belongs to this
@@ -141,6 +180,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             ended_turn: false,
+            gate: None,
             tmux_window: Some("lane-1".into()),
             last_message: None,
             pending_prompt: pending.map(str::to_string),
@@ -193,6 +233,72 @@ mod tests {
             last_activity_at: Utc::now(),
             pinned: false,
         }
+    }
+
+    #[test]
+    fn gate_verdict_grants_and_vetoes_done_candidate() {
+        use crate::agent::gate::GateVerdict;
+        let gate = |allowed: bool, mins_after_turn: i64, sid: Option<&str>| GateVerdict {
+            allowed,
+            net_new_findings: if allowed { 0 } else { 2 },
+            // Relative to the sess() helper's last_activity_at (now).
+            at: Utc::now() + chrono::Duration::minutes(mins_after_turn),
+            session_id: sid.map(str::to_string),
+        };
+        let with_gate = |mut s: AgentSession, g: GateVerdict| {
+            s.session_id = Some("abc".into());
+            s.gate = Some(g);
+            s
+        };
+
+        // A fresh ALLOWED verdict grants the review hint even on a dirty lane with no commit —
+        // the gate ran the tests/scanners; that beats the git heuristic.
+        let eot = with_gate(sess(AgentStatus::Waiting, None), gate(true, 0, Some("abc")));
+        assert_eq!(
+            agent_attention_in(&lane(false, None), &eot),
+            Attention::DoneCandidate
+        );
+
+        // A fresh BLOCK vetoes the git heuristic — clean + committed, but the gate said no.
+        let bounced = with_gate(
+            sess(AgentStatus::Waiting, None),
+            gate(false, 0, Some("abc")),
+        );
+        assert_eq!(
+            agent_attention_in(&lane(true, Some(5)), &bounced),
+            Attention::EndOfTurn
+        );
+
+        // A STALE verdict (from a turn long past) is ignored: back to the git heuristic.
+        let old = with_gate(
+            sess(AgentStatus::Waiting, None),
+            gate(true, -60, Some("abc")),
+        );
+        assert_eq!(
+            agent_attention_in(&lane(false, None), &old),
+            Attention::EndOfTurn
+        );
+
+        // Another session's verdict is ignored too.
+        let other = with_gate(sess(AgentStatus::Waiting, None), gate(true, 0, Some("zzz")));
+        assert_eq!(
+            agent_attention_in(&lane(false, None), &other),
+            Attention::EndOfTurn
+        );
+
+        // gate_bounced feeds the badge: the latest block for THIS session, however old.
+        let mut running = with_gate(
+            sess(AgentStatus::Running, None),
+            gate(false, -30, Some("abc")),
+        );
+        assert_eq!(gate_bounced(&running), Some(2));
+        running.gate = Some(gate(true, 0, Some("abc")));
+        assert_eq!(gate_bounced(&running), None);
+        let foreign = with_gate(
+            sess(AgentStatus::Running, None),
+            gate(false, 0, Some("zzz")),
+        );
+        assert_eq!(gate_bounced(&foreign), None);
     }
 
     #[test]

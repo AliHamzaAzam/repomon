@@ -43,6 +43,10 @@ pub struct AgentDigest {
     /// `AgentSession.stale`). A watchdog flag alongside `status`, not a status of its own.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stalled: bool,
+    /// The worktree's latest dxkit stop-gate verdict, when it runs one — the orchestrator's
+    /// strongest done/not-done evidence (see `AgentSession.gate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate: Option<repomon_core::agent::gate::GateVerdict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window: Option<String>,
     /// The open dialog's summary, when one is present. Skipped from fleet digests (it lives in
@@ -206,6 +210,7 @@ fn project_agent(lane: &Lane, s: &AgentSession, now: DateTime<Utc>) -> AgentDige
         external: s.external,
         inferred: s.inferred,
         stalled: s.stale,
+        gate: s.gate.clone(),
         window: s.tmux_window.clone(),
         pending_prompt: s.pending_prompt.clone(),
     }
@@ -246,6 +251,13 @@ fn fingerprint(lanes: &[LaneDigest]) -> u64 {
                 a.status.hash(&mut h);
                 a.attention.as_str().hash(&mut h);
                 a.stalled.hash(&mut h);
+                match &a.gate {
+                    Some(g) => {
+                        g.allowed.hash(&mut h);
+                        g.net_new_findings.hash(&mut h);
+                    }
+                    None => 2u8.hash(&mut h),
+                }
                 a.pending_prompt.as_deref().unwrap_or("").hash(&mut h);
             }
             None => 0u8.hash(&mut h),
@@ -353,6 +365,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             ended_turn: false,
+            gate: None,
             config_dir: None,
             custom_label: None,
         }

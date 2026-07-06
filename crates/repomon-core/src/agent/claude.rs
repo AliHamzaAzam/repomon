@@ -74,6 +74,7 @@ impl TranscriptSummary {
             stale: false, // overlaid by the daemon's stall detector
             stalled_since: None,
             ended_turn: self.ended_turn,
+            gate: None,
             config_dir: self.config_dir,
             custom_label: None, // overlay sets this from the session_labels store
         }
