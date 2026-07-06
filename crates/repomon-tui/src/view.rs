@@ -797,7 +797,7 @@ fn render_sessions(f: &mut Frame, app: &App) {
 
 fn notif_style(app: &App, kind: NotifKind) -> Style {
     match kind {
-        NotifKind::NeedsYou => app.theme.needs_you(),
+        NotifKind::NeedsYou | NotifKind::Stalled => app.theme.needs_you(),
         NotifKind::RateLimited => app.theme.rate_limited(),
         NotifKind::Resumed => app.theme.running(),
         NotifKind::Idle => app.theme.muted(),

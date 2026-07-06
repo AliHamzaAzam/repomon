@@ -54,6 +54,9 @@ fn fake_session(
         last_message: None,
         pending_prompt: prompt.map(str::to_string),
         pending_dialog: dialog,
+        stale: false,
+        stalled_since: None,
+        ended_turn: false,
         config_dir: None,
         custom_label: None,
     }

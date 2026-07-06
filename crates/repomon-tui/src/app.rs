@@ -21,8 +21,8 @@ use repomon_core::model::{
     RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
-    SessKey, activity_allows_refire, diff_session_transitions, session_by_key, session_statuses,
-    slot_by_key,
+    SessKey, SessState, activity_allows_refire, diff_session_transitions, session_by_key,
+    session_statuses, slot_by_key,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -281,10 +281,11 @@ pub struct App {
     pub settings_editing: bool,
     /// Screen row of the first settings item (for click hit-testing), set during render.
     pub settings_geom: std::cell::Cell<u16>,
-    /// Last-seen status per real agent session, for notification edge-detection. A session that
-    /// left the snapshot is expressed by key absence (there is no `None` value), which is what
-    /// lets each agent in a shared lane fire its own alerts instead of one rolled-up status.
-    prev_status: HashMap<(LaneId, SessKey), AgentStatus>,
+    /// Last-seen state (status + stall flag) per real agent session, for notification
+    /// edge-detection. A session that left the snapshot is expressed by key absence (there is
+    /// no `None` value), which is what lets each agent in a shared lane fire its own alerts
+    /// instead of one rolled-up status.
+    prev_status: HashMap<(LaneId, SessKey), SessState>,
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
     notif_seeded: bool,
@@ -1086,7 +1087,7 @@ impl App {
         // Snapshot the new statuses, one entry per real agent session. Inferred file-activity
         // sessions (worktree-isolated subagents) only count when the user opted in.
         let subagents = self.settings.notify_subagents;
-        let now: HashMap<(LaneId, SessKey), AgentStatus> = self
+        let now: HashMap<(LaneId, SessKey), SessState> = self
             .lanes
             .iter()
             .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
@@ -1204,6 +1205,8 @@ impl App {
             NotifKind::RateLimited => self.settings.notify_rate_limited,
             NotifKind::Resumed => self.settings.notify_resumed,
             NotifKind::Idle => self.settings.notify_idle,
+            // A stall is a needs-you-class event; it rides that toggle (same as the daemon).
+            NotifKind::Stalled => self.settings.notify_needs_you,
         }
     }
 
@@ -5108,6 +5111,9 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            ended_turn: false,
             config_dir: None,
             custom_label: None,
         }

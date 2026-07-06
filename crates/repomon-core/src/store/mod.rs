@@ -699,6 +699,9 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
         last_message: None,
         pending_prompt: None,
         pending_dialog: None,
+        stale: false,
+        stalled_since: None,
+        ended_turn: false,
         config_dir: None,
         custom_label: None,
     })
@@ -990,6 +993,9 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            ended_turn: false,
             config_dir: None,
             custom_label: None,
         };

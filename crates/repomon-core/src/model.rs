@@ -269,6 +269,19 @@ pub struct AgentSession {
     /// list time alongside `pending_prompt`; not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_dialog: Option<crate::agent::prompt::PendingDialog>,
+    /// Overlaid when the agent looks stuck: its window/process is alive, no dialog is up, it
+    /// did not end its turn — and neither the pane nor the transcript has moved for the stall
+    /// window. A watchdog signal, not a status: `status` still reads Running/Idle underneath.
+    #[serde(default)]
+    pub stale: bool,
+    /// When the stall began (the last time the pane changed), for "stalled 7m" display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_since: Option<DateTime<Utc>>,
+    /// Whether the transcript's last entry is the agent speaking with no tool call — i.e. it
+    /// finished its turn — independent of the Idle time-decay that hides this in `status`.
+    /// Daemon-internal (feeds the stall detector); never serialized.
+    #[serde(skip)]
+    pub ended_turn: bool,
     /// The Claude account (config dir) this agent runs under, overlaid at list time from the
     /// transcript. `None` = the default `~/.claude`; `Some` = a variant (`~/.claude-work`). Lets a
     /// client attribute account-level usage (the `/usage` probe) to the focused agent. Not persisted.

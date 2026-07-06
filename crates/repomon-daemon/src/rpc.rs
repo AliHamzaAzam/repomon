@@ -1976,6 +1976,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     last_message: None,
                     pending_prompt: None,
                     pending_dialog: None,
+                    stale: false,
+                    stalled_since: None,
+                    ended_turn: false,
                     config_dir: None,
                     custom_label: None,
                 });
@@ -2472,6 +2475,9 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         last_message: None,
         pending_prompt: None,
         pending_dialog: None,
+        stale: false,
+        stalled_since: None,
+        ended_turn: false,
         config_dir: None,
         custom_label: None,
     }
@@ -3637,6 +3643,7 @@ mod tests {
                 last_message: last_message.map(str::to_string),
                 config_dir: None,
                 session_id: None,
+                ended_turn: false,
             }
         }
         // The newest (first) entry is a content-less usage-probe session; skip it for the next

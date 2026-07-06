@@ -42,6 +42,10 @@ pub struct TranscriptSummary {
     /// The session id (transcript filename stem) — lets adopt resume *this* exact session
     /// (`claude --resume <id>`) when several run in one worktree.
     pub session_id: Option<String>,
+    /// Whether the last entry is the agent speaking with no tool call — it finished its turn.
+    /// Unlike `status` (whose `Waiting` decays to `Idle` after [`IDLE_AFTER`]), this fact
+    /// survives the decay: the stall detector needs "did it end its turn?" long after 10 min.
+    pub ended_turn: bool,
 }
 
 impl TranscriptSummary {
@@ -67,6 +71,9 @@ impl TranscriptSummary {
             tmux_window: None, // overlay pairs managed sessions with their windows
             resume_at: None,
             inferred: false,
+            stale: false, // overlaid by the daemon's stall detector
+            stalled_since: None,
+            ended_turn: self.ended_turn,
             config_dir: self.config_dir,
             custom_label: None, // overlay sets this from the session_labels store
         }
@@ -452,6 +459,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_string()),
+        ended_turn: last_type == Some("assistant") && !last_assistant_has_tool,
     })
 }
 
@@ -1134,6 +1142,41 @@ mod tests {
         let s = parse_transcript(&path).unwrap();
         assert_eq!(s.status, AgentStatus::Running);
         assert!(!s.status.needs_you());
+    }
+
+    #[test]
+    fn ended_turn_survives_the_idle_decay() {
+        // The stall detector must distinguish "Idle because the turn ended long ago" (fine)
+        // from "Idle because it froze mid-work" (stale) — `status` alone can't, since both
+        // decay to Idle after IDLE_AFTER. `ended_turn` carries the fact through the decay.
+        let dir = tempfile::tempdir().unwrap();
+
+        // Old turn that ENDED (assistant text, no tool): Idle + ended_turn.
+        let ended = [
+            r#"{"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","timestamp":"2020-01-01T00:00:05Z","message":{"content":[{"type":"text","text":"All done."}]}}"#,
+        ];
+        let s = parse_transcript(&write_transcript(dir.path(), "a.jsonl", &ended)).unwrap();
+        assert_eq!(s.status, AgentStatus::Idle);
+        assert!(s.ended_turn, "a finished turn must survive the Idle decay");
+
+        // Old transcript frozen MID-TOOL-CALL: Idle + NOT ended_turn (the stale shape).
+        let frozen = [
+            r#"{"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","timestamp":"2020-01-01T00:00:05Z","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
+        ];
+        let s = parse_transcript(&write_transcript(dir.path(), "b.jsonl", &frozen)).unwrap();
+        assert_eq!(s.status, AgentStatus::Idle);
+        assert!(!s.ended_turn, "frozen mid-tool is not a finished turn");
+
+        // And a FRESH finished turn reads Waiting + ended_turn.
+        let fresh = [
+            r#"{"type":"user","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#,
+        ];
+        let s = parse_transcript(&write_transcript(dir.path(), "c.jsonl", &fresh)).unwrap();
+        assert_eq!(s.status, AgentStatus::Waiting);
+        assert!(s.ended_turn);
     }
 
     #[test]

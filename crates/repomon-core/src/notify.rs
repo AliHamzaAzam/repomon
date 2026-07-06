@@ -27,6 +27,10 @@ pub enum NotifKind {
     Resumed,
     /// Agent went idle or its session ended.
     Idle,
+    /// Agent looks stuck: process alive, no dialog up, turn not ended — and neither the pane
+    /// nor the transcript has moved for the stall window. Gated by the needs-you toggle (a
+    /// stall is a needs-you-class event, not a new setting).
+    Stalled,
 }
 
 impl NotifKind {
@@ -36,6 +40,7 @@ impl NotifKind {
             NotifKind::RateLimited => "⏳",
             NotifKind::Resumed => "▶",
             NotifKind::Idle => "○",
+            NotifKind::Stalled => "⚠",
         }
     }
     /// The stable snake_case token for this kind (matches the serde wire name). Used to build a
@@ -46,6 +51,7 @@ impl NotifKind {
             NotifKind::RateLimited => "rate_limited",
             NotifKind::Resumed => "resumed",
             NotifKind::Idle => "idle",
+            NotifKind::Stalled => "stalled",
         }
     }
     fn verb(self) -> &'static str {
@@ -54,6 +60,7 @@ impl NotifKind {
             NotifKind::RateLimited => "hit a usage limit",
             NotifKind::Resumed => "resumed",
             NotifKind::Idle => "went idle",
+            NotifKind::Stalled => "looks stuck",
         }
     }
     fn verb_plural(self) -> &'static str {
@@ -62,6 +69,7 @@ impl NotifKind {
             NotifKind::RateLimited => "hit a usage limit",
             NotifKind::Resumed => "resumed",
             NotifKind::Idle => "went idle",
+            NotifKind::Stalled => "look stuck",
         }
     }
 }
@@ -80,20 +88,25 @@ pub enum SessKey {
     Fallback,
 }
 
-/// Key/status pairs for one lane's *real* agent sessions, used to drive notifications.
+/// A session's notification-relevant state in one snapshot: its status plus the stall flag.
+/// The pair is what the edge detectors diff across polls — a stall flip alerts even though
+/// the status underneath (Running/Idle) never changes.
+pub type SessState = (AgentStatus, bool);
+
+/// Key/state pairs for one lane's *real* agent sessions, used to drive notifications.
 ///
 /// `inferred` "file-activity" sessions are worktree-isolated subagents (a Claude Code subagent
 /// runs inside its parent's process and leaves no transcript or process of its own). They are
 /// dropped unless `include_subagents` is set — the `notify_subagents` toggle, off by default, so
 /// the user is alerted only when the *main* agent finishes, not each subagent it spawns. On a
 /// (theoretically impossible) duplicate key, the higher-priority status wins — the same order the
-/// old per-lane rollup used.
+/// old per-lane rollup used — and the stall flag is OR-merged.
 pub fn session_statuses(
     lane_id: LaneId,
     sessions: &[AgentSession],
     include_subagents: bool,
-) -> Vec<((LaneId, SessKey), AgentStatus)> {
-    let mut out: Vec<((LaneId, SessKey), AgentStatus)> = Vec::new();
+) -> Vec<((LaneId, SessKey), SessState)> {
+    let mut out: Vec<((LaneId, SessKey), SessState)> = Vec::new();
     for s in sessions.iter().filter(|s| include_subagents || !s.inferred) {
         let key = (
             lane_id,
@@ -103,9 +116,13 @@ pub fn session_statuses(
                 .unwrap_or(SessKey::Fallback),
         );
         match out.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, st)) if status_priority(s.status) < status_priority(*st) => *st = s.status,
-            Some(_) => {}
-            None => out.push((key, s.status)),
+            Some((_, st)) => {
+                if status_priority(s.status) < status_priority(st.0) {
+                    st.0 = s.status;
+                }
+                st.1 |= s.stale;
+            }
+            None => out.push((key, (s.status, s.stale))),
         }
     }
     out
@@ -129,22 +146,29 @@ pub fn status_priority(s: AgentStatus) -> usize {
 /// no-transcript placeholder disappears the moment the agent's transcript becomes parseable,
 /// and firing Idle there would alert on every spawn.
 pub fn diff_session_transitions(
-    prev: &HashMap<(LaneId, SessKey), AgentStatus>,
-    now: &HashMap<(LaneId, SessKey), AgentStatus>,
+    prev: &HashMap<(LaneId, SessKey), SessState>,
+    now: &HashMap<(LaneId, SessKey), SessState>,
     live_lanes: &HashSet<LaneId>,
     lanes_with_managed: &HashSet<LaneId>,
 ) -> Vec<((LaneId, SessKey), NotifKind)> {
     let mut out = Vec::new();
-    for (key, &status) in now {
+    for (key, &(status, stale)) in now {
         let was = prev.get(key).copied();
-        if was == Some(status) {
+        if was == Some((status, stale)) {
             continue;
         }
-        if let Some(kind) = transition_kind(was, Some(status)) {
+        // The stall flag flipping on is its own alert, independent of the status underneath
+        // (which typically never changes — that's what makes a stall invisible otherwise).
+        // Un-stalling stays quiet: output resuming is the good case.
+        if stale && !was.is_some_and(|(_, st)| st) {
+            out.push((key.clone(), NotifKind::Stalled));
+            continue;
+        }
+        if let Some(kind) = transition_kind(was.map(|(s, _)| s), Some(status)) {
             out.push((key.clone(), kind));
         }
     }
-    for (key, &was) in prev {
+    for (key, &(was, _)) in prev {
         if now.contains_key(key) || !live_lanes.contains(&key.0) {
             continue;
         }
@@ -267,15 +291,17 @@ pub fn compose(
     } else {
         agent
     };
-    // A NeedsYou names what the agent actually wants — permission, an answer, or just the
-    // next instruction — so the reader can triage from the notification alone. Falls back to
-    // the generic verb when the session vanished (or isn't in a waiting state after all).
+    // A NeedsYou names what the agent actually wants — permission, an answer, the review of
+    // finished work, or just the next instruction — so the reader can triage from the
+    // notification alone. Falls back to the generic verb when the session vanished (or isn't
+    // in a waiting state after all).
     let verb = match (kind, sess) {
         (NotifKind::NeedsYou, Some(s)) => {
-            use crate::agent::attention::{Attention, agent_attention};
-            match agent_attention(s) {
+            use crate::agent::attention::{Attention, agent_attention_in};
+            match agent_attention_in(lane, s) {
                 Attention::Permission => "is asking permission",
                 Attention::Decision => "has a question",
+                Attention::DoneCandidate => "is ready for review",
                 Attention::EndOfTurn => "finished its turn",
                 Attention::None => kind.verb(),
             }
@@ -315,6 +341,12 @@ pub fn compose(
                 "resets {}",
                 r.with_timezone(&Local).format("%H:%M")
             ));
+        }
+    }
+    if kind == NotifKind::Stalled {
+        if let Some(since) = sess.and_then(|s| s.stalled_since) {
+            let mins = (Utc::now() - since).num_minutes().max(0);
+            parts.push(format!("stalled {mins}m"));
         }
     }
     (title, parts.join(" · "))
@@ -552,6 +584,11 @@ mod tests {
         assert_eq!(&args[args.len() - 3..], ["--", "T", "B"]);
     }
 
+    /// A snapshot state with the stall flag off — the common case in transition tests.
+    fn st(s: AgentStatus) -> SessState {
+        (s, false)
+    }
+
     /// A minimal real-or-inferred session, mirroring the daemon's `overlay_agents` literals.
     fn sess(session_id: Option<&str>, status: AgentStatus, inferred: bool) -> AgentSession {
         AgentSession {
@@ -574,6 +611,9 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            ended_turn: false,
             config_dir: None,
             custom_label: None,
         }
@@ -670,15 +710,17 @@ mod tests {
         ];
         let got = session_statuses(7, &sessions, false);
         assert_eq!(got.len(), 3);
-        assert!(got.contains(&((7, SessKey::Transcript("a".into())), Waiting)));
-        assert!(got.contains(&((7, SessKey::Transcript("b".into())), RateLimited)));
-        assert!(got.contains(&((7, SessKey::Fallback), Running)));
+        assert!(got.contains(&((7, SessKey::Transcript("a".into())), st(Waiting))));
+        assert!(got.contains(&((7, SessKey::Transcript("b".into())), st(RateLimited))));
+        assert!(got.contains(&((7, SessKey::Fallback), st(Running))));
 
-        // Defensive: a duplicate key keeps the higher-priority status.
-        let dup = vec![sess(None, Idle, false), sess(None, Waiting, false)];
+        // Defensive: a duplicate key keeps the higher-priority status (and ORs the stall flag).
+        let mut stalled = sess(None, Idle, false);
+        stalled.stale = true;
+        let dup = vec![stalled, sess(None, Waiting, false)];
         assert_eq!(
             session_statuses(7, &dup, false),
-            vec![((7, SessKey::Fallback), Waiting)]
+            vec![((7, SessKey::Fallback), (Waiting, true))]
         );
     }
 
@@ -697,7 +739,7 @@ mod tests {
         // its finish (→ disappearance) can alert.
         assert_eq!(
             session_statuses(7, &sessions, true),
-            vec![((7, SessKey::Fallback), Running)]
+            vec![((7, SessKey::Fallback), st(Running))]
         );
 
         // A main (transcript-backed) agent alongside a subagent: the main always counts; the
@@ -720,15 +762,15 @@ mod tests {
         // One agent finishes its turn while its lane-mate is still rate-limited. The old
         // per-lane rollup saw "RateLimited" before and after and fired nothing — the masking
         // this change exists to fix.
-        let prev: HashMap<_, _> = [(k("a"), Running), (k("b"), RateLimited)].into();
-        let now: HashMap<_, _> = [(k("a"), Waiting), (k("b"), RateLimited)].into();
+        let prev: HashMap<_, _> = [(k("a"), st(Running)), (k("b"), st(RateLimited))].into();
+        let now: HashMap<_, _> = [(k("a"), st(Waiting)), (k("b"), st(RateLimited))].into();
         assert_eq!(
             diff_session_transitions(&prev, &now, &live, &managed),
             vec![(k("a"), NotifKind::NeedsYou)]
         );
 
         // And the rate-limited lane-mate resumes independently.
-        let now2: HashMap<_, _> = [(k("a"), Waiting), (k("b"), Running)].into();
+        let now2: HashMap<_, _> = [(k("a"), st(Waiting)), (k("b"), st(Running))].into();
         assert_eq!(
             diff_session_transitions(&now, &now2, &live, &managed),
             vec![(k("b"), NotifKind::Resumed)]
@@ -739,7 +781,7 @@ mod tests {
     fn disappearance_fires_idle_only_when_lane_lives() {
         use AgentStatus::*;
         let k = (1, SessKey::Transcript("a".into()));
-        let prev: HashMap<_, _> = [(k.clone(), Waiting)].into();
+        let prev: HashMap<_, _> = [(k.clone(), st(Waiting))].into();
         let now = HashMap::new();
         let managed = HashSet::new();
 
@@ -756,8 +798,8 @@ mod tests {
     fn fallback_handoff_does_not_fire_idle() {
         use AgentStatus::*;
         let live: HashSet<LaneId> = [1].into();
-        let prev: HashMap<_, _> = [((1, SessKey::Fallback), Running)].into();
-        let now: HashMap<_, _> = [((1, SessKey::Transcript("a".into())), Running)].into();
+        let prev: HashMap<_, _> = [((1, SessKey::Fallback), st(Running))].into();
+        let now: HashMap<_, _> = [((1, SessKey::Transcript("a".into())), st(Running))].into();
 
         // The managed spawn's transcript became parseable: Fallback hands off to Transcript
         // within one refresh. The agent didn't stop, so nothing fires.
@@ -782,13 +824,13 @@ mod tests {
 
         // A second agent appearing mid-run already waiting (e.g. a parallel session that
         // finished between refreshes) is exactly the alert the user wants.
-        let waiting: HashMap<_, _> = [(k.clone(), Waiting)].into();
+        let waiting: HashMap<_, _> = [(k.clone(), st(Waiting))].into();
         assert_eq!(
             diff_session_transitions(&prev, &waiting, &live, &managed),
             vec![(k.clone(), NotifKind::NeedsYou)]
         );
         // Appearing already-running is just work starting; stay quiet.
-        let running: HashMap<_, _> = [(k, Running)].into();
+        let running: HashMap<_, _> = [(k, st(Running))].into();
         assert!(diff_session_transitions(&prev, &running, &live, &managed).is_empty());
     }
 
@@ -819,6 +861,54 @@ mod tests {
     }
 
     #[test]
+    fn stall_flip_fires_stalled_once() {
+        use AgentStatus::*;
+        let live: HashSet<LaneId> = [1].into();
+        let managed = HashSet::new();
+        let k = (1, SessKey::Transcript("a".into()));
+
+        // Running → running-but-stale: the flip alerts even though the status never changed.
+        let prev: HashMap<_, _> = [(k.clone(), (Running, false))].into();
+        let now: HashMap<_, _> = [(k.clone(), (Running, true))].into();
+        assert_eq!(
+            diff_session_transitions(&prev, &now, &live, &managed),
+            vec![(k.clone(), NotifKind::Stalled)]
+        );
+        // Still stale on the next poll: no re-fire.
+        assert!(diff_session_transitions(&now, &now, &live, &managed).is_empty());
+        // The Running→Idle decay while the stall persists must not alert either.
+        let idle: HashMap<_, _> = [(k.clone(), (Idle, true))].into();
+        assert!(diff_session_transitions(&now, &idle, &live, &managed).is_empty());
+        // Un-stalling quietly (output resumed): no alert.
+        let back: HashMap<_, _> = [(k.clone(), (Running, false))].into();
+        assert!(diff_session_transitions(&idle, &back, &live, &managed).is_empty());
+        // A session first seen already-stale alerts (it stalled between polls).
+        assert_eq!(
+            diff_session_transitions(&HashMap::new(), &now, &live, &managed),
+            vec![(k, NotifKind::Stalled)]
+        );
+    }
+
+    #[test]
+    fn compose_stalled_and_done_candidate_wording() {
+        // Stalled: names the stall and how long the pane has been frozen.
+        let mut s = sess(Some("a"), AgentStatus::Running, false);
+        s.stale = true;
+        s.stalled_since = Some(Utc::now() - chrono::Duration::minutes(7));
+        let (title, body) = compose(NotifKind::Stalled, &lane(), Some(&s), None, true);
+        assert!(title.contains("looks stuck"), "{title}");
+        assert!(body.contains("stalled 7m"), "{body}");
+
+        // Done candidate: end-of-turn on a clean lane with a fresh commit reads as
+        // ready-for-review instead of the bare finished-turn wording.
+        let s = sess(Some("a"), AgentStatus::Waiting, false);
+        let mut l = lane();
+        l.state.last_commit_at = Some(Utc::now());
+        let (title, _) = compose(NotifKind::NeedsYou, &l, Some(&s), None, true);
+        assert!(title.contains("is ready for review"), "{title}");
+    }
+
+    #[test]
     fn reseed_snapshot_fires_nothing() {
         use AgentStatus::*;
         // Re-seeding (what the TUI does on attach-return / toggle flip, and the daemon on
@@ -827,7 +917,7 @@ mod tests {
         let live: HashSet<LaneId> = [1].into();
         let managed = HashSet::new();
         let k = |id: &str| (1, SessKey::Transcript(id.into()));
-        let snap: HashMap<_, _> = [(k("a"), Waiting), (k("b"), RateLimited)].into();
+        let snap: HashMap<_, _> = [(k("a"), st(Waiting)), (k("b"), st(RateLimited))].into();
         assert!(diff_session_transitions(&snap, &snap, &live, &managed).is_empty());
     }
 
