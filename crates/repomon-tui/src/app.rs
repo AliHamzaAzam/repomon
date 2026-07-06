@@ -202,6 +202,8 @@ pub struct App {
     /// The prompt-peek popup (`v`): the waiting agent's parsed dialog, answerable in place.
     /// An overlay, not a `View` — the underlying view stays rendered beneath it.
     pub peek: Option<PeekState>,
+    /// The `?` help overlay: the current view's key hints, expanded. Any key closes it.
+    pub help_open: bool,
     pub status: String,
     pub nl_repo_idx: usize,
     pub nl_branch: String,
@@ -448,6 +450,7 @@ impl App {
             rename_buf: String::new(),
             rename_target: None,
             peek: None,
+            help_open: false,
             status: String::new(),
             nl_repo_idx: 0,
             nl_branch: String::new(),
@@ -1983,6 +1986,8 @@ impl App {
             _ if self.renaming => self.rename_key(key).await,
             // So is the prompt-peek popup — it answers/steers/closes, whatever the view below.
             _ if self.peek.is_some() => self.peek_key(key).await,
+            // The help overlay reads until any key dismisses it.
+            _ if self.help_open => self.help_open = false,
             View::NewLane => self.new_lane_key(key).await,
             View::Split => self.split_key(key).await,
             View::Focus => self.focus_key(key).await,
@@ -4287,6 +4292,7 @@ impl App {
             Action::AttachNeedsYou => self.jump_attention_attach(),
             Action::FindLane => self.enter_lane_jump(),
             Action::PeekPrompt => self.open_peek().await,
+            Action::Help => self.help_open = true,
             Action::ToggleUrgent => {
                 self.urgent_only = !self.urgent_only;
                 self.status = if self.urgent_only {

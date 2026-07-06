@@ -17,7 +17,7 @@ use crate::keybinds::View;
 use crate::notify::NotifKind;
 use crate::theme;
 
-const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · v peek · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · v peek · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · ? help · q";
 const SPLIT_KEYS: &str = "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  v peek · e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
     "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
@@ -27,6 +27,10 @@ const SPLIT_ORCH_INSERT_KEYS: &str =
 const FOCUS_CMD_KEYS: &str = "↵/→ open (real terminal) · i quick-type · tab agent · PgUp scroll  ·  e spawn · o adopt · t term · s stop  ·  g/G next · f find  ·  ←/esc back";
 const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O command-mode";
 const GRID_KEYS: &str = "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g/G next · f find  ·  spc/esc fleet · q quit";
+const NOTIF_KEYS: &str =
+    "↑↓ move · ↵ open · t attach · d dismiss · c clear  ·  1 fleet · ←/esc back · q quit";
+/// Keys that work from (almost) every view — the help overlay's second section.
+const GLOBAL_KEYS: &str = "1 fleet · 2 timeline · 3 sessions · 4 search · 5 notifications · 6/O repomind  ·  v peek · f find · ? help · q quit";
 const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
     "↑↓ repo · tab agent · ^a manage  ·  type branch · ↵ create + spawn  ·  esc cancel";
@@ -68,10 +72,139 @@ pub fn render(f: &mut Frame, app: &App) {
         View::LaneJump => render_lane_jump(f, app),
         View::Orchestrator => render_orchestrator(f, app),
     }
-    // The prompt-peek popup floats over whatever view is beneath it.
+    // The prompt-peek popup floats over whatever view is beneath it; the help overlay over that.
     render_prompt_popup(f, app);
+    render_help(f, app);
     // Drawn last, over the free right end of the bottom row, so it overlays every view.
     corner(f, app);
+}
+
+/// The footer hint string for a view — what the `?` help overlay expands. Command-mode strings
+/// only: insert modes swallow `?` before it can open help.
+fn hints_for(view: View) -> &'static str {
+    match view {
+        View::Fleet => FLEET_KEYS,
+        View::Split => SPLIT_KEYS,
+        View::Focus => FOCUS_CMD_KEYS,
+        View::Grid => GRID_KEYS,
+        View::NewLane => NEWLANE_KEYS,
+        View::Timeline | View::Sessions | View::Search => DASH_KEYS,
+        View::AddRepo => ADDREPO_KEYS,
+        View::Agents => AGENTS_KEYS,
+        View::Settings => SETTINGS_KEYS,
+        View::Notifications => NOTIF_KEYS,
+        View::SpawnPick => "↑↓ pick · ↵ spawn · esc cancel",
+        View::LaneJump => "type to filter · ↑↓ pick · ↵ open · esc cancel",
+        View::Orchestrator => ORCH_KEYS,
+    }
+}
+
+fn view_title(view: View) -> &'static str {
+    match view {
+        View::Fleet => "FLEET",
+        View::Split => "SPLIT",
+        View::Focus => "FOCUS",
+        View::Grid => "GRID",
+        View::NewLane => "NEW LANE",
+        View::Timeline => "TIMELINE",
+        View::Sessions => "SESSIONS",
+        View::Search => "SEARCH",
+        View::AddRepo => "ADD REPO",
+        View::Agents => "AGENTS",
+        View::Settings => "SETTINGS",
+        View::Notifications => "NOTIFICATIONS",
+        View::SpawnPick => "SPAWN AGENT",
+        View::LaneJump => "FIND LANE",
+        View::Orchestrator => "COMMAND-CENTER",
+    }
+}
+
+/// The `?` help overlay: the current view's footer hints expanded one per row — parsed by the
+/// same `split_items_depth0`/`split_key_label` the footer uses, so footer and help can never
+/// drift — plus the global view-switching keys.
+fn render_help(f: &mut Frame, app: &App) {
+    use ratatui::widgets::{Block, Borders, Clear};
+    if !app.help_open {
+        return;
+    }
+    let area = f.area();
+    if area.width < 30 || area.height < 10 {
+        return;
+    }
+
+    // (key, label) rows per section; `None` rows are section breaks.
+    let mut rows: Vec<Option<(String, String)>> = Vec::new();
+    for (i, keys) in [hints_for(app.view), GLOBAL_KEYS].into_iter().enumerate() {
+        if i > 0 {
+            rows.push(None);
+        }
+        for group in keys.split("  ·  ") {
+            for item in split_items_depth0(group) {
+                let (key, label) = split_key_label(item);
+                if !key.is_empty() {
+                    rows.push(Some((key, label.unwrap_or_default())));
+                }
+            }
+        }
+    }
+    let key_w = rows
+        .iter()
+        .flatten()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(1);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for row in rows {
+        match row {
+            Some((key, label)) => {
+                let pad = " ".repeat(key_w.saturating_sub(key.chars().count()));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("{pad}{key}"), app.theme.footer_key()),
+                    Span::styled(format!("  {label}"), app.theme.muted()),
+                ]));
+            }
+            None => {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(Span::styled(
+                    "  GLOBAL".to_string(),
+                    app.theme.header_style(),
+                )));
+            }
+        }
+    }
+
+    let content_w = lines
+        .iter()
+        .map(|l| l.width() as u16)
+        .max()
+        .unwrap_or(20)
+        .max(24);
+    let w = (content_w + 4).min(area.width.saturating_sub(2));
+    let h = ((lines.len() + 2) as u16).min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: (area.width - w) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    format!(" KEYS — {} ", view_title(app.view)),
+                    app.theme.header_style(),
+                ))
+                .title_bottom(Span::styled(
+                    " any key closes ".to_string(),
+                    app.theme.dim(),
+                )),
+        ),
+        rect,
+    );
 }
 
 /// The prompt-peek popup (`v`): the waiting agent's dialog — title, body, options with the
@@ -734,14 +867,7 @@ fn render_notifications(f: &mut Frame, app: &App) {
         ]));
     }
     f.render_widget(Paragraph::new(lines), rows[0]);
-    f.render_widget(
-        footer(
-            "↑↓ move · ↵ open · t attach · d dismiss · c clear  ·  1 fleet · ←/esc back · q quit",
-            app,
-            rows[1].width,
-        ),
-        rows[1],
-    );
+    f.render_widget(footer(NOTIF_KEYS, app, rows[1].width), rows[1]);
 }
 
 /// The quick agent picker shown when spawning onto a lane (when "ask which agent on spawn" is
