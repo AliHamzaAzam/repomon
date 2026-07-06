@@ -2441,6 +2441,7 @@ fn reuse_per_path_on_failure<T: Clone>(
 /// transcript open, but its cwd is the worktree it runs in — so the count per worktree bounds
 /// how many of that worktree's sessions are actually running. `None` if the probe couldn't
 /// run (then we don't filter); `Some({})` means no claude is running.
+#[cfg(not(target_os = "linux"))]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     use std::process::Command;
     // Enumerate `claude` processes via `ps`, matching the executable basename. `pgrep -x claude`
@@ -2481,6 +2482,74 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     Some(counts)
 }
 
+/// Linux variant: scan `/proc` directly — always present, no `ps`/`lsof` dependency, and
+/// cheaper than either.
+#[cfg(target_os = "linux")]
+fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
+    live_cwds_by_name("claude")
+}
+
+/// Count processes named `name` per working directory by walking `/proc`. A process matches
+/// when its `comm` equals `name` (the kernel uses the script basename for `#!` launchers,
+/// truncated to 15 bytes — "claude" fits) OR when the basename of its cmdline argv[0] does
+/// (covers exec'd wrappers whose comm differs — the Linux analogue of the pgrep-vs-ps lesson
+/// above). cwd comes from `/proc/<pid>/cwd`; entries we can't read (other users) are skipped.
+#[cfg(target_os = "linux")]
+fn live_cwds_by_name(name: &str) -> Option<HashMap<PathBuf, usize>> {
+    let mut counts: HashMap<PathBuf, usize> = HashMap::new();
+    for entry in std::fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else { continue };
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_str()
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let base = PathBuf::from("/proc").join(pid);
+        let comm_matches = std::fs::read_to_string(base.join("comm"))
+            .map(|c| c.trim() == name)
+            .unwrap_or(false);
+        let argv0_matches = || {
+            std::fs::read(base.join("cmdline"))
+                .ok()
+                .and_then(|raw| {
+                    let argv0 = raw.split(|&b| b == 0).next()?.to_vec();
+                    let argv0 = String::from_utf8_lossy(&argv0).into_owned();
+                    Some(argv0.rsplit('/').next().unwrap_or("") == name)
+                })
+                .unwrap_or(false)
+        };
+        if !comm_matches && !argv0_matches() {
+            continue;
+        }
+        let Ok(cwd) = std::fs::read_link(base.join("cwd")) else {
+            continue;
+        };
+        let key = cwd.canonicalize().unwrap_or(cwd);
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    Some(counts)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod live_cwds_tests {
+    #[test]
+    fn proc_scan_finds_self() {
+        let comm = std::fs::read_to_string("/proc/self/comm")
+            .unwrap()
+            .trim()
+            .to_string();
+        let cwds = super::live_cwds_by_name(&comm).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let key = cwd.canonicalize().unwrap_or(cwd);
+        assert!(
+            cwds.get(&key).copied().unwrap_or(0) >= 1,
+            "expected {key:?} among {cwds:?}"
+        );
+    }
+}
+
 /// Cached [`live_claude_cwds`] with a 10s TTL (plus a 30s sticky-high grace against undercounts),
 /// so frequent `lane.list` calls don't hammer `lsof`.
 async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
@@ -2501,12 +2570,10 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
     {
         Some(m) => m,
         None => {
-            // The probe couldn't run (pgrep/lsof spawn failed, e.g. under load). Returning None
-            // means "don't filter" — callers keep all recent sessions rather than truncating to a
-            // bogus low count — but it was silent; log it so a recurring flap is visible.
-            tracing::warn!(
-                "live claude-process probe (pgrep/lsof) failed; not truncating sessions"
-            );
+            // The probe couldn't run (ps/lsof spawn failed under load, /proc unreadable).
+            // Returning None means "don't filter" — callers keep all recent sessions rather than
+            // truncating to a bogus low count — but it was silent; log it so a flap is visible.
+            tracing::warn!("live claude-process probe failed; not truncating sessions");
             return None;
         }
     };
