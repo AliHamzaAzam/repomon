@@ -267,13 +267,22 @@ pub fn compose(
     } else {
         agent
     };
-    let title = format!(
-        "{} {} {} — {}",
-        kind.glyph(),
-        agent,
-        kind.verb(),
-        lane.repo.name
-    );
+    // A NeedsYou names what the agent actually wants — permission, an answer, or just the
+    // next instruction — so the reader can triage from the notification alone. Falls back to
+    // the generic verb when the session vanished (or isn't in a waiting state after all).
+    let verb = match (kind, sess) {
+        (NotifKind::NeedsYou, Some(s)) => {
+            use crate::agent::attention::{Attention, agent_attention};
+            match agent_attention(s) {
+                Attention::Permission => "is asking permission",
+                Attention::Decision => "has a question",
+                Attention::EndOfTurn => "finished its turn",
+                Attention::None => kind.verb(),
+            }
+        }
+        _ => kind.verb(),
+    };
+    let title = format!("{} {} {} — {}", kind.glyph(), agent, verb, lane.repo.name);
 
     let mut parts = vec![
         lane.state
@@ -851,8 +860,9 @@ mod tests {
         s.last_message = Some("Should I also update the integration tests?".into());
         s.tool_call_count = 3;
         let (title, body) = compose(NotifKind::NeedsYou, &lane(), Some(&s), Some((1, 3)), true);
+        // A Waiting session with no open dialog reads as a finished turn, not a generic ask.
         assert!(
-            title.contains("needs you") && title.contains("alpha"),
+            title.contains("finished its turn") && title.contains("alpha"),
             "{title}"
         );
         assert!(body.contains("agent 2/3"), "{body}");
@@ -861,6 +871,31 @@ mod tests {
             !body.contains("build the parser"),
             "why replaces the ask: {body}"
         );
+    }
+
+    #[test]
+    fn compose_names_the_attention_for_needs_you() {
+        let mut s = sess(Some("abc"), AgentStatus::Waiting, false);
+
+        s.pending_prompt = Some("Bash command — Do you want to proceed?".into());
+        let (title, _) = compose(NotifKind::NeedsYou, &lane(), Some(&s), None, true);
+        assert!(title.contains("is asking permission"), "{title}");
+
+        s.pending_prompt = Some("Which auth method should we use?".into());
+        let (title, _) = compose(NotifKind::NeedsYou, &lane(), Some(&s), None, true);
+        assert!(title.contains("has a question"), "{title}");
+
+        s.pending_prompt = None;
+        let (title, _) = compose(NotifKind::NeedsYou, &lane(), Some(&s), None, true);
+        assert!(title.contains("finished its turn"), "{title}");
+
+        // The session vanished from the snapshot — fall back to the generic wording.
+        let (title, _) = compose(NotifKind::NeedsYou, &lane(), None, None, true);
+        assert!(title.contains("needs you"), "{title}");
+
+        // Other kinds keep their own verbs regardless of the session.
+        let (title, _) = compose(NotifKind::RateLimited, &lane(), Some(&s), None, true);
+        assert!(title.contains("hit a usage limit"), "{title}");
     }
 
     #[test]
