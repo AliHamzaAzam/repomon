@@ -2000,9 +2000,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // Interactive dialogs: a transcript that ends in a tool call reads **Running**, but the
     // pane may be sitting on a permission "Do you want…?" dialog; a turn ending in text reads
     // **Waiting**, but the pane may be showing an option menu (plan approval, a question with
-    // choices). Neither is in the JSONL. Sniff the panes of managed Running/Waiting sessions:
-    // a detected dialog sets `pending_prompt` (clients gate approve/menu controls on it),
-    // becomes the notification-ready "why", and flips Running → Waiting.
+    // choices). Neither is in the JSONL. Sniff the panes of managed sessions: a detected
+    // dialog sets `pending_prompt` (clients gate approve/menu controls on it), becomes the
+    // notification-ready "why", and flips the status → Waiting. Idle sessions with a live
+    // window are sniffed too — a dialog sitting unanswered for more than IDLE_AFTER decays the
+    // transcript to Idle, and skipping it here would silently drop its ⏸ — and the same
+    // captures feed the stall detector below.
     let candidates: Vec<(usize, usize, String, AgentStatus)> = lanes
         .iter()
         .enumerate()
@@ -2013,7 +2016,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 .filter_map(move |(si, s)| {
                     let sniffable = !s.external
                         && !s.inferred
-                        && matches!(s.status, AgentStatus::Running | AgentStatus::Waiting);
+                        && matches!(
+                            s.status,
+                            AgentStatus::Running | AgentStatus::Waiting | AgentStatus::Idle
+                        );
                     sniffable
                         .then(|| s.tmux_window.clone().map(|w| (li, si, w, s.status)))
                         .flatten()
@@ -2055,45 +2061,79 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         }
         if !misses.is_empty() {
             let tmux = ctx.tmux.clone();
-            let windows: Vec<String> = misses.iter().map(|&i| candidates[i].2.clone()).collect();
-            let fresh = tokio::task::spawn_blocking(move || {
-                windows
-                    .iter()
-                    .map(|w| {
-                        tmux.capture_named(w, Some(45))
-                            .ok()
-                            .and_then(|p| agent::prompt::detect_dialog(&p))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .unwrap_or_default();
+            let miss_windows: Vec<String> =
+                misses.iter().map(|&i| candidates[i].2.clone()).collect();
+            // Each fresh capture yields the parsed dialog AND a content hash — the hash feeds
+            // the stall detector's "when did this pane last change?" clock.
+            let fresh: Vec<(Option<agent::prompt::PendingDialog>, Option<u64>)> =
+                tokio::task::spawn_blocking(move || {
+                    miss_windows
+                        .iter()
+                        .map(|w| match tmux.capture_named(w, Some(45)) {
+                            Ok(pane) => {
+                                use std::hash::{Hash, Hasher};
+                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                pane.hash(&mut h);
+                                (agent::prompt::detect_dialog(&pane), Some(h.finish()))
+                            }
+                            Err(_) => (None, None),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+            let now_utc = chrono::Utc::now();
             let mut cache = ctx.prompt_cache.lock().await;
-            for (&i, p) in misses.iter().zip(fresh) {
-                cache.insert(
-                    candidates[i].2.clone(),
-                    (std::time::Instant::now(), p.clone()),
-                );
+            let mut seen = ctx.pane_seen.lock().await;
+            for (&i, (p, hash)) in misses.iter().zip(fresh) {
+                let window = &candidates[i].2;
+                cache.insert(window.clone(), (std::time::Instant::now(), p.clone()));
+                // Stamp the pane's last-change time only when the content actually differs.
+                if let Some(h) = hash {
+                    match seen.get(window) {
+                        Some((prev, _)) if *prev == h => {}
+                        _ => {
+                            seen.insert(window.clone(), (h, now_utc));
+                        }
+                    }
+                }
                 prompts[i] = p;
             }
         }
-        // Prune the sniff cache so it can't grow without bound — every window name ever sniffed
-        // would otherwise leak an entry. Drop any window no longer present in the current tmux set,
-        // and any whose result is older than the longest sniff TTL (it would be re-captured anyway).
+        // Prune the sniff caches so they can't grow without bound — every window name ever
+        // sniffed would otherwise leak an entry. `prompt_cache` also drops results older than
+        // the longest sniff TTL (they'd be re-captured anyway); `pane_seen` is pruned by window
+        // liveness ONLY — its old timestamps are the stall clock.
         {
             let live: std::collections::HashSet<&str> =
                 windows.iter().map(String::as_str).collect();
             let mut cache = ctx.prompt_cache.lock().await;
             cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
+            let mut seen = ctx.pane_seen.lock().await;
+            seen.retain(|w, _| live.contains(w.as_str()));
         }
-        for ((li, si, _, _), found) in candidates.into_iter().zip(prompts) {
-            if let Some(dialog) = found {
-                let s = &mut lanes[li].agent_sessions[si];
-                s.status = AgentStatus::Waiting;
-                let summary = dialog.summary();
-                s.last_message = Some(summary.clone());
-                s.pending_prompt = Some(summary);
-                s.pending_dialog = Some(dialog);
+        let now_utc = chrono::Utc::now();
+        let seen = ctx.pane_seen.lock().await;
+        for ((li, si, w, _), found) in candidates.into_iter().zip(prompts) {
+            let s = &mut lanes[li].agent_sessions[si];
+            match found {
+                Some(dialog) => {
+                    s.status = AgentStatus::Waiting;
+                    let summary = dialog.summary();
+                    s.last_message = Some(summary.clone());
+                    s.pending_prompt = Some(summary);
+                    s.pending_dialog = Some(dialog);
+                }
+                // No dialog: this is where a live-but-frozen agent surfaces as stalled.
+                None => {
+                    let changed_at = seen.get(&w).map(|&(_, t)| t);
+                    if let Some(since) =
+                        stall_since(s.status, s.ended_turn, false, changed_at, now_utc)
+                    {
+                        s.stale = true;
+                        s.stalled_since = Some(since);
+                    }
+                }
             }
         }
     }
@@ -2116,6 +2156,27 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
         Some(n) => n.max(managed_n).max(fresh).min(total),
         None => total, // probe unavailable: don't filter
     }
+}
+
+/// How long a managed agent's pane must sit unchanged — with no dialog up and its turn not
+/// ended — before the session reads as stalled.
+const STALL_AFTER_MINS: i64 = 5;
+
+/// When a sniffed session counts as stalled, returns the stall's start (the pane's last
+/// change). A stall is: workless status (Running mid-tool, or the post-decay Idle) with no
+/// dialog on screen, a turn that did NOT end (that would be waiting-for-instructions, not
+/// stuck), and a pane frozen for [`STALL_AFTER_MINS`]. `None` = not stalled.
+fn stall_since(
+    status: AgentStatus,
+    ended_turn: bool,
+    has_dialog: bool,
+    pane_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if has_dialog || ended_turn || !matches!(status, AgentStatus::Running | AgentStatus::Idle) {
+        return None;
+    }
+    pane_changed_at.filter(|&t| now - t >= chrono::Duration::minutes(STALL_AFTER_MINS))
 }
 
 /// A stable identity for a surfaced session: its transcript id, else `win:<window>` (a managed
@@ -3627,6 +3688,33 @@ mod tests {
         assert_eq!(v["session_id"], Value::Null);
         assert_eq!(v["attention"], json!("none"));
         assert_eq!(v["headline"], Value::Null);
+    }
+
+    #[test]
+    fn stall_needs_frozen_pane_and_an_unfinished_turn() {
+        use repomon_core::model::AgentStatus::*;
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::minutes(6);
+        let fresh = now - chrono::Duration::minutes(1);
+
+        // Frozen mid-work — Running (transcript ends in a tool call) or the post-10-min Idle
+        // decay of the same shape: stalled, anchored on the pane's last change.
+        assert_eq!(
+            stall_since(Running, false, false, Some(old), now),
+            Some(old)
+        );
+        assert_eq!(stall_since(Idle, false, false, Some(old), now), Some(old));
+        // The pane is still moving: not stalled.
+        assert_eq!(stall_since(Running, false, false, Some(fresh), now), None);
+        // A dialog is up (waiting on you): never a stall.
+        assert_eq!(stall_since(Running, false, true, Some(old), now), None);
+        // The turn ended (waiting for instructions, however long ago): never a stall.
+        assert_eq!(stall_since(Idle, true, false, Some(old), now), None);
+        assert_eq!(stall_since(Waiting, true, false, Some(old), now), None);
+        // Rate-limited is timer-owned, not stuck.
+        assert_eq!(stall_since(RateLimited, false, false, Some(old), now), None);
+        // No pane observation yet: can't call it.
+        assert_eq!(stall_since(Running, false, false, None, now), None);
     }
 
     #[test]
