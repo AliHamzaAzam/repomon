@@ -46,7 +46,8 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
     };
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
-    let sock = std::env::temp_dir().join(format!("repomon-orch-codex-it-{}.sock", std::process::id()));
+    let sock =
+        std::env::temp_dir().join(format!("repomon-orch-codex-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
 
     let server = {
@@ -113,7 +114,11 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
     assert_eq!(r.result.unwrap(), json!([]));
 
     let r = call(&mut stream, 5, "orchestrator.stop", None).await;
-    assert!(r.error.is_none(), "orchestrator.stop errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "orchestrator.stop errored: {:?}",
+        r.error
+    );
     assert_eq!(r.result.unwrap()["running"], json!(false));
 
     server.abort();

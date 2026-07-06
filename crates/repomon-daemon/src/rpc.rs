@@ -1451,7 +1451,11 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     // to this exact session.
                     let session_id = mint_session_id();
                     let command = build_claude_orchestrator_command(
-                        &base, &mcp_path, &model, &p.prompt, &session_id,
+                        &base,
+                        &mcp_path,
+                        &model,
+                        &p.prompt,
+                        &session_id,
                     );
                     (command, Some(session_id))
                 }
@@ -1460,7 +1464,12 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 // `backend.has_transcript()` instead of a session id.
                 crate::OrchestratorBackend::Codex => (
                     build_codex_orchestrator_command(
-                        &base, &socket, &p.autonomy, p.max_agents, &model, &p.prompt,
+                        &base,
+                        &socket,
+                        &p.autonomy,
+                        p.max_agents,
+                        &model,
+                        &p.prompt,
                     ),
                     None,
                 ),
@@ -3214,7 +3223,10 @@ mod tests {
         let mut customs = HashMap::new();
         customs.insert("my-yolo".to_string(), "claude --yolo".to_string());
         // Default and every claude-ish name → Claude.
-        assert_eq!(resolve_orchestrator_backend(&None, &customs).unwrap(), B::Claude);
+        assert_eq!(
+            resolve_orchestrator_backend(&None, &customs).unwrap(),
+            B::Claude
+        );
         for name in ["claude", "claude-code", "claude-work"] {
             assert_eq!(
                 resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap(),
@@ -3257,7 +3269,10 @@ mod tests {
             cmd.contains("REPOMON_MCP_SOCKET = \"/tmp/repomon-test.sock\""),
             "{cmd}"
         );
-        assert!(cmd.contains("REPOMON_MCP_AUTONOMY = \"autonomous\""), "{cmd}");
+        assert!(
+            cmd.contains("REPOMON_MCP_AUTONOMY = \"autonomous\""),
+            "{cmd}"
+        );
         assert!(cmd.contains("REPOMON_MCP_MAX_AGENTS = \"4\""), "{cmd}");
         assert!(cmd.contains(" -a never -s workspace-write"), "{cmd}");
         // The persona rides in as the initial prompt (codex has no --append-system-prompt).
