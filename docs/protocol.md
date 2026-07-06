@@ -51,7 +51,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `repo.add` | `{ path }` | `Repo` |
 | `repo.remove` | `{ repo_id }` | `null` |
 | `repo.discover` | `{ root, max_depth=4 }` | `[String]` (repo paths) |
-| `lane.list` | — | `[Lane]` (agent sessions overlaid) |
+| `lane.list` | — | `[Lane]` (agent sessions overlaid; each session may carry `pending_dialog`, `stale`/`stalled_since`, and `gate` — the worktree's latest dxkit stop-gate verdict `{ allowed, net_new_findings, at, session_id? }`, tailed from `.dxkit/loop/ledger.jsonl` when the lane runs dxkit's loop pack. A fresh `allowed` grants the done-candidate attention; a fresh block vetoes it) |
 | `lane.get` | `{ lane_id }` | `Lane` |
 | `lane.create` | `CreateLaneParams` | `Lane` |
 | `lane.delete` | `{ lane_id, also_delete_branch=false }` | `null` |

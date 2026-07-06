@@ -2010,6 +2010,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     stale: false,
                     stalled_since: None,
                     ended_turn: false,
+                    gate: None,
                     config_dir: None,
                     custom_label: None,
                 });
@@ -2026,6 +2027,38 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
             }
         }
+    }
+
+    // dxkit stop-gate verdicts: worktrees running dxkit's loop pack leave an append-only
+    // ledger (`.dxkit/loop/ledger.jsonl`); its tail verdict is overlaid onto the lane's real
+    // sessions so a fresh `allowed` grants (and a block vetoes) the done-candidate hint.
+    // Cached by the ledger's mtime — one cheap stat per lane per overlay, a re-read only when
+    // the gate actually ran again. Session matching happens client-side in `attention`.
+    {
+        let mut cache = ctx.gate_cache.lock().await;
+        for lane in lanes.iter_mut() {
+            let wt = lane.worktree.path.clone();
+            let mtime = std::fs::metadata(wt.join(agent::gate::LEDGER_REL))
+                .and_then(|m| m.modified())
+                .ok();
+            let verdict = match cache.get(&wt) {
+                Some((m, v)) if *m == mtime => v.clone(),
+                _ => {
+                    let v = mtime.and_then(|_| agent::gate::read_gate_verdict(&wt));
+                    cache.insert(wt.clone(), (mtime, v.clone()));
+                    v
+                }
+            };
+            if let Some(v) = verdict {
+                for s in lane.agent_sessions.iter_mut().filter(|s| !s.inferred) {
+                    s.gate = Some(v.clone());
+                }
+            }
+        }
+        // Bounded by the live lane set: drop worktrees no longer listed.
+        let live: std::collections::HashSet<&PathBuf> =
+            lanes.iter().map(|l| &l.worktree.path).collect();
+        cache.retain(|wt, _| live.contains(wt));
     }
 
     // Interactive dialogs: a transcript that ends in a tool call reads **Running**, but the
@@ -2570,6 +2603,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         stale: false,
         stalled_since: None,
         ended_turn: false,
+        gate: None,
         config_dir: None,
         custom_label: None,
     }

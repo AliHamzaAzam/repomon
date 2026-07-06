@@ -1146,6 +1146,7 @@ mod tests {
                 external: false,
                 inferred: false,
                 stalled: false,
+                gate: None,
                 window: Some("lane-1".into()),
                 pending_prompt: None,
             }),
@@ -1178,6 +1179,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             ended_turn: false,
+            gate: None,
             config_dir: None,
             custom_label: None,
         }

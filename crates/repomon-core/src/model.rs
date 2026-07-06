@@ -282,6 +282,11 @@ pub struct AgentSession {
     /// Daemon-internal (feeds the stall detector); never serialized.
     #[serde(skip)]
     pub ended_turn: bool,
+    /// The latest dxkit stop-gate verdict from the worktree's `.dxkit/loop/ledger.jsonl`,
+    /// when the lane uses dxkit. Overlaid at list time; not persisted. A fresh `allowed`
+    /// grants done-candidate, a fresh block vetoes it (see `agent_attention_in`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<crate::agent::gate::GateVerdict>,
     /// The Claude account (config dir) this agent runs under, overlaid at list time from the
     /// transcript. `None` = the default `~/.claude`; `Some` = a variant (`~/.claude-work`). Lets a
     /// client attribute account-level usage (the `/usage` probe) to the focused agent. Not persisted.

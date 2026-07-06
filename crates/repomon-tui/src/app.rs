@@ -5338,6 +5338,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             ended_turn: false,
+            gate: None,
             config_dir: None,
             custom_label: None,
         }

@@ -8,6 +8,7 @@
 
 pub mod attention;
 pub mod claude;
+pub mod gate;
 pub mod limit;
 pub mod prompt;
 pub mod text;
