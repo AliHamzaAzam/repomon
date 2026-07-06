@@ -56,6 +56,8 @@ clap_mangen = "0.2"
 # --- tui ---
 ratatui = "0.29"
 ansi-to-tui = "7"
+vt100 = "0.15"
+base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 # --- cli / app ergonomics ---
 anyhow = "1"

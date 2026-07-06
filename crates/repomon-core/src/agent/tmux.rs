@@ -403,6 +403,26 @@ impl TmuxRuntime {
         Ok(())
     }
 
+    /// Start streaming `window`'s raw PTY output into `fifo` (an existing named pipe): every
+    /// byte the pane emits from now on is appended by a `cat` tmux runs for the pane. Replaces
+    /// any pipe already on the window. ORDERING MATTERS: the reader must open the fifo BEFORE
+    /// this is called — `cat`'s open blocks until a reader appears, and tmux buffers pane
+    /// output behind a stalled pipe.
+    pub fn pipe_pane_named(&self, window: &str, fifo: &Path) -> Result<()> {
+        let target = self.exact_target(window);
+        let cmd = format!("cat > {}", shell_quote(&fifo.to_string_lossy()));
+        self.run(&["pipe-pane", "-t", &target, &cmd])?;
+        Ok(())
+    }
+
+    /// Stop streaming `window`'s output (tmux's no-command `pipe-pane` form). Benign when the
+    /// window — or the whole server — is already gone.
+    pub fn pipe_pane_off_named(&self, window: &str) -> Result<()> {
+        let target = self.exact_target(window);
+        self.run_allow_absent(&["pipe-pane", "-t", &target])?;
+        Ok(())
+    }
+
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
     pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
         self.send_literal_named(&Self::window_name(lane), text)
@@ -728,6 +748,62 @@ mod tests {
         // Tear down the test session.
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", rt.session()])
+            .output();
+    }
+
+    #[test]
+    fn pipe_pane_streams_raw_bytes_to_a_fifo() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-pipetest-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("bytes.fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "mkfifo"
+        );
+
+        rt.spawn(1, dir.path(), "sh -c 'sleep 30'").unwrap();
+
+        // Reader FIRST (cat's open blocks until one appears), then the pipe, then output.
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut f = std::fs::File::open(fifo).unwrap();
+                let mut buf = [0u8; 4096];
+                let mut got = String::new();
+                // Read until the marker shows up (bounded by the test timeout).
+                while !got.contains("PIPE_BYTES_MARKER") {
+                    let n = f.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    got.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                got
+            })
+        };
+        rt.pipe_pane_named("lane-1", &fifo).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        rt.send_text_named("lane-1", "echo PIPE_BYTES_MARKER")
+            .unwrap();
+
+        let got = reader.join().unwrap();
+        // The stream is the raw PTY byte flow: the echoed command AND its output pass through.
+        assert!(got.contains("PIPE_BYTES_MARKER"), "stream was: {got:?}");
+
+        rt.pipe_pane_off_named("lane-1").unwrap();
+        rt.kill_named("lane-1").unwrap();
+        let _ = Command::new("tmux")
+            .args(["-L", rt.session(), "kill-server"])
             .output();
     }
 

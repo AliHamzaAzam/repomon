@@ -6,6 +6,7 @@
 pub mod app;
 pub mod cli;
 pub mod client;
+pub mod emu;
 pub mod keybinds;
 pub mod notify;
 pub mod theme;

@@ -5,6 +5,7 @@
 //! wrapper around [`serve`]; the integration tests drive [`Ctx`] + [`serve`] directly.
 
 pub mod auto_continue;
+pub mod bytes_stream;
 pub mod notify_watch;
 pub mod pubsub;
 pub mod push;
@@ -165,6 +166,8 @@ pub struct Ctx {
     /// Per worktree: the dxkit loop ledger's mtime and the verdict parsed from its tail, so
     /// the overlay re-reads only when the gate actually ran again. Keyed by worktree path.
     pub gate_cache: Mutex<HashMap<PathBuf, GateCacheEntry>>,
+    /// The single active PTY byte watch (the Focus view's embedded renderer feed), if any.
+    pub bytes_watch: Mutex<Option<bytes_stream::BytesWatch>>,
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
@@ -268,6 +271,7 @@ impl Ctx {
             prompt_cache: Mutex::new(HashMap::new()),
             pane_seen: Mutex::new(HashMap::new()),
             gate_cache: Mutex::new(HashMap::new()),
+            bytes_watch: Mutex::new(None),
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),

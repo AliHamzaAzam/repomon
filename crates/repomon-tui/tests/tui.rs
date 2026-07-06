@@ -412,6 +412,76 @@ async fn grid_tiles_plain_shell_terminals() {
 }
 
 #[tokio::test]
+async fn focus_renders_the_embedded_emulator() {
+    use repomon_core::model::AgentStatus;
+    use repomon_tui::keybinds::View;
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-tui-emu-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = DaemonClient::connect(&sock).await.expect("connect");
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "feat: initial commit"]);
+    client
+        .call(
+            "repo.add",
+            Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+        )
+        .await
+        .expect("repo.add");
+
+    let mut app = App::new(client);
+    app.refresh().await;
+    let lane_id = app.lanes[0].id;
+    app.lanes[0].agent_sessions = vec![fake_session(AgentStatus::Running, None)];
+    app.selected = 1; // row 0 is the pinned repomind row; the lane is row 1
+    app.view = View::Focus;
+
+    // A live emulator for the focused lane: Focus renders ITS grid (absolute addressing and
+    // all), wears the pty marker, and skips the capture-based fallback.
+    let mut e = repomon_tui::emu::Emu::new(lane_id, "lane-1".into(), 30, 90);
+    e.feed(b"\x1b[2J\x1b[HEMU_SENTINEL from the byte stream\x1b[3;5Haddressed");
+    app.emu = Some(e);
+    let frame = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        frame.contains("EMU_SENTINEL from the byte stream"),
+        "emulator grid missing:\n{frame}"
+    );
+    assert!(
+        frame.contains("addressed"),
+        "absolute move missing:\n{frame}"
+    );
+    assert!(frame.contains("· pty"), "pty marker missing:\n{frame}");
+
+    // Paging back leaves the emulator (live tail) for the captured buffer, as scrollback.
+    app.scroll = 5;
+    let frame = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        !frame.contains("EMU_SENTINEL"),
+        "scrolled view must use the capture path:\n{frame}"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
 async fn renders_fleet_with_a_registered_repo() {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);

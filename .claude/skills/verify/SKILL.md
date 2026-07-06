@@ -5,6 +5,10 @@ description: Drive a real repomon TUI + daemon end-to-end in an isolated instanc
 
 # Verifying repomon changes live
 
+**Branch first.** Feature work starts with `git checkout -b feat/...` BEFORE the first
+edit — twice now a whole feature landed on local main and had to be surgically moved
+(`git checkout -b <branch> && git branch -f main origin/main`).
+
 ## Isolated instance (never touches the real fleet)
 
 The real daemon runs on the default socket with tmux server `repomon`. An isolated
