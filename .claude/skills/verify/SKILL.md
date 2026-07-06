@@ -57,9 +57,9 @@ Agent panes live on the isolated server: `tmux -L rmv capture-pane -t "rmv:=lane
   later captures report "no server running". Track which view you're in.
 - The Notifications view (`5`) swallows most keys; Esc out before pressing
   global keys like `v`.
-- **`repomon daemon stop|status|restart` IGNORE `--socket`** — they resolve the
-  socket from config, so with only env-var isolation they hit the REAL daemon.
-  Stop an isolated daemon by pid (`pgrep -fl repomond`), never via the subcommand.
+- `repomon daemon stop|status|restart` honor `--socket` since fix/daemon-cli-socket
+  (2026-07-07); on OLDER installed binaries they resolve from config and hit the
+  REAL daemon — with an old binary, stop isolated daemons by pid instead.
 - Time-based states (stall = 5 min of frozen pane): set the scenario up, verify
   the negative early, and come back on a background timer; poking the agent pane
   (`tmux send-keys -l "x"` — tty echo changes the content) resets the clock for

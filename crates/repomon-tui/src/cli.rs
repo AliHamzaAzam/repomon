@@ -187,7 +187,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             }
         }
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
-        Command::Daemon { cmd } => handle_daemon(cmd, config).await?,
+        Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd)?,
         Command::Orchestrate {
             agent,
@@ -498,11 +498,22 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
     Ok(())
 }
 
-async fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
-    let socket = config::socket_path(config);
+/// The socket a `daemon` subcommand should target: the CLI `--socket` flag when given, else
+/// the config's. (The same precedence `ensure_daemon` applies for every other subcommand.)
+fn daemon_socket(flag: Option<PathBuf>, config: &Config) -> PathBuf {
+    flag.unwrap_or_else(|| config::socket_path(config))
+}
+
+async fn handle_daemon(
+    cmd: DaemonCmd,
+    config: &Config,
+    socket_flag: Option<PathBuf>,
+) -> Result<()> {
+    let explicit_socket = socket_flag.is_some();
+    let socket = daemon_socket(socket_flag, config);
     match cmd {
         DaemonCmd::Start => {
-            crate::ensure_daemon(config, None).await?;
+            crate::ensure_daemon(config, Some(socket.clone())).await?;
             println!("daemon running (socket: {})", socket.display());
         }
         DaemonCmd::Stop => {
@@ -511,13 +522,17 @@ async fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
             } else {
                 println!("no running daemon at {}", socket.display());
             }
-            // Also stop a service-managed instance (launchd/systemd), if any.
-            let _ = service::stop();
+            // Also stop a service-managed instance (launchd/systemd), if any — but only when
+            // targeting the default socket. An explicit `--socket` means an isolated daemon;
+            // unloading the service would take down the real fleet alongside it.
+            if !explicit_socket {
+                let _ = service::stop();
+            }
         }
         DaemonCmd::Restart => {
             stop_running(&socket).await;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            crate::ensure_daemon(config, None).await?;
+            crate::ensure_daemon(config, Some(socket.clone())).await?;
             println!("daemon restarted (socket: {})", socket.display());
         }
         DaemonCmd::Status => match DaemonClient::connect(&socket).await {
@@ -656,5 +671,29 @@ mod tests {
         man.render(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("repomon"));
+    }
+
+    #[test]
+    fn daemon_socket_prefers_the_cli_flag() {
+        use repomon_core::Config;
+        use std::path::PathBuf;
+
+        // The regression this guards: `repomon --socket X daemon stop|status|restart` used to
+        // resolve the socket from config alone and hit the DEFAULT daemon — stopping the real
+        // fleet daemon when the caller meant an isolated one.
+        let config = Config {
+            socket_path: Some(PathBuf::from("/tmp/from-config.sock")),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::daemon_socket(Some(PathBuf::from("/tmp/from-flag.sock")), &config),
+            PathBuf::from("/tmp/from-flag.sock"),
+            "an explicit --socket must always win"
+        );
+        assert_eq!(
+            super::daemon_socket(None, &config),
+            PathBuf::from("/tmp/from-config.sock"),
+            "without the flag, the config path applies as before"
+        );
     }
 }
