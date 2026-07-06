@@ -1478,7 +1478,10 @@ impl App {
         let live = self.live_lanes();
         // The Grid's shell tiles stream as explicit terminal windows alongside the lane panes.
         let windows: Vec<String> = if self.view == View::Grid {
-            self.grid_tiles().into_iter().filter_map(|t| t.window).collect()
+            self.grid_tiles()
+                .into_iter()
+                .filter_map(|t| t.window)
+                .collect()
         } else {
             Vec::new()
         };
