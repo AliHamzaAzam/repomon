@@ -1,7 +1,7 @@
 //! Headless CLI subcommands: `repomon add|remove|discover|lane …|daemon …`.
 //!
 //! Repo/lane commands talk to the running daemon (the single SQLite writer); daemon
-//! commands drive the launchd service in `repomon_core::service`.
+//! commands drive the login service (launchd or systemd) in `repomon_core::service`.
 
 use std::path::PathBuf;
 
@@ -132,9 +132,9 @@ pub enum DaemonCmd {
     Status,
     /// Print the daemon log (tail).
     Logs,
-    /// Install + load a launchd-managed service (macOS).
+    /// Install + load the login service (launchd on macOS, systemd user unit on Linux).
     Install,
-    /// Unload + remove the launchd service.
+    /// Unload + remove the login service.
     Uninstall,
 }
 
@@ -511,7 +511,7 @@ async fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
             } else {
                 println!("no running daemon at {}", socket.display());
             }
-            // Also bootout a launchd-managed instance, if any.
+            // Also stop a service-managed instance (launchd/systemd), if any.
             let _ = service::stop();
         }
         DaemonCmd::Restart => {
@@ -542,7 +542,12 @@ async fn handle_daemon(cmd: DaemonCmd, config: &Config) -> Result<()> {
         }
         DaemonCmd::Install => {
             service::install(&service::repomond_path(), &socket)?;
-            println!("installed and loaded {}", service::plist_path().display());
+            println!(
+                "installed and loaded {}",
+                service::service_file_path().display()
+            );
+            #[cfg(target_os = "linux")]
+            println!("tip: run `loginctl enable-linger` so repomond survives logout");
         }
         DaemonCmd::Uninstall => {
             stop_running(&socket).await;
