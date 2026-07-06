@@ -37,25 +37,32 @@ jobs:
             repomon-*.tar.gz.sha256
 
   build-linux:
-    # x86_64 Linux, built natively on the ubuntu runner.
-    runs-on: ubuntu-latest
+    # Each Linux arch builds natively on its own runner (no cross C toolchain needed).
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: rustup target add x86_64-unknown-linux-gnu
-      - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          DIST="repomon-${VERSION}-x86_64-unknown-linux-gnu"
+          DIST="repomon-${VERSION}-${{ matrix.target }}"
           mkdir -p "$DIST"
-          cp "target/x86_64-unknown-linux-gnu/release/repomon" \
-             "target/x86_64-unknown-linux-gnu/release/repomond" "$DIST/"
+          cp "target/${{ matrix.target }}/release/repomon" \
+             "target/${{ matrix.target }}/release/repomond" "$DIST/"
           tar -czf "${DIST}.tar.gz" -C "$DIST" repomon repomond
           sha256sum "${DIST}.tar.gz" | awk '{print $1}' > "${DIST}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: x86_64-unknown-linux-gnu
+          name: ${{ matrix.target }}
           path: |
             repomon-*.tar.gz
             repomon-*.tar.gz.sha256
