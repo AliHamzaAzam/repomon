@@ -353,11 +353,14 @@ pub fn play_chime() {
             .arg(NOTIFY_SOUND_FILE)
             .output();
     });
+    #[cfg(not(target_os = "macos"))]
+    std::thread::spawn(play_sound_blocking);
 }
 
 /// Fire a native desktop notification, best-effort and without blocking the caller (the actual
 /// `osascript`/`notify-send` invocation runs on a detached thread). `click_focus` makes the popup
-/// click-to-focus the terminal when `terminal-notifier` is installed (plain popup otherwise).
+/// click-to-focus the terminal when `terminal-notifier` is installed (macOS only — on Linux
+/// there is no portable way to focus a terminal from a background process, so it's ignored).
 pub fn send_native(title: &str, body: &str, sound: bool, click_focus: bool) {
     let (title, body) = (title.to_string(), body.to_string());
     std::thread::spawn(move || {
@@ -446,12 +449,70 @@ fn terminal_bundle_id(term_program: &str) -> Option<&'static str> {
     }
 }
 
+/// Deliver via `notify-send` (libnotify/DBus). The `sound-name` hint covers desktops that honor
+/// it; the local player in [`play_sound_blocking`] covers the rest. Both are best-effort no-ops
+/// on headless boxes.
 #[cfg(not(target_os = "macos"))]
-fn run_native(title: &str, body: &str, _sound: bool, _click_focus: bool) {
+fn run_native(title: &str, body: &str, sound: bool, _click_focus: bool) {
     let _ = std::process::Command::new("notify-send")
-        .arg(title)
-        .arg(body)
+        .args(notify_send_args(title, body, sound))
         .output();
+    if sound {
+        play_sound_blocking();
+    }
+}
+
+/// Arguments for `notify-send`: app name, normal urgency, the freedesktop sound hint when
+/// `sound` is on, and title/body last behind `--` so they can never parse as flags. Pure and
+/// compiled everywhere so the shape is tested on every platform.
+pub fn notify_send_args(title: &str, body: &str, sound: bool) -> Vec<String> {
+    let mut args: Vec<String> = ["-a", "repomon", "-u", "normal"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if sound {
+        args.push("-h".into());
+        args.push("string:sound-name:message-new-instant".into());
+    }
+    args.push("--".into());
+    args.push(title.to_string());
+    args.push(body.to_string());
+    args
+}
+
+/// The local chime player, probed once per process: canberra (plays the themed event sound),
+/// else `paplay` with a freedesktop sound file that exists. `None` = no way to play a sound.
+#[cfg(not(target_os = "macos"))]
+fn sound_argv() -> Option<&'static [String]> {
+    fn locate() -> Option<Vec<String>> {
+        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect();
+        if crate::exec::find_in_path("canberra-gtk-play").is_some() {
+            return Some(owned(&["canberra-gtk-play", "-i", "message-new-instant"]));
+        }
+        if crate::exec::find_in_path("paplay").is_some() {
+            for file in [
+                "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga",
+                "/usr/share/sounds/freedesktop/stereo/message.oga",
+            ] {
+                if std::path::Path::new(file).exists() {
+                    return Some(owned(&["paplay", file]));
+                }
+            }
+        }
+        None
+    }
+    static ARGV: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    ARGV.get_or_init(locate).as_deref()
+}
+
+/// Play the notification chime through whatever player this box has, if any.
+#[cfg(not(target_os = "macos"))]
+fn play_sound_blocking() {
+    if let Some(argv) = sound_argv() {
+        let _ = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output();
+    }
 }
 
 /// Escape a string for embedding in an AppleScript double-quoted literal.
@@ -466,6 +527,21 @@ mod tests {
     use crate::model::{AgentKind, Repo, Worktree, WorktreeState};
     use chrono::Utc;
     use std::path::PathBuf;
+
+    #[test]
+    fn notify_send_args_carry_app_urgency_and_sound_hint() {
+        let args = notify_send_args("Title", "Body", true);
+        assert_eq!(&args[..4], ["-a", "repomon", "-u", "normal"]);
+        assert!(args.contains(&"string:sound-name:message-new-instant".to_string()));
+        assert_eq!(&args[args.len() - 3..], ["--", "Title", "Body"]);
+    }
+
+    #[test]
+    fn notify_send_args_skip_the_hint_when_silent() {
+        let args = notify_send_args("T", "B", false);
+        assert!(!args.iter().any(|a| a.contains("sound-name")));
+        assert_eq!(&args[args.len() - 3..], ["--", "T", "B"]);
+    }
 
     /// A minimal real-or-inferred session, mirroring the daemon's `overlay_agents` literals.
     fn sess(session_id: Option<&str>, status: AgentStatus, inferred: bool) -> AgentSession {
