@@ -160,6 +160,101 @@ async fn waiting_badges_distinguish_attention() {
 }
 
 #[tokio::test]
+async fn peek_popup_shows_the_dialog_and_queue() {
+    use repomon_core::model::AgentStatus;
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-tui-peek-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = DaemonClient::connect(&sock).await.expect("connect");
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "feat: initial commit"]);
+    client
+        .call(
+            "repo.add",
+            Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+        )
+        .await
+        .expect("repo.add");
+
+    let mut app = App::new(client);
+    app.refresh().await;
+    assert_eq!(app.lanes.len(), 1);
+
+    // With nothing waiting, `v` reports there is nothing to peek at.
+    app.open_peek().await;
+    assert!(app.peek.is_none(), "no popup without waiting agents");
+    assert!(
+        app.status.contains("no prompts"),
+        "status should say there's nothing to answer: {}",
+        app.status
+    );
+
+    // A lane sitting on a permission dialog: the popup shows the question, its options with
+    // the cursor, the queue counter, and the triage hints.
+    app.lanes[0].agent_sessions = vec![fake_session(
+        AgentStatus::Waiting,
+        Some("Do you want to proceed?"),
+    )];
+    app.open_peek().await;
+    assert!(app.peek.is_some(), "popup should open on the waiting lane");
+    // `open_peek` ends with a live pane re-read whose outcome depends on whatever tmux exists
+    // on the machine running this test; pin the popup to the seeded dialog so the rendering
+    // assertions are deterministic.
+    if let Some(p) = app.peek.as_mut() {
+        p.dialog = app.lanes[0].agent_sessions[0].pending_dialog.clone();
+        p.sel = 0;
+    }
+    let frame = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        frame.contains("Do you want to proceed?"),
+        "question missing:\n{frame}"
+    );
+    assert!(
+        frame.contains("▸ 1. Yes"),
+        "cursor option missing:\n{frame}"
+    );
+    assert!(frame.contains("2. No"), "second option missing:\n{frame}");
+    assert!(frame.contains("permission"), "class word missing:\n{frame}");
+    assert!(frame.contains("1/1"), "queue counter missing:\n{frame}");
+    assert!(frame.contains("esc"), "close hint missing:\n{frame}");
+
+    // Arrow keys steer the local selection cursor.
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    app.peek_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .await;
+    let frame = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        frame.contains("▸ 2. No"),
+        "cursor should move to option 2:\n{frame}"
+    );
+
+    // Esc closes without sending anything.
+    app.peek_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .await;
+    assert!(app.peek.is_none(), "esc must close the popup");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
 async fn renders_fleet_with_a_registered_repo() {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);

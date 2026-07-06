@@ -17,8 +17,8 @@ use crate::keybinds::View;
 use crate::notify::NotifKind;
 use crate::theme;
 
-const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · q";
-const SPLIT_KEYS: &str = "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
+const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · v peek · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · q";
+const SPLIT_KEYS: &str = "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  v peek · e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
     "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
 const SPLIT_ORCH_KEYS: &str = "i type to repomind · ↵/→ open command-center  ·  ↑↓ lane · click focus · wheel scroll  ·  ←/esc back";
@@ -68,8 +68,97 @@ pub fn render(f: &mut Frame, app: &App) {
         View::LaneJump => render_lane_jump(f, app),
         View::Orchestrator => render_orchestrator(f, app),
     }
+    // The prompt-peek popup floats over whatever view is beneath it.
+    render_prompt_popup(f, app);
     // Drawn last, over the free right end of the bottom row, so it overlays every view.
     corner(f, app);
+}
+
+/// The prompt-peek popup (`v`): the waiting agent's dialog — title, body, options with the
+/// steerable cursor — centered over the current view, plus the triage-queue counter.
+fn render_prompt_popup(f: &mut Frame, app: &App) {
+    use ratatui::widgets::{Block, Borders, Clear};
+    let Some(peek) = &app.peek else { return };
+    let area = f.area();
+    if area.width < 24 || area.height < 8 {
+        return;
+    }
+
+    let (class_word, title_style) = match peek.dialog.as_ref().map(|d| d.class()) {
+        Some(repomon_core::agent::prompt::PromptClass::Decision) => {
+            ("question", app.theme.needs_you())
+        }
+        Some(repomon_core::agent::prompt::PromptClass::Permission) => {
+            ("permission", app.theme.accented())
+        }
+        None => ("waiting", app.theme.dim()),
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match &peek.dialog {
+        Some(d) => {
+            for b in &d.body {
+                lines.push(Line::from(Span::styled(format!("  {b}"), app.theme.dim())));
+            }
+            if !d.body.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {}", d.question),
+                app.theme.bold(),
+            )));
+            lines.push(Line::raw(""));
+            for (i, opt) in d.options.iter().enumerate() {
+                let cursor = if i == peek.sel { "▸" } else { " " };
+                let num = opt
+                    .number
+                    .map(|n| format!("{n}."))
+                    .unwrap_or_else(|| format!("{}.", i + 1));
+                let text = format!("  {cursor} {num} {}", opt.text);
+                lines.push(Line::from(Span::styled(
+                    trunc(&text, 60),
+                    if i == peek.sel {
+                        app.theme.selected()
+                    } else {
+                        Style::default()
+                    },
+                )));
+            }
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  no dialog on screen — the agent may have moved on".to_string(),
+                app.theme.dim(),
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  1-9 send · ↑↓ ↵ · tab skip · esc close".to_string(),
+        app.theme.dim(),
+    )));
+
+    let w = 64.min(area.width.saturating_sub(4)).max(24);
+    let h = ((lines.len() + 2) as u16).min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: (area.width - w) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    let title = format!(
+        " {} · {class_word} — {}/{} ",
+        peek.repo, peek.queue_pos, peek.queue_len
+    );
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, title_style)),
+        ),
+        rect,
+    );
 }
 
 const AGENTS_KEYS: &str = "↑↓ select  ·  n new · e edit · d delete · * default  ·  esc back";
