@@ -16,6 +16,8 @@ pub const WAITING: &str = "⏸";
 pub const WAIT_QUESTION: &str = "?";
 /// A waiting agent that simply finished its turn (no dialog on screen).
 pub const WAIT_DONE: &str = "✓";
+/// A live agent whose pane and transcript have both frozen mid-work (see `AgentSession.stale`).
+pub const STALLED: &str = "⚠";
 pub const RATE_LIMITED: &str = "⏳";
 /// An *inferred* active agent (worktree file activity we can't attribute to a named session).
 pub const INFERRED_ACTIVE: &str = "◐";

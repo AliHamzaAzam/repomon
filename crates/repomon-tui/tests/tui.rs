@@ -147,8 +147,10 @@ async fn waiting_badges_distinguish_attention() {
     );
     app.view = View::Fleet;
 
-    // A bare end-of-turn wait (no dialog on screen): ✓, and "done" in the badge.
+    // A bare end-of-turn wait (no dialog on screen): ✓, and "done" in the badge. Dirty the
+    // worktree so the finished turn does NOT read as shippable (that's the next scenario).
     app.lanes[0].agent_sessions = vec![fake_session(AgentStatus::Waiting, None)];
+    app.lanes[0].state.dirty.unstaged = 1;
     let fleet = render_to_string(&app, 100, 40).unwrap();
     assert!(
         lane_row(&fleet).contains("✓"),
@@ -157,6 +159,41 @@ async fn waiting_badges_distinguish_attention() {
     app.view = View::LaneJump;
     let jump = render_to_string(&app, 100, 40).unwrap();
     assert!(jump.contains("⏸ done"), "done badge missing:\n{jump}");
+    app.view = View::Fleet;
+
+    // The same finished turn on a CLEAN lane with a this-turn commit: the review hint.
+    app.lanes[0].state.dirty.unstaged = 0;
+    app.lanes[0].state.last_commit_at = Some(chrono::Utc::now());
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        lane_row(&fleet).contains("✓"),
+        "review glyph missing:\n{fleet}"
+    );
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(jump.contains("✓ review?"), "review badge missing:\n{jump}");
+    app.view = View::Fleet;
+
+    // A stalled agent (alive but frozen mid-work): ⚠ on the row, duration in the badge.
+    let mut stuck = fake_session(AgentStatus::Running, None);
+    stuck.stale = true;
+    stuck.stalled_since = Some(chrono::Utc::now() - chrono::Duration::minutes(7));
+    app.lanes[0].agent_sessions = vec![stuck];
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        lane_row(&fleet).contains("⚠"),
+        "stall glyph missing:\n{fleet}"
+    );
+    assert!(
+        fleet.contains("1 need you"),
+        "a stalled lane must count as needing you:\n{fleet}"
+    );
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("⚠ stalled 7m"),
+        "stall badge missing:\n{jump}"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
