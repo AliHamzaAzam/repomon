@@ -27,6 +27,138 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+/// A managed lane session in the given status, optionally sitting on a pending dialog.
+fn fake_session(
+    status: repomon_core::model::AgentStatus,
+    prompt: Option<&str>,
+) -> repomon_core::model::AgentSession {
+    use repomon_core::agent::prompt::detect_dialog;
+    let dialog = prompt.and_then(|q| detect_dialog(&format!("{q}\n❯ 1. Yes\n  2. No")));
+    repomon_core::model::AgentSession {
+        id: 0,
+        agent: repomon_core::model::AgentKind::ClaudeCode,
+        repo_id: 1,
+        worktree_id: None,
+        started_at: chrono::Utc::now(),
+        last_activity_at: chrono::Utc::now(),
+        ended_at: None,
+        manifest_path: std::path::PathBuf::new(),
+        tool_call_count: 0,
+        title: None,
+        status,
+        external: false,
+        session_id: Some("uuid-test".into()),
+        resume_at: None,
+        inferred: false,
+        tmux_window: Some("lane-1".into()),
+        last_message: None,
+        pending_prompt: prompt.map(str::to_string),
+        pending_dialog: dialog,
+        config_dir: None,
+        custom_label: None,
+    }
+}
+
+#[tokio::test]
+async fn waiting_badges_distinguish_attention() {
+    use repomon_core::model::AgentStatus;
+    use repomon_tui::keybinds::View;
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-tui-badges-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = DaemonClient::connect(&sock).await.expect("connect");
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "feat: initial commit"]);
+    client
+        .call(
+            "repo.add",
+            Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+        )
+        .await
+        .expect("repo.add");
+
+    let mut app = App::new(client);
+    app.refresh().await;
+    assert_eq!(app.lanes.len(), 1);
+
+    // The lane row is the one carrying the agent cell.
+    let lane_row = |screen: &str| {
+        screen
+            .lines()
+            .find(|l| l.contains("claude"))
+            .map(str::to_string)
+            .expect("lane row missing")
+    };
+
+    // A routine permission ask: the fleet row wears ⏸; the lane switcher names it.
+    app.lanes[0].agent_sessions = vec![fake_session(
+        AgentStatus::Waiting,
+        Some("Bash command — Do you want to proceed?"),
+    )];
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        lane_row(&fleet).contains("⏸"),
+        "permission glyph missing:\n{fleet}"
+    );
+    app.view = View::LaneJump;
+    app.jump_query = String::new();
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("⏸ permission"),
+        "permission badge missing:\n{jump}"
+    );
+    app.view = View::Fleet;
+
+    // A real question the agent is deferring to the human: ? on the row, named in the badge.
+    app.lanes[0].agent_sessions = vec![fake_session(
+        AgentStatus::Waiting,
+        Some("Which auth method should we use?"),
+    )];
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        lane_row(&fleet).contains(" ? "),
+        "question glyph missing:\n{fleet}"
+    );
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        jump.contains("⏸ question"),
+        "question badge missing:\n{jump}"
+    );
+    app.view = View::Fleet;
+
+    // A bare end-of-turn wait (no dialog on screen): ✓, and "done" in the badge.
+    app.lanes[0].agent_sessions = vec![fake_session(AgentStatus::Waiting, None)];
+    let fleet = render_to_string(&app, 100, 40).unwrap();
+    assert!(
+        lane_row(&fleet).contains("✓"),
+        "done glyph missing:\n{fleet}"
+    );
+    app.view = View::LaneJump;
+    let jump = render_to_string(&app, 100, 40).unwrap();
+    assert!(jump.contains("⏸ done"), "done badge missing:\n{jump}");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
 #[tokio::test]
 async fn renders_fleet_with_a_registered_repo() {
     let store = Store::open_in_memory().unwrap();

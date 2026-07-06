@@ -720,10 +720,11 @@ impl App {
         attention_rank(&lane.agent_sessions, armed)
     }
 
-    /// Whether this lane is blocked on the user: an agent waiting for input, or rate-limited
-    /// with no auto-continue coming.
+    /// Whether this lane is blocked on the user: an agent waiting for input (any of the
+    /// decision / permission / end-of-turn buckets), or rate-limited with no auto-continue
+    /// coming. The threshold tracks `attention_rank`'s scale.
     fn lane_needs_attention(&self, lane: &Lane) -> bool {
-        self.lane_attention(lane) <= 1
+        self.lane_attention(lane) <= 3
     }
 
     /// Cycle the selection through the lanes blocked on the user, wrapping past the end. While
@@ -4204,22 +4205,29 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     Ok(app.cd_target)
 }
 
-/// How urgently a lane's sessions need the user: 0 = waiting on you, 1 = rate-limited with no
-/// auto-continue coming, 2 = working, 3 = nothing actionable. Inferred file-activity
-/// placeholders never rank — they can't be acted on.
+/// How urgently a lane's sessions need the user: 0 = waiting on a decision-question, 1 =
+/// waiting on a permission ask, 2 = waiting at end-of-turn, 3 = rate-limited with no
+/// auto-continue coming, 4 = working, 5 = nothing actionable. Inferred file-activity
+/// placeholders never rank — they can't be acted on. `lane_needs_attention`'s threshold
+/// (`<= 3`) and this scale move together.
 fn attention_rank(sessions: &[AgentSession], auto_continue_armed: bool) -> u8 {
     use AgentStatus::*;
+    use repomon_core::agent::attention::{Attention, agent_attention};
     sessions
         .iter()
         .filter(|s| !s.inferred)
         .map(|s| match s.status {
-            Waiting => 0,
-            RateLimited if !auto_continue_armed => 1,
-            Running | RateLimited => 2,
-            Idle | Ended => 3,
+            Waiting => match agent_attention(s) {
+                Attention::Decision => 0,
+                Attention::Permission => 1,
+                _ => 2,
+            },
+            RateLimited if !auto_continue_armed => 3,
+            Running | RateLimited => 4,
+            Idle | Ended => 5,
         })
         .min()
-        .unwrap_or(3)
+        .unwrap_or(5)
 }
 
 /// A stable identity for one agent session within a lane, used to remember which agent a lane
@@ -4951,18 +4959,50 @@ mod tests {
     #[test]
     fn attention_rank_orders_urgency() {
         use AgentStatus::*;
-        // Waiting always tops; a rate-limited agent only needs you when nothing will resume it.
-        assert_eq!(attention_rank(&[sess(Some("a"), Waiting, false)], true), 0);
+        // Waiting tops, refined by what the wait is: a real question (decision) outranks a
+        // routine permission ask outranks a bare end-of-turn. A rate-limited agent only needs
+        // you when nothing will resume it.
+        let with_prompt = |mut s: AgentSession, p: &str| {
+            s.pending_prompt = Some(p.into());
+            s
+        };
+        assert_eq!(
+            attention_rank(
+                &[with_prompt(
+                    sess(Some("a"), Waiting, false),
+                    "Which auth method should we use?"
+                )],
+                true
+            ),
+            0,
+            "a decision-question is the most urgent"
+        );
+        assert_eq!(
+            attention_rank(
+                &[with_prompt(
+                    sess(Some("a"), Waiting, false),
+                    "Bash command — Do you want to proceed?"
+                )],
+                true
+            ),
+            1,
+            "a permission ask ranks below a decision"
+        );
+        assert_eq!(
+            attention_rank(&[sess(Some("a"), Waiting, false)], true),
+            2,
+            "a bare end-of-turn is the least urgent wait"
+        );
         assert_eq!(
             attention_rank(&[sess(Some("a"), RateLimited, false)], false),
-            1
+            3
         );
         assert_eq!(
             attention_rank(&[sess(Some("a"), RateLimited, false)], true),
-            2
+            4
         );
-        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 2);
-        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 3);
+        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 4);
+        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 5);
         // The most urgent session wins; inferred placeholders never rank.
         assert_eq!(
             attention_rank(
@@ -4972,10 +5012,10 @@ mod tests {
                 ],
                 true
             ),
-            0
+            2
         );
-        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 3);
-        assert_eq!(attention_rank(&[], true), 3);
+        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 5);
+        assert_eq!(attention_rank(&[], true), 5);
     }
 
     #[test]

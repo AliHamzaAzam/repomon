@@ -9,6 +9,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use repomon_core::agent::attention::{Attention, agent_attention};
 use repomon_core::model::{AgentStatus, Commit, DirtyState, Lane, LaneId, RepoId};
 
 use crate::app::{AgField, App, ClickZone};
@@ -1571,11 +1572,39 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
             app.theme.rate_limited(),
         )
     } else if waiting > 0 {
-        (format!("⏸ needs you{count}{tag}"), app.theme.needs_you())
+        // Name what the wait is (the most urgent one when agents disagree): a real question,
+        // a routine permission ask, or a finished turn — instead of a generic "needs you".
+        let word = match max_waiting_attention(sessions) {
+            Attention::Decision => "question",
+            Attention::Permission => "permission",
+            _ => "done",
+        };
+        (format!("⏸ {word}{count}{tag}"), app.theme.needs_you())
     } else if running > 0 {
         (format!("▶ running{count}{tag}"), app.theme.running())
     } else {
         (format!("idle{count}{tag}"), app.theme.idle())
+    }
+}
+
+/// The most urgent attention among a lane's waiting sessions (inferred placeholders never
+/// count) — what a "⏸" actually is: a question, a permission ask, or a finished turn.
+fn max_waiting_attention(sessions: &[repomon_core::model::AgentSession]) -> Attention {
+    use repomon_core::model::AgentStatus;
+    sessions
+        .iter()
+        .filter(|s| !s.inferred && s.status == AgentStatus::Waiting)
+        .map(agent_attention)
+        .max_by_key(|a| a.priority())
+        .unwrap_or(Attention::None)
+}
+
+/// The waiting glyph for one session: `?` question, `⏸` permission, `✓` finished turn.
+fn waiting_glyph(sess: &repomon_core::model::AgentSession) -> &'static str {
+    match agent_attention(sess) {
+        Attention::Decision => theme::WAIT_QUESTION,
+        Attention::Permission => theme::WAITING,
+        _ => theme::WAIT_DONE,
     }
 }
 
@@ -2467,7 +2496,7 @@ fn agent_subrow(
     use repomon_core::model::AgentStatus;
     let (glyph, gstyle) = match sess.status {
         AgentStatus::RateLimited => (theme::RATE_LIMITED, app.theme.rate_limited()),
-        AgentStatus::Waiting => (theme::WAITING, app.theme.needs_you()),
+        AgentStatus::Waiting => (waiting_glyph(sess), app.theme.needs_you()),
         AgentStatus::Running => (theme::AGENT_ACTIVE, app.theme.running()),
         _ if sess.inferred => (theme::INFERRED_ACTIVE, app.theme.dim()),
         _ => ("·", app.theme.dim()),
@@ -2506,7 +2535,13 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
     let (active, active_style) = if any(AgentStatus::RateLimited) {
         (theme::RATE_LIMITED, app.theme.rate_limited()) // ⏳ paused on a usage limit
     } else if any(AgentStatus::Waiting) {
-        (theme::WAITING, app.theme.needs_you()) // ⏸ needs you
+        // ? question · ⏸ permission · ✓ finished turn — all amber "blocked on you".
+        let glyph = match max_waiting_attention(&lane.agent_sessions) {
+            Attention::Decision => theme::WAIT_QUESTION,
+            Attention::Permission => theme::WAITING,
+            _ => theme::WAIT_DONE,
+        };
+        (glyph, app.theme.needs_you())
     } else if any(AgentStatus::Running) {
         (theme::AGENT_ACTIVE, app.theme.running()) // ▶ working
     } else if any_inferred {

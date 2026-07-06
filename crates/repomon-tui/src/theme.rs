@@ -12,6 +12,10 @@ pub const DIRTY: &str = "●";
 pub const CLEAN: &str = "○";
 pub const AGENT_ACTIVE: &str = "▶";
 pub const WAITING: &str = "⏸";
+/// A waiting agent sitting on a real decision-question (vs a routine permission ⏸).
+pub const WAIT_QUESTION: &str = "?";
+/// A waiting agent that simply finished its turn (no dialog on screen).
+pub const WAIT_DONE: &str = "✓";
 pub const RATE_LIMITED: &str = "⏳";
 /// An *inferred* active agent (worktree file activity we can't attribute to a named session).
 pub const INFERRED_ACTIVE: &str = "◐";
