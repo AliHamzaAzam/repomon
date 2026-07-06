@@ -30,6 +30,8 @@ clap_mangen = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
 ansi-to-tui = { workspace = true }
+vt100 = { workspace = true }
+base64 = { workspace = true }
 qrcode = { workspace = true }
 
 [dev-dependencies]

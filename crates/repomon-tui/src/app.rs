@@ -176,6 +176,8 @@ pub struct Settings {
     pub notify_subagents: bool,
     pub usage_probe: bool,
     pub expand_agents: bool,
+    /// Focus renders through the embedded terminal emulator (real PTY byte stream).
+    pub embedded_pty: bool,
     /// The Claude account that powers the repomind orchestrator (empty = bare `claude`).
     pub orchestrator_agent: String,
     /// The orchestrator's model override (empty = the account default; e.g. `opus`/`sonnet`).
@@ -214,6 +216,9 @@ pub struct App {
     pub peek: Option<PeekState>,
     /// The `?` help overlay: the current view's key hints, expanded. Any key closes it.
     pub help_open: bool,
+    /// The Focus view's embedded terminal (a vt100 emulator fed by `event.agent.bytes`);
+    /// `None` = the capture-based fallback renders instead.
+    pub emu: Option<crate::emu::Emu>,
     pub status: String,
     pub nl_repo_idx: usize,
     pub nl_branch: String,
@@ -471,6 +476,7 @@ impl App {
             rename_target: None,
             peek: None,
             help_open: false,
+            emu: None,
             status: String::new(),
             nl_repo_idx: 0,
             nl_branch: String::new(),
@@ -516,6 +522,7 @@ impl App {
                 notify_show_why: true,
                 notify_coalesce: true,
                 notify_click_focus: true,
+                embedded_pty: true,
                 ..Settings::default()
             },
             settings_idx: 0,
@@ -1969,6 +1976,21 @@ impl App {
                     }
                 }
             }
+        } else if note.method == "event.agent.bytes" {
+            // The embedded renderer's feed: raw PTY bytes (base64) for the watched window.
+            if let (Some(w), Some(data)) = (
+                note.params.get("window").and_then(|v| v.as_str()),
+                note.params.get("data").and_then(|v| v.as_str()),
+            ) {
+                if let Some(e) = &mut self.emu {
+                    if e.window == w {
+                        use base64::Engine;
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+                            e.feed(&bytes);
+                        }
+                    }
+                }
+            }
         } else if note.method == "event.orchestrator.output" {
             if let Some(content) = note.params.get("content").and_then(|v| v.as_str()) {
                 let raw = content.to_string();
@@ -2098,8 +2120,19 @@ impl App {
                 }
                 return;
             }
+            // Bracketed paste from the terminal (enabled globally): one event for the whole
+            // pasted text, routed by mode — never replayed as a stream of key events by the
+            // terminal itself anymore.
+            Event::Paste(text) => {
+                self.handle_paste(text).await;
+                return;
+            }
             _ => return,
         };
+        self.handle_key(key).await;
+    }
+
+    async fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -2134,6 +2167,58 @@ impl App {
                     self.apply(action).await;
                 }
             }
+        }
+    }
+
+    /// Bracketed paste, routed by mode. Agent insert modes get the whole text as one input
+    /// burst — wrapped in real paste markers when the focused app asked for them (the
+    /// embedded emulator tracks the `?2004` mode); repomind insert forwards it whole; every
+    /// other mode replays it as typed characters, so text fields (filter, rename, New Lane,
+    /// find …) behave exactly as they did when the terminal streamed pastes per-char.
+    async fn handle_paste(&mut self, text: String) {
+        if self.orch_insert {
+            let _ = self
+                .client
+                .call(
+                    "orchestrator.send_input",
+                    Some(json!({ "text": text, "enter": false })),
+                )
+                .await;
+            return;
+        }
+        if self.focus_insert {
+            let bracketed =
+                self.view == View::Focus && self.emu.as_ref().is_some_and(|e| e.bracketed_paste());
+            if bracketed {
+                if let Some(lane) = self.selected_lane().map(|l| l.id) {
+                    let _ = self
+                        .client
+                        .call(
+                            "agent.send_input",
+                            Some(json!({
+                                "lane_id": lane,
+                                "text": format!("\x1b[200~{text}\x1b[201~"),
+                                "enter": false,
+                                "window": self.selected_window(),
+                            })),
+                        )
+                        .await;
+                }
+            } else {
+                // The coalescing buffer the event loop already flushes as one send_input.
+                self.pending_input.push_str(&text);
+            }
+            return;
+        }
+        for ch in text.chars() {
+            // Newlines in a paste act as Enter in whatever field is active, like typing.
+            let code = if ch == '\n' || ch == '\r' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            };
+            self.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .await;
         }
     }
 
@@ -2541,6 +2626,9 @@ impl App {
         if let Some(x) = b("expand_agents") {
             self.settings.expand_agents = x;
         }
+        if let Some(x) = b("embedded_pty") {
+            self.settings.embedded_pty = x;
+        }
         // Orchestrator overrides are `Option<String>` daemon-side; a null/absent value clears them.
         if let Some(a) = v.get("orchestrator_agent") {
             self.settings.orchestrator_agent = s(a).unwrap_or_default();
@@ -2576,6 +2664,7 @@ impl App {
             "notify_subagents": self.settings.notify_subagents,
             "usage_probe": self.settings.usage_probe,
             "expand_agents": self.settings.expand_agents,
+            "embedded_pty": self.settings.embedded_pty,
             // Empty string clears the override daemon-side (back to the account default).
             "orchestrator_agent": self.settings.orchestrator_agent,
             "orchestrator_model": self.settings.orchestrator_model,
@@ -3977,6 +4066,78 @@ impl App {
         }
     }
 
+    /// Reconcile the embedded renderer with the view: while Focus shows a managed agent (and
+    /// `embedded_pty` is on), exactly that window streams bytes into a vt100 emulator; any
+    /// other state tears the stream down. Seeded from one `capture-pane -e` snapshot — the
+    /// SIGWINCH from `agent.resize`'s window fit makes the app repaint, correcting any seed
+    /// drift. A failed start leaves `emu` unset: the capture-based view renders as before.
+    async fn sync_emu(&mut self) {
+        let want = if self.view == View::Focus && self.settings.embedded_pty {
+            self.selected_lane()
+                .map(|l| l.id)
+                .zip(self.selected_window())
+                .zip(self.focus_pane_dims.get())
+        } else {
+            None
+        };
+        match (want, &mut self.emu) {
+            (None, None) => {}
+            (None, Some(_)) => self.stop_emu().await,
+            (Some(((lane, window), (cols, rows))), Some(e)) => {
+                if e.lane != lane || e.window != window {
+                    self.stop_emu().await;
+                    self.start_emu(lane, window, rows, cols).await;
+                } else if e.size() != (rows, cols) && rows >= 2 && cols >= 4 {
+                    e.resize(rows, cols);
+                }
+            }
+            (Some(((lane, window), (cols, rows))), None) => {
+                if rows >= 2 && cols >= 4 {
+                    self.start_emu(lane, window, rows, cols).await;
+                }
+            }
+        }
+    }
+
+    async fn start_emu(&mut self, lane: LaneId, window: String, rows: u16, cols: u16) {
+        let mut e = crate::emu::Emu::new(lane, window.clone(), rows, cols);
+        if let Ok(v) = self
+            .client
+            .call(
+                "agent.capture",
+                Some(json!({ "lane_id": lane, "window": window })),
+            )
+            .await
+        {
+            if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
+                e.seed_capture(c);
+            }
+        }
+        match self
+            .client
+            .call(
+                "agent.watch_bytes",
+                Some(json!({ "lane_id": lane, "window": window, "on": true })),
+            )
+            .await
+        {
+            Ok(_) => self.emu = Some(e),
+            Err(_) => self.emu = None, // capture fallback keeps rendering
+        }
+    }
+
+    async fn stop_emu(&mut self) {
+        if let Some(e) = self.emu.take() {
+            let _ = self
+                .client
+                .call(
+                    "agent.watch_bytes",
+                    Some(json!({ "lane_id": e.lane, "on": false })),
+                )
+                .await;
+        }
+    }
+
     /// Refresh the fleet-wide open-terminal list (the Grid's shell tiles) — only while the
     /// Grid is open, throttled to ~2s. Prunes streamed panes of closed terminals.
     async fn sync_term_windows(&mut self) {
@@ -4546,6 +4707,7 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     app.load_settings().await;
 
     let mut terminal = ratatui::init();
+    enable_bracketed_paste();
     // Log panics to a file before the terminal is restored (which would otherwise scroll the
     // message off-screen, leaving a crash undiagnosable). Chains to ratatui's restore hook.
     {
@@ -4606,6 +4768,7 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
             .call("orchestrator.watch", Some(json!({ "on": false })))
             .await;
     }
+    disable_bracketed_paste();
     disable_mouse();
     ratatui::restore();
     // Hand the title back to the shell (most shells re-set it at the next prompt anyway).
@@ -4781,6 +4944,16 @@ fn drain_pending_input() {
     }
 }
 
+fn enable_bracketed_paste() {
+    use ratatui::crossterm::event::EnableBracketedPaste;
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+}
+
+fn disable_bracketed_paste() {
+    use ratatui::crossterm::event::DisableBracketedPaste;
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+}
+
 fn disable_mouse() {
     use ratatui::crossterm::event::DisableMouseCapture;
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
@@ -4811,6 +4984,7 @@ async fn event_loop(
         let t_commits = sync_t.elapsed();
         app.sync_terminals().await;
         app.sync_term_windows().await;
+        app.sync_emu().await;
         let t_terminals = sync_t.elapsed();
         if t_terminals >= Duration::from_millis(250) {
             tui_log(&format!(
@@ -4930,6 +5104,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // so it isn't silently dropped when the TUI suspends — attach requested outside the input burst
     // skips the event-loop's post-burst flush.
     app.flush_pending_input().await;
+    // Stop the embedded byte stream while attached: the real terminal shows the pane, and the
+    // sync block re-establishes the emulator on return.
+    app.stop_emu().await;
     let window = app.selected_window();
     let resp = app
         .client
@@ -4962,6 +5139,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
     let _ = app.client.call("watcher.park", None).await;
     app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
+    disable_bracketed_paste();
     disable_mouse();
     ratatui::restore();
     let keepalive = spawn_attach_keepalive(&app.client);
@@ -4972,6 +5150,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // network path — narrowing the "hangs for a bit on exit" report.
     let reinit_t = std::time::Instant::now();
     *terminal = ratatui::init();
+    enable_bracketed_paste();
     if app.mouse_on {
         enable_mouse();
     }
@@ -5009,12 +5188,14 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     // Signal the park so the daemon covers desktop popups immediately (see do_attach).
     let _ = app.client.call("watcher.park", None).await;
     app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
+    disable_bracketed_paste();
     disable_mouse();
     ratatui::restore();
     let keepalive = spawn_attach_keepalive(&app.client);
     tmux_attach(target);
     keepalive.abort();
     *terminal = ratatui::init();
+    enable_bracketed_paste();
     if app.mouse_on {
         enable_mouse();
     }

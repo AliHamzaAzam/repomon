@@ -1518,8 +1518,20 @@ fn render_focus(f: &mut Frame, app: &App) {
     .split(area);
 
     let lane = app.selected_lane();
+    // The embedded emulator renders while it matches the selection and we're at the live tail
+    // (paging back falls back to the captured buffer, which is what scrollback is).
+    let emu_active = app.scroll == 0
+        && app
+            .emu
+            .as_ref()
+            .is_some_and(|e| Some(e.lane) == lane.map(|l| l.id));
     let title = match lane {
-        Some(l) => format!("REPOMON · {}/{}", l.repo.name, lane_name(l)),
+        Some(l) => format!(
+            "REPOMON · {}/{}{}",
+            l.repo.name,
+            lane_name(l),
+            if emu_active { " · pty" } else { "" }
+        ),
         None => "REPOMON".to_string(),
     };
     f.render_widget(
@@ -1541,23 +1553,44 @@ fn render_focus(f: &mut Frame, app: &App) {
     let avail = (rows[1].height as usize).saturating_sub(body.len());
     // Record the pane size so the event loop fits the agent's tmux window to the full-screen view.
     app.focus_pane_dims.set(Some((rows[1].width, avail as u16)));
-    body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
-    f.render_widget(Paragraph::new(body), rows[1]);
+    if emu_active {
+        f.render_widget(Paragraph::new(body), rows[1]);
+        let pane = Rect {
+            x: rows[1].x,
+            y: out_y0,
+            width: rows[1].width,
+            height: avail as u16,
+        };
+        if let Some(e) = &app.emu {
+            e.render(pane, f.buffer_mut());
+            // The emulator knows the real cursor — draw it where you're typing.
+            if app.focus_insert {
+                if let Some((cx, cy)) = e.cursor() {
+                    if cx < pane.width && cy < pane.height {
+                        f.set_cursor_position((pane.x + cx, pane.y + cy));
+                    }
+                }
+            }
+        }
+    } else {
+        body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
+        f.render_widget(Paragraph::new(body), rows[1]);
 
-    // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
-    if app.focus_insert && app.scroll == 0 {
-        if let Some((cx, cy)) = lane
-            .and_then(|l| app.output.get(&l.id))
-            .and_then(|p| p.cursor)
-        {
-            let (cur_y0, start, count) = app.focus_geom.get();
-            let pane = Rect {
-                x: rows[1].x,
-                y: cur_y0,
-                width: rows[1].width,
-                height: count as u16,
-            };
-            place_pane_cursor(f, pane, start, count, (cx, cy));
+        // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
+        if app.focus_insert && app.scroll == 0 {
+            if let Some((cx, cy)) = lane
+                .and_then(|l| app.output.get(&l.id))
+                .and_then(|p| p.cursor)
+            {
+                let (cur_y0, start, count) = app.focus_geom.get();
+                let pane = Rect {
+                    x: rows[1].x,
+                    y: cur_y0,
+                    width: rows[1].width,
+                    height: count as u16,
+                };
+                place_pane_cursor(f, pane, start, count, (cx, cy));
+            }
         }
     }
 

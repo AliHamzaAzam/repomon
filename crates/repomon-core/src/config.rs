@@ -112,6 +112,11 @@ pub struct Config {
     /// The model the orchestrator session runs (e.g. `opus`, `sonnet`). `None` lets `claude` pick
     /// its default. An explicit override on `orchestrator.start` takes precedence.
     pub orchestrator_model: Option<String>,
+    /// Render the focused agent through the embedded terminal emulator (fed by the pane's real
+    /// PTY byte stream) instead of the capture-based view. On by default; the capture path
+    /// remains the automatic fallback, and this is the escape hatch if the embedded renderer
+    /// misbehaves in some terminal.
+    pub embedded_pty: bool,
 }
 
 impl Default for Config {
@@ -144,6 +149,7 @@ impl Default for Config {
             expand_agents: false,
             orchestrator_agent: None,
             orchestrator_model: None,
+            embedded_pty: true,
         }
     }
 }

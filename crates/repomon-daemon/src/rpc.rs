@@ -76,6 +76,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_subagents": cfg.notify_subagents,
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
+        "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
     })
@@ -165,6 +166,13 @@ struct AgentPrompt {
     lane_id: repomon_core::model::LaneId,
     #[serde(default)]
     window: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentWatchBytes {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
+    on: bool,
 }
 #[derive(Deserialize)]
 struct AgentAnswer {
@@ -269,6 +277,8 @@ struct ConfigSet {
     usage_probe: Option<bool>,
     #[serde(default)]
     expand_agents: Option<bool>,
+    #[serde(default)]
+    embedded_pty: Option<bool>,
     #[serde(default)]
     orchestrator_agent: Option<String>,
     #[serde(default)]
@@ -867,6 +877,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 if let Some(b) = p.expand_agents {
                     cfg.expand_agents = b;
                 }
+                if let Some(b) = p.embedded_pty {
+                    cfg.embedded_pty = b;
+                }
                 // An empty string clears the override (back to bare `claude` / the model default),
                 // so the Settings view can cycle to a "default" entry.
                 if let Some(a) = p.orchestrator_agent {
@@ -1047,6 +1060,28 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             .map_err(internal)?
             .map_err(internal)?;
             mark_input(ctx, lane, &window).await;
+            Ok(Value::Null)
+        }
+        "agent.watch_bytes" => {
+            // The embedded renderer's feed: stream one pane's raw PTY bytes as
+            // `event.agent.bytes`. Single-watch semantics — a new `on` replaces the previous
+            // watch, `off` just stops it.
+            let p: AgentWatchBytes = parse(params)?;
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            crate::bytes_stream::stop(&ctx.tmux, &ctx.bytes_watch).await;
+            if p.on {
+                crate::bytes_stream::start(
+                    ctx.tmux.clone(),
+                    ctx.events.clone(),
+                    &ctx.bytes_watch,
+                    p.lane_id,
+                    window,
+                )
+                .await
+                .map_err(internal)?;
+            }
             Ok(Value::Null)
         }
         "agent.prompt" => {
