@@ -8,7 +8,7 @@ forwards input. That split is what keeps the UI instant and lets agents outlive 
       ┌───────────────────────── repomon-core ────────────────────────┐
       │ model · store(SQLite) · git(gix + worktree shellout) · watch  │
       │ registry · lane · agent(tmux runtime + Claude/Aider monitors) │
-      │ analytics · session · indexer · service(launchd) · protocol   │
+      │ analytics · session · indexer · service(launchd/systemd) · protocol │
       └──────────────▲──────────────────────────────▲─────────────────┘
                      │                              │
                      │ (lib)                        │ (lib)
@@ -29,7 +29,8 @@ forwards input. That split is what keeps the UI instant and lets agents outlive 
   store (a dedicated writer thread; never blocks the runtime), the gix-backed git reader and
   `git worktree` shellout, the notify watcher, the repo registry and lane manager, the
   tmux-backed agent runtime and the agent monitors, the Phase-3 analytics/sessions/indexer,
-  launchd service management, and the shared JSON-RPC protocol + framing.
+  service management (launchd on macOS, systemd user units on Linux), and the shared
+  JSON-RPC protocol + framing.
 - **repomon-daemon** (`repomond`) — hosts core behind a length-prefixed JSON-RPC Unix socket.
   Owns the `Ctx` (store, registry, lanes, tmux runtime, event bus, viewport + focus, and the
   overlay/status caches), the per-connection socket handling, RPC dispatch, the output streamer,

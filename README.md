@@ -94,7 +94,7 @@ is a thin client. Four crates:
 
 ## Install
 
-**One line, no deps** (macOS & Linux x86_64, incl. WSL2; prebuilt binaries, no Rust or Xcode):
+**One line, no deps** (macOS & Linux, x86_64 / aarch64, incl. WSL2; prebuilt binaries, no Rust or Xcode):
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -111,8 +111,7 @@ Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repo
 per-arch (`aarch64`/`x86_64`) or the `universal` build, then extract, and put `repomon` and `repomond`
 on your `PATH`.
 
-**From source**: any platform with the Rust toolchain (e.g. ARM Linux, or anywhere without a
-prebuilt binary):
+**From source**: any platform with the Rust toolchain (anywhere without a prebuilt binary):
 
 ```sh
 cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
@@ -128,6 +127,26 @@ Then enable cd-on-exit by adding to your `~/.zshrc` (or `~/.bashrc`):
 ```sh
 eval "$(repomon shell-init zsh)"
 ```
+
+### Run the daemon as a service (optional)
+
+The TUI auto-starts `repomond` on demand, so a service is never required. To keep the daemon
+(and its notifications) alive across logins:
+
+```sh
+repomon daemon install     # macOS: launchd LaunchAgent · Linux: systemd user unit
+```
+
+On Linux this writes `~/.config/systemd/user/repomon.service`; run
+`loginctl enable-linger` if you want `repomond` to survive logout.
+
+### Linux platform notes
+
+- Desktop notifications use `notify-send` (libnotify); the chime plays through
+  `canberra-gtk-play` or `paplay` when present.
+- Clipboard copy uses `wl-copy` (Wayland) or `xclip` (X11); inside tmux, drag-select falls
+  back to OSC52 when neither is installed. Image paste needs `wl-paste` or `xclip`.
+- Click-to-focus notifications are macOS-only (`terminal-notifier`).
 
 ## Usage
 
@@ -232,9 +251,10 @@ babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/searc
 per-session notifications (pane-sniffed permission-dialog detection, fired as desktop popups
 even when the TUI is closed or parked full-screen in an agent), the remote access layer
 (WebSocket bridge + APNs + pairing), and repomind (the MCP-driven fleet orchestrator —
-`repomon orchestrate` and the TUI command-center) are all in. The iOS companion app is built
-and ships once an Apple Developer account is in place. Deferred: an embedded PTY renderer (vs
-the tmux pivot), a web dashboard, and Windows support.
+`repomon orchestrate` and the TUI command-center) are all in, on macOS and Linux (systemd
+service, notifications, clipboard, and process probing all have native Linux paths). The iOS
+companion app is built and ships once an Apple Developer account is in place. Deferred: an
+embedded PTY renderer (vs the tmux pivot), a web dashboard, and Windows support.
 
 ---
 

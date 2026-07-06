@@ -1,6 +1,6 @@
 # repomon — Completion Status
 
-_Snapshot: 2026-05-30 · branch `main` · 44 commits · github.com/AliHamzaAzam/repomon (private)_
+_Snapshot: 2026-07-06 · branch `main` · 248 commits · github.com/AliHamzaAzam/repomon (public)_
 
 repomon is a Rust TUI for running a fleet of AI coding agents across many repos,
 branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned milestones
@@ -19,7 +19,8 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
 
 ## Quality bar (verified)
 
-- **65 tests passing** — core unit + rpc unit + daemon integration + TUI snapshots.
+- **288 tests passing** (macOS; the Linux CI leg adds Linux-only ones) — core unit + rpc unit +
+  daemon integration (incl. MCP stdio e2e + orchestrator lifecycle) + TUI snapshots.
 - **clippy `-D warnings` clean**, `cargo fmt` clean.
 - **Perf gates met:**
   - daemon cold start **108 ms** (target < 500)
@@ -56,6 +57,12 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
   per `~/.claude*` account) and Codex `/status` (5h/weekly or Free monthly). Scraped via a hidden
   throwaway session per account (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a
   rate-limit countdown fallback. See `docs/agents.md`.
+- **repomind** — the MCP-driven fleet orchestrator (`repomon orchestrate` + TUI command-center)
+  with a switchable backend (Claude or Codex). Shipped in v0.3.0.
+- **Full Linux support** — systemd user service (`repomon daemon install`), notify-send
+  notifications with sound, wl-copy/xclip clipboard (OSC52 fallback in tmux), image paste via
+  wl-paste/xclip, and a /proc-based liveness probe. CI runs the suite on macOS + Ubuntu;
+  releases ship x86_64 and aarch64 Linux binaries.
 
 ## Deferred (explicitly out of scope in the plan)
 
@@ -68,8 +75,9 @@ SwiftUI menu-bar app · native repomon-owned PTY mode · web dashboard · Window
   mtime). Claude is the rich path (status, needs-you, multi-account).
 - **cd-on-exit (`c`)** only acts when the `repomon` shell function is installed (it sets
   `$REPOMON_CD_FD`); otherwise it shows a hint instead of quitting.
-- In agent views (Focus/Split/Grid) the daemon refreshes ~1 s and runs a cached (2 s)
-  `pgrep`/`lsof` liveness probe — light, but slightly more active than the 0% Fleet idle.
+- In agent views (Focus/Split/Grid) the daemon refreshes ~1 s and runs a cached liveness
+  probe (`ps`+`lsof` on macOS, `/proc` on Linux) — light, but slightly more active than the
+  0% Fleet idle.
 
 ## Suggested next steps
 
