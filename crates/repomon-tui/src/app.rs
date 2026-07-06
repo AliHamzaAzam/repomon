@@ -4695,23 +4695,9 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Copy `text` to the system clipboard (macOS `pbcopy`, falling back to Linux tools).
+/// Copy `text` to the system clipboard (pbcopy / wl-copy / xclip, probed in core).
 fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    for prog in ["pbcopy", "wl-copy", "xclip"] {
-        let mut cmd = Command::new(prog);
-        if prog == "xclip" {
-            cmd.args(["-selection", "clipboard"]);
-        }
-        if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            return;
-        }
-    }
+    repomon_core::clipboard::copy_text(text);
 }
 
 /// Save a clipboard image to a temp PNG and return its path (macOS), so it can be referenced
