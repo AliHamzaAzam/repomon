@@ -9,8 +9,10 @@
 pub mod agent;
 pub mod analytics;
 pub mod client;
+pub mod clipboard;
 pub mod config;
 pub mod error;
+pub mod exec;
 pub mod git;
 pub mod indexer;
 pub mod lane;

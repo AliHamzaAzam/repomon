@@ -24,6 +24,7 @@ case "$os" in
   Linux)
     case "$arch" in
       x86_64) target="x86_64-unknown-linux-gnu" ;;
+      arm64 | aarch64) target="aarch64-unknown-linux-gnu" ;;
       *) echo "no prebuilt binary for Linux $arch. Install from source:" >&2
          echo "  cargo install --git https://github.com/$REPO repomon-tui repomon-daemon" >&2
          exit 1 ;;

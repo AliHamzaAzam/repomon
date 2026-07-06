@@ -119,7 +119,11 @@ async fn concurrent_starts_spawn_exactly_one_orchestrator() {
     );
 
     let r = call(&mut a, 2, "orchestrator.stop", None).await;
-    assert!(r.error.is_none(), "orchestrator.stop errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "orchestrator.stop errored: {:?}",
+        r.error
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

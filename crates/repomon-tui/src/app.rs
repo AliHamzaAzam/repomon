@@ -4695,43 +4695,50 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Copy `text` to the system clipboard (macOS `pbcopy`, falling back to Linux tools).
+/// Copy `text` to the system clipboard (pbcopy / wl-copy / xclip, probed in core).
 fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    for prog in ["pbcopy", "wl-copy", "xclip"] {
-        let mut cmd = Command::new(prog);
-        if prog == "xclip" {
-            cmd.args(["-selection", "clipboard"]);
-        }
-        if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            return;
-        }
-    }
+    repomon_core::clipboard::copy_text(text);
 }
 
-/// Save a clipboard image to a temp PNG and return its path (macOS), so it can be referenced
-/// to an agent. Tries `pngpaste`, then AppleScript. `None` if the clipboard has no image.
+/// Save a clipboard image to a temp PNG and return its path, so it can be referenced to an
+/// agent. `None` if the clipboard has no image (or no tool exists to read one).
 fn clipboard_image_to_file() -> Option<String> {
-    use std::process::Command;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = format!("/tmp/repomon-paste-{}-{nanos}.png", std::process::id());
+    let path =
+        std::env::temp_dir().join(format!("repomon-paste-{}-{nanos}.png", std::process::id()));
+    if write_clipboard_png(&path) && png_nonempty(&path) {
+        Some(path.to_string_lossy().into_owned())
+    } else {
+        let _ = std::fs::remove_file(&path);
+        None
+    }
+}
+
+/// The written file genuinely holds a PNG (starts with the 8-byte PNG signature) — guards
+/// against a tool that "succeeds" with empty or non-image output.
+fn png_nonempty(path: &std::path::Path) -> bool {
+    std::fs::read(path)
+        .map(|b| b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]))
+        .unwrap_or(false)
+}
+
+/// Write the clipboard's image to `path` as PNG. Tries `pngpaste`, then AppleScript.
+#[cfg(target_os = "macos")]
+fn write_clipboard_png(path: &std::path::Path) -> bool {
+    use std::process::Command;
+    let path = path.to_string_lossy();
 
     if Command::new("pngpaste")
-        .arg(&path)
+        .arg(path.as_ref())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-        && std::path::Path::new(&path).exists()
+        && std::path::Path::new(path.as_ref()).exists()
     {
-        return Some(path);
+        return true;
     }
 
     let set_f = format!("set f to open for access POSIX file \"{path}\" with write permission");
@@ -4751,13 +4758,35 @@ fn clipboard_image_to_file() -> Option<String> {
     for l in &lines {
         cmd.arg("-e").arg(l);
     }
-    let out = cmd.output().ok()?;
-    if String::from_utf8_lossy(&out.stdout).trim() == "ok" && std::path::Path::new(&path).exists() {
-        Some(path)
-    } else {
-        let _ = std::fs::remove_file(&path);
-        None
+    let Ok(out) = cmd.output() else { return false };
+    String::from_utf8_lossy(&out.stdout).trim() == "ok"
+}
+
+/// Write the clipboard's image to `path` as PNG. Tries `wl-paste`, then `xclip`; both exit
+/// non-zero when the clipboard holds no image target.
+#[cfg(not(target_os = "macos"))]
+fn write_clipboard_png(path: &std::path::Path) -> bool {
+    use std::process::{Command, Stdio};
+    let candidates: [&[&str]; 2] = [
+        &["wl-paste", "--type", "image/png"],
+        &["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+    ];
+    for argv in candidates {
+        let Ok(file) = std::fs::File::create(path) else {
+            return false;
+        };
+        let ok = Command::new(argv[0])
+            .args(&argv[1..])
+            .stdout(Stdio::from(file))
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
     }
+    false
 }
 
 /// The keystroke that leaves insert mode. It's `Ctrl-O` (not `Esc`) because the agent itself

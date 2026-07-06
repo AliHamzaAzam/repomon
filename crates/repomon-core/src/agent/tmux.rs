@@ -441,17 +441,24 @@ impl TmuxRuntime {
         let _ = self.run(&["set", "-g", "set-clipboard", "on"]);
         // History deep enough to scroll back through a long plan.
         let _ = self.run(&["set", "-g", "history-limit", "50000"]);
+        // Drag-select pipes into the platform clipboard tool when one exists; otherwise fall
+        // back to tmux's own buffer, which `set-clipboard on` above still forwards to the
+        // terminal's clipboard via OSC52 on modern emulators.
+        let pipe = crate::clipboard::copy_pipe_command();
         for table in ["copy-mode", "copy-mode-vi"] {
-            let _ = self.run(&[
-                "bind",
-                "-T",
-                table,
-                "MouseDragEnd1Pane",
-                "send",
-                "-X",
-                "copy-pipe-and-cancel",
-                "pbcopy",
-            ]);
+            let bind = ["bind", "-T", table, "MouseDragEnd1Pane", "send", "-X"];
+            let _ = match &pipe {
+                Some(cmd) => {
+                    let mut args = bind.to_vec();
+                    args.extend(["copy-pipe-and-cancel", cmd.as_str()]);
+                    self.run(&args)
+                }
+                None => {
+                    let mut args = bind.to_vec();
+                    args.push("copy-selection-and-cancel");
+                    self.run(&args)
+                }
+            };
         }
 
         // A thin status bar that always shows the way back, so detaching is discoverable.
