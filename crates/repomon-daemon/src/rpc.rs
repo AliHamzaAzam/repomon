@@ -323,6 +323,10 @@ struct ViewportSet {
     focus_lane: Option<repomon_core::model::LaneId>,
     #[serde(default)]
     focus_window: Option<String>,
+    /// Plain-terminal windows (`term-{lane}-{n}`) visible as Grid tiles, streamed alongside
+    /// the lane panes. Non-terminal names are ignored.
+    #[serde(default)]
+    windows: Vec<String>,
 }
 #[derive(Deserialize)]
 struct LaneMerge {
@@ -1293,6 +1297,28 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             terms.sort();
             to_value(terms)
         }
+        "terminal.list_all" => {
+            // Every lane's open plain terminals — what the Grid tiles. Fleet-wide (unlike
+            // `terminal.list`) so one call covers every visible lane.
+            let tmux = ctx.tmux.clone();
+            let wins = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
+                .await
+                .map_err(internal)?;
+            let mut terms: Vec<Value> = wins
+                .into_iter()
+                .filter_map(|w| {
+                    TmuxRuntime::parse_term_window(&w)
+                        .map(|lane| json!({ "lane_id": lane, "id": w }))
+                })
+                .collect();
+            terms.sort_by_key(|t| {
+                (
+                    t["lane_id"].as_i64().unwrap_or(0),
+                    t["id"].as_str().unwrap_or("").to_string(),
+                )
+            });
+            Ok(Value::Array(terms))
+        }
         "terminal.close" => {
             let p: TerminalId = parse(params)?;
             let tmux = ctx.tmux.clone();
@@ -1373,9 +1399,14 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(Value::Null)
         }
         "viewport.set" => {
-            let p: ViewportSet = parse(params)?;
+            let mut p: ViewportSet = parse(params)?;
             *ctx.viewport.lock().await = p.lane_ids;
             *ctx.viewport_focus.lock().await = p.focus_lane.zip(p.focus_window);
+            // Only real terminal windows are streamable extras — anything else is dropped so a
+            // client can't point the capture loop at arbitrary windows.
+            p.windows
+                .retain(|w| TmuxRuntime::parse_term_window(w).is_some());
+            *ctx.viewport_windows.lock().await = p.windows;
             Ok(Value::Null)
         }
 

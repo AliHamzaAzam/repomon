@@ -75,6 +75,16 @@ impl TmuxRuntime {
         Self::parse_lane_window(name).map(|(id, _)| id)
     }
 
+    /// Parse a plain-terminal window name (`term-{lane}-{n}`, as `terminal.open` mints them)
+    /// into its lane. `None` for anything else — agent windows, the usage probe, malformed
+    /// names — so terminal scans and agent scans stay mutually blind.
+    pub fn parse_term_window(name: &str) -> Option<LaneId> {
+        let rest = name.strip_prefix("term-")?;
+        let (id, seq) = rest.split_once('-')?;
+        seq.parse::<u32>().ok()?;
+        id.parse::<LaneId>().ok()
+    }
+
     /// The 1-based agent slot a managed window occupies, or `None` if it isn't a lane window.
     pub fn slot_of_window(name: &str) -> Option<usize> {
         Self::parse_lane_window(name).map(|(_, slot)| slot)
@@ -659,6 +669,19 @@ mod tests {
         assert_eq!(TmuxRuntime::slot_of_window("lane-42"), Some(1));
         assert_eq!(TmuxRuntime::slot_of_window("lane-42-3"), Some(3));
         assert_eq!(TmuxRuntime::slot_of_window("term-1"), None);
+    }
+
+    #[test]
+    fn parses_terminal_windows_back_to_lane() {
+        // `terminal.open` mints `term-{lane}-{n}`; the parse is its inverse.
+        assert_eq!(TmuxRuntime::parse_term_window("term-7-1"), Some(7));
+        assert_eq!(TmuxRuntime::parse_term_window("term-81-12"), Some(81));
+        // Agent windows, sequence-less/malformed names, and strangers are not terminals.
+        assert_eq!(TmuxRuntime::parse_term_window("lane-7"), None);
+        assert_eq!(TmuxRuntime::parse_term_window("term-7"), None);
+        assert_eq!(TmuxRuntime::parse_term_window("term-x-1"), None);
+        assert_eq!(TmuxRuntime::parse_term_window("term-7-x"), None);
+        assert_eq!(TmuxRuntime::parse_term_window("orchestrator"), None);
     }
 
     #[test]

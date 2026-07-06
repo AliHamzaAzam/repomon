@@ -90,14 +90,24 @@ pub struct Pane {
 /// A clickable lane region recorded during render (in `view.rs`) and hit-tested by the mouse
 /// handler. `interactive` = a single-click focuses the lane for typing in place (Grid tiles,
 /// Split panes/rows); otherwise a single-click only selects it (Fleet rows, which show no pane).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ClickZone {
     pub rect: Rect,
     pub lane: LaneId,
     /// Which agent within the lane this row targets, when the sidebar is expanded into per-agent
     /// rows; `None` for a normal lane row / lane header.
     pub session: Option<usize>,
+    /// The plain-terminal window this region shows (a Grid shell tile); `None` = an agent pane.
+    pub window: Option<String>,
     pub interactive: bool,
+}
+
+/// One Grid tile: a lane's agent pane, or one of its plain terminals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GridTile {
+    pub lane_id: LaneId,
+    /// `Some("term-{lane}-{n}")` for a plain-terminal tile; `None` = the lane's agent pane.
+    pub window: Option<String>,
 }
 
 /// A row in the fleet sidebar: a lane (header), or — when `expand_agents` is on and the lane runs
@@ -351,6 +361,14 @@ pub struct App {
     /// Plain shell terminals open for the selected lane (tmux window names).
     pub terminals: Vec<String>,
     terminals_lane: Option<LaneId>,
+    /// Every lane's open plain terminals `(lane, window)` — the Grid's shell tiles. Synced
+    /// from `terminal.list_all` while the Grid is open.
+    pub term_windows: Vec<(LaneId, String)>,
+    /// Live pane per terminal window, pushed by `event.agent.output` (window-tagged) — the
+    /// shell-tile counterpart of the lane-keyed `output`.
+    pub term_output: HashMap<String, Pane>,
+    /// When `term_windows` was last fetched (throttles the Grid's list_all poll).
+    term_sync_at: Option<Instant>,
     pub browse_path: String,
     pub browse_parent: Option<String>,
     pub browse_entries: Vec<BrowseEntry>,
@@ -378,6 +396,7 @@ pub struct App {
     agents_return: Option<View>,
     last_viewport: Vec<LaneId>,
     last_viewport_focus: Option<(LaneId, String)>,
+    last_viewport_windows: Vec<String>,
     /// Last terminal title emitted (OSC 2), to skip redundant writes.
     last_title: String,
     attach_request: Option<LaneId>,
@@ -532,6 +551,9 @@ impl App {
             pending_focus_ticks: 0,
             terminals: Vec::new(),
             terminals_lane: None,
+            term_windows: Vec::new(),
+            term_output: HashMap::new(),
+            term_sync_at: None,
             browse_path: String::new(),
             browse_parent: None,
             browse_entries: Vec::new(),
@@ -549,6 +571,7 @@ impl App {
             ag_orig: None,
             agents_return: None,
             last_viewport: Vec::new(),
+            last_viewport_windows: Vec::new(),
             last_viewport_focus: None,
             last_title: String::new(),
             attach_request: None,
@@ -1387,6 +1410,36 @@ impl App {
         lanes.into_iter().take(8).map(|l| l.id).collect()
     }
 
+    /// The Grid's tiles: agent panes first (the most active lanes, as ever), then every open
+    /// plain terminal (`t` shells) of a visible lane — in lane display order — up to 8 tiles.
+    pub fn grid_tiles(&self) -> Vec<GridTile> {
+        let mut tiles: Vec<GridTile> = self
+            .grid_lane_ids()
+            .into_iter()
+            .map(|id| GridTile {
+                lane_id: id,
+                window: None,
+            })
+            .collect();
+        let lane_order: Vec<LaneId> = self.visible_lanes().iter().map(|l| l.id).collect();
+        let mut terms: Vec<&(LaneId, String)> = self
+            .term_windows
+            .iter()
+            .filter(|(l, _)| lane_order.contains(l))
+            .collect();
+        terms.sort_by_key(|(l, w)| (lane_order.iter().position(|x| x == l), w.clone()));
+        for (l, w) in terms {
+            if tiles.len() >= 8 {
+                break;
+            }
+            tiles.push(GridTile {
+                lane_id: *l,
+                window: Some(w.clone()),
+            });
+        }
+        tiles
+    }
+
     fn clamp_selection(&mut self) {
         let n = self.rows_len();
         if n == 0 {
@@ -1423,16 +1476,39 @@ impl App {
     /// either changed.
     pub async fn sync_viewport(&mut self) {
         let live = self.live_lanes();
-        // Name the lane the user is actively watching (Split/Focus, or the highlighted Grid tile)
-        // so the daemon streams it at the fast cadence and lets the other viewport panes back off.
+        // The Grid's shell tiles stream as explicit terminal windows alongside the lane panes.
+        let windows: Vec<String> = if self.view == View::Grid {
+            self.grid_tiles().into_iter().filter_map(|t| t.window).collect()
+        } else {
+            Vec::new()
+        };
+        // Name the pane the user is actively watching (Split/Focus, or the highlighted Grid
+        // tile — its terminal window when it's a shell tile) so the daemon streams it at the
+        // fast cadence and lets the other viewport panes back off.
         let focus = match self.view {
-            View::Split | View::Focus | View::Grid => self
+            View::Grid => {
+                let tiles = self.grid_tiles();
+                match tiles.get(self.grid_active) {
+                    Some(GridTile {
+                        lane_id,
+                        window: Some(w),
+                    }) => Some((*lane_id, w.clone())),
+                    _ => self
+                        .selected_lane()
+                        .map(|l| l.id)
+                        .zip(self.selected_window()),
+                }
+            }
+            View::Split | View::Focus => self
                 .selected_lane()
                 .map(|l| l.id)
                 .zip(self.selected_window()),
             _ => None,
         };
-        if live != self.last_viewport || focus != self.last_viewport_focus {
+        if live != self.last_viewport
+            || focus != self.last_viewport_focus
+            || windows != self.last_viewport_windows
+        {
             let _ = self
                 .client
                 .call(
@@ -1441,11 +1517,13 @@ impl App {
                         "lane_ids": live,
                         "focus_lane": focus.as_ref().map(|(l, _)| l),
                         "focus_window": focus.as_ref().map(|(_, w)| w),
+                        "windows": windows,
                     })),
                 )
                 .await;
             self.last_viewport = live;
             self.last_viewport_focus = focus;
+            self.last_viewport_windows = windows;
         }
         // Stream the orchestrator pane while the command-center view is open, or while the pinned
         // repomind row is selected in Split (its right column previews the live pane). Toggle the
@@ -1684,26 +1762,34 @@ impl App {
 
     /// Point the fleet selection at the grid's active tile (so per-lane actions act on it).
     fn select_grid_active(&mut self) {
-        let ids = self.grid_lane_ids();
-        if let Some(&id) = ids.get(self.grid_active) {
-            self.select_lane_session(id, None);
+        let tiles = self.grid_tiles();
+        if let Some(t) = tiles.get(self.grid_active) {
+            self.select_lane_session(t.lane_id, None);
         }
     }
 
     /// Key handling in the babysit Grid: a linear cursor over the live tiles (arrows move it,
     /// dots show position), `↵` focuses the active tile, and esc/spc/q leave the view.
     async fn grid_key(&mut self, key: KeyEvent) {
-        // Click-focused a tile? Keystrokes go straight to that agent (like Split/Focus insert);
-        // ^O blurs, as does a click on empty space.
+        // Click-focused a tile? Keystrokes go straight to that pane (like Split/Focus insert) —
+        // the active tile's agent, or its plain terminal; ^O blurs, as does a click on empty
+        // space.
         if self.focus_insert {
             if leaves_insert(&key) {
                 self.focus_insert = false;
                 return;
             }
-            self.send_agent_key(key).await;
+            let term = self
+                .grid_tiles()
+                .get(self.grid_active)
+                .and_then(|t| t.window.clone().map(|w| (t.lane_id, w)));
+            match term {
+                Some((lane, window)) => self.send_window_key(lane, window, key).await,
+                None => self.send_agent_key(key).await,
+            }
             return;
         }
-        let n = self.grid_lane_ids().len();
+        let n = self.grid_tiles().len();
         if self.grid_active >= n {
             self.grid_active = n.saturating_sub(1);
         }
@@ -1716,10 +1802,16 @@ impl App {
             {
                 self.grid_active += 1;
             }
-            // ↵ opens the active tile's agent in its real tmux pane (a native terminal).
+            // ↵ opens the active tile's pane in its real tmux window (a native terminal).
             KeyCode::Enter if n > 0 => {
-                self.select_grid_active();
-                self.attach_request = self.selected_lane().map(|l| l.id);
+                let tile = self.grid_tiles().get(self.grid_active).cloned();
+                match tile.as_ref().and_then(|t| t.window.clone()) {
+                    Some(w) => self.attach_terminal_window(&w).await,
+                    None => {
+                        self.select_grid_active();
+                        self.attach_request = self.selected_lane().map(|l| l.id);
+                    }
+                }
             }
             // Per-tile actions act on the active tile.
             KeyCode::Char('e') => {
@@ -1735,17 +1827,20 @@ impl App {
                 self.select_grid_active();
                 self.toggle_pin().await;
             }
-            // Hop to the next tile whose agent needs you, wrapping.
+            // Hop to the next tile whose agent needs you, wrapping. (Shell tiles never need
+            // you — the filter naturally skips them.)
             KeyCode::Char('g') if n > 0 => {
-                let ids = self.grid_lane_ids();
-                let need: Vec<usize> = ids
+                let tiles = self.grid_tiles();
+                let need: Vec<usize> = tiles
                     .iter()
                     .enumerate()
-                    .filter(|(_, id)| {
-                        self.lanes
-                            .iter()
-                            .find(|l| l.id == **id)
-                            .is_some_and(|l| self.lane_needs_attention(l))
+                    .filter(|(_, t)| {
+                        t.window.is_none()
+                            && self
+                                .lanes
+                                .iter()
+                                .find(|l| l.id == t.lane_id)
+                                .is_some_and(|l| self.lane_needs_attention(l))
                     })
                     .map(|(i, _)| i)
                     .collect();
@@ -1854,7 +1949,22 @@ impl App {
                     .get("cursor")
                     .and_then(|v| v.as_array())
                     .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
-                self.output.insert(id, Pane { raw, lines, cursor });
+                // A window-tagged terminal stream (a Grid shell tile) has its own store — a
+                // lane's agent pane and its terminals must never overwrite each other.
+                match note
+                    .params
+                    .get("window")
+                    .and_then(|v| v.as_str())
+                    .filter(|w| w.starts_with("term-"))
+                {
+                    Some(w) => {
+                        self.term_output
+                            .insert(w.to_string(), Pane { raw, lines, cursor });
+                    }
+                    None => {
+                        self.output.insert(id, Pane { raw, lines, cursor });
+                    }
+                }
             }
         } else if note.method == "event.orchestrator.output" {
             if let Some(content) = note.params.get("content").and_then(|v| v.as_str()) {
@@ -3078,11 +3188,32 @@ impl App {
             .borrow()
             .iter()
             .find(|z| z.rect.contains(Position { x: col, y: row }))
-            .copied();
+            .cloned();
         // Clicking a lane (or the gutter) leaves any repomind insert mode, since the selection is
         // moving off the pinned row.
         self.orch_insert = false;
         match hit {
+            // A Grid shell tile: move the grid cursor onto it (input routes by active tile);
+            // single-click types in place, double-click attaches into the real terminal.
+            Some(z) if z.window.is_some() => {
+                let window = z.window.clone().unwrap();
+                let now = std::time::Instant::now();
+                let dbl = is_double_click(self.last_click, z.lane, now);
+                self.last_click = Some((now, z.lane));
+                if let Some(i) = self
+                    .grid_tiles()
+                    .iter()
+                    .position(|t| t.window.as_deref() == Some(window.as_str()))
+                {
+                    self.grid_active = i;
+                }
+                if dbl {
+                    self.focus_insert = false;
+                    self.attach_terminal_window(&window).await;
+                } else {
+                    self.focus_insert = true;
+                }
+            }
             Some(z) => {
                 let now = std::time::Instant::now();
                 let dbl = is_double_click(self.last_click, z.lane, now);
@@ -3400,6 +3531,40 @@ impl App {
                 })),
             )
             .await;
+    }
+
+    /// Send one keystroke to an explicit window (a Grid shell tile's plain terminal). Unlike
+    /// `send_agent_key` there's no coalescing buffer: a shell echoes per keystroke anyway, and
+    /// the pending-input buffer flushes to the *agent* window, which would misroute here.
+    async fn send_window_key(&mut self, lane: LaneId, window: String, key: KeyEvent) {
+        let Some((spec, literal)) = translate_key(&key) else {
+            return;
+        };
+        let _ = self
+            .client
+            .call(
+                "agent.key",
+                Some(json!({
+                    "lane_id": lane,
+                    "key": spec,
+                    "literal": literal,
+                    "window": window,
+                })),
+            )
+            .await;
+    }
+
+    /// Attach into a plain-terminal window (a Grid shell tile) by name.
+    async fn attach_terminal_window(&mut self, window: &str) {
+        if let Ok(v) = self
+            .client
+            .call("terminal.target", Some(json!({ "id": window })))
+            .await
+        {
+            if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
+                self.attach_target = Some(t.to_string());
+            }
+        }
     }
 
     /// Send the buffered keystrokes/paste to the agent as one `send_input` (literal, no Enter).
@@ -3806,6 +3971,35 @@ impl App {
                 }
             }
             None => self.open_terminal().await,
+        }
+    }
+
+    /// Refresh the fleet-wide open-terminal list (the Grid's shell tiles) — only while the
+    /// Grid is open, throttled to ~2s. Prunes streamed panes of closed terminals.
+    async fn sync_term_windows(&mut self) {
+        if self.view != View::Grid {
+            return;
+        }
+        if self
+            .term_sync_at
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        self.term_sync_at = Some(Instant::now());
+        #[derive(serde::Deserialize)]
+        struct Term {
+            lane_id: LaneId,
+            id: String,
+        }
+        if let Ok(terms) = self
+            .client
+            .call_typed::<Vec<Term>>("terminal.list_all", None)
+            .await
+        {
+            self.term_windows = terms.into_iter().map(|t| (t.lane_id, t.id)).collect();
+            self.term_output
+                .retain(|w, _| self.term_windows.iter().any(|(_, tw)| tw == w));
         }
     }
 
@@ -4613,6 +4807,7 @@ async fn event_loop(
         app.sync_recent_commits().await;
         let t_commits = sync_t.elapsed();
         app.sync_terminals().await;
+        app.sync_term_windows().await;
         let t_terminals = sync_t.elapsed();
         if t_terminals >= Duration::from_millis(250) {
             tui_log(&format!(
