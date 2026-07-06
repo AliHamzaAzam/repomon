@@ -295,6 +295,83 @@ async fn peek_popup_shows_the_dialog_and_queue() {
 }
 
 #[tokio::test]
+async fn grid_tiles_plain_shell_terminals() {
+    use repomon_core::model::AgentStatus;
+    use repomon_tui::keybinds::View;
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-tui-grid-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = DaemonClient::connect(&sock).await.expect("connect");
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "feat: initial commit"]);
+    client
+        .call(
+            "repo.add",
+            Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+        )
+        .await
+        .expect("repo.add");
+
+    let mut app = App::new(client);
+    app.refresh().await;
+    let lane_id = app.lanes[0].id;
+
+    // A lane with a running agent AND an open plain terminal: the grid tiles both.
+    app.lanes[0].agent_sessions = vec![fake_session(AgentStatus::Running, None)];
+    let term = format!("term-{lane_id}-1");
+    app.term_windows = vec![(lane_id, term.clone())];
+    let raw = "SHELL_TILE_SENTINEL $ cargo build".to_string();
+    app.term_output.insert(
+        term.clone(),
+        repomon_tui::app::Pane {
+            lines: repomon_tui::view::parse_pane(&raw),
+            raw,
+            cursor: None,
+        },
+    );
+    app.view = View::Grid;
+    let grid = render_to_string(&app, 120, 40).unwrap();
+    assert!(
+        grid.contains("2 live panes"),
+        "grid must count the shell tile:\n{grid}"
+    );
+    assert!(
+        grid.contains(&term),
+        "shell tile header must name its terminal window:\n{grid}"
+    );
+    assert!(
+        grid.contains("SHELL_TILE_SENTINEL"),
+        "shell tile must render the terminal's streamed pane:\n{grid}"
+    );
+
+    // The terminal's pane content must not bleed into the agent tile (separate keying).
+    assert!(
+        grid.contains("no live output"),
+        "the agent tile (no streamed output) keeps its own empty state:\n{grid}"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
 async fn renders_fleet_with_a_registered_repo() {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);

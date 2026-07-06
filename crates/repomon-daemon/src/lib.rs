@@ -131,6 +131,9 @@ pub struct Ctx {
     /// Which agent window the focused lane should stream, when the TUI has a specific session
     /// selected (Tab in Focus/Split). Lanes not named here stream their first slot.
     pub viewport_focus: Mutex<Option<(LaneId, String)>>,
+    /// Plain-terminal windows (`term-{lane}-{n}`) the TUI has visible as Grid tiles — streamed
+    /// alongside the lane panes, each tagged with its window in the output event.
+    pub viewport_windows: Mutex<Vec<String>>,
     /// Cache of how many live `claude` processes have each working dir (ps/lsof, 10s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
     pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
@@ -249,6 +252,7 @@ impl Ctx {
             events,
             viewport: Mutex::new(Vec::new()),
             viewport_focus: Mutex::new(None),
+            viewport_windows: Mutex::new(Vec::new()),
             live_cwds: Mutex::new(None),
             cwds_sticky: Mutex::new(HashMap::new()),
             overlay_cache: Mutex::new(None),
@@ -301,10 +305,9 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
-    /// Per-lane streaming state: the last pushed window+content, the current poll interval, and
-    /// when this lane was last captured.
+    /// Per-window streaming state: the last pushed content, the current poll interval, and
+    /// when this window was last captured.
     struct St {
-        window: String,
         content: String,
         backoff: Duration,
         last_cap: Instant,
@@ -331,8 +334,8 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     // serviced round-robin across ticks.
     const MAX_PER_TICK: usize = 3;
 
-    let mut state: HashMap<LaneId, St> = HashMap::new();
-    let mut rr: usize = 0; // round-robin offset so background lanes share the per-tick budget fairly
+    let mut state: HashMap<String, St> = HashMap::new();
+    let mut rr: usize = 0; // round-robin offset so background panes share the per-tick budget fairly
     // The base tick must be at least as fast as the tightest regime (TYPING_FLOOR); per-lane
     // gating below keeps non-typing lanes at their slower cadence, so these extra wakeups are
     // cheap no-ops (no captures) when nothing is being typed.
@@ -349,44 +352,53 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             m.retain(|_, t| now.saturating_duration_since(*t) < TYPING_WINDOW);
         }
         let lanes: Vec<LaneId> = ctx.viewport.lock().await.clone();
-        if lanes.is_empty() {
+        let extra_windows: Vec<String> = ctx.viewport_windows.lock().await.clone();
+        if lanes.is_empty() && extra_windows.is_empty() {
             state.clear();
             continue;
         }
         let focus = ctx.viewport_focus.lock().await.clone();
-        let focus_lane = focus.as_ref().map(|(l, _)| *l);
-        state.retain(|k, _| lanes.contains(k));
+        // One stream target per visible pane: each lane's resolved window, plus any plain
+        // terminals the Grid is tiling (each with the lane it belongs to for the event payload).
+        let mut targets: Vec<(LaneId, String)> = lanes
+            .iter()
+            .map(|&lane| (lane, stream_window_for(lane, &focus)))
+            .collect();
+        for w in &extra_windows {
+            if let Some(lane) = TmuxRuntime::parse_term_window(w) {
+                if !targets.iter().any(|(_, tw)| tw == w) {
+                    targets.push((lane, w.clone()));
+                }
+            }
+        }
+        state.retain(|w, _| targets.iter().any(|(_, tw)| tw == w));
         // Snapshot which lanes were typed into recently — they capture at frame-rate. The map was
         // just pruned above, so this is the live set of within-TYPING_WINDOW lanes.
         let typing_lanes: HashMap<LaneId, Instant> = ctx.input_seen.lock().await.clone();
 
-        // Service the focused lane first (so the per-tick cap never starves what the user is
+        // Service the focused pane first (so the per-tick cap never starves what the user is
         // watching), then the rest from a rotating offset so every background pane gets a turn.
-        let n = lanes.len();
-        let mut order: Vec<LaneId> = Vec::with_capacity(n);
-        if let Some(fl) = focus_lane {
-            if lanes.contains(&fl) {
-                order.push(fl);
+        let focus_window = focus.as_ref().map(|(_, w)| w.clone());
+        let n = targets.len();
+        let mut order: Vec<(LaneId, String)> = Vec::with_capacity(n);
+        if let Some(fw) = &focus_window {
+            if let Some(t) = targets.iter().find(|(_, w)| w == fw) {
+                order.push(t.clone());
             }
         }
         for i in 0..n {
-            let lane = lanes[(rr + i) % n];
-            if Some(lane) != focus_lane {
-                order.push(lane);
+            let t = &targets[(rr + i) % n];
+            if Some(&t.1) != focus_window.as_ref() {
+                order.push(t.clone());
             }
         }
         rr = (rr + 1) % n;
 
         let mut budget = MAX_PER_TICK;
-        for lane in order {
-            let is_focused = focus_lane == Some(lane);
-            // The focused lane streams its selected agent's window; others their first slot.
-            let window = match &focus {
-                Some((l, w)) if *l == lane => w.clone(),
-                _ => TmuxRuntime::window_name(lane),
-            };
+        for (lane, window) in order {
+            let is_focused = focus_window.as_deref() == Some(window.as_str());
             // Cadence regime: a lane typed into within TYPING_WINDOW captures at frame-rate;
-            // otherwise the focused lane is fast and background/Grid tiles slow.
+            // otherwise the focused pane is fast and background/Grid tiles slow.
             let typing = typing_lanes
                 .get(&lane)
                 .is_some_and(|t| now.saturating_duration_since(*t) < TYPING_WINDOW);
@@ -401,18 +413,18 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             // starts being typed into, a stale 150ms wait shrinks to <=60ms and it captures on the
             // next tick (prompt first-keystroke echo without coupling to the input handler).
             let interval = state
-                .get(&lane)
+                .get(&window)
                 .map(|s| s.backoff.clamp(floor, cap))
                 .unwrap_or(floor);
-            // Not due yet (and window unchanged) → leave it for a later tick; costs nothing. A
-            // lane absent from the map (freshly spawned / first frame) or whose window switched
-            // (Tab) is always due, so fresh output shows immediately.
-            if let Some(s) = state.get(&lane) {
-                if s.window == window && now < s.last_cap + interval {
+            // Not due yet → leave it for a later tick; costs nothing. A window absent from the
+            // map (freshly spawned / first frame / Tab switch) is always due, so fresh output
+            // shows immediately.
+            if let Some(s) = state.get(&window) {
+                if now < s.last_cap + interval {
                     continue;
                 }
             }
-            // Cap captures per tick; a due lane skipped here is picked up next tick (rr rotates).
+            // Cap captures per tick; a due pane skipped here is picked up next tick (rr rotates).
             if budget == 0 {
                 break;
             }
@@ -437,13 +449,16 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 None
             };
             let content_changed = state
-                .get(&lane)
-                .map(|s| s.window != window || s.content != content)
+                .get(&window)
+                .map(|s| s.content != content)
                 .unwrap_or(true);
             // The focused pane also re-pushes on a cursor-only move (arrowing within the input box)
             // so the rendered cursor tracks even when the text itself is unchanged.
-            let cursor_changed =
-                is_focused && state.get(&lane).map(|s| s.cursor != cursor).unwrap_or(true);
+            let cursor_changed = is_focused
+                && state
+                    .get(&window)
+                    .map(|s| s.cursor != cursor)
+                    .unwrap_or(true);
             let changed = content_changed || cursor_changed;
             // Reset to the floor on any change; otherwise double the (clamped) interval toward cap.
             let backoff = if changed {
@@ -456,15 +471,15 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                     pubsub::topic::AGENT_OUTPUT,
                     serde_json::json!({
                         "lane_id": lane,
+                        "window": window,
                         "content": content.clone(),
                         "cursor": cursor.map(|(x, y)| [x, y]),
                     }),
                 );
             }
             state.insert(
-                lane,
+                window,
                 St {
-                    window,
                     content,
                     backoff,
                     last_cap: now,
@@ -472,6 +487,17 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 },
             );
         }
+    }
+}
+
+/// The window a viewport lane streams: the TUI-selected agent window when this lane is the
+/// focus (Tab in Focus/Split), else the lane's first slot. A focused plain terminal never
+/// hijacks its lane's stream — the terminal is its own target via `viewport_windows`, so the
+/// lane's agent tile keeps updating beside it.
+fn stream_window_for(lane: LaneId, focus: &Option<(LaneId, String)>) -> String {
+    match focus {
+        Some((l, w)) if *l == lane && TmuxRuntime::parse_term_window(w).is_none() => w.clone(),
+        _ => TmuxRuntime::window_name(lane),
     }
 }
 
@@ -567,5 +593,31 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
             last = Some(content);
             last_cursor = cursor;
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn focused_terminal_never_hijacks_its_lanes_stream() {
+        // No focus / focus on another lane: the lane streams its first slot.
+        assert_eq!(stream_window_for(7, &None), "lane-7");
+        assert_eq!(
+            stream_window_for(7, &Some((3, "lane-3-2".into()))),
+            "lane-7"
+        );
+        // The focused lane streams its selected agent window (Tab in Focus/Split).
+        assert_eq!(
+            stream_window_for(7, &Some((7, "lane-7-2".into()))),
+            "lane-7-2"
+        );
+        // A focused plain terminal is its own stream target (viewport_windows); the lane's
+        // pane must keep streaming its agent, or the agent tile freezes beside the terminal.
+        assert_eq!(
+            stream_window_for(7, &Some((7, "term-7-1".into()))),
+            "lane-7"
+        );
     }
 }

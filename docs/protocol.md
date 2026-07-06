@@ -85,10 +85,11 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen — the client then scrolls the captured buffer itself) |
 | `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
+| `terminal.list_all` | — | `[{ lane_id, id }]` (every lane's open terminals, sorted — what the Grid tiles) |
 | `terminal.close` | `{ id }` | `null` |
 | `terminal.target` | `{ id }` | `{ target, available }` |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
-| `viewport.set` | `{ lane_ids, focus_lane?, focus_window? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot) |
+| `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored) |
 | `subscribe` | `{ topics? }` | `null` |
 | `ping` | — | `"pong"` (remote keep-alive / connectivity probe) |
 | `push.register` | `{ device_token }` | `null` (register an APNs device for push; idempotent) |
@@ -172,7 +173,7 @@ when readable (a partial parse still returns what it could).
 | `event.lane.created` | `{ lane }` |
 | `event.lane.deleted` | `{ lane_id }` |
 | `event.agent.status` | `{ lane_id, status }` |
-| `event.agent.output` | `{ lane_id, content, cursor? }` (`cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused lane when its cursor is visible; `null`/absent otherwise) |
+| `event.agent.output` | `{ lane_id, window, content, cursor? }` (`window` names the tmux window the capture came from — a `lane-*` agent pane or a `term-*` plain terminal, so one lane can stream both without colliding; `cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused pane when its cursor is visible; `null`/absent otherwise) |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt?, attention, dialog? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`, `stalled`; `prompt` is the agent's pending question verbatim). `attention` refines `needs_you`: `permission` (routine tool-call ask) / `decision` (a real question) / `done_candidate` (turn finished on a clean lane with a this-turn commit — ready to review) / `end_of_turn` (turn finished, no dialog) / `none`; `dialog` is the full `PendingDialog` when one is on screen, so an actionable client can offer its real options. `stalled` fires once when a managed agent's pane and transcript both freeze mid-work for ~5 min while its process lives (see `AgentSession.stale`/`stalled_since` on `lane.list` — additive overlay fields, with `stalled_since` marking the pane's last change). Emitted only while `[remote]` is enabled; the same alert goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
 | `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |

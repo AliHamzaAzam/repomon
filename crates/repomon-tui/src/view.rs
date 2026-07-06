@@ -42,7 +42,19 @@ fn click_zone(app: &App, rect: Rect, lane: LaneId, session: Option<usize>, inter
         rect,
         lane,
         session,
+        window: None,
         interactive,
+    });
+}
+
+/// Record a clickable Grid shell-tile region: clicks route to the named terminal window.
+fn click_zone_window(app: &App, rect: Rect, lane: LaneId, window: String) {
+    app.click_zones.borrow_mut().push(ClickZone {
+        rect,
+        lane,
+        session: None,
+        window: Some(window),
+        interactive: true,
     });
 }
 
@@ -1589,8 +1601,8 @@ fn render_grid(f: &mut Frame, app: &App) {
     ])
     .split(area);
 
-    let ids = app.grid_lane_ids();
-    let n = ids.len();
+    let tiles = app.grid_tiles();
+    let n = tiles.len();
     let header = format!(
         "REPOMON · GRID — {n} live pane{}",
         if n == 1 { "" } else { "s" }
@@ -1603,15 +1615,17 @@ fn render_grid(f: &mut Frame, app: &App) {
         rows[0],
     );
 
-    if ids.is_empty() {
+    if tiles.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
                 Line::raw(""),
                 Line::raw(
-                    "  Nothing to babysit yet — the grid tiles your most active agents".to_string(),
+                    "  Nothing to babysit yet — the grid tiles your most active agents and open shells"
+                        .to_string(),
                 ),
                 Line::raw(
-                    "  (pin any with p). Spawn one with e, or press esc to go back.".to_string(),
+                    "  (pin any with p). Spawn one with e, open a shell with t, or press esc to go back."
+                        .to_string(),
                 ),
             ]),
             rows[1],
@@ -1636,17 +1650,21 @@ fn render_grid(f: &mut Frame, app: &App) {
                 continue;
             }
             let cell = cells[c * 2];
-            let lane = app.lanes.iter().find(|l| l.id == ids[idx]);
-            click_zone(app, cell, ids[idx], None, true);
+            let tile = &tiles[idx];
+            let lane = app.lanes.iter().find(|l| l.id == tile.lane_id);
+            match &tile.window {
+                Some(w) => click_zone_window(app, cell, tile.lane_id, w.clone()),
+                None => click_zone(app, cell, tile.lane_id, None, true),
+            }
             f.render_widget(
                 Paragraph::new(tile_lines(
                     app,
                     lane,
-                    ids[idx],
+                    tile,
                     cell.height as usize,
                     idx == active,
                     idx == active && app.focus_insert,
-                    app.hover_lane == Some(ids[idx]),
+                    app.hover_lane == Some(tile.lane_id),
                 )),
                 cell,
             );
@@ -1673,8 +1691,11 @@ fn render_grid(f: &mut Frame, app: &App) {
     let label = app
         .lanes
         .iter()
-        .find(|l| l.id == ids[active])
-        .map(|l| format!("{}/{}", l.repo.name, lane_name(l)))
+        .find(|l| l.id == tiles[active].lane_id)
+        .map(|l| match &tiles[active].window {
+            Some(w) => format!("{}/{} · {w}", l.repo.name, lane_name(l)),
+            None => format!("{}/{}", l.repo.name, lane_name(l)),
+        })
         .unwrap_or_default();
     let mut spans = vec![Span::raw("  ")];
     for i in 0..n {
@@ -1703,12 +1724,13 @@ fn render_grid(f: &mut Frame, app: &App) {
 fn tile_lines(
     app: &App,
     lane: Option<&Lane>,
-    id: LaneId,
+    tile: &crate::app::GridTile,
     height: usize,
     active: bool,
     focused: bool,
     hovered: bool,
 ) -> Vec<Line<'static>> {
+    let id = tile.lane_id;
     let marker = if focused {
         "▶"
     } else if active {
@@ -1716,13 +1738,15 @@ fn tile_lines(
     } else {
         " "
     };
-    let (badge, badge_style) = match lane {
-        Some(l) => agent_badge(l, app),
-        None => (String::new(), Style::default()),
+    // A shell tile names its terminal window instead of wearing an agent badge.
+    let (badge, badge_style) = match (&tile.window, lane) {
+        (None, Some(l)) => agent_badge(l, app),
+        _ => (String::new(), Style::default()),
     };
-    let label = match lane {
-        Some(l) => format!("{marker}{}/{}  ", l.repo.name, lane_name(l)),
-        None => format!("{marker}lane {id}"),
+    let label = match (lane, &tile.window) {
+        (Some(l), Some(w)) => format!("{marker}{}/{} · {w}  ", l.repo.name, lane_name(l)),
+        (Some(l), None) => format!("{marker}{}/{}  ", l.repo.name, lane_name(l)),
+        (None, _) => format!("{marker}lane {id}"),
     };
     let base = if focused {
         app.theme.selected()
@@ -1747,7 +1771,20 @@ fn tile_lines(
         ));
     }
     let mut lines = vec![Line::from(spans)];
-    lines.extend(output_tail(app, Some(id), height.saturating_sub(1)));
+    let budget = height.saturating_sub(1);
+    match &tile.window {
+        Some(w) => match app.term_output.get(w) {
+            Some(pane) => {
+                let start = pane.lines.len().saturating_sub(budget);
+                lines.extend(pane.lines[start..].iter().cloned());
+            }
+            None => lines.push(Line::from(Span::styled(
+                "  (no live output yet)".to_string(),
+                app.theme.dim(),
+            ))),
+        },
+        None => lines.extend(output_tail(app, Some(id), budget)),
+    }
     lines
 }
 
