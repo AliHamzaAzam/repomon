@@ -52,9 +52,20 @@ Agent panes live on the isolated server: `tmux -L rmv capture-pane -t "rmv:=lane
 
 - `e` (spawn) auto-focuses into Split; send Escape to get back to Fleet before
   reading fleet badges.
+- **Esc in Fleet QUITS the TUI** (zoom out past the top level). Never send a
+  "just in case" Escape when already in Fleet — the driver session dies and
+  later captures report "no server running". Track which view you're in.
 - The Notifications view (`5`) swallows most keys; Esc out before pressing
   global keys like `v`.
+- **`repomon daemon stop|status|restart` IGNORE `--socket`** — they resolve the
+  socket from config, so with only env-var isolation they hit the REAL daemon.
+  Stop an isolated daemon by pid (`pgrep -fl repomond`), never via the subcommand.
+- Time-based states (stall = 5 min of frozen pane): set the scenario up, verify
+  the negative early, and come back on a background timer; poking the agent pane
+  (`tmux send-keys -l "x"` — tty echo changes the content) resets the clock for
+  edge-refire tests. Launch the driver with `remain-on-exit on` so a dying TUI
+  leaves its exit status behind.
 - After a rebuild the USER's real daemon still runs old code: finish with
   `repomon daemon restart` (agents survive — they live in tmux).
-- Teardown: quit the TUI (`q`), `rmv daemon stop`, kill both tmux servers
-  (`tmux -L drv kill-server`, `tmux -L rmv kill-server`), rm the tmp dir.
+- Teardown: quit the TUI (`q`), kill the isolated daemon by pid, kill both tmux
+  servers (`tmux -L drv kill-server`, `tmux -L rmv kill-server`), rm the tmp dir.

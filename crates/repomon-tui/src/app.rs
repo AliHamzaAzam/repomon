@@ -21,8 +21,8 @@ use repomon_core::model::{
     RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
-    SessKey, activity_allows_refire, diff_session_transitions, session_by_key, session_statuses,
-    slot_by_key,
+    SessKey, SessState, activity_allows_refire, diff_session_transitions, session_by_key,
+    session_statuses, slot_by_key,
 };
 use repomon_core::protocol::Notification;
 use serde_json::json;
@@ -281,10 +281,11 @@ pub struct App {
     pub settings_editing: bool,
     /// Screen row of the first settings item (for click hit-testing), set during render.
     pub settings_geom: std::cell::Cell<u16>,
-    /// Last-seen status per real agent session, for notification edge-detection. A session that
-    /// left the snapshot is expressed by key absence (there is no `None` value), which is what
-    /// lets each agent in a shared lane fire its own alerts instead of one rolled-up status.
-    prev_status: HashMap<(LaneId, SessKey), AgentStatus>,
+    /// Last-seen state (status + stall flag) per real agent session, for notification
+    /// edge-detection. A session that left the snapshot is expressed by key absence (there is
+    /// no `None` value), which is what lets each agent in a shared lane fire its own alerts
+    /// instead of one rolled-up status.
+    prev_status: HashMap<(LaneId, SessKey), SessState>,
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
     notif_seeded: bool,
@@ -744,14 +745,14 @@ impl App {
     /// rate-limited agent will be auto-continued (global toggle minus this lane's opt-out).
     fn lane_attention(&self, lane: &Lane) -> u8 {
         let armed = self.settings.auto_continue && !self.ac_off.contains(&lane.id);
-        attention_rank(&lane.agent_sessions, armed)
+        attention_rank(lane, armed)
     }
 
     /// Whether this lane is blocked on the user: an agent waiting for input (any of the
-    /// decision / permission / end-of-turn buckets), or rate-limited with no auto-continue
-    /// coming. The threshold tracks `attention_rank`'s scale.
-    fn lane_needs_attention(&self, lane: &Lane) -> bool {
-        self.lane_attention(lane) <= 3
+    /// decision / permission / done-candidate / end-of-turn buckets), stalled mid-work, or
+    /// rate-limited with no auto-continue coming. The threshold tracks [`session_rank`]'s scale.
+    pub(crate) fn lane_needs_attention(&self, lane: &Lane) -> bool {
+        self.lane_attention(lane) <= 5
     }
 
     /// Cycle the selection through the lanes blocked on the user, wrapping past the end. While
@@ -825,11 +826,18 @@ impl App {
         self.attach_request = Some(lane_id);
     }
 
-    /// The lanes blocked on the user, in display order — the queue the prompt-peek popup walks.
+    /// The lanes with an answerable dialog on screen, in display order — the queue the
+    /// prompt-peek popup walks. Tighter than `lane_needs_attention` (which also counts
+    /// end-of-turn, stalled, and rate-limited lanes): `v` exists to ANSWER dialogs, and a
+    /// lane with nothing to answer would only open an empty popup.
     fn triage_queue(&self) -> Vec<LaneId> {
         self.visible_lanes()
             .into_iter()
-            .filter(|l| self.lane_needs_attention(l))
+            .filter(|l| {
+                l.agent_sessions
+                    .iter()
+                    .any(|s| !s.inferred && s.pending_dialog.is_some())
+            })
             .map(|l| l.id)
             .collect()
     }
@@ -1086,7 +1094,7 @@ impl App {
         // Snapshot the new statuses, one entry per real agent session. Inferred file-activity
         // sessions (worktree-isolated subagents) only count when the user opted in.
         let subagents = self.settings.notify_subagents;
-        let now: HashMap<(LaneId, SessKey), AgentStatus> = self
+        let now: HashMap<(LaneId, SessKey), SessState> = self
             .lanes
             .iter()
             .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
@@ -1204,6 +1212,8 @@ impl App {
             NotifKind::RateLimited => self.settings.notify_rate_limited,
             NotifKind::Resumed => self.settings.notify_resumed,
             NotifKind::Idle => self.settings.notify_idle,
+            // A stall is a needs-you-class event; it rides that toggle (same as the daemon).
+            NotifKind::Stalled => self.settings.notify_needs_you,
         }
     }
 
@@ -4412,29 +4422,48 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     Ok(app.cd_target)
 }
 
-/// How urgently a lane's sessions need the user: 0 = waiting on a decision-question, 1 =
-/// waiting on a permission ask, 2 = waiting at end-of-turn, 3 = rate-limited with no
-/// auto-continue coming, 4 = working, 5 = nothing actionable. Inferred file-activity
-/// placeholders never rank — they can't be acted on. `lane_needs_attention`'s threshold
-/// (`<= 3`) and this scale move together.
-fn attention_rank(sessions: &[AgentSession], auto_continue_armed: bool) -> u8 {
-    use AgentStatus::*;
-    use repomon_core::agent::attention::{Attention, agent_attention};
-    sessions
+/// How urgently a lane's sessions need the user (the most urgent session wins). Inferred
+/// file-activity placeholders never rank — they can't be acted on. `lane_needs_attention`'s
+/// threshold and [`session_rank`]'s scale move together.
+fn attention_rank(lane: &Lane, auto_continue_armed: bool) -> u8 {
+    use repomon_core::agent::attention::agent_attention_in;
+    lane.agent_sessions
         .iter()
         .filter(|s| !s.inferred)
-        .map(|s| match s.status {
-            Waiting => match agent_attention(s) {
-                Attention::Decision => 0,
-                Attention::Permission => 1,
-                _ => 2,
-            },
-            RateLimited if !auto_continue_armed => 3,
-            Running | RateLimited => 4,
-            Idle | Ended => 5,
+        .map(|s| {
+            session_rank(
+                agent_attention_in(lane, s),
+                s.status,
+                s.stale,
+                auto_continue_armed,
+            )
         })
         .min()
-        .unwrap_or(5)
+        .unwrap_or(7)
+}
+
+/// One session's urgency: 0 = decision-question, 1 = permission ask, 2 = done-candidate
+/// (review?), 3 = bare end-of-turn, 4 = stalled, 5 = rate-limited with no auto-continue
+/// coming, 6 = working, 7 = nothing actionable. `lane_needs_attention`'s threshold (`<= 5`)
+/// and this scale move together.
+fn session_rank(
+    att: repomon_core::agent::attention::Attention,
+    status: AgentStatus,
+    stale: bool,
+    auto_continue_armed: bool,
+) -> u8 {
+    use AgentStatus::*;
+    use repomon_core::agent::attention::Attention;
+    match (att, status) {
+        (Attention::Decision, _) => 0,
+        (Attention::Permission, _) => 1,
+        (Attention::DoneCandidate, _) => 2,
+        (Attention::EndOfTurn, _) | (_, Waiting) => 3,
+        _ if stale => 4,
+        (_, RateLimited) if !auto_continue_armed => 5,
+        (_, Running | RateLimited) => 6,
+        (_, Idle | Ended) => 7,
+    }
 }
 
 /// A stable identity for one agent session within a lane, used to remember which agent a lane
@@ -5108,6 +5137,9 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            ended_turn: false,
             config_dir: None,
             custom_label: None,
         }
@@ -5164,65 +5196,29 @@ mod tests {
     }
 
     #[test]
-    fn attention_rank_orders_urgency() {
+    fn session_rank_orders_urgency() {
         use AgentStatus::*;
-        // Waiting tops, refined by what the wait is: a real question (decision) outranks a
-        // routine permission ask outranks a bare end-of-turn. A rate-limited agent only needs
-        // you when nothing will resume it.
-        let with_prompt = |mut s: AgentSession, p: &str| {
-            s.pending_prompt = Some(p.into());
-            s
-        };
+        use repomon_core::agent::attention::Attention::*;
+        // Dialogs top the scale (a real question above a routine permission), then the
+        // review-ready done-candidate, the bare end-of-turn, a stall, and a rate limit that
+        // nothing will resume. Working and idle never demand attention.
+        assert_eq!(session_rank(Decision, Waiting, false, true), 0);
+        assert_eq!(session_rank(Permission, Waiting, false, true), 1);
+        assert_eq!(session_rank(DoneCandidate, Waiting, false, true), 2);
+        assert_eq!(session_rank(EndOfTurn, Waiting, false, true), 3);
+        assert_eq!(session_rank(None, Running, true, true), 4, "stalled");
         assert_eq!(
-            attention_rank(
-                &[with_prompt(
-                    sess(Some("a"), Waiting, false),
-                    "Which auth method should we use?"
-                )],
-                true
-            ),
-            0,
-            "a decision-question is the most urgent"
+            session_rank(None, Idle, true, true),
+            4,
+            "stalled post-decay"
         );
-        assert_eq!(
-            attention_rank(
-                &[with_prompt(
-                    sess(Some("a"), Waiting, false),
-                    "Bash command — Do you want to proceed?"
-                )],
-                true
-            ),
-            1,
-            "a permission ask ranks below a decision"
-        );
-        assert_eq!(
-            attention_rank(&[sess(Some("a"), Waiting, false)], true),
-            2,
-            "a bare end-of-turn is the least urgent wait"
-        );
-        assert_eq!(
-            attention_rank(&[sess(Some("a"), RateLimited, false)], false),
-            3
-        );
-        assert_eq!(
-            attention_rank(&[sess(Some("a"), RateLimited, false)], true),
-            4
-        );
-        assert_eq!(attention_rank(&[sess(Some("a"), Running, false)], true), 4);
-        assert_eq!(attention_rank(&[sess(Some("a"), Idle, false)], true), 5);
-        // The most urgent session wins; inferred placeholders never rank.
-        assert_eq!(
-            attention_rank(
-                &[
-                    sess(Some("a"), Running, false),
-                    sess(Some("b"), Waiting, false)
-                ],
-                true
-            ),
-            2
-        );
-        assert_eq!(attention_rank(&[sess(None, Waiting, true)], true), 5);
-        assert_eq!(attention_rank(&[], true), 5);
+        assert_eq!(session_rank(None, RateLimited, false, false), 5);
+        assert_eq!(session_rank(None, RateLimited, false, true), 6);
+        assert_eq!(session_rank(None, Running, false, true), 6);
+        assert_eq!(session_rank(None, Idle, false, true), 7);
+        // Everything through the unarmed rate limit counts as "needs attention" (<= 5).
+        assert!(session_rank(None, RateLimited, false, false) <= 5);
+        assert!(session_rank(None, Running, false, true) > 5);
     }
 
     #[test]

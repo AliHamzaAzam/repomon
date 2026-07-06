@@ -797,7 +797,7 @@ fn render_sessions(f: &mut Frame, app: &App) {
 
 fn notif_style(app: &App, kind: NotifKind) -> Style {
     match kind {
-        NotifKind::NeedsYou => app.theme.needs_you(),
+        NotifKind::NeedsYou | NotifKind::Stalled => app.theme.needs_you(),
         NotifKind::RateLimited => app.theme.rate_limited(),
         NotifKind::Resumed => app.theme.running(),
         NotifKind::Idle => app.theme.muted(),
@@ -1781,6 +1781,7 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
     let rate_limited = sessions
         .iter()
         .find(|s| s.status == AgentStatus::RateLimited);
+    let stalled = sessions.iter().find(|s| !s.inferred && s.stale);
     if let Some(rl) = rate_limited {
         (
             format!("⏳ rate-limited · {}{count}{tag}", fmt_resume(rl.resume_at)),
@@ -1788,13 +1789,20 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
         )
     } else if waiting > 0 {
         // Name what the wait is (the most urgent one when agents disagree): a real question,
-        // a routine permission ask, or a finished turn — instead of a generic "needs you".
-        let word = match max_waiting_attention(sessions) {
-            Attention::Decision => "question",
-            Attention::Permission => "permission",
-            _ => "done",
+        // a routine permission ask, shippable work, or a finished turn — never a generic
+        // "needs you".
+        let (glyph, word) = match max_waiting_attention(lane) {
+            Attention::Decision => ("⏸", "question"),
+            Attention::Permission => ("⏸", "permission"),
+            Attention::DoneCandidate => ("✓", "review?"),
+            _ => ("⏸", "done"),
         };
-        (format!("⏸ {word}{count}{tag}"), app.theme.needs_you())
+        (format!("{glyph} {word}{count}{tag}"), app.theme.needs_you())
+    } else if let Some(st) = stalled {
+        (
+            format!("⚠ stalled {}{count}{tag}", fmt_stall(st.stalled_since)),
+            app.theme.needs_you(),
+        )
     } else if running > 0 {
         (format!("▶ running{count}{tag}"), app.theme.running())
     } else {
@@ -1803,13 +1811,15 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
 }
 
 /// The most urgent attention among a lane's waiting sessions (inferred placeholders never
-/// count) — what a "⏸" actually is: a question, a permission ask, or a finished turn.
-fn max_waiting_attention(sessions: &[repomon_core::model::AgentSession]) -> Attention {
+/// count) — what a "⏸" actually is: a question, a permission ask, shippable work, or a
+/// finished turn.
+fn max_waiting_attention(lane: &Lane) -> Attention {
+    use repomon_core::agent::attention::agent_attention_in;
     use repomon_core::model::AgentStatus;
-    sessions
+    lane.agent_sessions
         .iter()
         .filter(|s| !s.inferred && s.status == AgentStatus::Waiting)
-        .map(agent_attention)
+        .map(|s| agent_attention_in(lane, s))
         .max_by_key(|a| a.priority())
         .unwrap_or(Attention::None)
 }
@@ -1820,6 +1830,18 @@ fn waiting_glyph(sess: &repomon_core::model::AgentSession) -> &'static str {
         Attention::Decision => theme::WAIT_QUESTION,
         Attention::Permission => theme::WAITING,
         _ => theme::WAIT_DONE,
+    }
+}
+
+/// How long an agent has been stalled, for badges: "7m", or "1h 12m" past the hour.
+fn fmt_stall(since: Option<DateTime<Utc>>) -> String {
+    let mins = since
+        .map(|t| (Utc::now() - t).num_minutes().max(0))
+        .unwrap_or(0);
+    if mins >= 60 {
+        format!("{}h {}m", mins / 60, mins % 60)
+    } else {
+        format!("{mins}m")
     }
 }
 
@@ -2152,9 +2174,11 @@ fn fleet_lines(
 
     let visible = app.visible_lanes();
     let repos = distinct_repos(&visible);
+    // The same definition the urgent filter and g/G jumps use — so a stalled or
+    // dead-rate-limited lane counts here too, not just a Waiting one.
     let needs = visible
         .iter()
-        .filter(|l| l.agent_sessions.iter().any(|s| s.status.needs_you()))
+        .filter(|l| app.lane_needs_attention(l))
         .count();
     let urgent = if app.urgent_only {
         " · URGENT only"
@@ -2711,6 +2735,8 @@ fn agent_subrow(
     use repomon_core::model::AgentStatus;
     let (glyph, gstyle) = match sess.status {
         AgentStatus::RateLimited => (theme::RATE_LIMITED, app.theme.rate_limited()),
+        // Stalled outranks the Running/Idle underneath it — that's the whole point.
+        _ if sess.stale => (theme::STALLED, app.theme.needs_you()),
         AgentStatus::Waiting => (waiting_glyph(sess), app.theme.needs_you()),
         AgentStatus::Running => (theme::AGENT_ACTIVE, app.theme.running()),
         _ if sess.inferred => (theme::INFERRED_ACTIVE, app.theme.dim()),
@@ -2747,16 +2773,19 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
             .any(|s| !s.inferred && s.status == st)
     };
     let any_inferred = lane.agent_sessions.iter().any(|s| s.inferred);
+    let any_stalled = lane.agent_sessions.iter().any(|s| !s.inferred && s.stale);
     let (active, active_style) = if any(AgentStatus::RateLimited) {
         (theme::RATE_LIMITED, app.theme.rate_limited()) // ⏳ paused on a usage limit
     } else if any(AgentStatus::Waiting) {
-        // ? question · ⏸ permission · ✓ finished turn — all amber "blocked on you".
-        let glyph = match max_waiting_attention(&lane.agent_sessions) {
+        // ? question · ⏸ permission · ✓ finished turn / shippable — all amber "blocked on you".
+        let glyph = match max_waiting_attention(lane) {
             Attention::Decision => theme::WAIT_QUESTION,
             Attention::Permission => theme::WAITING,
             _ => theme::WAIT_DONE,
         };
         (glyph, app.theme.needs_you())
+    } else if any_stalled {
+        (theme::STALLED, app.theme.needs_you()) // ⚠ alive but frozen mid-work
     } else if any(AgentStatus::Running) {
         (theme::AGENT_ACTIVE, app.theme.running()) // ▶ working
     } else if any_inferred {

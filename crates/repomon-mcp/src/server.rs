@@ -249,7 +249,7 @@ impl Server {
                         .into(),
                 );
             }
-            Attention::EndOfTurn => {
+            Attention::EndOfTurn | Attention::DoneCandidate => {
                 return Err(
                     "the agent ended its turn (no open dialog) — use send_to_agent to \
                      give it the next instruction, not approve_agent."
@@ -757,8 +757,12 @@ fn diff(baseline: &[LaneDigest], current: &[LaneDigest], filter: Option<&[i64]>)
 
 fn tally(lanes: &[LaneDigest]) -> Value {
     let (mut running, mut waiting, mut permission, mut decision) = (0, 0, 0, 0);
-    let (mut end_of_turn, mut rate_limited, mut idle, mut no_agent) = (0, 0, 0, 0);
+    let (mut end_of_turn, mut done_candidate, mut stalled) = (0, 0, 0);
+    let (mut rate_limited, mut idle, mut no_agent) = (0, 0, 0);
     for l in lanes {
+        if l.agent.as_ref().is_some_and(|a| a.stalled) {
+            stalled += 1;
+        }
         match l.attention() {
             Attention::Permission => {
                 permission += 1;
@@ -766,6 +770,10 @@ fn tally(lanes: &[LaneDigest]) -> Value {
             }
             Attention::Decision => {
                 decision += 1;
+                waiting += 1;
+            }
+            Attention::DoneCandidate => {
+                done_candidate += 1;
                 waiting += 1;
             }
             Attention::EndOfTurn => {
@@ -786,7 +794,9 @@ fn tally(lanes: &[LaneDigest]) -> Value {
         "needs_you": waiting,
         "permission": permission,
         "decision": decision,
+        "done_candidate": done_candidate,
         "end_of_turn": end_of_turn,
+        "stalled": stalled,
         "rate_limited": rate_limited,
         "idle": idle,
         "no_agent": no_agent,
@@ -1135,6 +1145,7 @@ mod tests {
                 idle_secs: 0,
                 external: false,
                 inferred: false,
+                stalled: false,
                 window: Some("lane-1".into()),
                 pending_prompt: None,
             }),
@@ -1164,6 +1175,9 @@ mod tests {
             last_message: None,
             pending_prompt: None,
             pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            ended_turn: false,
             config_dir: None,
             custom_label: None,
         }

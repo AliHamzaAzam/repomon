@@ -22,7 +22,9 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 // The attention taxonomy grew out of this module and now lives in core, shared with the TUI's
 // badges and the daemon's notifications; re-exported so orchestrator-side callers don't churn.
-pub use repomon_core::agent::attention::{Attention, agent_attention, primary_agent};
+pub use repomon_core::agent::attention::{
+    Attention, agent_attention, agent_attention_in, primary_agent,
+};
 
 /// A single agent session, projected to the fields an orchestrator reasons about.
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +39,10 @@ pub struct AgentDigest {
     pub external: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub inferred: bool,
+    /// The agent looks stuck: alive but neither pane nor transcript has moved (see
+    /// `AgentSession.stale`). A watchdog flag alongside `status`, not a status of its own.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stalled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window: Option<String>,
     /// The open dialog's summary, when one is present. Skipped from fleet digests (it lives in
@@ -148,7 +154,7 @@ impl Fleet {
 
 /// Project a live `Lane` into its compact digest.
 pub fn project_lane(lane: &Lane, now: DateTime<Utc>) -> LaneDigest {
-    let agent = primary_agent(lane).map(|s| project_agent(s, now));
+    let agent = primary_agent(lane).map(|s| project_agent(lane, s, now));
     let extra = lane.agent_sessions.len().saturating_sub(1);
     let active_agents = lane
         .agent_sessions
@@ -180,8 +186,8 @@ pub fn is_active_status(s: &AgentStatus) -> bool {
     )
 }
 
-fn project_agent(s: &AgentSession, now: DateTime<Utc>) -> AgentDigest {
-    let attention = agent_attention(s);
+fn project_agent(lane: &Lane, s: &AgentSession, now: DateTime<Utc>) -> AgentDigest {
+    let attention = agent_attention_in(lane, s);
     let headline = match s.status {
         AgentStatus::Waiting => s.pending_prompt.clone().or_else(|| s.last_message.clone()),
         AgentStatus::RateLimited => Some(match s.resume_at {
@@ -199,6 +205,7 @@ fn project_agent(s: &AgentSession, now: DateTime<Utc>) -> AgentDigest {
         idle_secs: (now - s.last_activity_at).num_seconds().max(0),
         external: s.external,
         inferred: s.inferred,
+        stalled: s.stale,
         window: s.tmux_window.clone(),
         pending_prompt: s.pending_prompt.clone(),
     }
@@ -222,9 +229,9 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Hash only the fields that represent a *meaningful* transition: lane set, primary agent kind,
-/// status, attention, and the open-dialog summary. Deliberately excludes churning fields
-/// (headline text, idle seconds, dirty counts) so `wait_for_change` wakes on real edges, not on
-/// every streamed token or file save.
+/// status, attention, the stall flag, and the open-dialog summary. Deliberately excludes
+/// churning fields (headline text, idle seconds, dirty counts) so `wait_for_change` wakes on
+/// real edges, not on every streamed token or file save.
 fn fingerprint(lanes: &[LaneDigest]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut ordered: Vec<&LaneDigest> = lanes.iter().collect();
@@ -238,6 +245,7 @@ fn fingerprint(lanes: &[LaneDigest]) -> u64 {
                 a.kind.hash(&mut h);
                 a.status.hash(&mut h);
                 a.attention.as_str().hash(&mut h);
+                a.stalled.hash(&mut h);
                 a.pending_prompt.as_deref().unwrap_or("").hash(&mut h);
             }
             None => 0u8.hash(&mut h),
@@ -342,6 +350,9 @@ mod tests {
             last_message: None,
             pending_prompt: pending.map(str::to_string),
             pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            ended_turn: false,
             config_dir: None,
             custom_label: None,
         }

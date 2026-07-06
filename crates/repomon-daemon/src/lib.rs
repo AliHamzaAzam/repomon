@@ -149,6 +149,10 @@ pub struct Ctx {
     /// to a window drops its entry, so an answered dialog can't ride out the TTL as a ghost.
     pub prompt_cache:
         Mutex<HashMap<String, (Instant, Option<repomon_core::agent::prompt::PendingDialog>)>>,
+    /// Per window: the last sniffed pane-content hash and when it last CHANGED — the stall
+    /// detector's clock. Never TTL-pruned (its point is remembering how long a pane has sat
+    /// still); entries drop only when their window vanishes.
+    pub pane_seen: Mutex<HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>>,
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
@@ -249,6 +253,7 @@ impl Ctx {
             cwds_sticky: Mutex::new(HashMap::new()),
             overlay_cache: Mutex::new(None),
             prompt_cache: Mutex::new(HashMap::new()),
+            pane_seen: Mutex::new(HashMap::new()),
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),

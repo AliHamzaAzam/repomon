@@ -17,8 +17,8 @@ use repomon_core::Config;
 use repomon_core::agent;
 use repomon_core::model::{AgentStatus, LaneId};
 use repomon_core::notify::{
-    NotifKind, SessKey, activity_allows_refire, compose, diff_session_transitions, session_by_key,
-    session_statuses, slot_by_key,
+    NotifKind, SessKey, SessState, activity_allows_refire, compose, diff_session_transitions,
+    session_by_key, session_statuses, slot_by_key,
 };
 use serde_json::json;
 
@@ -47,7 +47,7 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let mut prev: HashMap<(LaneId, SessKey), AgentStatus> = HashMap::new();
+    let mut prev: HashMap<(LaneId, SessKey), SessState> = HashMap::new();
     let mut seeded = false;
     let mut debounce: HashMap<(LaneId, SessKey, NotifKind), Instant> = HashMap::new();
     // Activity-anchored re-fire latch: the session's `last_activity_at` (transcript mtime) at the
@@ -104,7 +104,7 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             continue;
         };
         let subagents = cfg.notify_subagents;
-        let now: HashMap<(LaneId, SessKey), AgentStatus> = lanes
+        let now: HashMap<(LaneId, SessKey), SessState> = lanes
             .iter()
             .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
             .collect();
@@ -256,6 +256,9 @@ fn kind_enabled(cfg: &Config, kind: NotifKind) -> bool {
         NotifKind::RateLimited => cfg.notify_rate_limited,
         NotifKind::Resumed => cfg.notify_resumed,
         NotifKind::Idle => cfg.notify_idle,
+        // A stall is a needs-you-class event (the agent is blocked and only you can unblock
+        // it), so it rides that toggle rather than growing its own setting.
+        NotifKind::Stalled => cfg.notify_needs_you,
     }
 }
 
