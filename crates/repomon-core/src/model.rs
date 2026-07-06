@@ -264,6 +264,11 @@ pub struct AgentSession {
     /// exactly when this is present — a plain end-of-turn `Waiting` has none.
     #[serde(default)]
     pub pending_prompt: Option<String>,
+    /// The full parsed dialog behind `pending_prompt` — question, body, options, cursor — so
+    /// clients can render answer controls without capturing the pane themselves. Overlaid at
+    /// list time alongside `pending_prompt`; not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_dialog: Option<crate::agent::prompt::PendingDialog>,
     /// The Claude account (config dir) this agent runs under, overlaid at list time from the
     /// transcript. `None` = the default `~/.claude`; `Some` = a variant (`~/.claude-work`). Lets a
     /// client attribute account-level usage (the `/usage` probe) to the focused agent. Not persisted.

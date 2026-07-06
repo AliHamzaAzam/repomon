@@ -1858,6 +1858,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     tmux_window: None,
                     last_message: None,
                     pending_prompt: None,
+                    pending_dialog: None,
                     config_dir: None,
                     custom_label: None,
                 });
@@ -2350,6 +2351,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         tmux_window: Some(window),
         last_message: None,
         pending_prompt: None,
+        pending_dialog: None,
         config_dir: None,
         custom_label: None,
     }
