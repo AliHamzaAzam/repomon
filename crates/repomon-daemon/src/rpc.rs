@@ -1250,6 +1250,41 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .map_err(internal)?;
             Ok(Value::Null)
         }
+        "agent.fit" => {
+            // The arbitrated resize for remote viewers: reflow the pane to the caller's grid
+            // ONLY while no live mediated viewer (the TUI's viewport focus, kept fresh by its
+            // heartbeat) owns the window's size. Always answers with the authoritative grid,
+            // so a refused caller renders pinned at the shared size instead of fighting.
+            let p: AgentResize = parse(params)?;
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            let owned = {
+                let focus = ctx.viewport_focus.lock().await;
+                let at = *ctx.viewport_focus_at.lock().await;
+                fit_owned(focus.as_ref(), at, &window, std::time::Instant::now())
+            };
+            if owned {
+                let tmux = ctx.tmux.clone();
+                let w = window.clone();
+                let dims = tokio::task::spawn_blocking(move || tmux.size_named(&w))
+                    .await
+                    .map_err(internal)?;
+                return Ok(json!({
+                    "applied": false,
+                    "cols": dims.map(|d| d.0),
+                    "rows": dims.map(|d| d.1),
+                }));
+            }
+            let (cols, rows) = (p.cols.max(20), p.rows.max(4));
+            let tmux = ctx.tmux.clone();
+            let w = window.clone();
+            tokio::task::spawn_blocking(move || tmux.resize_named(&w, cols, rows))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            Ok(json!({ "applied": true, "cols": cols, "rows": rows }))
+        }
         "agent.scroll" => {
             let p: AgentScroll = parse(params)?;
             let tmux = ctx.tmux.clone();
@@ -1448,6 +1483,10 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             let mut p: ViewportSet = parse(params)?;
             *ctx.viewport.lock().await = p.lane_ids;
             *ctx.viewport_focus.lock().await = p.focus_lane.zip(p.focus_window);
+            // The focus heartbeat: `agent.fit` treats the focused window as size-owned while
+            // this is fresh. The TUI re-asserts its viewport every few seconds, so a crashed
+            // or closed TUI releases ownership when the beat stops.
+            *ctx.viewport_focus_at.lock().await = Some(std::time::Instant::now());
             // Only real terminal windows are streamable extras — anything else is dropped so a
             // client can't point the capture loop at arbitrary windows.
             p.windows
@@ -2266,6 +2305,28 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
         Some(n) => n.max(managed_n).max(fresh).min(total),
         None => total, // probe unavailable: don't filter
     }
+}
+
+/// How long a viewport focus keeps owning its window's size after the last `viewport.set`.
+/// Three missed ~5s TUI heartbeats — generous against a busy tick, short enough that a
+/// closed/crashed TUI frees the pane for remote reflow within seconds.
+const FOCUS_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether a live mediated viewer owns `window`'s size (`agent.fit`'s arbitration): the
+/// viewport focus names this window and the viewport beat is fresh.
+fn fit_owned(
+    focus: Option<&(repomon_core::model::LaneId, String)>,
+    focus_at: Option<std::time::Instant>,
+    window: &str,
+    now: std::time::Instant,
+) -> bool {
+    let Some((_, focused)) = focus else {
+        return false;
+    };
+    if focused != window {
+        return false;
+    }
+    focus_at.is_some_and(|at| now.duration_since(at) < FOCUS_OWNED_TTL)
 }
 
 /// How long a managed agent's pane must sit unchanged — with no dialog up and its turn not
@@ -3339,6 +3400,24 @@ fn write_orchestrator_mcp_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_ownership_follows_the_live_viewport_focus() {
+        let now = std::time::Instant::now();
+        let fresh = Some(now - std::time::Duration::from_secs(2));
+        let stale = Some(now - std::time::Duration::from_secs(30));
+        let focus = Some((7i64, "lane-7".to_string()));
+
+        // A live focus on the same window owns its size.
+        assert!(fit_owned(focus.as_ref(), fresh, "lane-7", now));
+        // A different window is free.
+        assert!(!fit_owned(focus.as_ref(), fresh, "lane-9", now));
+        // A crashed/closed TUI stops owning once the viewport beat goes stale.
+        assert!(!fit_owned(focus.as_ref(), stale, "lane-7", now));
+        assert!(!fit_owned(focus.as_ref(), None, "lane-7", now));
+        // No focus at all — nothing is owned.
+        assert!(!fit_owned(None, fresh, "lane-7", now));
+    }
 
     #[test]
     fn session_visibility_rules() {
