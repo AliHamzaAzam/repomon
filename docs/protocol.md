@@ -26,6 +26,15 @@ with `repomon remote pair`, which renders a `repomon://<host:port>#<token>` QR).
   token can read panes and type into agents.
 - `ping` → `"pong"` serves as an application-level keep-alive; events flow after `subscribe`
   exactly as on the Unix socket.
+- **Method allowlist (default-deny):** the bridge only dispatches reads and
+  interaction-with-existing-agents — anything else (host management, spawning, config,
+  terminal open/close, filesystem) answers `-32601` `"not permitted over remote bridge"`.
+  Since v0.4.1 that includes `agent.prompt`, `agent.answer` (verified dialog steering,
+  strictly safer than the blind `agent.key` it complements), `agent.watch_bytes`, and
+  `terminal.list_all`. Events themselves are forwarded unfiltered after `subscribe`. Note
+  `agent.watch_bytes` is single-watch daemon-wide: a remote client and a local TUI Focus view
+  contend for the one byte stream, last writer wins — the loser should fall back to
+  capture-based polling.
 
 ## Envelope
 

@@ -59,11 +59,17 @@ fn remote_method_allowed(method: &str) -> bool {
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
         | "agent.capture" | "agent.transcript"
         | "usage.get" | "daemon.status"
+        // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
+        | "terminal.list_all"
         // event stream + per-client streaming hint
         | "subscribe" | "viewport.set"
-        // drive an existing agent
+        // drive an existing agent. agent.prompt is a read (fresh pane capture parsed for the
+        // on-screen dialog); agent.answer is strictly safer than the already-allowed blind
+        // agent.key — it re-captures and verifies the dialog before steering; agent.watch_bytes
+        // is a read-only byte stream of a pane the client could already agent.capture.
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
         | "agent.target" | "agent.resize"
+        | "agent.prompt" | "agent.answer" | "agent.watch_bytes"
         // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
         // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
         // process-spawn with caller-chosen autonomy/max_agents/prompt, so strictly higher privilege
@@ -271,6 +277,10 @@ mod tests {
             "commit.recent",
             "agent.capture",
             "agent.transcript",
+            "agent.prompt",
+            "agent.answer",
+            "agent.watch_bytes",
+            "terminal.list_all",
             "agent.send_input",
             "agent.signal",
             "agent.key",
@@ -308,6 +318,8 @@ mod tests {
             "config.get",
             "config.set",
             "terminal.open",
+            "terminal.close",
+            "terminal.target",
             "fs.browse",
             "daemon.shutdown",
             "agent.add",
