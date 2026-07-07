@@ -67,8 +67,12 @@ fn remote_method_allowed(method: &str) -> bool {
         // on-screen dialog); agent.answer is strictly safer than the already-allowed blind
         // agent.key — it re-captures and verifies the dialog before steering; agent.watch_bytes
         // is a read-only byte stream of a pane the client could already agent.capture.
+        // agent.fit is the ONLY remote door to pane sizing: it reflows the shared pane to the
+        // caller's grid only while no live TUI viewport owns the window, and always answers
+        // with the authoritative grid. The blind agent.resize stays local-only — an
+        // unconditional remote resize is exactly what squeezed the TUI's mediated view.
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
-        | "agent.target" | "agent.resize"
+        | "agent.target" | "agent.fit"
         | "agent.prompt" | "agent.answer" | "agent.watch_bytes"
         // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
         // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
@@ -286,7 +290,7 @@ mod tests {
             "agent.key",
             "agent.scroll",
             "agent.target",
-            "agent.resize",
+            "agent.fit",
             "agent.pin",
             "subscribe",
             "viewport.set",
@@ -307,6 +311,7 @@ mod tests {
             "agent.adopt",
             "agent.spawn",
             "agent.stop",
+            "agent.resize",
             "repo.add",
             "repo.remove",
             "repo.discover",

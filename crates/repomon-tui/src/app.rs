@@ -407,6 +407,10 @@ pub struct App {
     last_viewport: Vec<LaneId>,
     last_viewport_focus: Option<(LaneId, String)>,
     last_viewport_windows: Vec<String>,
+    /// When the viewport was last sent. Expires after [`VIEWPORT_REASSERT`] so the daemon's
+    /// focus-ownership beat (`agent.fit` arbitration) stays fresh while this TUI is alive —
+    /// an unchanged viewport is re-sent, which is otherwise a no-op.
+    last_viewport_at: Option<std::time::Instant>,
     /// Last terminal title emitted (OSC 2), to skip redundant writes.
     last_title: String,
     attach_request: Option<LaneId>,
@@ -586,6 +590,7 @@ impl App {
             last_viewport: Vec::new(),
             last_viewport_windows: Vec::new(),
             last_viewport_focus: None,
+            last_viewport_at: None,
             last_title: String::new(),
             attach_request: None,
             attach_target: None,
@@ -1521,9 +1526,13 @@ impl App {
                 .zip(self.selected_window()),
             _ => None,
         };
+        let beat_due = self
+            .last_viewport_at
+            .is_none_or(|at| at.elapsed() >= VIEWPORT_REASSERT);
         if live != self.last_viewport
             || focus != self.last_viewport_focus
             || windows != self.last_viewport_windows
+            || beat_due
         {
             let _ = self
                 .client
@@ -1540,6 +1549,7 @@ impl App {
             self.last_viewport = live;
             self.last_viewport_focus = focus;
             self.last_viewport_windows = windows;
+            self.last_viewport_at = Some(std::time::Instant::now());
         }
         // Stream the orchestrator pane while the command-center view is open, or while the pinned
         // repomind row is selected in Split (its right column previews the live pane). Toggle the
@@ -4778,6 +4788,17 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
             .call("orchestrator.watch", Some(json!({ "on": false })))
             .await;
     }
+    // Release the viewport on a clean quit so remote viewers may reflow panes immediately
+    // instead of waiting out the focus-ownership TTL (a crash falls back to that TTL).
+    let _ = app
+        .client
+        .call(
+            "viewport.set",
+            Some(
+                json!({ "lane_ids": [], "focus_lane": null, "focus_window": null, "windows": [] }),
+            ),
+        )
+        .await;
     disable_bracketed_paste();
     disable_mouse();
     ratatui::restore();
@@ -4849,6 +4870,11 @@ enum SessionRef {
 /// How long the TUI trusts its last `agent.resize` before re-asserting the same size. Long
 /// enough not to spam tmux, short enough that an externally squeezed pane heals in seconds.
 const RESIZE_REASSERT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often an unchanged viewport is re-sent anyway — the daemon's focus-ownership beat for
+/// `agent.fit` arbitration (its 15s TTL tolerates two missed beats). A re-send is a no-op
+/// beyond stamping the beat.
+const VIEWPORT_REASSERT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Consecutive lane refreshes a focused lane may show no managed session before Focus detaches.
 /// More than one, so a single transient overlay flap (one bad snapshot — a tmux/lsof probe blip)

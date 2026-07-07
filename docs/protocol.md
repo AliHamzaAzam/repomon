@@ -31,7 +31,10 @@ with `repomon remote pair`, which renders a `repomon://<host:port>#<token>` QR).
   terminal open/close, filesystem) answers `-32601` `"not permitted over remote bridge"`.
   Since v0.4.1 that includes `agent.prompt`, `agent.answer` (verified dialog steering,
   strictly safer than the blind `agent.key` it complements), `agent.watch_bytes`, and
-  `terminal.list_all`. Events themselves are forwarded unfiltered after `subscribe`. Note
+  `terminal.list_all`; since v0.4.2 `agent.fit` replaces `agent.resize` over the bridge —
+  the unconditional resize is local-only (a blind remote resize is exactly what squeezed
+  the TUI's mediated view), and `agent.fit` reflows the shared pane only while no live
+  TUI viewport owns it. Events themselves are forwarded unfiltered after `subscribe`. Note
   `agent.watch_bytes` is single-watch daemon-wide: a remote client and a local TUI Focus view
   contend for the one byte stream, last writer wins — the loser should fall back to
   capture-based polling.
@@ -84,7 +87,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.send_input` | `{ lane_id, text, enter=true, window? }` | `null` (types text, then Enter unless `enter=false`; `window` targets one agent in a multi-agent lane) |
 | `agent.key` | `{ lane_id, key, literal=false, window? }` | `null` (one keystroke: literal char or key name; `window` targets one agent in a multi-agent lane) |
 | `agent.signal` | `{ lane_id, key, window? }` | `null` |
-| `agent.watch_bytes` | `{ lane_id, window?, on }` | on `on: true`, `{ cols, rows }` — the pane's current grid (`null`s when the window is gone); `null` on `off`. Streams the pane's raw PTY bytes (tmux `pipe-pane`) as `event.agent.bytes`. Single-watch: a new `on` replaces the previous watch. Render your emulator at exactly the acked grid — do NOT `agent.resize` the pane to fit your screen: the pane is shared, and a local TUI (which re-asserts its own size within seconds) would render squeezed in the meantime. The capture-based `viewport.set` streaming is unaffected. |
+| `agent.watch_bytes` | `{ lane_id, window?, on }` | on `on: true`, `{ cols, rows }` — the pane's current grid (`null`s when the window is gone); `null` on `off`. Streams the pane's raw PTY bytes (tmux `pipe-pane`) as `event.agent.bytes`. Single-watch: a new `on` replaces the previous watch. Render your emulator at the authoritative grid — the ack's, or the one `agent.fit` answers with: the pane is shared, and only `agent.fit` may reflow it remotely (a local TUI re-asserts its own size within seconds). The capture-based `viewport.set` streaming is unaffected. |
 | `agent.prompt` | `{ lane_id, window? }` | `{ dialog: PendingDialog\|null }` — fresh pane capture parsed for the interactive dialog actually on screen right now (never the sniff cache). `PendingDialog` = `{ title?, question, body?: [String], options: [{ number?, text }], selected? }`; `lane.list` carries the same object on `AgentSession.pending_dialog` alongside the `pending_prompt` summary. |
 | `agent.answer` | `{ lane_id, choice, window?, expect_summary? }` | `{ answered, sent }` — re-captures the pane, verifies a dialog is still up (and, when `expect_summary` is set, that it still summarizes to that string), then steers to `choice` (0-based) and confirms. On a stale view it does NOT send anything: error `-32010` (`no pending dialog` / `dialog changed`) with `error.data.dialog` carrying what's actually on screen (possibly `null`) so the client re-renders instead of re-fetching. Any input path (`send_input`/`key`/`signal`/`answer`) drops the window's sniff-cache entry, so an answered dialog can't be re-advertised for the rest of its TTL. |
 | `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
@@ -92,6 +95,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `session.rename` | `{ session_id, label? }` | `null` (set/clear a user label for a session, keyed by its durable transcript id; empty/absent `label` clears it; overlaid onto `AgentSession.custom_label`) |
 | `agent.target` | `{ lane_id, window? }` | `{ target, available }` (also resets the window to follow the attaching client's size) |
 | `agent.resize` | `{ lane_id, cols, rows, window? }` | `null` (resize the agent's pane so the mediated view reflows to fit; clamped to a floor) |
+| `agent.fit` | `{ lane_id, cols, rows, window? }` | `{ applied, cols, rows }` — the arbitrated resize for remote viewers: reflows the shared pane to the caller's grid ONLY while no live local viewport focus owns the window (the TUI heartbeats its viewport every ~5s; ownership lapses 15s after the last beat, and a clean TUI quit releases it immediately). Refused (`applied: false`) it answers with the pane's current grid so the caller renders pinned at the shared size instead of fighting. Poll it (~10s) to adapt when the TUI starts or stops viewing. |
 | `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen — the client then scrolls the captured buffer itself) |
 | `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |

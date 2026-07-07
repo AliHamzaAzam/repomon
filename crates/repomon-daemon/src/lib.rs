@@ -138,6 +138,10 @@ pub struct Ctx {
     /// Which agent window the focused lane should stream, when the TUI has a specific session
     /// selected (Tab in Focus/Split). Lanes not named here stream their first slot.
     pub viewport_focus: Mutex<Option<(LaneId, String)>>,
+    /// When the viewport was last (re)asserted. The TUI heartbeats `viewport.set` every few
+    /// seconds; `agent.fit` treats the focused window as size-owned only while this is fresh,
+    /// so a closed or crashed TUI frees the pane for remote reflow within seconds.
+    pub viewport_focus_at: Mutex<Option<Instant>>,
     /// Plain-terminal windows (`term-{lane}-{n}`) the TUI has visible as Grid tiles — streamed
     /// alongside the lane panes, each tagged with its window in the output event.
     pub viewport_windows: Mutex<Vec<String>>,
@@ -264,6 +268,7 @@ impl Ctx {
             events,
             viewport: Mutex::new(Vec::new()),
             viewport_focus: Mutex::new(None),
+            viewport_focus_at: Mutex::new(None),
             viewport_windows: Mutex::new(Vec::new()),
             live_cwds: Mutex::new(None),
             cwds_sticky: Mutex::new(HashMap::new()),
