@@ -1077,10 +1077,21 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                     ctx.events.clone(),
                     &ctx.bytes_watch,
                     p.lane_id,
-                    window,
+                    window.clone(),
                 )
                 .await
                 .map_err(internal)?;
+                // The ack carries the pane's grid so a remote emulator renders at exactly
+                // this size instead of resizing the real pane (which would squeeze a
+                // simultaneously attached TUI's mediated view).
+                let tmux = ctx.tmux.clone();
+                let dims = tokio::task::spawn_blocking(move || tmux.size_named(&window))
+                    .await
+                    .map_err(internal)?;
+                return Ok(json!({
+                    "cols": dims.map(|d| d.0),
+                    "rows": dims.map(|d| d.1),
+                }));
             }
             Ok(Value::Null)
         }

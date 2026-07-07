@@ -268,6 +268,11 @@ pub struct App {
     /// The `(lane, window, cols, rows)` of the last `agent.resize` sent, so it fires only on a real
     /// size/focus change rather than every tick.
     last_resize: Option<(LaneId, String, u16, u16)>,
+    /// When that resize was sent. The dedup expires after [`RESIZE_REASSERT`] so the TUI
+    /// re-asserts its desired size: an external resizer (an old phone build, a manual tmux
+    /// attach) would otherwise squeeze the pane forever — the dedup key never changes on the
+    /// TUI's side, so it would never notice. Re-sending the same size is a tmux no-op.
+    last_resize_at: Option<std::time::Instant>,
     /// The `(cols, rows)` of the last `orchestrator.resize` sent, so it fires only on a real size
     /// change. Cleared after an attach (which restores the window's client-follow size).
     last_orch_resize: Option<(u16, u16)>,
@@ -501,6 +506,7 @@ impl App {
             focus_geom: std::cell::Cell::new((0, 0, 0)),
             focus_pane_dims: std::cell::Cell::new(None),
             last_resize: None,
+            last_resize_at: None,
             last_orch_resize: None,
             click_zones: RefCell::new(Vec::new()),
             last_click: None,
@@ -1567,7 +1573,10 @@ impl App {
             return;
         }
         let key = (lane, window.clone(), cols, rows);
-        if self.last_resize.as_ref() == Some(&key) {
+        let fresh = self
+            .last_resize_at
+            .is_some_and(|at| at.elapsed() < RESIZE_REASSERT);
+        if self.last_resize.as_ref() == Some(&key) && fresh {
             return;
         }
         let _ = self
@@ -1578,6 +1587,7 @@ impl App {
             )
             .await;
         self.last_resize = Some(key);
+        self.last_resize_at = Some(std::time::Instant::now());
     }
 
     /// Size the orchestrator's tmux window to the right-pane area while it's being streamed (the
@@ -4835,6 +4845,10 @@ enum SessionRef {
     Window(String),
     Transcript(String),
 }
+
+/// How long the TUI trusts its last `agent.resize` before re-asserting the same size. Long
+/// enough not to spam tmux, short enough that an externally squeezed pane heals in seconds.
+const RESIZE_REASSERT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Consecutive lane refreshes a focused lane may show no managed session before Focus detaches.
 /// More than one, so a single transient overlay flap (one bad snapshot — a tmux/lsof probe blip)
