@@ -355,6 +355,27 @@ impl TmuxRuntime {
         visible.then_some((x, y))
     }
 
+    /// The pane's current grid `(cols, rows)`, or `None` when the window is gone. Remote
+    /// clients render their emulator at exactly this grid instead of resizing the real pane
+    /// (which would squeeze a simultaneously attached TUI's view).
+    pub fn size_named(&self, window: &str) -> Option<(u16, u16)> {
+        let target = self.exact_target(window);
+        let out = self
+            .run_allow_absent(&[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "-F",
+                "#{pane_width} #{pane_height}",
+            ])
+            .ok()?;
+        let mut it = out.split_whitespace();
+        let cols: u16 = it.next()?.parse().ok()?;
+        let rows: u16 = it.next()?.parse().ok()?;
+        Some((cols, rows))
+    }
+
     /// Resize a window to `cols × rows` so the mediated view's pane reflows to exactly the visible
     /// width (no right-edge clipping). `resize-window` sets the window's `window-size` to `manual`;
     /// [`follow_client_named`](Self::follow_client_named) restores client-follow before an attach.
