@@ -18,6 +18,20 @@ pub struct TmuxRuntime {
     session: String,
 }
 
+/// One window as the overlay probes it ([`TmuxRuntime::list_windows_meta`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowMeta {
+    pub name: String,
+    /// Parsed from `#{window_id}` (`@12` → 12). tmux never reuses window ids within a server,
+    /// so ordering by id is true creation order even when slot NAMES are recycled after an
+    /// exit (`spawn` fills the first free slot). `u64::MAX` when unparsable (sorts last).
+    pub wid: u64,
+    /// The transcript session id bound to this window via the `@repomon_session` window
+    /// option ([`TmuxRuntime::set_window_session`]), if any. tmux destroys window options
+    /// with the window, so a binding can never outlive its agent.
+    pub session: Option<String>,
+}
+
 impl TmuxRuntime {
     pub fn new(session: impl Into<String>) -> Self {
         Self {
@@ -164,10 +178,14 @@ impl TmuxRuntime {
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         // tmux: "can't find window/session/pane: …", "no server running on …",
-        // "error connecting to …" — the target simply isn't there.
+        // "error connecting to …" — the target simply isn't there. `set-option` phrases the
+        // same absence as "no such window/session: …" (tmux ≥ 3.x), unlike the capture/list
+        // commands.
         let absent = stderr.contains("can't find ")
             || stderr.contains("no server running")
-            || stderr.contains("error connecting");
+            || stderr.contains("error connecting")
+            || stderr.contains("no such window")
+            || stderr.contains("no such session");
         if absent {
             Ok(String::new())
         } else {
@@ -256,6 +274,88 @@ impl TmuxRuntime {
                 Some((name, path, activity))
             })
             .collect())
+    }
+
+    /// One window as the overlay probes it: name, tmux's window id, and the transcript
+    /// session id stuck to it via the `@repomon_session` window option, if bound.
+    pub fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
+        // Same single fork the overlay already pays for `list_windows`, richer format string.
+        let out = self.run_allow_absent(&[
+            "list-windows",
+            "-t",
+            &self.session,
+            "-F",
+            "#{window_name}\t#{window_id}\t#{@repomon_session}",
+        ])?;
+        Ok(Self::parse_windows_meta(&out))
+    }
+
+    /// Parse `list_windows_meta` probe lines (`name\t@id\tsession?`).
+    fn parse_windows_meta(out: &str) -> Vec<WindowMeta> {
+        out.lines()
+            .filter_map(|l| {
+                let mut it = l.splitn(3, '\t');
+                let name = it.next()?.to_string();
+                let wid = it
+                    .next()
+                    .and_then(|w| w.strip_prefix('@'))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(u64::MAX);
+                let session = it
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                Some(WindowMeta { name, wid, session })
+            })
+            .collect()
+    }
+
+    /// Stamp `@repomon_session` on `window` by NAME — for callers that just created the
+    /// window and know exactly which transcript runs in it (`agent.adopt`). tmux destroys
+    /// window options with the window, so the binding can never outlive its agent (slot-name
+    /// recycling included). A vanished window is a benign no-op.
+    pub fn set_window_session(&self, window: &str, session_id: &str) -> Result<()> {
+        let target = self.exact_target(window);
+        self.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-t",
+            &target,
+            "@repomon_session",
+            session_id,
+        ])?;
+        Ok(())
+    }
+
+    /// Stamp `@repomon_session` by window ID (`@N`) — the overlay binder's write-back. The id
+    /// pins the exact window the pairing was computed against: ids are never reused within a
+    /// server, so a slot NAME recycled between the probe and the stamp can't inherit the old
+    /// transcript's binding. A vanished window is a benign no-op.
+    pub fn set_window_session_by_id(&self, wid: u64, session_id: &str) -> Result<()> {
+        let target = format!("@{wid}");
+        self.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-t",
+            &target,
+            "@repomon_session",
+            session_id,
+        ])?;
+        Ok(())
+    }
+
+    /// [`lane_windows_in`] for metas: `lane`'s agent windows, in slot order.
+    pub fn lane_windows_meta(metas: &[WindowMeta], lane: LaneId) -> Vec<WindowMeta> {
+        let mut slots: Vec<(usize, WindowMeta)> = metas
+            .iter()
+            .filter_map(|m| {
+                let (id, slot) = Self::parse_lane_window(&m.name)?;
+                (id == lane).then(|| (slot, m.clone()))
+            })
+            .collect();
+        slots.sort_by_key(|(s, _)| *s);
+        slots.into_iter().map(|(_, m)| m).collect()
     }
 
     pub fn has_window(&self, lane: LaneId) -> bool {
@@ -685,6 +785,68 @@ mod tests {
         );
         assert_eq!(TmuxRuntime::lane_windows_in(&names, 12), vec!["lane-12"]);
         assert!(TmuxRuntime::lane_windows_in(&names, 3).is_empty());
+    }
+
+    #[test]
+    fn parses_windows_meta_lines() {
+        // `name\t@id\tsession?` — the third field is empty when `@repomon_session` is unset.
+        let out = "lane-1\t@3\tabc-123\nlane-1-2\t@7\t\norchestrator\t@1\t\n";
+        assert_eq!(
+            TmuxRuntime::parse_windows_meta(out),
+            vec![
+                WindowMeta {
+                    name: "lane-1".into(),
+                    wid: 3,
+                    session: Some("abc-123".into()),
+                },
+                WindowMeta {
+                    name: "lane-1-2".into(),
+                    wid: 7,
+                    session: None,
+                },
+                WindowMeta {
+                    name: "orchestrator".into(),
+                    wid: 1,
+                    session: None,
+                },
+            ]
+        );
+        // A malformed window id sorts last (u64::MAX), never panics.
+        assert_eq!(
+            TmuxRuntime::parse_windows_meta("w\tbogus\t\n")[0].wid,
+            u64::MAX
+        );
+        // Empty probe (no server) → no windows.
+        assert!(TmuxRuntime::parse_windows_meta("").is_empty());
+    }
+
+    #[test]
+    fn lane_windows_meta_filters_and_slot_orders() {
+        let wm = |name: &str, wid: u64| WindowMeta {
+            name: name.into(),
+            wid,
+            session: None,
+        };
+        // Exact lane matching (`lane-1` never claims `lane-12`), slot order regardless of
+        // probe order or window id.
+        let metas = vec![
+            wm("lane-1-2", 9),
+            wm("lane-12", 4),
+            wm("lane-1", 2),
+            wm("term-1-1", 5),
+            wm("orchestrator", 1),
+        ];
+        let lane1 = TmuxRuntime::lane_windows_meta(&metas, 1);
+        let names: Vec<&str> = lane1.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["lane-1", "lane-1-2"]);
+        assert_eq!(
+            TmuxRuntime::lane_windows_meta(&metas, 12)
+                .iter()
+                .map(|w| w.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lane-12"]
+        );
+        assert!(TmuxRuntime::lane_windows_meta(&metas, 3).is_empty());
     }
 
     #[test]

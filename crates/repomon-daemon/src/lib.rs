@@ -198,10 +198,11 @@ pub struct Ctx {
     /// count immediately so the vanished agent drops from the `×N` count without waiting out the
     /// `live_cwds` cache TTL.
     pub last_managed_windows: Mutex<HashSet<String>>,
-    /// Last tmux window list a probe returned successfully. Reused for one overlay tick when
-    /// `list_windows` fails transiently (fork/connection fault under load), so a single bad
-    /// snapshot doesn't drop every managed agent — see `rpc::resolve_windows`.
-    pub last_good_windows: Mutex<Vec<String>>,
+    /// Last tmux window list a probe returned successfully (names + window ids +
+    /// `@repomon_session` bindings). Reused for one overlay tick when `list_windows_meta`
+    /// fails transiently (fork/connection fault under load), so a single bad snapshot doesn't
+    /// drop every managed agent — see `rpc::resolve_windows`.
+    pub last_good_windows: Mutex<Vec<repomon_core::agent::WindowMeta>>,
     /// Consecutive empty `list_windows` results. A sudden total-empty is usually a tmux server
     /// bounce, not every agent exiting at once — `resolve_windows` reuses last-good until this
     /// reaches the confirm threshold, so a server restart doesn't mass-fire Idle.

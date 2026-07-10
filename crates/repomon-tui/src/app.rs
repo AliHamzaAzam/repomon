@@ -356,18 +356,47 @@ pub struct App {
     pub recent_commits: Vec<Commit>,
     recent_commits_lane: Option<LaneId>,
     /// Which of the selected lane's agent sessions is highlighted (for adopt). Several
-    /// concurrent agents can run in one worktree; this cursor picks among them.
+    /// concurrent agents can run in one worktree; this cursor picks among them. Derived: the
+    /// daemon orders `agent_sessions` newest-active-first and re-sorts it as agents take
+    /// turns, so `sync_session_cursor` re-derives this position from `session_ref` on every
+    /// tick — a raw index held across refreshes would silently drift onto a different agent
+    /// (wrong usage account, keys routed to the wrong pane).
     pub session_idx: usize,
     session_lane: Option<LaneId>,
-    /// The agent each lane had selected when you last left it, so returning to a multi-agent
-    /// lane restores your pick instead of snapping back to the first slot. Keyed by a stable
-    /// identity (tmux window / transcript id), so it survives the session list reordering.
+    /// The durable identity of the agent the session cursor is on — the source of truth that
+    /// `session_idx` is re-derived from each tick. `None` until a lane's first pin.
+    session_ref: Option<SessionRef>,
+    /// Consecutive refreshes the anchored agent has been missing from the selected lane (see
+    /// [`SESSION_REF_GRACE`]); counted at most once per `refresh_gen`.
+    session_ref_misses: u8,
+    /// The `refresh_gen` the last anchor miss was counted against, so a burst of input events
+    /// during one bad snapshot (the cursor sync runs per event-loop iteration) can't exhaust
+    /// the grace that is meant to be measured in data refreshes.
+    session_ref_miss_gen: u64,
+    /// Bumped by every successful `refresh_lanes` — the anchor miss counter's clock.
+    refresh_gen: u64,
+    /// Manual scroll offset for the Fleet page. `None` = follow the selection (the default:
+    /// the view keeps the selected lane centered); `Some(n)` = the user scrolled freely
+    /// (wheel / PgUp/PgDn) to read past the fold — e.g. the TODAY commit list. Any deliberate
+    /// selection move snaps back to `None`.
+    pub fleet_scroll: Option<usize>,
+    /// What `render_fleet` last showed: `(applied scroll, viewport height, max scroll)`.
+    /// Written each frame so scroll keys can start from the on-screen position and clamp
+    /// without re-deriving layout.
+    pub fleet_viewport: std::cell::Cell<(usize, usize, usize)>,
+    /// The agent each lane had selected when you last left it (saved from `session_ref` on
+    /// lane change), so returning to a multi-agent lane restores your pick instead of
+    /// snapping back to the first slot. Keyed by a stable identity (transcript id / tmux
+    /// window), so it survives the session list reordering.
     session_memory: HashMap<LaneId, SessionRef>,
     /// After spawning an agent, the (lane, tmux window) to move the session cursor onto once it
     /// shows up in `lane.list` — so a fresh spawn lands you on the *new* agent, not the old one.
     /// Cleared when matched (or after a few refreshes if the window never appears).
     pending_focus_window: Option<(LaneId, String)>,
     pending_focus_ticks: u8,
+    /// The `refresh_gen` the last pending-focus miss was counted against — the give-up
+    /// clock ticks per data refresh, not per event-loop iteration.
+    pending_focus_gen: u64,
     /// Plain shell terminals open for the selected lane (tmux window names).
     pub terminals: Vec<String>,
     terminals_lane: Option<LaneId>,
@@ -563,9 +592,17 @@ impl App {
             recent_commits_lane: None,
             session_idx: 0,
             session_lane: None,
+            session_ref: None,
+            session_ref_misses: 0,
+            // Sentinel ≠ refresh_gen, so the very first snapshot's miss is counted too.
+            session_ref_miss_gen: u64::MAX,
+            refresh_gen: 0,
+            fleet_scroll: None,
+            fleet_viewport: std::cell::Cell::new((0, 0, 0)),
             session_memory: HashMap::new(),
             pending_focus_window: None,
             pending_focus_ticks: 0,
+            pending_focus_gen: u64::MAX,
             terminals: Vec::new(),
             terminals_lane: None,
             term_windows: Vec::new(),
@@ -730,6 +767,8 @@ impl App {
                 let keep = self.selected_lane().map(|l| l.id);
                 let keep_ref = self.selected_session_ref();
                 self.lanes = l;
+                // New snapshot: advance the anchor miss counter's clock (see `refresh_gen`).
+                self.refresh_gen = self.refresh_gen.wrapping_add(1);
                 // Forget remembered agent selections for lanes that no longer exist.
                 self.session_memory
                     .retain(|id, _| self.lanes.iter().any(|l| l.id == *id));
@@ -1685,24 +1724,28 @@ impl App {
                 });
                 match hit {
                     Some(i) => {
-                        self.session_idx = i;
+                        // Anchor by identity: the ref is the window for now and upgrades to
+                        // the transcript id once the `.jsonl` lands (per-tick re-resolve).
+                        self.pin_session(i);
                         self.pending_focus_window = None;
                         self.pending_focus_ticks = 0;
                         self.reset_scroll();
                         if self.settings.expand_agents {
-                            let sref = self
-                                .selected_lane()
-                                .and_then(|l| l.agent_sessions.get(i))
-                                .and_then(agent_session_ref);
-                            self.select_lane_session(lane, sref);
+                            self.select_lane_session(lane, self.session_ref.clone());
                         }
                         return;
                     }
                     None => {
-                        self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
-                        if self.pending_focus_ticks > PENDING_FOCUS_GIVE_UP_TICKS {
-                            self.pending_focus_window = None;
-                            self.pending_focus_ticks = 0;
+                        // Count the give-up clock in data REFRESHES, not event-loop
+                        // iterations — this sync runs per input event, and a burst of
+                        // keystrokes during one slow snapshot must not drop the intent.
+                        if self.pending_focus_gen != self.refresh_gen {
+                            self.pending_focus_gen = self.refresh_gen;
+                            self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
+                            if self.pending_focus_ticks > PENDING_FOCUS_GIVE_UP_TICKS {
+                                self.pending_focus_window = None;
+                                self.pending_focus_ticks = 0;
+                            }
                         }
                     }
                 }
@@ -1713,18 +1756,28 @@ impl App {
             }
         }
         // In expanded mode an agent sub-row IS the session cursor — drive `session_idx` straight
-        // from the selected row (the memory logic below is for the collapsed lane rows).
+        // from the selected row (the row itself is identity-remapped on refresh, so it's safe);
+        // the anchor mirrors it so collapsing keeps the pick.
         if self.settings.expand_agents {
             if let Some(FleetRow {
                 session: Some(s), ..
             }) = self.selected_row()
             {
                 let lane_id = self.selected_lane().map(|l| l.id);
-                if self.session_idx != s || self.session_lane != lane_id {
+                // Same agent? Compare by identity, not raw index — the daemon re-sorts
+                // `agent_sessions` as agents take turns, so the same agent's row carries a
+                // new index after every re-sort; wiping the scrollback for that would kick
+                // the user out of what they were reading.
+                let same_agent = self.session_lane == lane_id
+                    && self.session_ref.as_ref().and_then(|r| {
+                        self.selected_lane()
+                            .and_then(|l| session_index_for_ref(&l.agent_sessions, r))
+                    }) == Some(s);
+                if !same_agent {
                     self.reset_scroll();
                 }
                 self.session_lane = lane_id;
-                self.session_idx = s;
+                self.pin_session(s);
                 return;
             }
         }
@@ -1734,34 +1787,80 @@ impl App {
             // your pick instead of snapping to the first slot. Identity-keyed, so it survives
             // the session list reordering; falls back to the first agent when the remembered
             // one is gone (or this lane was never visited).
-            if let Some(old) = self.session_lane {
-                if let Some(r) = self
-                    .lanes
-                    .iter()
-                    .find(|l| l.id == old)
-                    .and_then(|l| l.agent_sessions.get(self.session_idx))
-                    .and_then(agent_session_ref)
-                {
-                    self.session_memory.insert(old, r);
-                }
+            if let (Some(old), Some(r)) = (self.session_lane, self.session_ref.clone()) {
+                self.session_memory.insert(old, r);
             }
             self.session_lane = sel;
-            self.session_idx = sel
+            let idx = sel
                 .and_then(|id| self.session_memory.get(&id))
                 .and_then(|r| {
                     self.selected_lane()
                         .and_then(|l| session_index_for_ref(&l.agent_sessions, r))
                 })
                 .unwrap_or(0);
+            self.pin_session(idx);
             self.reset_scroll(); // scrollback buffer belonged to the previous lane
+            return;
         }
-        let n = self
+        // Same lane, possibly a new snapshot: re-resolve the anchor EVERY tick. The daemon
+        // orders `agent_sessions` newest-active-first and re-sorts it as agents take turns,
+        // so identity is the truth and `session_idx` merely its current position. No scroll
+        // reset on a position change — it is the same agent.
+        let resolved = self.session_ref.as_ref().and_then(|r| {
+            self.selected_lane()
+                .and_then(|l| session_index_for_ref(&l.agent_sessions, r))
+        });
+        match resolved {
+            Some(i) => {
+                self.session_idx = i;
+                self.session_ref_misses = 0;
+                // Re-derive the anchor from the resolved session, so a `Window` ref upgrades
+                // to the sturdier `Transcript` ref once a placeholder gains its transcript.
+                self.session_ref = self
+                    .selected_lane()
+                    .and_then(|l| l.agent_sessions.get(i))
+                    .and_then(agent_session_ref);
+            }
+            None => {
+                let n = self
+                    .selected_lane()
+                    .map(|l| l.agent_sessions.len())
+                    .unwrap_or(0);
+                if self.session_idx >= n {
+                    self.session_idx = n.saturating_sub(1);
+                }
+                if n == 0 {
+                    return;
+                }
+                if self.session_ref.is_none() {
+                    // First contact with a populated lane (arrival landed on an empty lane, or
+                    // nothing was ever pinned): pin the current occupant — and hold it, per
+                    // the pin-on-arrival rule, instead of following the daemon's re-sorts.
+                    self.pin_session(self.session_idx);
+                } else if self.session_ref_miss_gen != self.refresh_gen {
+                    // The anchored agent is missing from this snapshot. Counted once per data
+                    // refresh: a transient overlay flap must not re-pin the pick, a real exit
+                    // adopts the occupant after the grace.
+                    self.session_ref_miss_gen = self.refresh_gen;
+                    self.session_ref_misses = self.session_ref_misses.saturating_add(1);
+                    if self.session_ref_misses > SESSION_REF_GRACE {
+                        self.pin_session(self.session_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Point the session cursor at `idx` on the selected lane and anchor it by identity —
+    /// every deliberate cursor move funnels through here so `sync_session_cursor`'s per-tick
+    /// re-resolve can never snap the cursor back to a stale pick.
+    fn pin_session(&mut self, idx: usize) {
+        self.session_idx = idx;
+        self.session_ref = self
             .selected_lane()
-            .map(|l| l.agent_sessions.len())
-            .unwrap_or(0);
-        if self.session_idx >= n {
-            self.session_idx = n.saturating_sub(1);
-        }
+            .and_then(|l| l.agent_sessions.get(idx))
+            .and_then(agent_session_ref);
+        self.session_ref_misses = 0;
     }
 
     /// Drop out of Focus once the agent we were driving exits (its managed session is gone —
@@ -1943,11 +2042,12 @@ impl App {
         if n <= 1 {
             return;
         }
-        self.session_idx = if forward {
+        let idx = if forward {
             (self.session_idx + 1) % n
         } else {
             (self.session_idx + n - 1) % n
         };
+        self.pin_session(idx);
         // The scrollback snapshot belonged to the previous agent's window — drop it so the new
         // agent shows its own live tail instead of stale lines.
         self.reset_scroll();
@@ -1955,11 +2055,7 @@ impl App {
         // agent's sub-row — otherwise the per-tick cursor sync snaps session_idx straight back.
         if self.settings.expand_agents {
             if let Some(lane_id) = self.selected_lane().map(|l| l.id) {
-                let sref = self
-                    .selected_lane()
-                    .and_then(|l| l.agent_sessions.get(self.session_idx))
-                    .and_then(agent_session_ref);
-                self.select_lane_session(lane_id, sref);
+                self.select_lane_session(lane_id, self.session_ref.clone());
             }
         }
     }
@@ -2129,8 +2225,19 @@ impl App {
                         }
                         _ => {}
                     },
-                    // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
-                    // terminal, a click on empty space blurs); the wheel still navigates.
+                    // Fleet: the wheel scrolls the PAGE (lanes + the TODAY commits), not the
+                    // cursor — arrow keys and clicks snap the view back to the selection.
+                    View::Fleet => match me.kind {
+                        MouseEventKind::ScrollUp => self.fleet_scroll_by(true, 3),
+                        MouseEventKind::ScrollDown => self.fleet_scroll_by(false, 3),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.handle_click(me.column, me.row).await
+                        }
+                        _ => {}
+                    },
+                    // Grid (and the rest): a left-click focuses the clicked lane (double-click
+                    // opens its real terminal, a click on empty space blurs); the wheel still
+                    // navigates.
                     _ => match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.handle_click(me.column, me.row).await
@@ -2183,6 +2290,10 @@ impl App {
                 // `R` renames the selected agent sub-row in the expanded fleet sidebar.
                 if key.code == KeyCode::Char('R') {
                     self.start_rename();
+                } else if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                    // Free-scroll the page (reaches the TODAY commits past the fold).
+                    let (_, h, _) = self.fleet_viewport.get();
+                    self.fleet_scroll_by(key.code == KeyCode::PageUp, h.saturating_sub(2).max(1));
                 } else if let Some(action) = keybinds::nav(key) {
                     self.apply(action).await;
                 }
@@ -2946,16 +3057,19 @@ impl App {
         if let Some(i) = idx {
             self.session_lane = Some(lane_id); // keep sync_session_cursor from resetting it
             self.session_idx = i;
+            // Anchor by identity (from the target lane — the fleet cursor may not be on it
+            // yet), or the per-tick re-resolve would snap back to the old pick within a tick.
+            self.session_ref = self
+                .lanes
+                .iter()
+                .find(|l| l.id == lane_id)
+                .and_then(|l| l.agent_sessions.get(i))
+                .and_then(agent_session_ref);
+            self.session_ref_misses = 0;
             // In expanded mode, also land the fleet cursor on that agent's row so the per-tick
             // cursor sync (which keys off the selected row) keeps it there.
             if self.settings.expand_agents {
-                let sref = self
-                    .lanes
-                    .iter()
-                    .find(|l| l.id == lane_id)
-                    .and_then(|l| l.agent_sessions.get(i))
-                    .and_then(agent_session_ref);
-                self.select_lane_session(lane_id, sref);
+                self.select_lane_session(lane_id, self.session_ref.clone());
             }
         }
     }
@@ -3277,6 +3391,20 @@ impl App {
     /// A left-click in Grid/Fleet/Split. Hit-test the lane regions recorded during render: a click
     /// inside one focuses that lane (single-click → type in place for interactive zones; another
     /// click within `DOUBLE_CLICK` → open its real terminal). A click on empty space blurs.
+    /// Scroll the Fleet page manually (wheel / PgUp). Starts from the position currently on
+    /// screen, clamps to the rendered bounds, and stays in effect until the next deliberate
+    /// selection move snaps the view back to following the selection.
+    fn fleet_scroll_by(&mut self, up: bool, step: usize) {
+        let (applied, _, max) = self.fleet_viewport.get();
+        let cur = self.fleet_scroll.unwrap_or(applied).min(max);
+        let next = if up {
+            cur.saturating_sub(step)
+        } else {
+            (cur + step).min(max)
+        };
+        self.fleet_scroll = Some(next);
+    }
+
     async fn handle_click(&mut self, col: u16, row: u16) {
         // The pinned "repomind" row isn't a lane click-zone; hit-test it first: a click selects it
         // and opens the command-center view.
@@ -3304,6 +3432,8 @@ impl App {
         // Clicking a lane (or the gutter) leaves any repomind insert mode, since the selection is
         // moving off the pinned row.
         self.orch_insert = false;
+        // …and re-attaches a manually scrolled Fleet page to the (new) selection.
+        self.fleet_scroll = None;
         match hit {
             // A Grid shell tile: move the grid cursor onto it (input routes by active tile);
             // single-click types in place, double-click attaches into the real terminal.
@@ -4518,8 +4648,12 @@ impl App {
             self.repo_remove_armed = None;
         }
         match action {
-            Action::MoveUp => self.selected = self.selected.saturating_sub(1),
+            Action::MoveUp => {
+                self.fleet_scroll = None; // a deliberate move re-attaches the view to the cursor
+                self.selected = self.selected.saturating_sub(1);
+            }
             Action::MoveDown => {
+                self.fleet_scroll = None;
                 let n = self.rows_len();
                 if n > 0 && self.selected + 1 < n {
                     self.selected += 1;
@@ -4857,10 +4991,11 @@ fn session_rank(
     }
 }
 
-/// A stable identity for one agent session within a lane, used to remember which agent a lane
-/// had selected across a switch away and back. The persistent `id` is `0` for daemon-overlaid
-/// placeholders so it can't be used; the managed tmux window (preferred) and the Claude
-/// transcript id are the durable handles the rest of the app already keys on.
+/// A stable identity for one agent session within a lane — the session cursor's anchor and
+/// the per-lane selection memory. The persistent `id` is `0` for daemon-overlaid
+/// placeholders so it can't be used; the Claude transcript id (preferred — UUIDs are never
+/// reused, while slot names are recycled on respawn) and the managed tmux window (the
+/// placeholder fallback) are the durable handles. See [`agent_session_ref`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionRef {
     Window(String),
@@ -4881,6 +5016,12 @@ const VIEWPORT_REASSERT: std::time::Duration = std::time::Duration::from_secs(5)
 /// doesn't kick the user out of a still-running agent; a real exit stays absent and detaches
 /// within ~grace refreshes.
 const FOCUS_DETACH_GRACE: u8 = 3;
+
+/// Consecutive cursor syncs the anchored agent may be missing from the selected lane before
+/// the cursor re-pins to whatever agent it currently rests on. More than one, so a transient
+/// overlay flap (one bad tmux/transcript snapshot) can't permanently retarget the pick; a
+/// real exit stays absent and re-pins within ~grace ticks.
+const SESSION_REF_GRACE: u8 = 3;
 
 /// How many ~1s refreshes to keep trying to land the cursor on a just-spawned agent's window
 /// before giving up (the transcript/window may take a moment to appear).
@@ -4916,11 +5057,14 @@ fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
 }
 
 /// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
+/// Transcript id first — UUIDs are never reused, while slot names (`lane-7-2`) are recycled on
+/// respawn, so a long-held `Window` ref could resolve to a brand-new different agent. The
+/// window is the fallback for just-spawned placeholders whose `.jsonl` hasn't appeared yet.
 fn agent_session_ref(s: &AgentSession) -> Option<SessionRef> {
-    if let Some(w) = &s.tmux_window {
-        Some(SessionRef::Window(w.clone()))
+    if let Some(id) = &s.session_id {
+        Some(SessionRef::Transcript(id.clone()))
     } else {
-        s.session_id.clone().map(SessionRef::Transcript)
+        s.tmux_window.clone().map(SessionRef::Window)
     }
 }
 
@@ -5573,10 +5717,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_ref_prefers_window_then_transcript() {
-        // A managed agent keys on its window even when it also has a transcript id.
+    fn agent_session_ref_prefers_transcript_then_window() {
+        // A transcript-backed agent keys on its transcript id even when it also has a window:
+        // transcript UUIDs are never reused, while slot names like `lane-7-2` are recycled on
+        // respawn — a remembered Window ref could resolve to a brand-new different agent.
         assert_eq!(
             agent_session_ref(&managed("lane-7-2", Some("uuid-1"))),
+            Some(SessionRef::Transcript("uuid-1".into()))
+        );
+        // A just-spawned placeholder (window, no `.jsonl` yet) falls back to its window.
+        assert_eq!(
+            agent_session_ref(&managed("lane-7-2", None)),
             Some(SessionRef::Window("lane-7-2".into()))
         );
         // An external/transcript-only session keys on the transcript id.
@@ -5613,6 +5764,301 @@ mod tests {
             session_index_for_ref(&sessions, &SessionRef::Window("lane-7-3".into())),
             None
         );
+    }
+
+    /// A minimal collapsed-mode fleet: real `Lane` built over the wire shape (the TUI has no
+    /// gix dependency to mint `ObjectId`s directly), sessions swapped in by the caller.
+    fn fake_lane(id: repomon_core::model::LaneId, sessions: Vec<AgentSession>) -> Lane {
+        let zero = "0".repeat(40);
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut lane: Lane = serde_json::from_value(json!({
+            "id": id,
+            "repo": {
+                "id": 1, "path": "/tmp/repo", "name": "repo",
+                "added_at": now, "worktree_root_template": null,
+            },
+            "worktree": {
+                "id": id, "repo_id": 1, "path": format!("/tmp/wt{id}"),
+                "branch": "main", "head": zero, "is_main": true, "name": format!("wt{id}"),
+            },
+            "state": {
+                "worktree_id": id, "head": zero, "branch": "main", "upstream": null,
+                "ahead": 0, "behind": 0,
+                "dirty": {"staged": 0, "unstaged": 0, "untracked": 0},
+                "last_commit_at": null,
+            },
+            "agent_sessions": [],
+            "last_activity_at": now,
+            "pinned": false,
+        }))
+        .expect("fake lane");
+        lane.agent_sessions = sessions;
+        lane
+    }
+
+    /// Two managed agents on distinct accounts for cursor-identity tests: `a` in slot 1 on
+    /// the default account, `b` in slot 2 on a work account.
+    fn two_agents() -> (AgentSession, AgentSession) {
+        let a = managed("lane-1", Some("sid-a"));
+        let mut b = managed("lane-1-2", Some("sid-b"));
+        b.config_dir = Some(PathBuf::from("/Users/x/.claude-work"));
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn session_cursor_survives_within_lane_reorder() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, b) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
+        app.selected = 1; // row 0 is the pinned orchestrator row
+        app.sync_session_cursor();
+        // Tab onto the second agent and note its account.
+        app.cycle_session(true);
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        let key = app.focused_account_key().expect("account key");
+        // The daemon re-sorts `agent_sessions` newest-active-first: b moves to the front.
+        app.lanes[0].agent_sessions = vec![b, a];
+        app.sync_session_cursor();
+        assert_eq!(
+            app.selected_window().as_deref(),
+            Some("lane-1-2"),
+            "the cursor must follow the agent, not the slot"
+        );
+        assert_eq!(
+            app.focused_account_key().as_deref(),
+            Some(key.as_str()),
+            "the usage corner must keep the picked agent's account"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_on_arrival_does_not_follow_newest() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, b) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
+        app.selected = 1;
+        // No explicit pick: arriving on the lane pins whatever is front-most at that moment.
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1"));
+        // b takes a turn and the daemon reorders — the default pick must not drift with it.
+        app.lanes[0].agent_sessions = vec![b, a];
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1"));
+    }
+
+    #[tokio::test]
+    async fn anchor_rides_out_a_flap_then_adopts_occupant() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        // One "refresh": a new daemon snapshot (refresh_gen advances) then the cursor sync,
+        // mirroring refresh_lanes + the event loop.
+        fn refresh(app: &mut App, sessions: Vec<AgentSession>) {
+            app.lanes[0].agent_sessions = sessions;
+            app.refresh_gen = app.refresh_gen.wrapping_add(1);
+            app.sync_session_cursor();
+        }
+        let (a, b) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![])];
+        app.selected = 1;
+        refresh(&mut app, vec![a.clone(), b.clone()]);
+        app.cycle_session(true); // pick b
+        // b's session flaps out for one snapshot: the cursor falls back without re-pinning…
+        refresh(&mut app, vec![a.clone()]);
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1"));
+        // …even while input events re-run the sync against the same bad snapshot…
+        for _ in 0..10 {
+            app.sync_session_cursor();
+        }
+        // …and re-lands on b the moment it reappears.
+        refresh(&mut app, vec![a.clone(), b.clone()]);
+        assert_eq!(
+            app.selected_window().as_deref(),
+            Some("lane-1-2"),
+            "a one-tick flap must not lose the pick"
+        );
+        // A sustained absence is a real exit: the pick re-pins to the current occupant and
+        // stays there even when the old identity's window name is later reused.
+        for _ in 0..=(SESSION_REF_GRACE as usize) {
+            refresh(&mut app, vec![a.clone()]);
+        }
+        refresh(&mut app, vec![a.clone(), b.clone()]);
+        assert_eq!(
+            app.selected_window().as_deref(),
+            Some("lane-1"),
+            "after a sustained absence the pick belongs to the occupant"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_focus_pins_placeholder_then_upgrades_to_transcript() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, _) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone()])];
+        app.selected = 1;
+        app.sync_session_cursor();
+        // A second agent is spawned; its window appears before its transcript.
+        app.pending_focus_window = Some((1, "lane-1-2".to_string()));
+        let placeholder = managed("lane-1-2", None);
+        app.lanes[0].agent_sessions = vec![a.clone(), placeholder];
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        // The transcript lands and the daemon lists the new agent first (newest activity).
+        let b = managed("lane-1-2", Some("sid-b"));
+        app.lanes[0].agent_sessions = vec![b.clone(), a.clone()];
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        // A later reorder still can't move the cursor off the spawned agent.
+        app.lanes[0].agent_sessions = vec![a, b];
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    #[tokio::test]
+    async fn expanded_row_resort_keeps_scroll_on_same_agent() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = true;
+        let (a, b) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
+        // Land the fleet cursor on b's sub-row (rows: orchestrator, header, sub, sub).
+        app.select_lane_session(1, Some(SessionRef::Transcript("sid-b".into())));
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        app.scroll = 7;
+        // The daemon re-sorts; refresh_lanes re-anchors the row by identity — same agent,
+        // new raw index. That must not read as a switch and wipe the scrollback position.
+        app.lanes[0].agent_sessions = vec![b.clone(), a.clone()];
+        app.select_lane_session(1, Some(SessionRef::Transcript("sid-b".into())));
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        assert_eq!(
+            app.scroll, 7,
+            "a re-sort of the same agent must keep the scroll"
+        );
+        // A real move to the other agent still resets it.
+        app.cycle_session(true);
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn pending_focus_survives_input_burst() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, _) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone()])];
+        app.selected = 1;
+        app.sync_session_cursor();
+        // An agent was just spawned; its window hasn't shown up in lane.list yet.
+        app.pending_focus_window = Some((1, "lane-1-2".to_string()));
+        // A burst of input events re-runs the sync many times against the SAME snapshot:
+        // the give-up clock counts data refreshes, not event-loop iterations.
+        for _ in 0..20 {
+            app.sync_session_cursor();
+        }
+        assert!(
+            app.pending_focus_window.is_some(),
+            "spawn-focus intent must survive an input burst"
+        );
+        // The window appears on the next refresh: the cursor lands on it.
+        app.lanes[0].agent_sessions = vec![a, managed("lane-1-2", None)];
+        app.refresh_gen = app.refresh_gen.wrapping_add(1);
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    #[tokio::test]
+    async fn notification_jump_pick_survives_resort() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, b) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
+        app.selected = 1;
+        app.sync_session_cursor();
+        // A notification jump lands on b by transcript id…
+        app.select_session(1, Some("sid-b"));
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        // …and must hold through the next daemon re-sort.
+        app.lanes[0].agent_sessions = vec![b, a];
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    #[tokio::test]
+    async fn return_to_lane_restores_pick() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, b) = two_agents();
+        app.lanes = vec![
+            fake_lane(1, vec![a, b]),
+            fake_lane(2, vec![managed("lane-2", Some("sid-c"))]),
+        ];
+        app.selected = 1;
+        app.sync_session_cursor();
+        app.cycle_session(true); // pick b on lane 1
+        // Visit lane 2, then come back: the pick is restored by identity.
+        app.selected = 2;
+        app.sync_session_cursor();
+        app.selected = 1;
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    #[tokio::test]
+    async fn fleet_page_scrolls_to_reach_all_commits() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        let (a, _) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a])];
+        app.selected = 1;
+        let now = chrono::Utc::now().to_rfc3339();
+        app.commits = (1..=20)
+            .map(|i| {
+                serde_json::from_value(json!({
+                    "oid": "0".repeat(40),
+                    "repo_id": 1,
+                    "author_name": "t",
+                    "author_email": "t@t",
+                    "summary": format!("commit-number-{i:02}"),
+                    "time": now,
+                    "parent_count": 1,
+                }))
+                .expect("fake commit")
+            })
+            .collect();
+        // Follow-selection mode: the page top (lanes) is on screen, the commit tail is not.
+        let top = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(
+            top.contains("repomind"),
+            "page top visible in follow mode:\n{top}"
+        );
+        assert!(
+            !top.contains("commit-number-20"),
+            "the tail can't fit on one screen:\n{top}"
+        );
+        // Manual scroll reaches the very last commit — and everything past the old 12-cap.
+        app.fleet_scroll = Some(usize::MAX / 2);
+        let bottom = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(
+            bottom.contains("commit-number-20"),
+            "manual scroll must reach the last commit:\n{bottom}"
+        );
+        assert!(
+            bottom.contains("commit-number-13"),
+            "the 12-commit cap must be gone:\n{bottom}"
+        );
+        // A deliberate selection move snaps back to follow mode.
+        app.apply(Action::MoveUp).await;
+        assert_eq!(app.fleet_scroll, None);
     }
 
     #[test]
