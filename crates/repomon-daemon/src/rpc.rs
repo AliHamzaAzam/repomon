@@ -1749,7 +1749,7 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             ctx.last_good_windows
                 .lock()
                 .await
-                .retain(|w| w != ORCHESTRATOR_WINDOW);
+                .retain(|w| w.name != ORCHESTRATOR_WINDOW);
             *orch = None;
             *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
             let status = orchestrator_status_value(None, "none", None);
@@ -1944,8 +1944,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
     // every managed agent — that flips sessions to `external`, detaches the focused TUI, and fires
     // stale notifications). A real empty result still clears.
-    let fresh: Result<Vec<String>, String> =
-        match tokio::task::spawn_blocking(move || tmux.list_windows()).await {
+    let fresh: Result<Vec<agent::WindowMeta>, String> =
+        match tokio::task::spawn_blocking(move || tmux.list_windows_meta()).await {
             Ok(Ok(w)) => Ok(w),
             Ok(Err(e)) => Err(e.to_string()),
             Err(e) => Err(e.to_string()),
@@ -1964,8 +1964,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // fresh on the very next line, and the gone agent disappears within one refresh.
     let managed_now: std::collections::HashSet<String> = windows
         .iter()
-        .filter(|w| w.starts_with("lane-"))
-        .cloned()
+        .filter(|w| w.name.starts_with("lane-"))
+        .map(|w| w.name.clone())
         .collect();
     {
         let mut prev = ctx.last_managed_windows.lock().await;
@@ -1989,11 +1989,13 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let auto_off = ctx.auto_continue_off.lock().await.clone();
     let global_auto = ctx.config.read().await.auto_continue;
 
-    for (lane, mut summaries) in lanes.iter_mut().zip(per_lane) {
-        // The lane's managed agent windows, in slot order (= spawn order). A window only exists
-        // while its agent's process lives (tmux closes it on exit), so it doubles as proof of
-        // liveness and as the routing target for keys/captures.
-        let lane_windows = TmuxRuntime::lane_windows_in(&windows, lane.id);
+    // Sticky bindings established this tick, stamped as `@repomon_session` after the loop.
+    let mut new_bindings: Vec<(String, String)> = Vec::new();
+    for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
+        // The lane's managed agent windows, in slot order. A window only exists while its
+        // agent's process lives (tmux closes it on exit), so it doubles as proof of liveness
+        // and as the routing target for keys/captures.
+        let lane_windows = TmuxRuntime::lane_windows_meta(&windows, lane.id);
         let managed_n = lane_windows.len();
         // Live `claude` processes whose cwd is this worktree bound how many of its sessions are
         // running (a `/exit`ed one leaves a recent transcript but no process). But never drop a
@@ -2016,13 +2018,22 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             .filter(|s| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS)
             .count();
         let keep = sessions_to_keep(summaries.len(), alive, managed_n, fresh);
-        summaries.truncate(keep);
+        // A transcript bound to a live window IS a live agent regardless of what the process
+        // count says — never truncate it away in favor of a newer unbound one.
+        let bound: std::collections::HashSet<String> = lane_windows
+            .iter()
+            .filter_map(|w| w.session.clone())
+            .collect();
+        let summaries = select_kept_summaries(summaries, &bound, keep);
         if !summaries.is_empty() {
-            // Pair the newest `k` transcripts with the `k` windows, oldest with oldest (slot order
-            // tracks spawn order, transcripts arrive newest-first). A heuristic, but it routes
-            // keys/captures to the right pane in practice.
-            let paired = summaries.len().min(managed_n);
-            for (idx, s) in summaries.into_iter().enumerate() {
+            // Pair transcripts with windows by sticky identity (`@repomon_session`), falling
+            // back to the oldest-with-oldest heuristic only on first contact — see
+            // `pair_transcripts_to_windows`. The old purely positional zip re-bound windows
+            // whenever two agents swapped activity rank, which moved names, panes, and usage
+            // accounts between rows.
+            let pairing = pair_transcripts_to_windows(&summaries, &lane_windows);
+            new_bindings.extend(pairing.new_bindings);
+            for (s, win) in summaries.into_iter().zip(pairing.assignment) {
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
                 }
@@ -2031,11 +2042,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     .session_id
                     .as_ref()
                     .and_then(|id| labels.get(id).cloned());
-                if idx < paired {
-                    session.external = false;
-                    session.tmux_window = Some(lane_windows[paired - 1 - idx].clone());
-                } else {
-                    session.external = true;
+                match win {
+                    Some(w) => {
+                        session.external = false;
+                        session.tmux_window = Some(w);
+                    }
+                    None => session.external = true,
                 }
                 lane.agent_sessions.push(session);
             }
@@ -2044,13 +2056,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // away as a window-only placeholder so it isn't invisible until then. At most one
             // (the `SessKey::Fallback` model allows a single no-transcript session per lane): the
             // newest unpaired window, which is the slot the latest spawn took.
-            if let Some(w) = placeholder_window_index(paired, managed_n) {
+            if let Some(w) = pairing.unpaired.first() {
                 let kind = lane_meta_kind(&metas, lane.id);
-                lane.agent_sessions.push(window_placeholder_session(
-                    lane,
-                    kind,
-                    lane_windows[w].clone(),
-                ));
+                lane.agent_sessions
+                    .push(window_placeholder_session(lane, kind, w.clone()));
             }
         } else if managed_n > 0 {
             // No parseable transcript: surface a repomon-spawned agent if its window is alive.
@@ -2058,7 +2067,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             lane.agent_sessions.push(window_placeholder_session(
                 lane,
                 kind,
-                lane_windows[0].clone(),
+                lane_windows[0].name.clone(),
             ));
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
@@ -2112,6 +2121,21 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
             }
         }
+    }
+
+    // Persist the sticky bindings established this tick: stamp `@repomon_session` on each
+    // window so the pairing survives daemon restarts and activity-order flips. Rare — once
+    // per agent lifetime — so this adds no forks to a steady-state overlay.
+    if !new_bindings.is_empty() {
+        let tmux = ctx.tmux.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            for (w, sid) in new_bindings {
+                if let Err(e) = tmux.set_window_session(&w, &sid) {
+                    tracing::warn!("failed to stamp @repomon_session on {w}: {e}");
+                }
+            }
+        })
+        .await;
     }
 
     // dxkit stop-gate verdicts: worktrees running dxkit's loop pack leave an append-only
@@ -2255,7 +2279,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // liveness ONLY — its old timestamps are the stall clock.
         {
             let live: std::collections::HashSet<&str> =
-                windows.iter().map(String::as_str).collect();
+                windows.iter().map(|w| w.name.as_str()).collect();
             let mut cache = ctx.prompt_cache.lock().await;
             cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
             let mut seen = ctx.pane_seen.lock().await;
@@ -2305,6 +2329,108 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
         Some(n) => n.max(managed_n).max(fresh).min(total),
         None => total, // probe unavailable: don't filter
     }
+}
+
+/// A lane's transcript↔window pairing for one overlay tick ([`pair_transcripts_to_windows`]).
+struct Pairing {
+    /// Per input summary (order preserved): the managed window it runs in; `None` = external.
+    assignment: Vec<Option<String>>,
+    /// Sticky bindings established this tick — `(window_name, session_id)` to stamp as
+    /// `@repomon_session` so they survive daemon restarts and activity-order flips.
+    new_bindings: Vec<(String, String)>,
+    /// Live managed windows no transcript claimed, newest (highest window id) first. The
+    /// first is the placeholder target for a just-spawned agent whose `.jsonl` hasn't
+    /// appeared yet (at most one, per the `SessKey::Fallback` model).
+    unpaired: Vec<String>,
+}
+
+/// Pair a lane's kept transcripts (newest-first) with its live managed windows by STICKY
+/// IDENTITY first, position last.
+///
+/// Pass 1: a window whose `@repomon_session` names a kept transcript keeps it. This is what
+/// makes the pairing immune to two agents swapping activity rank — which used to re-bind
+/// their windows every poll, moving names, panes, and usage accounts between rows — and to
+/// daemon restarts (the binding lives in tmux, not daemon memory).
+///
+/// Pass 2 (first contact only): the newest still-unassigned transcripts meet the still-free
+/// windows, oldest-with-oldest — the same heuristic the overlay always used, but run ONCE
+/// per agent: each pair is emitted in `new_bindings` and pass 1 owns it from the next tick.
+/// Never-bound windows are offered before stale-bound ones (whose transcript vanished this
+/// tick), so a one-tick transcript flap can't hand a live agent's window to a newcomer; and
+/// window age is the window id — slot NAMES are recycled after an exit, ids never are.
+fn pair_transcripts_to_windows(
+    summaries: &[agent::TranscriptSummary],
+    windows: &[agent::WindowMeta],
+) -> Pairing {
+    let mut assignment: Vec<Option<String>> = vec![None; summaries.len()];
+    let mut taken = vec![false; windows.len()];
+    // Pass 1 — sticky identity.
+    for (wi, w) in windows.iter().enumerate() {
+        let Some(sid) = &w.session else { continue };
+        if let Some(si) = summaries
+            .iter()
+            .position(|s| s.session_id.as_deref() == Some(sid.as_str()))
+        {
+            if assignment[si].is_none() {
+                assignment[si] = Some(w.name.clone());
+                taken[wi] = true;
+            }
+        }
+    }
+    // Pass 2 — first contact. Never-bound windows are offered before stale-bound ones, both
+    // oldest (lowest window id) first.
+    let mut free: Vec<usize> = (0..windows.len()).filter(|&i| !taken[i]).collect();
+    free.sort_by_key(|&i| (windows[i].session.is_some(), windows[i].wid));
+    // `summaries` is newest-first, so the first `free.len()` unassigned ones are the newest;
+    // pair that subset oldest-with-oldest (hence `.rev()`), like the legacy positional zip.
+    let chosen: Vec<usize> = (0..summaries.len())
+        .filter(|&i| assignment[i].is_none())
+        .take(free.len())
+        .collect();
+    let mut new_bindings = Vec::new();
+    for (&si, &wi) in chosen.iter().rev().zip(&free) {
+        assignment[si] = Some(windows[wi].name.clone());
+        taken[wi] = true;
+        if let Some(sid) = &summaries[si].session_id {
+            new_bindings.push((windows[wi].name.clone(), sid.clone()));
+        }
+    }
+    let mut unpaired: Vec<&agent::WindowMeta> = windows
+        .iter()
+        .zip(&taken)
+        .filter(|(_, t)| !**t)
+        .map(|(w, _)| w)
+        .collect();
+    unpaired.sort_by_key(|w| std::cmp::Reverse(w.wid));
+    Pairing {
+        assignment,
+        new_bindings,
+        unpaired: unpaired.into_iter().map(|w| w.name.clone()).collect(),
+    }
+}
+
+/// Which of a lane's newest-first transcripts to keep, honoring bindings: every summary bound
+/// to a live managed window is kept regardless of rank (the window only exists while its
+/// agent's process lives, so it outranks the process-count probe), then newest-first from the
+/// rest up to `keep` total. Output is re-sorted newest-first so the wire order is unchanged.
+/// Without this, a bound-but-quiet agent could be truncated in favor of a newer external
+/// transcript, dropping a live agent from the lane.
+fn select_kept_summaries(
+    summaries: Vec<agent::TranscriptSummary>,
+    bound: &std::collections::HashSet<String>,
+    keep: usize,
+) -> Vec<agent::TranscriptSummary> {
+    if summaries.len() <= keep {
+        return summaries;
+    }
+    let (bound_s, rest): (Vec<_>, Vec<_>) = summaries
+        .into_iter()
+        .partition(|s| s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
+    let take_rest = keep.saturating_sub(bound_s.len());
+    let mut out = bound_s;
+    out.extend(rest.into_iter().take(take_rest));
+    out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+    out
 }
 
 /// How long a viewport focus keeps owning its window's size after the last `viewport.set`.
@@ -2716,16 +2842,6 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
     }
 }
 
-/// Whether a lane needs a window-only placeholder for a just-spawned agent whose transcript
-/// hasn't appeared yet, and which managed-window index it maps to. `shown` = transcript-backed
-/// sessions already emitted; `managed_n` = live managed windows. A managed window exists only
-/// while its agent's process lives (tmux closes it on exit), so an unpaired window is a real
-/// agent that simply hasn't written its `.jsonl` yet. Returns the newest unpaired window's index
-/// (at most one, per the `SessKey::Fallback` single-no-transcript-session model), or `None`.
-fn placeholder_window_index(shown: usize, managed_n: usize) -> Option<usize> {
-    (managed_n > shown).then(|| managed_n - 1)
-}
-
 /// A Claude session id is safe to interpolate into a resume command (`claude --resume <id>`).
 /// Transcript ids are UUIDs / `[A-Za-z0-9_-]`; anything else (whitespace, `;`, `$`, quotes, `|`,
 /// backticks…) is rejected so `agent.adopt` can't be turned into shell injection — the command is
@@ -2741,11 +2857,11 @@ fn valid_session_id(s: &str) -> bool {
 /// `tmux` failing to spawn under load — distinct from a genuinely empty server), reuse the
 /// last-good list so a single bad snapshot doesn't momentarily drop every managed agent — which
 /// would flip sessions to `external`, detach the focused TUI, and fire stale notifications.
-fn resolve_windows(
-    fresh: Result<Vec<String>, String>,
-    last_good: &mut Vec<String>,
+fn resolve_windows<T: Clone>(
+    fresh: Result<Vec<T>, String>,
+    last_good: &mut Vec<T>,
     empty_misses: &mut u8,
-) -> Vec<String> {
+) -> Vec<T> {
     match fresh {
         // Transient probe fault (fork/connection): reuse last-good; don't touch the empty counter.
         Err(_) => last_good.clone(),
@@ -3539,19 +3655,181 @@ mod tests {
         assert_eq!(misses, 0);
     }
 
+    /// A minimal transcript summary for pairing tests: `sid` + activity time.
+    fn tsum(sid: &str, last_activity: chrono::DateTime<chrono::Utc>) -> agent::TranscriptSummary {
+        agent::TranscriptSummary {
+            kind: repomon_core::model::AgentKind::ClaudeCode,
+            manifest_path: PathBuf::from(format!("/tmp/{sid}.jsonl")),
+            cwd: None,
+            last_activity,
+            tool_call_count: 0,
+            status: repomon_core::model::AgentStatus::Idle,
+            title: None,
+            last_message: None,
+            config_dir: None,
+            session_id: Some(sid.to_string()),
+            ended_turn: false,
+        }
+    }
+
+    fn wm(name: &str, wid: u64, sid: Option<&str>) -> agent::WindowMeta {
+        agent::WindowMeta {
+            name: name.into(),
+            wid,
+            session: sid.map(str::to_string),
+        }
+    }
+
+    /// Activity times t(0) < t(1) < …, so `t(2)` is newer than `t(1)`.
+    fn t(n: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_700_000_000 + n * 60, 0).unwrap()
+    }
+
     #[test]
-    fn placeholder_for_the_newest_unpaired_window() {
-        // One existing agent (transcript) + a freshly-spawned second window: surface the new
-        // window immediately, mapped to the newest slot, so it isn't invisible until its
-        // transcript lands.
-        assert_eq!(placeholder_window_index(1, 2), Some(1));
-        // Every managed window already transcript-backed → no placeholder.
-        assert_eq!(placeholder_window_index(2, 2), None);
-        assert_eq!(placeholder_window_index(1, 1), None);
-        assert_eq!(placeholder_window_index(0, 0), None);
-        // Three windows, one transcript: still a single placeholder (the Fallback invariant),
-        // mapped to the newest window.
-        assert_eq!(placeholder_window_index(1, 3), Some(2));
+    fn pairing_without_bindings_matches_legacy_heuristic() {
+        // First contact (nothing bound yet): newest transcript ↔ newest slot, oldest paired ↔
+        // slot 1, the overflow transcript external — exactly what the positional zip did.
+        let summaries = vec![tsum("c", t(3)), tsum("b", t(2)), tsum("a", t(1))];
+        let windows = vec![wm("lane-5", 1, None), wm("lane-5-2", 2, None)];
+        let p = pair_transcripts_to_windows(&summaries, &windows);
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-5-2".into()), Some("lane-5".into()), None]
+        );
+        // Both pairs become sticky bindings.
+        let mut nb = p.new_bindings.clone();
+        nb.sort();
+        assert_eq!(
+            nb,
+            vec![
+                ("lane-5".to_string(), "b".to_string()),
+                ("lane-5-2".to_string(), "c".to_string())
+            ]
+        );
+        assert!(p.unpaired.is_empty());
+    }
+
+    #[test]
+    fn pairing_sticks_across_activity_flip() {
+        // The reported bug: two bound agents swap activity rank; the pairing must not move.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        // b most recently active…
+        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &windows);
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7-2".into()), Some("lane-7".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+        // …then a takes a turn and the order flips: same windows per session id.
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &windows);
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), Some("lane-7-2".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+        assert!(p.unpaired.is_empty());
+    }
+
+    #[test]
+    fn first_contact_binds_then_holds_through_flip() {
+        // Unbound windows (daemon restart / pre-upgrade agents): the heuristic runs once and
+        // its result is emitted as bindings; re-running with those bindings and flipped
+        // activity keeps the original assignment.
+        let unbound = vec![wm("lane-7", 1, None), wm("lane-7-2", 2, None)];
+        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &unbound);
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7-2".into()), Some("lane-7".into())]
+        );
+        let bound = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &bound);
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), Some("lane-7-2".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+    }
+
+    #[test]
+    fn slot_recycling_pairs_new_transcript_to_new_window() {
+        // Slot 1 (`lane-7`) died and was respawned: same NAME, higher window id, no binding.
+        // The surviving agent b keeps its bound `lane-7-2`; the newcomer c gets the recycled
+        // window — even though slot-name order would have handed c the older agent's window.
+        let windows = vec![wm("lane-7", 7, None), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("c", t(9)), tsum("b", t(2))], &windows);
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), Some("lane-7-2".into())]
+        );
+        assert_eq!(
+            p.new_bindings,
+            vec![("lane-7".to_string(), "c".to_string())]
+        );
+    }
+
+    #[test]
+    fn one_tick_transcript_flap_does_not_rebind() {
+        // b's transcript flaps out for one tick: its window merely goes unpaired (placeholder
+        // target); it is NOT rebound to the surviving transcript and no binding is written.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3))], &windows);
+        assert_eq!(p.assignment, vec![Some("lane-7".into())]);
+        assert!(p.new_bindings.is_empty());
+        assert_eq!(p.unpaired, vec!["lane-7-2".to_string()]);
+    }
+
+    #[test]
+    fn stale_binding_released_to_a_genuinely_new_transcript() {
+        // The bound transcript is gone AND a new one needs a window: the stale binding is
+        // released and rewritten to the newcomer.
+        let windows = vec![wm("lane-7", 1, Some("x"))];
+        let p = pair_transcripts_to_windows(&[tsum("y", t(5))], &windows);
+        assert_eq!(p.assignment, vec![Some("lane-7".into())]);
+        assert_eq!(
+            p.new_bindings,
+            vec![("lane-7".to_string(), "y".to_string())]
+        );
+        assert!(p.unpaired.is_empty());
+    }
+
+    #[test]
+    fn placeholder_target_is_the_newest_unpaired_window() {
+        // One transcript, two windows (second freshly spawned, no `.jsonl` yet): the leftover
+        // is the NEWEST window (highest id) so the placeholder lands on the fresh spawn.
+        let windows = vec![wm("lane-5", 1, None), wm("lane-5-2", 2, None)];
+        let p = pair_transcripts_to_windows(&[tsum("a", t(1))], &windows);
+        assert_eq!(p.assignment, vec![Some("lane-5".into())]);
+        assert_eq!(p.unpaired, vec!["lane-5-2".to_string()]);
+        // All windows transcript-backed → nothing unpaired.
+        let p = pair_transcripts_to_windows(
+            &[tsum("b", t(2)), tsum("a", t(1))],
+            &[wm("lane-5", 1, None), wm("lane-5-2", 2, None)],
+        );
+        assert!(p.unpaired.is_empty());
+    }
+
+    #[test]
+    fn select_kept_summaries_protects_bound_sessions() {
+        // A bound-but-quiet agent (its window is alive — that IS liveness) must survive
+        // truncation ahead of newer unbound transcripts; output stays newest-first.
+        let bound: std::collections::HashSet<String> = ["a".to_string()].into();
+        let kept = select_kept_summaries(
+            vec![tsum("e1", t(3)), tsum("e2", t(2)), tsum("a", t(1))],
+            &bound,
+            2,
+        );
+        let ids: Vec<&str> = kept
+            .iter()
+            .filter_map(|s| s.session_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["e1", "a"]);
+        // Under the cap nothing is dropped.
+        let kept = select_kept_summaries(vec![tsum("e1", t(3)), tsum("a", t(1))], &bound, 5);
+        assert_eq!(kept.len(), 2);
+        // More bound sessions than `keep` says: the windows win (each proves a live agent).
+        let bound: std::collections::HashSet<String> = ["a".to_string(), "b".to_string()].into();
+        let kept = select_kept_summaries(vec![tsum("b", t(3)), tsum("a", t(1))], &bound, 1);
+        assert_eq!(kept.len(), 2);
     }
 
     #[test]
