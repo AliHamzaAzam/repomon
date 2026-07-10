@@ -178,10 +178,14 @@ impl TmuxRuntime {
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         // tmux: "can't find window/session/pane: …", "no server running on …",
-        // "error connecting to …" — the target simply isn't there.
+        // "error connecting to …" — the target simply isn't there. `set-option` phrases the
+        // same absence as "no such window/session: …" (tmux ≥ 3.x), unlike the capture/list
+        // commands.
         let absent = stderr.contains("can't find ")
             || stderr.contains("no server running")
-            || stderr.contains("error connecting");
+            || stderr.contains("error connecting")
+            || stderr.contains("no such window")
+            || stderr.contains("no such session");
         if absent {
             Ok(String::new())
         } else {
@@ -307,11 +311,29 @@ impl TmuxRuntime {
             .collect()
     }
 
-    /// Stamp `@repomon_session` on `window` — the overlay binder's write-back, done once per
-    /// agent lifetime. tmux destroys window options with the window, so the binding can never
-    /// outlive its agent (slot-name recycling included). A vanished window is a benign no-op.
+    /// Stamp `@repomon_session` on `window` by NAME — for callers that just created the
+    /// window and know exactly which transcript runs in it (`agent.adopt`). tmux destroys
+    /// window options with the window, so the binding can never outlive its agent (slot-name
+    /// recycling included). A vanished window is a benign no-op.
     pub fn set_window_session(&self, window: &str, session_id: &str) -> Result<()> {
         let target = self.exact_target(window);
+        self.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-t",
+            &target,
+            "@repomon_session",
+            session_id,
+        ])?;
+        Ok(())
+    }
+
+    /// Stamp `@repomon_session` by window ID (`@N`) — the overlay binder's write-back. The id
+    /// pins the exact window the pairing was computed against: ids are never reused within a
+    /// server, so a slot NAME recycled between the probe and the stamp can't inherit the old
+    /// transcript's binding. A vanished window is a benign no-op.
+    pub fn set_window_session_by_id(&self, wid: u64, session_id: &str) -> Result<()> {
+        let target = format!("@{wid}");
         self.run_allow_absent(&[
             "set-option",
             "-w",

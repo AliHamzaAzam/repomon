@@ -983,6 +983,21 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
+            // The one moment the daemon KNOWS which transcript runs in this window: stamp
+            // the sticky binding deterministically instead of leaving it to first-contact
+            // guessing — `--resume` doesn't touch the resumed .jsonl until the first
+            // exchange, so the binder could otherwise pair a newer external transcript onto
+            // the adopted window and the stamp would wedge it there.
+            if let Some(sid) = p.session_id.clone() {
+                let tmux = ctx.tmux.clone();
+                let w = window.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = tmux.set_window_session(&w, &sid) {
+                        tracing::warn!("failed to stamp adopted session on {w}: {e}");
+                    }
+                })
+                .await;
+            }
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
@@ -1953,6 +1968,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     if let Err(ref e) = fresh {
         tracing::warn!("tmux list-windows failed; reusing last-good window set this overlay: {e}");
     }
+    // A tick that ran on the last-good snapshot pairs against binding info that lags any
+    // stamps by a generation — good enough to display, but never persist first-contact
+    // bindings computed from it (they could overwrite fresh stamps with crossed pairs).
+    let probe_ok = fresh.is_ok();
     let windows = {
         let mut last_good = ctx.last_good_windows.lock().await;
         let mut empty_misses = ctx.window_empty_misses.lock().await;
@@ -1990,7 +2009,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let global_auto = ctx.config.read().await.auto_continue;
 
     // Sticky bindings established this tick, stamped as `@repomon_session` after the loop.
-    let mut new_bindings: Vec<(String, String)> = Vec::new();
+    let mut new_bindings: Vec<(u64, String, String)> = Vec::new();
     for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
         // The lane's managed agent windows, in slot order. A window only exists while its
         // agent's process lives (tmux closes it on exit), so it doubles as proof of liveness
@@ -2024,14 +2043,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             .iter()
             .filter_map(|w| w.session.clone())
             .collect();
-        let summaries = select_kept_summaries(summaries, &bound, keep);
+        let summaries = select_kept_summaries(summaries, &bound, keep, now);
         if !summaries.is_empty() {
             // Pair transcripts with windows by sticky identity (`@repomon_session`), falling
             // back to the oldest-with-oldest heuristic only on first contact — see
             // `pair_transcripts_to_windows`. The old purely positional zip re-bound windows
             // whenever two agents swapped activity rank, which moved names, panes, and usage
             // accounts between rows.
-            let pairing = pair_transcripts_to_windows(&summaries, &lane_windows);
+            let pairing = pair_transcripts_to_windows(&summaries, &lane_windows, now);
             new_bindings.extend(pairing.new_bindings);
             for (s, win) in summaries.into_iter().zip(pairing.assignment) {
                 if s.last_activity > lane.last_activity_at {
@@ -2125,13 +2144,17 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 
     // Persist the sticky bindings established this tick: stamp `@repomon_session` on each
     // window so the pairing survives daemon restarts and activity-order flips. Rare — once
-    // per agent lifetime — so this adds no forks to a steady-state overlay.
-    if !new_bindings.is_empty() {
+    // per agent lifetime — so this adds no forks to a steady-state overlay. Stamped by
+    // window ID (never reused), and only on fresh-probe ticks (see `probe_ok`). Concurrent
+    // overlay ticks can still cross-stamp in a sub-second window; a wrong winner is caught
+    // by the supersession rule in `pair_transcripts_to_windows` once the real transcript
+    // starts writing.
+    if probe_ok && !new_bindings.is_empty() {
         let tmux = ctx.tmux.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            for (w, sid) in new_bindings {
-                if let Err(e) = tmux.set_window_session(&w, &sid) {
-                    tracing::warn!("failed to stamp @repomon_session on {w}: {e}");
+            for (wid, name, sid) in new_bindings {
+                if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
+                    tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
                 }
             }
         })
@@ -2335,9 +2358,11 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
 struct Pairing {
     /// Per input summary (order preserved): the managed window it runs in; `None` = external.
     assignment: Vec<Option<String>>,
-    /// Sticky bindings established this tick — `(window_name, session_id)` to stamp as
-    /// `@repomon_session` so they survive daemon restarts and activity-order flips.
-    new_bindings: Vec<(String, String)>,
+    /// Sticky bindings established this tick — `(window_id, window_name, session_id)` to
+    /// stamp as `@repomon_session` so they survive daemon restarts and activity-order flips.
+    /// Stamped by window ID: a slot NAME recycled between the probe and the stamp must not
+    /// inherit the old transcript's binding.
+    new_bindings: Vec<(u64, String, String)>,
     /// Live managed windows no transcript claimed, newest (highest window id) first. The
     /// first is the placeholder target for a just-spawned agent whose `.jsonl` hasn't
     /// appeared yet (at most one, per the `SessKey::Fallback` model).
@@ -2361,38 +2386,88 @@ struct Pairing {
 fn pair_transcripts_to_windows(
     summaries: &[agent::TranscriptSummary],
     windows: &[agent::WindowMeta],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Pairing {
-    let mut assignment: Vec<Option<String>> = vec![None; summaries.len()];
-    let mut taken = vec![false; windows.len()];
-    // Pass 1 — sticky identity.
+    let is_fresh =
+        |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
+    // Pass 1 — sticky identity, tentatively: each window claims the kept transcript its
+    // `@repomon_session` names.
+    let mut claim: Vec<Option<usize>> = vec![None; windows.len()];
+    let mut claimed = vec![false; summaries.len()];
     for (wi, w) in windows.iter().enumerate() {
         let Some(sid) = &w.session else { continue };
         if let Some(si) = summaries
             .iter()
             .position(|s| s.session_id.as_deref() == Some(sid.as_str()))
         {
-            if assignment[si].is_none() {
-                assignment[si] = Some(w.name.clone());
-                taken[wi] = true;
+            if !claimed[si] {
+                claim[wi] = Some(si);
+                claimed[si] = true;
             }
         }
     }
-    // Pass 2 — first contact. Never-bound windows are offered before stale-bound ones, both
-    // oldest (lowest window id) first.
+    // Supersession: a claude process rotates its transcript id in place (`/clear`, a
+    // fork-on-resume), leaving its window bound to a dead transcript while the live
+    // continuation has no window. When more FRESH unclaimed transcripts exist than free
+    // windows to receive them, release claims whose transcript has gone quiet — coldest
+    // first — so pass 2 can re-bind those windows to the transcripts actually writing. A
+    // claim on a fresh transcript is never released, so an idle fleet can't be shuffled.
+    let fresh_unclaimed = summaries
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| !claimed[*i] && is_fresh(s))
+        .count();
+    let mut free_n = claim.iter().filter(|c| c.is_none()).count();
+    if fresh_unclaimed > free_n {
+        let mut stale_wis: Vec<usize> = (0..windows.len())
+            .filter(|&wi| claim[wi].is_some_and(|si| !is_fresh(&summaries[si])))
+            .collect();
+        stale_wis.sort_by_key(|&wi| summaries[claim[wi].unwrap()].last_activity);
+        for wi in stale_wis {
+            if fresh_unclaimed <= free_n {
+                break;
+            }
+            claimed[claim[wi].unwrap()] = false;
+            claim[wi] = None;
+            free_n += 1;
+        }
+    }
+    // Honor the surviving claims.
+    let mut assignment: Vec<Option<String>> = vec![None; summaries.len()];
+    let mut taken = vec![false; windows.len()];
+    for (wi, c) in claim.iter().enumerate() {
+        if let Some(si) = c {
+            assignment[*si] = Some(windows[wi].name.clone());
+            taken[wi] = true;
+        }
+    }
+    // Pass 2 — first contact. Never-bound windows are offered before stale/released-bound
+    // ones; among the windows actually used, oldest (lowest window id) pairs with the oldest
+    // chosen transcript, like the legacy positional zip.
     let mut free: Vec<usize> = (0..windows.len()).filter(|&i| !taken[i]).collect();
     free.sort_by_key(|&i| (windows[i].session.is_some(), windows[i].wid));
-    // `summaries` is newest-first, so the first `free.len()` unassigned ones are the newest;
-    // pair that subset oldest-with-oldest (hence `.rev()`), like the legacy positional zip.
+    // `summaries` is newest-first, so the first `free.len()` unassigned ones are the newest.
     let chosen: Vec<usize> = (0..summaries.len())
         .filter(|&i| assignment[i].is_none())
         .take(free.len())
         .collect();
+    let mut used: Vec<usize> = free.into_iter().take(chosen.len()).collect();
+    used.sort_by_key(|&i| windows[i].wid);
     let mut new_bindings = Vec::new();
-    for (&si, &wi) in chosen.iter().rev().zip(&free) {
+    for (&si, &wi) in chosen.iter().rev().zip(&used) {
         assignment[si] = Some(windows[wi].name.clone());
         taken[wi] = true;
-        if let Some(sid) = &summaries[si].session_id {
-            new_bindings.push((windows[wi].name.clone(), sid.clone()));
+        // Persist only pairs we're confident in: an actively-writing transcript IS the agent
+        // in this window. A quiet one is a stand-in guess (e.g. a fresh spawn whose .jsonl
+        // hasn't appeared yet, with an old transcript filling the display) — show it, but
+        // leave the window unbound so first contact re-runs once the real transcript starts
+        // writing, instead of wedging the guess for hours.
+        if is_fresh(&summaries[si]) {
+            if let Some(sid) = &summaries[si].session_id {
+                if windows[wi].session.as_deref() != Some(sid.as_str()) {
+                    new_bindings.push((windows[wi].wid, windows[wi].name.clone(), sid.clone()));
+                }
+            }
         }
     }
     let mut unpaired: Vec<&agent::WindowMeta> = windows
@@ -2419,15 +2494,21 @@ fn select_kept_summaries(
     summaries: Vec<agent::TranscriptSummary>,
     bound: &std::collections::HashSet<String>,
     keep: usize,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<agent::TranscriptSummary> {
     if summaries.len() <= keep {
         return summaries;
     }
-    let (bound_s, rest): (Vec<_>, Vec<_>) = summaries
+    let is_fresh =
+        |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
+    // Protected: bound to a live window (the window proves its agent alive) OR actively
+    // writing right now — `sessions_to_keep`'s "never drop a session that is working"
+    // contract must survive bound-protection, or a stale binding could make the one live
+    // transcript invisible.
+    let (mut out, rest): (Vec<_>, Vec<_>) = summaries
         .into_iter()
-        .partition(|s| s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
-    let take_rest = keep.saturating_sub(bound_s.len());
-    let mut out = bound_s;
+        .partition(|s| is_fresh(s) || s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
+    let take_rest = keep.saturating_sub(out.len());
     out.extend(rest.into_iter().take(take_rest));
     out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
     out
@@ -3680,9 +3761,10 @@ mod tests {
         }
     }
 
-    /// Activity times t(0) < t(1) < …, so `t(2)` is newer than `t(1)`.
+    /// Activity times t(0) < t(1) < … in 10s steps, so several consecutive stamps all count
+    /// as "fresh" (within `RECENTLY_ACTIVE_SECS`) relative to a nearby `now`.
     fn t(n: i64) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::from_timestamp(1_700_000_000 + n * 60, 0).unwrap()
+        chrono::DateTime::from_timestamp(1_700_000_000 + n * 10, 0).unwrap()
     }
 
     #[test]
@@ -3691,19 +3773,19 @@ mod tests {
         // slot 1, the overflow transcript external — exactly what the positional zip did.
         let summaries = vec![tsum("c", t(3)), tsum("b", t(2)), tsum("a", t(1))];
         let windows = vec![wm("lane-5", 1, None), wm("lane-5-2", 2, None)];
-        let p = pair_transcripts_to_windows(&summaries, &windows);
+        let p = pair_transcripts_to_windows(&summaries, &windows, t(3));
         assert_eq!(
             p.assignment,
             vec![Some("lane-5-2".into()), Some("lane-5".into()), None]
         );
-        // Both pairs become sticky bindings.
+        // Both paired transcripts are actively fresh → both pairs become sticky bindings.
         let mut nb = p.new_bindings.clone();
         nb.sort();
         assert_eq!(
             nb,
             vec![
-                ("lane-5".to_string(), "b".to_string()),
-                ("lane-5-2".to_string(), "c".to_string())
+                (1, "lane-5".to_string(), "b".to_string()),
+                (2, "lane-5-2".to_string(), "c".to_string())
             ]
         );
         assert!(p.unpaired.is_empty());
@@ -3714,14 +3796,14 @@ mod tests {
         // The reported bug: two bound agents swap activity rank; the pairing must not move.
         let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
         // b most recently active…
-        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &windows);
+        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &windows, t(2));
         assert_eq!(
             p.assignment,
             vec![Some("lane-7-2".into()), Some("lane-7".into())]
         );
         assert!(p.new_bindings.is_empty());
         // …then a takes a turn and the order flips: same windows per session id.
-        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &windows);
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &windows, t(3));
         assert_eq!(
             p.assignment,
             vec![Some("lane-7".into()), Some("lane-7-2".into())]
@@ -3736,13 +3818,13 @@ mod tests {
         // its result is emitted as bindings; re-running with those bindings and flipped
         // activity keeps the original assignment.
         let unbound = vec![wm("lane-7", 1, None), wm("lane-7-2", 2, None)];
-        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &unbound);
+        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &unbound, t(2));
         assert_eq!(
             p.assignment,
             vec![Some("lane-7-2".into()), Some("lane-7".into())]
         );
         let bound = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
-        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &bound);
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &bound, t(3));
         assert_eq!(
             p.assignment,
             vec![Some("lane-7".into()), Some("lane-7-2".into())]
@@ -3756,14 +3838,14 @@ mod tests {
         // The surviving agent b keeps its bound `lane-7-2`; the newcomer c gets the recycled
         // window — even though slot-name order would have handed c the older agent's window.
         let windows = vec![wm("lane-7", 7, None), wm("lane-7-2", 2, Some("b"))];
-        let p = pair_transcripts_to_windows(&[tsum("c", t(9)), tsum("b", t(2))], &windows);
+        let p = pair_transcripts_to_windows(&[tsum("c", t(9)), tsum("b", t(2))], &windows, t(9));
         assert_eq!(
             p.assignment,
             vec![Some("lane-7".into()), Some("lane-7-2".into())]
         );
         assert_eq!(
             p.new_bindings,
-            vec![("lane-7".to_string(), "c".to_string())]
+            vec![(7, "lane-7".to_string(), "c".to_string())]
         );
     }
 
@@ -3772,7 +3854,7 @@ mod tests {
         // b's transcript flaps out for one tick: its window merely goes unpaired (placeholder
         // target); it is NOT rebound to the surviving transcript and no binding is written.
         let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
-        let p = pair_transcripts_to_windows(&[tsum("a", t(3))], &windows);
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3))], &windows, t(3));
         assert_eq!(p.assignment, vec![Some("lane-7".into())]);
         assert!(p.new_bindings.is_empty());
         assert_eq!(p.unpaired, vec!["lane-7-2".to_string()]);
@@ -3780,14 +3862,14 @@ mod tests {
 
     #[test]
     fn stale_binding_released_to_a_genuinely_new_transcript() {
-        // The bound transcript is gone AND a new one needs a window: the stale binding is
-        // released and rewritten to the newcomer.
+        // The bound transcript is gone AND a new (actively writing) one needs a window: the
+        // stale binding is released and rewritten to the newcomer.
         let windows = vec![wm("lane-7", 1, Some("x"))];
-        let p = pair_transcripts_to_windows(&[tsum("y", t(5))], &windows);
+        let p = pair_transcripts_to_windows(&[tsum("y", t(5))], &windows, t(5));
         assert_eq!(p.assignment, vec![Some("lane-7".into())]);
         assert_eq!(
             p.new_bindings,
-            vec![("lane-7".to_string(), "y".to_string())]
+            vec![(1, "lane-7".to_string(), "y".to_string())]
         );
         assert!(p.unpaired.is_empty());
     }
@@ -3797,26 +3879,104 @@ mod tests {
         // One transcript, two windows (second freshly spawned, no `.jsonl` yet): the leftover
         // is the NEWEST window (highest id) so the placeholder lands on the fresh spawn.
         let windows = vec![wm("lane-5", 1, None), wm("lane-5-2", 2, None)];
-        let p = pair_transcripts_to_windows(&[tsum("a", t(1))], &windows);
+        let p = pair_transcripts_to_windows(&[tsum("a", t(1))], &windows, t(1));
         assert_eq!(p.assignment, vec![Some("lane-5".into())]);
         assert_eq!(p.unpaired, vec!["lane-5-2".to_string()]);
         // All windows transcript-backed → nothing unpaired.
         let p = pair_transcripts_to_windows(
             &[tsum("b", t(2)), tsum("a", t(1))],
             &[wm("lane-5", 1, None), wm("lane-5-2", 2, None)],
+            t(2),
         );
         assert!(p.unpaired.is_empty());
     }
 
     #[test]
+    fn spawn_race_displays_but_does_not_stamp_a_stale_transcript() {
+        // agent.spawn created the window but claude hasn't written its .jsonl yet; the only
+        // transcript around is a stale leftover (an /exited session, or the user's own
+        // external one). It may stand in for DISPLAY, but the binding must not be stamped —
+        // otherwise the guess wedges for hours (pass 1 would re-claim it every tick).
+        let windows = vec![wm("lane-7", 5, None)];
+        let stale = tsum("e", t(0));
+        let p = pair_transcripts_to_windows(std::slice::from_ref(&stale), &windows, t(100));
+        assert_eq!(p.assignment, vec![Some("lane-7".into())]);
+        assert!(
+            p.new_bindings.is_empty(),
+            "a quiet transcript is a guess, not a binding"
+        );
+        // The real transcript appears (actively writing): IT gets the window and the stamp;
+        // the stale one falls back to external.
+        let p = pair_transcripts_to_windows(&[tsum("x", t(100)), stale], &windows, t(100));
+        assert_eq!(p.assignment, vec![Some("lane-7".into()), None]);
+        assert_eq!(
+            p.new_bindings,
+            vec![(5, "lane-7".to_string(), "x".to_string())]
+        );
+    }
+
+    #[test]
+    fn clear_rotation_rebinds_window_to_the_live_transcript() {
+        // `/clear` (or a fork-on-resume) rotates the session id in place: the window stays
+        // bound to the dead transcript e while the live continuation x has no window. The
+        // stale binding must be superseded — released and re-stamped to the transcript that
+        // is actually writing.
+        let windows = vec![wm("lane-7", 1, Some("e"))];
+        let p =
+            pair_transcripts_to_windows(&[tsum("x", t(100)), tsum("e", t(0))], &windows, t(100));
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), None],
+            "the live transcript takes the window; the dead one goes external"
+        );
+        assert_eq!(
+            p.new_bindings,
+            vec![(1, "lane-7".to_string(), "x".to_string())]
+        );
+    }
+
+    #[test]
+    fn fresh_external_does_not_steal_a_bound_window_when_a_free_one_exists() {
+        // An idle bound agent e plus a fresh unpaired transcript x: with a free window
+        // available, x takes the free window and e's binding is left alone — supersession
+        // only fires when the fresh transcript would otherwise have no home.
+        let windows = vec![wm("lane-7", 1, Some("e")), wm("lane-7-2", 9, None)];
+        let p =
+            pair_transcripts_to_windows(&[tsum("x", t(100)), tsum("e", t(0))], &windows, t(100));
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7-2".into()), Some("lane-7".into())]
+        );
+        assert_eq!(
+            p.new_bindings,
+            vec![(9, "lane-7-2".to_string(), "x".to_string())]
+        );
+    }
+
+    #[test]
+    fn idle_bound_pairing_holds_without_fresh_claimants() {
+        // Nothing fresh in the lane (everyone idle): stale-bound windows keep their agents —
+        // supersession must never shuffle a merely-idle fleet.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("b", t(1)), tsum("a", t(0))], &windows, t(100));
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7-2".into()), Some("lane-7".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+    }
+
+    #[test]
     fn select_kept_summaries_protects_bound_sessions() {
         // A bound-but-quiet agent (its window is alive — that IS liveness) must survive
-        // truncation ahead of newer unbound transcripts; output stays newest-first.
+        // truncation ahead of newer unbound transcripts; output stays newest-first. `now` is
+        // far past every activity time so freshness plays no part here.
         let bound: std::collections::HashSet<String> = ["a".to_string()].into();
         let kept = select_kept_summaries(
             vec![tsum("e1", t(3)), tsum("e2", t(2)), tsum("a", t(1))],
             &bound,
             2,
+            t(1000),
         );
         let ids: Vec<&str> = kept
             .iter()
@@ -3824,12 +3984,29 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["e1", "a"]);
         // Under the cap nothing is dropped.
-        let kept = select_kept_summaries(vec![tsum("e1", t(3)), tsum("a", t(1))], &bound, 5);
+        let kept =
+            select_kept_summaries(vec![tsum("e1", t(3)), tsum("a", t(1))], &bound, 5, t(1000));
         assert_eq!(kept.len(), 2);
         // More bound sessions than `keep` says: the windows win (each proves a live agent).
         let bound: std::collections::HashSet<String> = ["a".to_string(), "b".to_string()].into();
-        let kept = select_kept_summaries(vec![tsum("b", t(3)), tsum("a", t(1))], &bound, 1);
+        let kept =
+            select_kept_summaries(vec![tsum("b", t(3)), tsum("a", t(1))], &bound, 1, t(1000));
         assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn select_kept_summaries_never_drops_a_fresh_transcript() {
+        // The fresh backstop must survive bound-protection: with keep=1 and the budget
+        // filled by a bound-but-stale transcript, the actively-writing one is kept too —
+        // truncating the only session doing work would make the live agent invisible.
+        let bound: std::collections::HashSet<String> = ["e".to_string()].into();
+        let kept =
+            select_kept_summaries(vec![tsum("x", t(100)), tsum("e", t(0))], &bound, 1, t(100));
+        let ids: Vec<&str> = kept
+            .iter()
+            .filter_map(|s| s.session_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["x", "e"]);
     }
 
     #[test]
