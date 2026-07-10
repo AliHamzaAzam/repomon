@@ -4991,11 +4991,14 @@ fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
 }
 
 /// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
+/// Transcript id first — UUIDs are never reused, while slot names (`lane-7-2`) are recycled on
+/// respawn, so a long-held `Window` ref could resolve to a brand-new different agent. The
+/// window is the fallback for just-spawned placeholders whose `.jsonl` hasn't appeared yet.
 fn agent_session_ref(s: &AgentSession) -> Option<SessionRef> {
-    if let Some(w) = &s.tmux_window {
-        Some(SessionRef::Window(w.clone()))
+    if let Some(id) = &s.session_id {
+        Some(SessionRef::Transcript(id.clone()))
     } else {
-        s.session_id.clone().map(SessionRef::Transcript)
+        s.tmux_window.clone().map(SessionRef::Window)
     }
 }
 
@@ -5648,10 +5651,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_ref_prefers_window_then_transcript() {
-        // A managed agent keys on its window even when it also has a transcript id.
+    fn agent_session_ref_prefers_transcript_then_window() {
+        // A transcript-backed agent keys on its transcript id even when it also has a window:
+        // transcript UUIDs are never reused, while slot names like `lane-7-2` are recycled on
+        // respawn — a remembered Window ref could resolve to a brand-new different agent.
         assert_eq!(
             agent_session_ref(&managed("lane-7-2", Some("uuid-1"))),
+            Some(SessionRef::Transcript("uuid-1".into()))
+        );
+        // A just-spawned placeholder (window, no `.jsonl` yet) falls back to its window.
+        assert_eq!(
+            agent_session_ref(&managed("lane-7-2", None)),
             Some(SessionRef::Window("lane-7-2".into()))
         );
         // An external/transcript-only session keys on the transcript id.
