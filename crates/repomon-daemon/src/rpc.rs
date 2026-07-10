@@ -2409,9 +2409,11 @@ fn pair_transcripts_to_windows(
     // Supersession: a claude process rotates its transcript id in place (`/clear`, a
     // fork-on-resume), leaving its window bound to a dead transcript while the live
     // continuation has no window. When more FRESH unclaimed transcripts exist than free
-    // windows to receive them, release claims whose transcript has gone quiet — coldest
-    // first — so pass 2 can re-bind those windows to the transcripts actually writing. A
-    // claim on a fresh transcript is never released, so an idle fleet can't be shuffled.
+    // windows to receive them, release claims whose transcript has gone quiet — WARMEST
+    // first: the transcript that stopped writing most recently is the one that just rotated
+    // into the newcomer, while a long-cold one is simply an idle agent whose window must not
+    // be given away. A claim on a fresh transcript is never released, so an idle fleet
+    // can't be shuffled.
     let fresh_unclaimed = summaries
         .iter()
         .enumerate()
@@ -2422,7 +2424,7 @@ fn pair_transcripts_to_windows(
         let mut stale_wis: Vec<usize> = (0..windows.len())
             .filter(|&wi| claim[wi].is_some_and(|si| !is_fresh(&summaries[si])))
             .collect();
-        stale_wis.sort_by_key(|&wi| summaries[claim[wi].unwrap()].last_activity);
+        stale_wis.sort_by_key(|&wi| std::cmp::Reverse(summaries[claim[wi].unwrap()].last_activity));
         for wi in stale_wis {
             if fresh_unclaimed <= free_n {
                 break;
@@ -3932,6 +3934,29 @@ mod tests {
         assert_eq!(
             p.new_bindings,
             vec![(1, "lane-7".to_string(), "x".to_string())]
+        );
+    }
+
+    #[test]
+    fn clear_rotation_releases_the_rotated_window_not_the_coldest() {
+        // Two bound agents, both currently quiet: a rotated its session id a moment ago
+        // (`/clear` → continuation c), b has been idle for much longer. The window released
+        // for c must be a's — the transcript that went quiet MOST recently is the one that
+        // just rotated; sacrificing the long-idle b would route c's keys into b's pane.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(
+            &[tsum("c", t(100)), tsum("a", t(50)), tsum("b", t(0))],
+            &windows,
+            t(100),
+        );
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), None, Some("lane-7-2".into())],
+            "c inherits a's window; b keeps its own; dead a goes external"
+        );
+        assert_eq!(
+            p.new_bindings,
+            vec![(1, "lane-7".to_string(), "c".to_string())]
         );
     }
 
