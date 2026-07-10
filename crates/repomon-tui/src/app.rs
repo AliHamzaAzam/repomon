@@ -375,6 +375,15 @@ pub struct App {
     session_ref_miss_gen: u64,
     /// Bumped by every successful `refresh_lanes` — the anchor miss counter's clock.
     refresh_gen: u64,
+    /// Manual scroll offset for the Fleet page. `None` = follow the selection (the default:
+    /// the view keeps the selected lane centered); `Some(n)` = the user scrolled freely
+    /// (wheel / PgUp/PgDn) to read past the fold — e.g. the TODAY commit list. Any deliberate
+    /// selection move snaps back to `None`.
+    pub fleet_scroll: Option<usize>,
+    /// What `render_fleet` last showed: `(applied scroll, viewport height, max scroll)`.
+    /// Written each frame so scroll keys can start from the on-screen position and clamp
+    /// without re-deriving layout.
+    pub fleet_viewport: std::cell::Cell<(usize, usize, usize)>,
     /// The agent each lane had selected when you last left it (saved from `session_ref` on
     /// lane change), so returning to a multi-agent lane restores your pick instead of
     /// snapping back to the first slot. Keyed by a stable identity (transcript id / tmux
@@ -588,6 +597,8 @@ impl App {
             // Sentinel ≠ refresh_gen, so the very first snapshot's miss is counted too.
             session_ref_miss_gen: u64::MAX,
             refresh_gen: 0,
+            fleet_scroll: None,
+            fleet_viewport: std::cell::Cell::new((0, 0, 0)),
             session_memory: HashMap::new(),
             pending_focus_window: None,
             pending_focus_ticks: 0,
@@ -2214,8 +2225,19 @@ impl App {
                         }
                         _ => {}
                     },
-                    // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
-                    // terminal, a click on empty space blurs); the wheel still navigates.
+                    // Fleet: the wheel scrolls the PAGE (lanes + the TODAY commits), not the
+                    // cursor — arrow keys and clicks snap the view back to the selection.
+                    View::Fleet => match me.kind {
+                        MouseEventKind::ScrollUp => self.fleet_scroll_by(true, 3),
+                        MouseEventKind::ScrollDown => self.fleet_scroll_by(false, 3),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.handle_click(me.column, me.row).await
+                        }
+                        _ => {}
+                    },
+                    // Grid (and the rest): a left-click focuses the clicked lane (double-click
+                    // opens its real terminal, a click on empty space blurs); the wheel still
+                    // navigates.
                     _ => match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.handle_click(me.column, me.row).await
@@ -2268,6 +2290,10 @@ impl App {
                 // `R` renames the selected agent sub-row in the expanded fleet sidebar.
                 if key.code == KeyCode::Char('R') {
                     self.start_rename();
+                } else if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                    // Free-scroll the page (reaches the TODAY commits past the fold).
+                    let (_, h, _) = self.fleet_viewport.get();
+                    self.fleet_scroll_by(key.code == KeyCode::PageUp, h.saturating_sub(2).max(1));
                 } else if let Some(action) = keybinds::nav(key) {
                     self.apply(action).await;
                 }
@@ -3365,6 +3391,20 @@ impl App {
     /// A left-click in Grid/Fleet/Split. Hit-test the lane regions recorded during render: a click
     /// inside one focuses that lane (single-click → type in place for interactive zones; another
     /// click within `DOUBLE_CLICK` → open its real terminal). A click on empty space blurs.
+    /// Scroll the Fleet page manually (wheel / PgUp). Starts from the position currently on
+    /// screen, clamps to the rendered bounds, and stays in effect until the next deliberate
+    /// selection move snaps the view back to following the selection.
+    fn fleet_scroll_by(&mut self, up: bool, step: usize) {
+        let (applied, _, max) = self.fleet_viewport.get();
+        let cur = self.fleet_scroll.unwrap_or(applied).min(max);
+        let next = if up {
+            cur.saturating_sub(step)
+        } else {
+            (cur + step).min(max)
+        };
+        self.fleet_scroll = Some(next);
+    }
+
     async fn handle_click(&mut self, col: u16, row: u16) {
         // The pinned "repomind" row isn't a lane click-zone; hit-test it first: a click selects it
         // and opens the command-center view.
@@ -3392,6 +3432,8 @@ impl App {
         // Clicking a lane (or the gutter) leaves any repomind insert mode, since the selection is
         // moving off the pinned row.
         self.orch_insert = false;
+        // …and re-attaches a manually scrolled Fleet page to the (new) selection.
+        self.fleet_scroll = None;
         match hit {
             // A Grid shell tile: move the grid cursor onto it (input routes by active tile);
             // single-click types in place, double-click attaches into the real terminal.
@@ -4606,8 +4648,12 @@ impl App {
             self.repo_remove_armed = None;
         }
         match action {
-            Action::MoveUp => self.selected = self.selected.saturating_sub(1),
+            Action::MoveUp => {
+                self.fleet_scroll = None; // a deliberate move re-attaches the view to the cursor
+                self.selected = self.selected.saturating_sub(1);
+            }
             Action::MoveDown => {
+                self.fleet_scroll = None;
                 let n = self.rows_len();
                 if n > 0 && self.selected + 1 < n {
                     self.selected += 1;
@@ -5965,6 +6011,54 @@ mod tests {
         app.selected = 1;
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    #[tokio::test]
+    async fn fleet_page_scrolls_to_reach_all_commits() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        let (a, _) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a])];
+        app.selected = 1;
+        let now = chrono::Utc::now().to_rfc3339();
+        app.commits = (1..=20)
+            .map(|i| {
+                serde_json::from_value(json!({
+                    "oid": "0".repeat(40),
+                    "repo_id": 1,
+                    "author_name": "t",
+                    "author_email": "t@t",
+                    "summary": format!("commit-number-{i:02}"),
+                    "time": now,
+                    "parent_count": 1,
+                }))
+                .expect("fake commit")
+            })
+            .collect();
+        // Follow-selection mode: the page top (lanes) is on screen, the commit tail is not.
+        let top = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(
+            top.contains("repomind"),
+            "page top visible in follow mode:\n{top}"
+        );
+        assert!(
+            !top.contains("commit-number-20"),
+            "the tail can't fit on one screen:\n{top}"
+        );
+        // Manual scroll reaches the very last commit — and everything past the old 12-cap.
+        app.fleet_scroll = Some(usize::MAX / 2);
+        let bottom = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(
+            bottom.contains("commit-number-20"),
+            "manual scroll must reach the last commit:\n{bottom}"
+        );
+        assert!(
+            bottom.contains("commit-number-13"),
+            "the 12-commit cap must be gone:\n{bottom}"
+        );
+        // A deliberate selection move snaps back to follow mode.
+        app.apply(Action::MoveUp).await;
+        assert_eq!(app.fleet_scroll, None);
     }
 
     #[test]
