@@ -2786,16 +2786,26 @@ fn pair_transcripts_to_windows(
     for (&si, &wi) in chosen.iter().rev().zip(&used) {
         assignment[si] = Some(windows[wi].name.clone());
         taken[wi] = true;
-        // Nominate only transcripts we could ever be confident in: an actively-writing one
-        // IS some window's agent. A quiet one is a stand-in guess (e.g. a fresh spawn whose
-        // .jsonl hasn't appeared yet, with an old transcript filling the display) — show
-        // it, but never nominate it for a binding.
-        if is_fresh(&summaries[si]) {
-            if let Some(sid) = &summaries[si].session_id {
-                if windows[wi].session.as_deref() != Some(sid.as_str()) {
+        // Nominate a transcript for a durable stamp when PANE EVIDENCE could confirm it.
+        // Two routes qualify:
+        //  - it is actively writing (`is_fresh`): it IS some window's agent right now, so
+        //    the evidence pass will find its turn on screen.
+        //  - it is quiet but its window carries NO binding yet AND it has a distinctive
+        //    last-message fingerprint: this recovers an idle agent whose `@repomon_session`
+        //    was lost (a daemon restart of a quiet fleet leaves the window unstamped and no
+        //    transcript fresh, so pass 1 can't reclaim it and this pass never used to try).
+        //    Its pane still shows that last message, so `confirmed_stamps` can reclaim the
+        //    window by evidence. A quiet transcript with no fingerprint stays a display-only
+        //    stand-in — there is nothing to confirm — and a released stale binding
+        //    (`session.is_some()`) is left for a fresh claimant, never re-stamped from a guess.
+        if let Some(sid) = &summaries[si].session_id {
+            if windows[wi].session.as_deref() != Some(sid.as_str()) {
+                let needle = message_fingerprint(summaries[si].last_message.as_deref());
+                if is_fresh(&summaries[si]) || (windows[wi].session.is_none() && needle.is_some())
+                {
                     new_bindings.push(BindingCandidate {
                         sid: sid.clone(),
-                        needle: message_fingerprint(summaries[si].last_message.as_deref()),
+                        needle,
                     });
                 }
             }
@@ -4201,6 +4211,18 @@ mod tests {
         }
     }
 
+    /// A `tsum` that also carries a last message, so it has a pane-evidence fingerprint.
+    fn tsum_msg(
+        sid: &str,
+        last_activity: chrono::DateTime<chrono::Utc>,
+        last_message: &str,
+    ) -> agent::TranscriptSummary {
+        agent::TranscriptSummary {
+            last_message: Some(last_message.to_string()),
+            ..tsum(sid, last_activity)
+        }
+    }
+
     fn candidate_sids(p: &Pairing) -> Vec<&str> {
         p.new_bindings.iter().map(|b| b.sid.as_str()).collect()
     }
@@ -4357,6 +4379,92 @@ mod tests {
         let p = pair_transcripts_to_windows(&[tsum("x", t(100)), stale], &windows, t(100));
         assert_eq!(p.assignment, vec![Some("lane-7".into()), None]);
         assert_eq!(candidate_sids(&p), vec!["x"]);
+    }
+
+    #[test]
+    fn idle_agent_recovers_its_unstamped_window_by_pane_evidence() {
+        // Daemon restarted a quiet fleet: the agent's `@repomon_session` is gone (unstamped
+        // window) and it went idle far longer than RECENTLY_ACTIVE_SECS ago. Its pane still
+        // shows its last message, so it MUST be nominated for a pane-evidence stamp — before
+        // this fix a quiet transcript was never nominated and the window stayed unrecoverable,
+        // so the positional guess wedged and reopening attached the wrong conversation.
+        let msg = "recovered idle agent distinctive last message tail marker";
+        let windows = vec![wm("lane-7", 1, None)];
+        let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
+        assert_eq!(p.assignment, vec![Some("lane-7".into())]);
+        assert_eq!(candidate_sids(&p), vec!["a"]);
+        assert_eq!(p.new_bindings[0].needle, message_fingerprint(Some(msg)));
+    }
+
+    #[test]
+    fn restart_recovers_two_idle_agents_to_their_own_windows() {
+        // Two idle agents, both windows unstamped after a restart. The positional hint may
+        // pair them either way, but the evidence pass pins each to the window whose pane
+        // shows ITS OWN last message — never crosswise.
+        let ma = "idle alpha last message evidence tail one two three";
+        let mb = "idle bravo last message evidence tail four five six";
+        let windows = vec![wm("lane-7", 1, None), wm("lane-7-2", 2, None)];
+        let p = pair_transcripts_to_windows(
+            &[tsum_msg("b", t(1), mb), tsum_msg("a", t(0), ma)],
+            &windows,
+            t(100),
+        );
+        let mut sids = candidate_sids(&p);
+        sids.sort();
+        assert_eq!(sids, vec!["a", "b"]);
+        // Each agent's message sits on its own pane; evidence must resolve each to its window.
+        let panes = vec![
+            (
+                1,
+                "lane-7".to_string(),
+                normalize_fingerprint(&format!("✻ {ma}\n❯")),
+            ),
+            (
+                2,
+                "lane-7-2".to_string(),
+                normalize_fingerprint(&format!("✻ {mb}\n❯")),
+            ),
+        ];
+        let mut got = confirmed_stamps(&p.new_bindings, &panes);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (1, "lane-7".to_string(), "a".to_string()),
+                (2, "lane-7-2".to_string(), "b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn idle_recovery_without_matching_pane_stamps_nothing() {
+        // A nominated idle agent (unstamped window + fingerprint) whose message is NOT on the
+        // captured pane — scrolled off, or the window is a fresh-spawn stand-in showing a
+        // different agent — gets no 1:1 evidence, so nothing is stamped and no guess wedges.
+        let msg = "idle agent whose tail is not on the captured pane at all";
+        let windows = vec![wm("lane-7", 1, None)];
+        let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
+        assert_eq!(candidate_sids(&p), vec!["a"]);
+        let panes = vec![(
+            1,
+            "lane-7".to_string(),
+            normalize_fingerprint("a completely different agent booting up on this pane"),
+        )];
+        assert!(confirmed_stamps(&p.new_bindings, &panes).is_empty());
+    }
+
+    #[test]
+    fn idle_transcript_without_fingerprint_is_not_nominated() {
+        // A quiet stand-in with no distinctive last message (too short to fingerprint, or
+        // None) stays a DISPLAY guess: no evidence to confirm, so it must not be nominated —
+        // preserving the spawn-race invariant that a guess is never stamped.
+        let windows = vec![wm("lane-7", 1, None)];
+        // Too short to fingerprint (< FINGERPRINT_MIN normalized chars).
+        let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), "ok")], &windows, t(100));
+        assert!(p.new_bindings.is_empty());
+        // A None last message (the plain `tsum`) likewise.
+        let p = pair_transcripts_to_windows(&[tsum("a", t(0))], &windows, t(100));
+        assert!(p.new_bindings.is_empty());
     }
 
     #[test]
