@@ -44,11 +44,12 @@ impl Drop for ConnGuard {
 }
 
 /// Methods the remote WebSocket bridge may invoke. **Default-deny**: anything not listed here
-/// (including any future RPC) is rejected over the network, so the bridge can't be used to manage
-/// the host. Allows read + interaction with *existing* agents and the companion's own push
-/// registration; blocks host-management (repo/lane/worktree mutation, agent spawn/adopt/stop,
-/// config writes, terminal/filesystem access, daemon shutdown) and secret-exposing reads
-/// (`config.get` can carry the remote token). The local Unix socket is unaffected.
+/// (including any future RPC) is rejected over the network, so the bridge can't be used to reach
+/// past what's listed. Paired devices get full fleet control: read the fleet, drive existing
+/// agents, and now spawn/stop/adopt agents and create/delete/merge lanes too. Still blocked:
+/// daemon lifecycle (`daemon.shutdown`), config/secrets (`config.get` can carry the remote token,
+/// `config.set`), host terminal + filesystem access (`terminal.open/close/target`, `fs.browse`),
+/// and credential minting (`remote.*`, local-only). The local Unix socket is unaffected.
 fn remote_method_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -74,11 +75,20 @@ fn remote_method_allowed(method: &str) -> bool {
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
         | "agent.target" | "agent.fit"
         | "agent.prompt" | "agent.answer" | "agent.watch_bytes"
+        // full fleet control: spawn/stop/adopt an agent, and manage the lanes they run in.
+        // agent.detect is a read (the spawn sheet's agent picker) — it's the only remote door to
+        // the configured agent list, since config.get stays blocked. lane.create's `path` param
+        // is optional, so no fs.browse is needed; the repo picker is the already-allowed
+        // repo.list.
+        | "agent.spawn" | "agent.stop" | "agent.adopt" | "agent.detect"
+        | "lane.create" | "lane.delete" | "lane.merge"
+        | "lane.diff" | "lane.focus"
         // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
         // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
         // process-spawn with caller-chosen autonomy/max_agents/prompt, so strictly higher privilege
-        // than the already-blocked agent.spawn. Remote tokens may chat with a running repomind but
-        // cannot start or stop it.
+        // than the already-allowed agent.spawn (which targets a known, already-configured agent
+        // rather than an arbitrary claude invocation). Remote tokens may chat with a running
+        // repomind but cannot start or stop it.
         | "orchestrator.status" | "orchestrator.transcript"
         | "orchestrator.send_input" | "orchestrator.key"
         // benign metadata
@@ -271,19 +281,29 @@ mod tests {
     }
 
     #[test]
-    fn remote_allowlist_permits_read_and_interaction_only() {
-        // Read + interaction with existing agents, and the companion's own push registration.
+    fn remote_allowlist_permits_full_fleet_control() {
+        // Read, interact with, and now manage the fleet: spawn/stop/adopt agents, create/delete/
+        // merge lanes, plus the companion's own push registration.
         for m in [
             "ping",
             "repo.list",
             "lane.list",
             "lane.get",
+            "lane.create",
+            "lane.delete",
+            "lane.merge",
+            "lane.diff",
+            "lane.focus",
             "commit.recent",
             "agent.capture",
             "agent.transcript",
             "agent.prompt",
             "agent.answer",
             "agent.watch_bytes",
+            "agent.spawn",
+            "agent.stop",
+            "agent.adopt",
+            "agent.detect",
             "terminal.list_all",
             "agent.send_input",
             "agent.signal",
@@ -306,20 +326,16 @@ mod tests {
         ] {
             assert!(remote_method_allowed(m), "{m} should be allowed");
         }
-        // Host-management, dangerous, and secret-exposing methods are blocked over the bridge.
+        // Daemon lifecycle, config/secrets, host terminal + filesystem access, and credential
+        // minting stay blocked over the bridge even under full fleet control.
         for m in [
-            "agent.adopt",
-            "agent.spawn",
-            "agent.stop",
             "agent.resize",
+            "agent.add",
+            "agent.remove",
+            "agent.set_default",
             "repo.add",
             "repo.remove",
             "repo.discover",
-            "lane.create",
-            "lane.delete",
-            "lane.merge",
-            "lane.focus",
-            "lane.diff",
             "config.get",
             "config.set",
             "terminal.open",
@@ -327,14 +343,16 @@ mod tests {
             "terminal.target",
             "fs.browse",
             "daemon.shutdown",
-            "agent.add",
-            "agent.remove",
-            "agent.detect",
             "watcher.park",
             "orchestrator.watch",
             "orchestrator.resize",
             "orchestrator.start",
             "orchestrator.stop",
+            // upcoming local-only credential-minting RPCs (task A2) — must never be reachable
+            // over the remote bridge.
+            "remote.pair",
+            "remote.devices",
+            "remote.revoke",
             "some.future.method",
         ] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
