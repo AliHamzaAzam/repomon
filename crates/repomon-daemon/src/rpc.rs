@@ -7,7 +7,7 @@ use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
     AgentChoice, AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit,
-    CreateLaneParams, Lane, RepoId, TimeRange,
+    CreateLaneParams, Lane, RemoteDevice, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
 use repomon_core::{Indexer, TmuxRuntime, analytics, session};
@@ -28,6 +28,58 @@ fn parse<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcError> {
 
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
     serde_json::to_value(v).map_err(internal)
+}
+
+/// Rebuild [`Ctx::remote_tokens`] from the store's paired devices plus the legacy `[remote] token`
+/// from config (device name `None`). The single choke point for the auth cache: startup seeding
+/// and every pair/revoke funnel through here, so the handshake callback always reads a current set.
+pub async fn refresh_remote_tokens(ctx: &Ctx) -> Result<(), RpcError> {
+    let devices = ctx.store.remote_device_list().await.map_err(internal)?;
+    let config_token = ctx.config.read().await.remote.token.clone();
+    let mut tokens: Vec<(String, Option<String>)> = devices
+        .into_iter()
+        .map(|d| (d.token, Some(d.name)))
+        .collect();
+    if let Some(t) = config_token {
+        if !t.is_empty() {
+            tokens.push((t, None));
+        }
+    }
+    *ctx.remote_tokens.write().unwrap() = tokens;
+    Ok(())
+}
+
+/// The pairing URL the companion app scans: the same `repomon://<bind>#<token>` shape the legacy
+/// QR uses, with `&name=<urlencoded>` appended to the fragment so the app can label the connection.
+async fn remote_pair_url(ctx: &Ctx, dev: &RemoteDevice) -> String {
+    let bind = ctx
+        .config
+        .read()
+        .await
+        .remote
+        .bind
+        .clone()
+        .unwrap_or_default();
+    format!(
+        "repomon://{bind}#{}&name={}",
+        dev.token,
+        percent_encode(&dev.name)
+    )
+}
+
+/// Minimal percent-encoding for a device name spliced into a URL fragment. Keeps the unreserved
+/// set and escapes everything else; avoids a urlencoding dependency for one short field.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// `agent.answer` found the pane in a different state than the client expected (dialog gone or
@@ -287,6 +339,14 @@ struct ConfigSet {
 #[derive(Deserialize)]
 struct PushDevice {
     device_token: String,
+}
+#[derive(Deserialize)]
+struct RemotePair {
+    name: String,
+}
+#[derive(Deserialize)]
+struct RemoteRevoke {
+    name: String,
 }
 #[derive(Deserialize)]
 struct SessionRename {
@@ -1463,6 +1523,47 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             to_value(items)
         }
         // Push-notification device registration (the iOS companion).
+        // ---- remote devices (LOCAL SOCKET ONLY — blocked over the bridge by the allowlist) ----
+        "remote.pair" => {
+            let p: RemotePair = parse(params)?;
+            let dev = ctx
+                .store
+                .remote_device_pair(&p.name)
+                .await
+                .map_err(internal)?;
+            // Refresh the auth cache so the freshly minted token authenticates immediately.
+            refresh_remote_tokens(ctx).await?;
+            let url = remote_pair_url(ctx, &dev).await;
+            Ok(json!({ "name": dev.name, "token": dev.token, "url": url }))
+        }
+        "remote.devices" => {
+            let devices = ctx.store.remote_device_list().await.map_err(internal)?;
+            // Never expose the token here — this is the listing surface.
+            let out: Vec<Value> = devices
+                .iter()
+                .map(|d| {
+                    json!({
+                        "name": d.name,
+                        "role": d.role,
+                        "created_at": d.created_at,
+                        "last_seen_at": d.last_seen_at,
+                    })
+                })
+                .collect();
+            Ok(Value::Array(out))
+        }
+        "remote.revoke" => {
+            let p: RemoteRevoke = parse(params)?;
+            let revoked = ctx
+                .store
+                .remote_device_revoke(&p.name)
+                .await
+                .map_err(internal)?;
+            // Drop the revoked token from the auth cache; live connections holding it are kicked
+            // on their next request (see `remote::handle_conn`).
+            refresh_remote_tokens(ctx).await?;
+            Ok(json!({ "revoked": revoked }))
+        }
         "push.register" => {
             let p: PushDevice = parse(params)?;
             ctx.store

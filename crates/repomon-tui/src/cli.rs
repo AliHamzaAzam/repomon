@@ -112,8 +112,18 @@ pub enum RemoteCmd {
         #[arg(long)]
         rotate_token: bool,
     },
-    /// Show a QR code for the companion app to scan (encodes address + token).
-    Pair,
+    /// Show a QR code for the companion app to scan (encodes address + token). With `--name`,
+    /// mints a named, individually-revocable per-device token via the daemon instead of encoding
+    /// the shared config token.
+    Pair {
+        /// Pair this named device with its own revocable token (via the daemon).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List paired remote devices (name, role, created, last-seen).
+    Devices,
+    /// Revoke a paired device's token by name.
+    Revoke { name: String },
     /// Show the remote-access configuration (token masked).
     Status,
     /// Turn the bridge off (keeps the token for re-enabling).
@@ -188,7 +198,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         }
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
-        Command::Remote { cmd } => handle_remote(cmd)?,
+        Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
         Command::Orchestrate {
             agent,
             autonomy,
@@ -210,9 +220,22 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
     Ok(())
 }
 
-/// `repomon remote …` — manage the companion-app bridge. These edit the config *file* (the
-/// token never crosses the RPC surface); the daemon picks changes up on restart.
-fn handle_remote(cmd: RemoteCmd) -> Result<()> {
+/// `repomon remote …` — manage the companion-app bridge. Enable/Disable/Status and an un-named
+/// Pair edit the config *file* (the shared token never crosses the RPC surface); the daemon picks
+/// those up on restart. The per-device flows (`pair --name`, `devices`, `revoke`) instead talk to
+/// the running daemon over the local socket, since device tokens live in the store.
+async fn handle_remote(cmd: RemoteCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
+    match cmd {
+        RemoteCmd::Pair { name: Some(name) } => remote_pair_named(config, socket, name).await,
+        RemoteCmd::Devices => remote_devices(config, socket).await,
+        RemoteCmd::Revoke { name } => remote_revoke(config, socket, name).await,
+        // Enable/Disable/Status and un-named Pair keep editing the config file directly.
+        other => handle_remote_config(other),
+    }
+}
+
+/// The config-file half of `repomon remote …` (Enable/Disable/Status, and an un-named Pair).
+fn handle_remote_config(cmd: RemoteCmd) -> Result<()> {
     let path = config::config_path();
     let mut cfg = Config::load().unwrap_or_default();
     match cmd {
@@ -244,7 +267,8 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
             cfg.save_to(&path)?;
             println!("remote bridge disabled (token kept) — repomon daemon restart to apply");
         }
-        RemoteCmd::Pair => {
+        RemoteCmd::Pair { name: _ } => {
+            // Only the un-named Pair reaches here (the `--name` case is daemon-backed above).
             let (Some(bind), Some(token), true) =
                 (&cfg.remote.bind, &cfg.remote.token, cfg.remote.enabled)
             else {
@@ -253,14 +277,7 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
                 ));
             };
             let url = format!("repomon://{bind}#{token}");
-            let code = qrcode::QrCode::new(url.as_bytes())?;
-            let art = code
-                .render::<qrcode::render::unicode::Dense1x2>()
-                .quiet_zone(true)
-                .build();
-            println!("{art}");
-            println!("scan with the repomon iOS app · {url}");
-            println!("(anyone with this QR can drive your agents — share it with no one)");
+            render_pair_qr(&url)?;
         }
         RemoteCmd::Status => {
             let state = if cfg.remote.enabled {
@@ -290,6 +307,90 @@ fn handle_remote(cmd: RemoteCmd) -> Result<()> {
                 }
             );
         }
+        // Routed to the daemon-backed handlers by `handle_remote`; never reach the config path.
+        RemoteCmd::Devices | RemoteCmd::Revoke { .. } => unreachable!(),
+    }
+    Ok(())
+}
+
+/// Render a pairing URL as a scannable QR plus the URL and the sharing warning. Shared by the
+/// legacy config-token pair and the per-device `pair --name` flow so both print identically.
+fn render_pair_qr(url: &str) -> Result<()> {
+    let code = qrcode::QrCode::new(url.as_bytes())?;
+    let art = code
+        .render::<qrcode::render::unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build();
+    println!("{art}");
+    println!("scan with the repomon iOS app · {url}");
+    println!("(anyone with this QR can drive your agents — share it with no one)");
+    Ok(())
+}
+
+/// `repomon remote pair --name <device>` — mint (or re-show) this device's own revocable token via
+/// the daemon and print its QR.
+async fn remote_pair_named(config: &Config, socket: Option<PathBuf>, name: String) -> Result<()> {
+    let client = crate::ensure_daemon(config, socket).await?;
+    let resp = client
+        .call("remote.pair", Some(json!({ "name": name })))
+        .await?;
+    let url = resp
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("daemon returned no pairing url"))?;
+    render_pair_qr(url)?;
+    println!("paired device '{name}'. revoke with `repomon remote revoke {name}`");
+    Ok(())
+}
+
+/// `repomon remote devices` — list paired devices in aligned rows, then the legacy shared token.
+async fn remote_devices(config: &Config, socket: Option<PathBuf>) -> Result<()> {
+    let client = crate::ensure_daemon(config, socket).await?;
+    let resp = client.call("remote.devices", None).await?;
+    let devices = resp.as_array().cloned().unwrap_or_default();
+    if devices.is_empty() {
+        println!("no paired devices");
+    } else {
+        let str_field = |d: &Value, k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name_w = devices
+            .iter()
+            .map(|d| str_field(d, "name").len())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        for d in &devices {
+            let name = str_field(d, "name");
+            let role = str_field(d, "role");
+            let created = str_field(d, "created_at");
+            let seen = d
+                .get("last_seen_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("never");
+            println!("{name:<name_w$}  {role:<6}  created {created}  seen {seen}");
+        }
+    }
+    // The shared config token (if configured) isn't a listed device — call it out so it isn't
+    // mistaken for gone. It's retired by rotating it: `repomon remote enable --rotate-token`.
+    if config.remote.token.is_some() {
+        println!("(config token - shared; repomon remote enable --rotate-token to retire)");
+    }
+    Ok(())
+}
+
+/// `repomon remote revoke <name>` — revoke a device's token via the daemon.
+async fn remote_revoke(config: &Config, socket: Option<PathBuf>, name: String) -> Result<()> {
+    let client = crate::ensure_daemon(config, socket).await?;
+    let resp = client
+        .call("remote.revoke", Some(json!({ "name": name })))
+        .await?;
+    let revoked = resp
+        .get("revoked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if revoked {
+        println!("revoked device '{name}'; its token no longer connects");
+    } else {
+        println!("no paired device named '{name}'");
     }
     Ok(())
 }

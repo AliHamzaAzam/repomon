@@ -231,6 +231,12 @@ pub struct Ctx {
     /// command-center header stay live) and folded into `orchestrator_status_value`'s payload on
     /// change. See `notify_watch::check_orchestrator_attention`.
     pub orchestrator_attention: Mutex<(String, Option<String>)>,
+    /// The valid remote bearer tokens, each paired with its device name (`None` for the legacy
+    /// shared `[remote] token` from config). This is a **std** `RwLock`, not the tokio locks the
+    /// rest of `Ctx` uses, because it is read synchronously inside the tungstenite WebSocket
+    /// handshake callback (which is not an async context). Rebuilt from the store by
+    /// [`rpc::refresh_remote_tokens`] at startup and after every pair/revoke.
+    pub remote_tokens: std::sync::RwLock<Vec<(String, Option<String>)>>,
     pub shutdown: Notify,
 }
 
@@ -292,6 +298,7 @@ impl Ctx {
             orchestrator_watched: Mutex::new(false),
             orchestrator_input_seen: Mutex::new(None),
             orchestrator_attention: Mutex::new(("none".to_string(), None)),
+            remote_tokens: std::sync::RwLock::new(Vec::new()),
             shutdown: Notify::new(),
         })
     }

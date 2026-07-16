@@ -9,15 +9,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use repomon_core::protocol::{MAX_FRAME_BYTES, Request, Response, RpcError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    ErrorResponse, Request as HsRequest, Response as HsResponse,
-};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request as HsRequest};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::{Ctx, rpc};
@@ -98,11 +97,12 @@ fn remote_method_allowed(method: &str) -> bool {
     )
 }
 
-/// Bind the WebSocket bridge and serve until shutdown is requested.
-pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::Result<()> {
+/// Bind the WebSocket bridge and serve until shutdown is requested. The set of valid tokens lives
+/// in `ctx.remote_tokens` (seeded from the store's paired devices plus the legacy config token, and
+/// refreshed on every pair/revoke), so no token is passed in here.
+pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     tracing::info!("remote bridge listening on ws://{bind}");
-    let token = Arc::new(token);
     let conns = Arc::new(AtomicUsize::new(0));
 
     loop {
@@ -117,10 +117,9 @@ pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::
                         continue; // `guard` drops here, undoing the increment
                     }
                     let ctx = ctx.clone();
-                    let token = token.clone();
                     tokio::spawn(async move {
                         let _guard = guard;
-                        if let Err(e) = handle_conn(ctx, stream, &token).await {
+                        if let Err(e) = handle_conn(ctx, stream).await {
                             tracing::debug!("remote conn {addr}: {e}");
                         }
                     });
@@ -132,23 +131,48 @@ pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::
     Ok(())
 }
 
+/// How often a live connection re-stamps its device's `last_seen_at` (throttled, per connection).
+const LAST_SEEN_THROTTLE: Duration = Duration::from_secs(60);
+
 // `result_large_err`: the auth closure's Err type (a full http::Response) is dictated by
 // tungstenite's `Callback` contract — nothing to box here.
 #[allow(clippy::result_large_err)]
 async fn handle_conn(
     ctx: Arc<Ctx>,
     stream: TcpStream,
-    token: &str,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-    // Check the token during the handshake — an unauthorized client never completes the
-    // upgrade and learns nothing but "401".
+    // Check the token during the handshake — an unauthorized client never completes the upgrade
+    // and learns nothing but "401". The matching entry's identity (device name, `None` for the
+    // legacy shared token) and the token itself are captured out of the callback.
+    let mut identity: Option<(String, Option<String>)> = None;
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
-        |req: &HsRequest, resp| auth(req, resp, token),
+        |req: &HsRequest, resp| match authorize(req, &ctx) {
+            Some(hit) => {
+                identity = Some(hit);
+                Ok(resp)
+            }
+            None => {
+                let mut deny = ErrorResponse::new(Some("unauthorized".into()));
+                *deny.status_mut() =
+                    tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+                Err(deny)
+            }
+        },
         Some(remote_ws_config()),
     )
     .await?;
+    // Present because the handshake only completes on a match. This connection's identity is a
+    // plain local for now; task A3 will move it into a per-connection session struct.
+    let (conn_token, device_name) =
+        identity.expect("authorized handshake must record an identity");
     let (mut sink, mut source) = ws.split();
+
+    // Stamp last-seen once on connect for a named device, then at most once per minute below.
+    let mut last_seen_stamp = Instant::now();
+    if let Some(name) = &device_name {
+        let _ = ctx.store.remote_device_seen(name).await;
+    }
 
     // Every connection holds an event receiver, but only forwards once subscribed —
     // mirroring the Unix-socket connection loop.
@@ -178,6 +202,20 @@ async fn handle_conn(
                     }
                 };
                 let id = req.id;
+                // Live revocation: if this connection's token has been revoked since the
+                // handshake (dropped from the auth cache), refuse this request and close.
+                if !token_present(&ctx, &conn_token) {
+                    let resp = Response::err(id, RpcError::new(-32000, "device revoked"));
+                    send_json(&mut sink, &resp).await?;
+                    break;
+                }
+                // Throttled last-seen refresh for named devices (at most once a minute).
+                if let Some(name) = &device_name {
+                    if last_seen_stamp.elapsed() >= LAST_SEEN_THROTTLE {
+                        last_seen_stamp = Instant::now();
+                        let _ = ctx.store.remote_device_seen(name).await;
+                    }
+                }
                 let resp = if remote_method_allowed(&req.method) {
                     if req.method == "subscribe" {
                         forwarding = true;
@@ -227,23 +265,33 @@ where
     sink.send(Message::text(text)).await
 }
 
-/// The handshake gatekeeper: pass the upgrade through when the token matches, else 401.
-#[allow(clippy::result_large_err)] // the signature is tungstenite's Callback contract
-fn auth(req: &HsRequest, resp: HsResponse, token: &str) -> Result<HsResponse, ErrorResponse> {
-    if request_authorized(req, token) {
-        Ok(resp)
-    } else {
-        let mut deny = ErrorResponse::new(Some("unauthorized".into()));
-        *deny.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
-        Err(deny)
+/// Match the handshake's presented token against the auth cache. On a hit, returns
+/// `Some((token, device_name))` — `device_name` is `None` for the legacy shared config token — so
+/// the connection learns the identity it authenticated as. `None` means no valid token (→ 401).
+fn authorize(req: &HsRequest, ctx: &Ctx) -> Option<(String, Option<String>)> {
+    let presented = presented_token(req)?;
+    let tokens = ctx.remote_tokens.read().unwrap();
+    for (tok, name) in tokens.iter() {
+        if constant_time_eq(presented.as_bytes(), tok.as_bytes()) {
+            return Some((presented, name.clone()));
+        }
     }
+    None
 }
 
-/// Whether the handshake request carries the right token: `Authorization: Bearer <token>` or a
-/// `token=<token>` query parameter (for clients that can't set headers on a WS dial).
-fn request_authorized(req: &HsRequest, token: &str) -> bool {
-    let presented = req
-        .headers()
+/// Whether a token is still in the auth cache — the live-revocation check on each request.
+fn token_present(ctx: &Ctx, token: &str) -> bool {
+    ctx.remote_tokens
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(t, _)| constant_time_eq(token.as_bytes(), t.as_bytes()))
+}
+
+/// The token a handshake request carries: `Authorization: Bearer <token>` or a `token=<token>`
+/// query parameter (for clients that can't set headers on a WS dial).
+fn presented_token(req: &HsRequest) -> Option<String> {
+    req.headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -253,11 +301,7 @@ fn request_authorized(req: &HsRequest, token: &str) -> bool {
                 q.split('&')
                     .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
             })
-        });
-    match presented {
-        Some(p) => constant_time_eq(p.as_bytes(), token.as_bytes()),
-        None => false,
-    }
+        })
 }
 
 /// Compare two byte strings without early exit on the first mismatch (timing side channel).
