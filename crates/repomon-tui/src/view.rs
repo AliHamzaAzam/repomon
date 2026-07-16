@@ -2045,7 +2045,9 @@ fn ago(t: DateTime<Utc>) -> String {
 /// `App::on_notification`) and cached, so the render path only slices — it never re-parses.
 pub fn parse_pane(raw: &str) -> Vec<Line<'static>> {
     use ansi_to_tui::IntoText;
+    let raw = strip_osc(raw);
     let mut lines: Vec<Line<'static>> = raw
+        .as_ref()
         .into_text()
         .map(|t| t.lines)
         .unwrap_or_else(|_| raw.lines().map(|l| Line::raw(l.to_string())).collect());
@@ -2053,6 +2055,45 @@ pub fn parse_pane(raw: &str) -> Vec<Line<'static>> {
         lines.pop();
     }
     lines
+}
+
+/// Remove OSC sequences (`ESC ] … BEL` or `ESC ] … ESC \`) before ANSI parsing: ansi-to-tui
+/// (≤8.0.1) consumes an ST-terminated OSC through to end of line, deleting the visible text of
+/// the OSC 8 hyperlinks Claude Code wraps file paths in. The link text itself sits between the
+/// wrappers, so dropping only the escapes keeps it.
+fn strip_osc(raw: &str) -> std::borrow::Cow<'_, str> {
+    if !raw.contains("\x1b]") {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b']') {
+            i += 2;
+            while i < bytes.len() {
+                match bytes[i] {
+                    0x07 => {
+                        i += 1;
+                        break;
+                    }
+                    0x1b if bytes.get(i + 1) == Some(&b'\\') => {
+                        i += 2;
+                        break;
+                    }
+                    // An OSC never spans captured lines; keep the newline so a malformed
+                    // sequence can't swallow the rest of the pane.
+                    b'\n' => break,
+                    _ => i += 1,
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    // Sequence bounds are all ASCII, so removal preserves UTF-8 validity.
+    std::borrow::Cow::Owned(String::from_utf8(out).expect("OSC removal cuts at ASCII bounds"))
 }
 
 /// The last `height` lines of a lane's captured output, ANSI-colored, or a placeholder.
@@ -3058,6 +3099,28 @@ pub fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_pane_keeps_osc8_hyperlink_text() {
+        // Claude Code wraps file paths in OSC 8 hyperlinks; tmux `capture-pane -e` passes them
+        // through, and ansi-to-tui (≤8.0.1) eats from the introducer to end of line — the path
+        // and closing paren vanished from the agent screen. Both terminators must survive.
+        let st = "\x1b[1mUpdate\x1b[0m(\x1b]8;id=zqbfql;file:///Users/a/blog_visuals.py\x1b\\~/a/blog_visuals.py\x1b]8;;\x1b\\)";
+        let flat: String = parse_pane(st)[0]
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert_eq!(flat, "Update(~/a/blog_visuals.py)");
+
+        let bel = "Update(\x1b]8;;file:///x\x07~/x.py\x1b]8;;\x07)";
+        let flat: String = parse_pane(bel)[0]
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert_eq!(flat, "Update(~/x.py)");
+    }
 
     #[test]
     fn items_split_only_at_top_level() {
