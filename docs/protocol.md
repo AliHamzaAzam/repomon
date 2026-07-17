@@ -67,7 +67,8 @@ restart).
   this connection watches for the lane.
 - **Fit arbitration.** A local (TUI) session's fresh viewport focus always owns a window's
   size. Among remote sessions actively focused on the same window, the one that most recently
-  drove the agent (`agent.send_input`/`key`/`scroll`/`answer`, or an applied `agent.fit`) wins.
+  drove the agent (`agent.send_input`/`signal`/`key`/`scroll`/`answer`, or an applied
+  `agent.fit`) wins.
   Both kinds of ownership decay: the TUI heartbeats its viewport every ~5s and a focus lapses
   15s after the last beat, so a crashed or closed client's hold releases within seconds. The
   unconditional `agent.resize` stays local-only regardless of who's connected.
