@@ -205,13 +205,18 @@ pub(crate) fn parse_reset_at(lower: &str, now: DateTime<Local>) -> Option<DateTi
 }
 
 /// Find the reset clock time — preferring one that appears after a "reset"/"again" cue, falling
-/// back to the first time anywhere in the text.
+/// back to the first time anywhere in the text. Cues are tried bottom-up: pane text is
+/// chronological, so when a resumed-then-re-limited agent still shows an old limit message in
+/// scrollback, the newest (lowest) message must supply the time — scheduling off the stale one
+/// put a resume half a day out. A trailing cue with no time after it (prose like "the password
+/// reset flow") falls through to the previous cue rather than shadowing the real message.
 pub(crate) fn find_reset_time(lower: &str) -> Option<NaiveTime> {
-    let cue = ["reset", "again"]
+    let mut cues: Vec<usize> = ["reset", "again"]
         .iter()
-        .filter_map(|c| lower.find(c))
-        .min();
-    if let Some(idx) = cue {
+        .flat_map(|c| lower.match_indices(c).map(|(i, _)| i))
+        .collect();
+    cues.sort_unstable();
+    for idx in cues.into_iter().rev() {
         if let Some(t) = parse_first_time(&lower[idx..]) {
             return Some(t);
         }
@@ -312,6 +317,32 @@ mod tests {
         assert_eq!(parse_pct("100% used"), Some(100));
         assert_eq!(parse_pct("no percent here"), None);
         assert_eq!(parse_pct("999% bogus"), None); // >100 → mis-parse, skipped
+    }
+
+    #[test]
+    fn reset_time_prefers_the_newest_message() {
+        // A pane keeps scrollback: after a resume and a re-limit, the OLD limit message is
+        // still above the fresh one. The pane is chronological, so the bottom-most cue with
+        // a time must win — scheduling off the stale message put a resume 14h out (seen live:
+        // "resets 7am" from the morning outranked the current "resets 5pm").
+        let pane = "you've hit your session limit \u{b7} resets 7am (asia/karachi)\n\
+                    /upgrade or /usage-credits to finish what you're working on.\n\
+                    \u{276f} continue\n\
+                    the workflow is resuming in the background.\n\
+                    you've hit your session limit \u{b7} resets 5pm (asia/karachi)\n\
+                    /upgrade or /usage-credits to finish what you're working on.";
+        let t = find_reset_time(pane).unwrap();
+        assert_eq!((t.hour(), t.minute()), (17, 0));
+    }
+
+    #[test]
+    fn reset_time_skips_trailing_cue_without_a_time() {
+        // Agent prose below the limit message can contain the cue word with no clock time
+        // ("the password reset flow"); that occurrence must not shadow the real message.
+        let pane = "you've hit your session limit \u{b7} resets 5pm (asia/karachi)\n\
+                    \u{276f} next: fix the password reset flow and try again";
+        let t = find_reset_time(pane).unwrap();
+        assert_eq!((t.hour(), t.minute()), (17, 0));
     }
 
     #[test]
