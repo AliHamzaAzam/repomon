@@ -47,6 +47,7 @@ tokio = { version = "1", features = [
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-tungstenite = "0.29"
+httparse = "1"
 a2 = { version = "0.10", default-features = false, features = ["ring"] }
 futures = "0.3"
 plist = "1"

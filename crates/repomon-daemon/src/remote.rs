@@ -13,11 +13,14 @@ use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use repomon_core::protocol::{MAX_FRAME_BYTES, Request, Response, RpcError};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request as HsRequest};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+use tokio_tungstenite::tungstenite::http;
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 
 use crate::{Ctx, rpc};
 
@@ -103,6 +106,13 @@ fn remote_method_allowed(method: &str) -> bool {
 pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     tracing::info!("remote bridge listening on ws://{bind}");
+    serve_remote_on(ctx, listener).await
+}
+
+/// Serve the WebSocket bridge on an already-bound listener. Split out from `serve_remote` so tests
+/// can bind an exclusive ephemeral port and hand the live listener in — with no bind-then-rebind
+/// window for a concurrent test to race on.
+pub async fn serve_remote_on(ctx: Arc<Ctx>, listener: TcpListener) -> std::io::Result<()> {
     let conns = Arc::new(AtomicUsize::new(0));
 
     loop {
@@ -134,35 +144,72 @@ pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str) -> std::io::Result<()> {
 /// How often a live connection re-stamps its device's `last_seen_at` (throttled, per connection).
 const LAST_SEEN_THROTTLE: Duration = Duration::from_secs(60);
 
-// `result_large_err`: the auth closure's Err type (a full http::Response) is dictated by
-// tungstenite's `Callback` contract — nothing to box here.
-#[allow(clippy::result_large_err)]
+/// Upper bound on the handshake request head we'll buffer before giving up — a WS upgrade request
+/// is a few hundred bytes; anything past this is not a client we serve.
+const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
+
 async fn handle_conn(
     ctx: Arc<Ctx>,
-    stream: TcpStream,
+    mut stream: TcpStream,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-    // Check the token during the handshake — an unauthorized client never completes the upgrade
-    // and learns nothing but "401". The matching entry's identity (device name, `None` for the
-    // legacy shared token) and the token itself are captured out of the callback.
-    let mut identity: Option<(String, Option<String>)> = None;
-    let ws = tokio_tungstenite::accept_hdr_async_with_config(
-        stream,
-        |req: &HsRequest, resp| match authorize(req, &ctx) {
-            Some(hit) => {
-                identity = Some(hit);
-                Ok(resp)
-            }
-            None => {
-                let mut deny = ErrorResponse::new(Some("unauthorized".into()));
-                *deny.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
-                Err(deny)
-            }
-        },
-        Some(remote_ws_config()),
-    )
-    .await?;
-    // Present because the handshake only completes on a match.
-    let (conn_token, device_name) = identity.expect("authorized handshake must record an identity");
+    // Hand-rolled handshake so the 101 response uses Title-Case header names (`Connection`,
+    // `Upgrade`, `Sec-WebSocket-Accept`). tokio-tungstenite's server path serializes them through
+    // the `http` crate's `HeaderMap`, which canonicalizes names to lowercase; iOS 27's CFNetwork
+    // rejects that lowercase 101 outright ("bad response from the server"), so we emit the bytes
+    // ourselves and only then hand the raw socket to tungstenite for the framed protocol.
+    //
+    // Read the request head (bounded), then authenticate BEFORE any upgrade — an unauthorized
+    // client gets a 401 and a closed socket, never a WebSocket and never any connection state.
+    let head = match read_handshake_head(&mut stream).await {
+        Ok(head) => head,
+        // Malformed, oversized, or a peer that hung up mid-handshake: drop it quietly.
+        Err(_) => return Ok(()),
+    };
+    let req = match parse_request(&head) {
+        Some(req) => req,
+        None => {
+            let _ = write_simple_response(&mut stream, 400, "Bad Request").await;
+            return Ok(());
+        }
+    };
+
+    // Constant-time token check, before the upgrade. The matching entry's identity (device name,
+    // `None` for the legacy shared token) and the token itself are captured for the session below.
+    let (conn_token, device_name) = match authorize(&req, &ctx) {
+        Some(hit) => hit,
+        None => {
+            // 401 with Title-Case headers, then terminate the connection.
+            let _ = write_simple_response(&mut stream, 401, "Unauthorized").await;
+            return Ok(());
+        }
+    };
+
+    // Validate the WebSocket upgrade and derive the accept key. A malformed upgrade (missing
+    // Upgrade/Connection/Version/Key) never reaches this authenticated client's session.
+    let accept = match ws_accept_key(&req) {
+        Some(accept) => accept,
+        None => {
+            let _ = write_simple_response(&mut stream, 400, "Bad Request").await;
+            return Ok(());
+        }
+    };
+
+    // Emit the Title-Case 101. `permessage-deflate` is deliberately NOT negotiated: we omit
+    // `Sec-WebSocket-Extensions` entirely, so no compression is agreed (matching the reference
+    // server iOS 27 accepts).
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Accept: {accept}\r\n\
+         \r\n"
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Hand the post-handshake socket to tungstenite for the framed protocol, keeping the same
+    // MAX_FRAME_BYTES bounds the previous accept path applied.
+    let ws = WebSocketStream::from_raw_socket(stream, Role::Server, Some(remote_ws_config())).await;
     let (mut sink, mut source) = ws.split();
 
     // This connection's per-device session, carrying its identity (device name) and its own
@@ -290,10 +337,119 @@ where
     sink.send(Message::text(text)).await
 }
 
+/// Read the HTTP request head (up to and including the terminating CRLFCRLF) from a freshly
+/// accepted socket, bounded by `MAX_HANDSHAKE_BYTES`. A WebSocket client sends nothing before the
+/// 101, so a well-behaved peer never writes bytes past the head; if it does, that's a protocol
+/// violation and we error (there's no way to feed a tail to `from_raw_socket`, and tungstenite's
+/// own server rejects junk-after-request identically).
+async fn read_handshake_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "eof during handshake",
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = find_headers_end(&buf) {
+            if end != buf.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "junk after handshake request",
+                ));
+            }
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HANDSHAKE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "handshake request head too large",
+            ));
+        }
+    }
+}
+
+/// Index just past the `\r\n\r\n` that ends an HTTP head, if present.
+fn find_headers_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// Parse a raw HTTP request head into an `http::Request<()>` so the existing token-auth path can
+/// read its headers and query. Returns `None` for anything that isn't a complete `GET` request.
+fn parse_request(head: &[u8]) -> Option<http::Request<()>> {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut parsed = httparse::Request::new(&mut headers);
+    match parsed.parse(head) {
+        Ok(httparse::Status::Complete(_)) => {}
+        _ => return None,
+    }
+    // WebSocket upgrades are always GET; reject anything else outright.
+    if !parsed.method.is_some_and(|m| m.eq_ignore_ascii_case("GET")) {
+        return None;
+    }
+    let mut builder = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(parsed.path?);
+    for h in parsed.headers.iter() {
+        builder = builder.header(h.name, h.value);
+    }
+    builder.body(()).ok()
+}
+
+/// Validate the WebSocket upgrade request (case-insensitively, per RFC 9110) and, if valid, return
+/// the `Sec-WebSocket-Accept` value for the client's key. Mirrors the checks tungstenite's server
+/// performs before it would have produced a 101.
+fn ws_accept_key(req: &http::Request<()>) -> Option<String> {
+    let headers = req.headers();
+    let upgrade_ok = headers
+        .get("Upgrade")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let connection_ok = headers
+        .get("Connection")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split([' ', ','])
+                .any(|p| p.trim().eq_ignore_ascii_case("Upgrade"))
+        });
+    let version_ok = headers
+        .get("Sec-WebSocket-Version")
+        .is_some_and(|v| v == "13");
+    if !(upgrade_ok && connection_ok && version_ok) {
+        return None;
+    }
+    let key = headers.get("Sec-WebSocket-Key")?;
+    Some(derive_accept_key(key.as_bytes()))
+}
+
+/// Write a minimal Title-Case HTTP response (used for the 401 and 400 pre-upgrade refusals) and
+/// signal connection close. Best-effort: the caller drops the socket right after.
+async fn write_simple_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+) -> std::io::Result<()> {
+    let body = reason;
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Connection: close\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: {len}\r\n\
+         \r\n{body}",
+        len = body.len(),
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    stream.shutdown().await
+}
+
 /// Match the handshake's presented token against the auth cache. On a hit, returns
 /// `Some((token, device_name))` — `device_name` is `None` for the legacy shared config token — so
 /// the connection learns the identity it authenticated as. `None` means no valid token (→ 401).
-fn authorize(req: &HsRequest, ctx: &Ctx) -> Option<(String, Option<String>)> {
+fn authorize(req: &http::Request<()>, ctx: &Ctx) -> Option<(String, Option<String>)> {
     let presented = presented_token(req)?;
     let tokens = ctx.remote_tokens.read().unwrap();
     for (tok, name) in tokens.iter() {
@@ -315,7 +471,7 @@ fn token_present(ctx: &Ctx, token: &str) -> bool {
 
 /// The token a handshake request carries: `Authorization: Bearer <token>` or a `token=<token>`
 /// query parameter (for clients that can't set headers on a WS dial).
-fn presented_token(req: &HsRequest) -> Option<String> {
+fn presented_token(req: &http::Request<()>) -> Option<String> {
     req.headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
