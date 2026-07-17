@@ -148,8 +148,13 @@ async fn main() {
                 Some(bind) => {
                     // Seed the auth cache (paired device tokens + the legacy config token) before
                     // the listener accepts, so the first handshake matches against a current set.
-                    if let Err(e) = repomon_daemon::rpc::refresh_remote_tokens(&ctx).await {
-                        tracing::error!("failed to seed remote tokens: {e:?}");
+                    // Under the mutate lock for consistency with pair/revoke (nothing races here yet,
+                    // but the choke point stays uniform).
+                    {
+                        let _guard = ctx.remote_mutate_lock.lock().await;
+                        if let Err(e) = repomon_daemon::rpc::refresh_remote_tokens(&ctx).await {
+                            tracing::error!("failed to seed remote tokens: {e:?}");
+                        }
                     }
                     let ctx_r = ctx.clone();
                     tokio::spawn(async move {

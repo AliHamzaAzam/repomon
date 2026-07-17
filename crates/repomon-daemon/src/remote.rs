@@ -248,6 +248,14 @@ async fn handle_conn(
             }
             event = events.recv() => match event {
                 Ok(value) => {
+                    // Passive revocation: a device that stays silent still holds a live event
+                    // receiver, so the request-arm's revocation check never runs for it. Re-check
+                    // the token on every forward and drop the connection the moment it's gone —
+                    // otherwise a revoked-but-quiet device keeps receiving event.agent.bytes/output
+                    // forever. Sync std RwLock read, no await held.
+                    if !token_present(&ctx, &conn_token) {
+                        break;
+                    }
                     // Per-connection filtering: `event.agent.bytes` reaches only the connections
                     // that watch its window, and `event.agent.output` only the connections whose
                     // viewport covers its lane/window (the bus broadcasts both to every subscriber);

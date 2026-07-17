@@ -36,6 +36,13 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
 /// Rebuild [`Ctx::remote_tokens`] from the store's paired devices plus the legacy `[remote] token`
 /// from config (device name `None`). The single choke point for the auth cache: startup seeding
 /// and every pair/revoke funnel through here, so the handshake callback always reads a current set.
+///
+/// **Concurrency:** this is read-then-write (read the store's device list, then overwrite the cache)
+/// and is NOT internally serialized. Two overlapping refreshes race — an auth-cache refresh race
+/// where a `remote.pair`'s post-mutation read lands after a concurrent `remote.revoke`'s write,
+/// re-adding a just-revoked token. Callers MUST hold [`Ctx::remote_mutate_lock`] across their store
+/// mutation and this refresh so the mutate+rebuild is atomic (see the `remote.pair`/`remote.revoke`
+/// handlers and the startup seed).
 pub async fn refresh_remote_tokens(ctx: &Ctx) -> Result<(), RpcError> {
     let devices = ctx.store.remote_device_list().await.map_err(internal)?;
     let config_token = ctx.config.read().await.remote.token.clone();
@@ -604,7 +611,16 @@ pub async fn dispatch(
             to_value(one.into_iter().next().unwrap())
         }
         "lane.create" => {
-            let p: CreateLaneParams = parse(params)?;
+            let mut p: CreateLaneParams = parse(params)?;
+            // Defense-in-depth: a remote caller must not pin the worktree to an arbitrary host path.
+            // The remote allowlist grants `lane.create` but deliberately withholds `fs.browse`, so a
+            // paired device has no legitimate way to have picked a path — it's expected to let the
+            // daemon derive the template worktree location. Strip any supplied `path` (rather than
+            // hard-erroring) so a harmless client that fills it in still succeeds, while a hostile
+            // one can't write outside the managed worktree root. The local Unix socket is unaffected.
+            if !sess.is_local() && p.path.take().is_some() {
+                tracing::warn!("remote lane.create supplied a path; ignoring it (deriving template)");
+            }
             let lane = ctx.lanes.create(p).await.map_err(internal)?;
             ctx.broadcast(crate::pubsub::topic::LANE_CREATED, json!({ "lane": lane }));
             ctx.invalidate_overlay().await;
@@ -1579,13 +1595,20 @@ pub async fn dispatch(
         // ---- remote devices (LOCAL SOCKET ONLY — blocked over the bridge by the allowlist) ----
         "remote.pair" => {
             let p: RemotePair = parse(params)?;
-            let dev = ctx
-                .store
-                .remote_device_pair(&p.name)
-                .await
-                .map_err(internal)?;
-            // Refresh the auth cache so the freshly minted token authenticates immediately.
-            refresh_remote_tokens(ctx).await?;
+            // Serialize the store mutation and the cache rebuild together (see
+            // `Ctx::remote_mutate_lock`): a concurrent `remote.revoke` must not interleave a stale
+            // refresh between our write and rebuild and resurrect a revoked token.
+            let dev = {
+                let _guard = ctx.remote_mutate_lock.lock().await;
+                let dev = ctx
+                    .store
+                    .remote_device_pair(&p.name)
+                    .await
+                    .map_err(internal)?;
+                // Refresh the auth cache so the freshly minted token authenticates immediately.
+                refresh_remote_tokens(ctx).await?;
+                dev
+            };
             let url = remote_pair_url(ctx, &dev).await;
             Ok(json!({ "name": dev.name, "token": dev.token, "url": url }))
         }
@@ -1607,14 +1630,20 @@ pub async fn dispatch(
         }
         "remote.revoke" => {
             let p: RemoteRevoke = parse(params)?;
-            let revoked = ctx
-                .store
-                .remote_device_revoke(&p.name)
-                .await
-                .map_err(internal)?;
-            // Drop the revoked token from the auth cache; live connections holding it are kicked
-            // on their next request (see `remote::handle_conn`).
-            refresh_remote_tokens(ctx).await?;
+            // Serialize the mutate+refresh pair against a concurrent `remote.pair` (see
+            // `Ctx::remote_mutate_lock`) so the revoked token can't survive in the auth cache.
+            let revoked = {
+                let _guard = ctx.remote_mutate_lock.lock().await;
+                let revoked = ctx
+                    .store
+                    .remote_device_revoke(&p.name)
+                    .await
+                    .map_err(internal)?;
+                // Drop the revoked token from the auth cache; live connections holding it are kicked
+                // on their next request (see `remote::handle_conn`) or next event forward.
+                refresh_remote_tokens(ctx).await?;
+                revoked
+            };
             Ok(json!({ "revoked": revoked }))
         }
         "push.register" => {

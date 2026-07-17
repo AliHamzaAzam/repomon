@@ -240,6 +240,15 @@ pub struct Ctx {
     /// handshake callback (which is not an async context). Rebuilt from the store by
     /// [`rpc::refresh_remote_tokens`] at startup and after every pair/revoke.
     pub remote_tokens: std::sync::RwLock<Vec<(String, Option<String>)>>,
+    /// Serializes the *mutate-then-refresh* pair behind every `remote.pair` / `remote.revoke` (and
+    /// the startup seed). [`rpc::refresh_remote_tokens`] is read-then-write (read the store's device
+    /// list, then overwrite `remote_tokens`); running two of them concurrently races. Interleaving a
+    /// `remote.pair` and a `remote.revoke` can otherwise let the pair's stale post-mutation read land
+    /// AFTER the revoke's write, resurrecting a just-revoked token in the auth cache. Holding this
+    /// lock across the store mutation and the refresh makes each token change atomic. It is separate
+    /// from `remote_tokens`'s own (std) `RwLock`, which only guards a single read/write of the Vec —
+    /// not the compound mutate+rebuild transaction.
+    pub remote_mutate_lock: Mutex<()>,
     pub shutdown: Notify,
 }
 
@@ -300,6 +309,7 @@ impl Ctx {
             orchestrator_input_seen: Mutex::new(None),
             orchestrator_attention: Mutex::new(("none".to_string(), None)),
             remote_tokens: std::sync::RwLock::new(Vec::new()),
+            remote_mutate_lock: Mutex::new(()),
             shutdown: Notify::new(),
         })
     }

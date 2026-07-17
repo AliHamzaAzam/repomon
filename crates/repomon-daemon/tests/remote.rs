@@ -1,5 +1,6 @@
 //! End-to-end for the remote WebSocket bridge: token gate, RPC round-trip, event push.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -218,6 +219,51 @@ async fn bridge_kicks_a_revoked_token_mid_session() {
     assert!(closed, "the bridge closes the socket after a revoked request");
 }
 
+/// Passive revocation: a device that subscribes and watches, then is revoked while sending NO
+/// further requests, must stop receiving events. The request-arm revocation check never fires for
+/// a silent device, so the event-forward arm has to re-check the token itself and close the socket
+/// within one event delivery.
+#[tokio::test]
+async fn bridge_stops_events_to_a_silently_revoked_device() {
+    let (ctx, addr) = start_bridge("live-token").await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token=live-token"))
+        .await
+        .expect("authorized connect");
+
+    // Subscribe so the connection forwards events; drain the ack. (A byte-watch would be seeded the
+    // same way as the other bridge tests, but a plain topic exercises the same forward arm.)
+    ws.send(Message::text(
+        json!({"jsonrpc":"2.0","id":1,"method":"subscribe"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let _ack = recv_json(&mut ws).await;
+
+    // A pre-revocation broadcast is delivered — the stream is live.
+    ctx.broadcast("event.test", json!({ "n": 1 }));
+    let ev = recv_json(&mut ws).await;
+    assert_eq!(ev["method"], json!("event.test"));
+    assert_eq!(ev["params"]["n"], json!(1));
+
+    // Revoke by clearing the auth cache (what `remote.revoke` does via refresh). The device sends
+    // NO further request, so only the event-forward arm can notice.
+    ctx.remote_tokens.write().unwrap().clear();
+
+    // The next event must NOT reach the device: the forward arm re-checks the token, finds it gone,
+    // and closes the socket. The client sees a close (or EOF/err), never the event frame.
+    ctx.broadcast("event.test", json!({ "n": 2 }));
+    let closed = matches!(
+        tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("the bridge acts within 2s"),
+        None | Some(Ok(Message::Close(_))) | Some(Err(_))
+    );
+    assert!(
+        closed,
+        "a silently-revoked device stops receiving events and the socket closes"
+    );
+}
+
 #[tokio::test]
 async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     let store = Store::open_in_memory().unwrap();
@@ -264,6 +310,160 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
         .await
         .unwrap();
     assert_eq!(rev2["revoked"], json!(false));
+}
+
+/// Auth-cache refresh race (Finding 4): a `remote.pair` and a `remote.revoke` running at once must
+/// leave the cache consistent with the store. `refresh_remote_tokens` is read-then-write, so an
+/// unserialized pair could rebuild from a pre-revoke snapshot and resurrect the revoked token. With
+/// the mutate lock serializing each mutate+refresh, the final cache always mirrors the store — the
+/// revoked device is gone and the paired one is present, regardless of interleaving.
+#[tokio::test]
+async fn concurrent_pair_and_revoke_leave_the_cache_consistent() {
+    use std::collections::HashSet;
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sess = ctx.open_session(ConnKind::Local).await;
+
+    // Start with device "a" paired and in the cache.
+    rpc::dispatch(&ctx, &sess, "remote.pair", Some(json!({ "name": "a" })))
+        .await
+        .unwrap();
+
+    // Concurrently pair "b" and revoke "a".
+    let (c1, s1) = (ctx.clone(), sess.clone());
+    let (c2, s2) = (ctx.clone(), sess.clone());
+    let pair = tokio::spawn(async move {
+        rpc::dispatch(&c1, &s1, "remote.pair", Some(json!({ "name": "b" })))
+            .await
+            .unwrap();
+    });
+    let revoke = tokio::spawn(async move {
+        rpc::dispatch(&c2, &s2, "remote.revoke", Some(json!({ "name": "a" })))
+            .await
+            .unwrap();
+    });
+    pair.await.unwrap();
+    revoke.await.unwrap();
+
+    // The auth cache must equal the store's live device set: "b" present, "a" absent.
+    let store_names: HashSet<String> = ctx
+        .store
+        .remote_device_list()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    let cache_names: HashSet<String> = ctx
+        .remote_tokens
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, n)| n.clone())
+        .collect();
+    assert_eq!(
+        cache_names, store_names,
+        "auth cache must mirror the store after concurrent pair+revoke"
+    );
+    assert!(
+        !cache_names.contains("a"),
+        "a revoked device must never survive in the cache"
+    );
+    assert!(
+        cache_names.contains("b"),
+        "the concurrently paired device is present"
+    );
+}
+
+/// Run a git command in `dir`, asserting success (test setup for a real repo to branch from).
+fn git(dir: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?} failed");
+}
+
+/// Defense-in-depth (Finding 5): a remote `lane.create` must NOT honor a caller-supplied `path` —
+/// the bridge withholds `fs.browse`, so a paired device has no legitimate way to have chosen one.
+/// The daemon strips it and derives the template worktree location; a LOCAL caller is unaffected.
+#[tokio::test]
+async fn remote_lane_create_ignores_caller_path() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+
+    // A real repo with one commit on main (lane.create branches a worktree off it).
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "init"]);
+    let repo = ctx.registry.add(repo_dir.path()).await.unwrap();
+
+    // A paired device tries to pin the worktree to an attacker-chosen host path.
+    let sess = ctx
+        .open_session(ConnKind::Remote {
+            device: Some("phone".into()),
+        })
+        .await;
+    let outside = tempfile::tempdir().unwrap();
+    // Canonicalize the base: the daemon returns canonical worktree paths, and on macOS the tempdir
+    // lives under a `/private` symlink, so a raw join wouldn't compare equal.
+    let outside_base = std::fs::canonicalize(outside.path()).unwrap();
+    let evil_path = outside_base.join("pwned");
+    let lane = rpc::dispatch(
+        &ctx,
+        &sess,
+        "lane.create",
+        Some(json!({
+            "repo_id": repo.id,
+            "branch": "feat/x",
+            "source_branch": "main",
+            "path": evil_path.to_string_lossy(),
+        })),
+    )
+    .await
+    .expect("remote lane.create still succeeds (path is stripped, not rejected)");
+
+    let created = PathBuf::from(lane["worktree"]["path"].as_str().unwrap());
+    assert_ne!(
+        created, evil_path,
+        "remote lane.create must not honor the caller-supplied path"
+    );
+    assert!(
+        !evil_path.exists(),
+        "nothing may be created at the attacker path"
+    );
+
+    // Sanity: a LOCAL caller's path IS honored — the strip is remote-only.
+    let local = ctx.open_session(ConnKind::Local).await;
+    let local_path = outside_base.join("local-ok");
+    let lane2 = rpc::dispatch(
+        &ctx,
+        &local,
+        "lane.create",
+        Some(json!({
+            "repo_id": repo.id,
+            "branch": "feat/y",
+            "source_branch": "main",
+            "path": local_path.to_string_lossy(),
+        })),
+    )
+    .await
+    .expect("local lane.create honors the path");
+    assert_eq!(
+        PathBuf::from(lane2["worktree"]["path"].as_str().unwrap()),
+        local_path,
+        "a local caller keeps full control of the worktree path"
+    );
 }
 
 /// Find the live session a named remote device connected as (polls; the session registers just
