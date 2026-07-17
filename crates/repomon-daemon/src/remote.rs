@@ -162,11 +162,20 @@ async fn handle_conn(
         Some(remote_ws_config()),
     )
     .await?;
-    // Present because the handshake only completes on a match. This connection's identity is a
-    // plain local for now; task A3 will move it into a per-connection session struct.
+    // Present because the handshake only completes on a match.
     let (conn_token, device_name) =
         identity.expect("authorized handshake must record an identity");
     let (mut sink, mut source) = ws.split();
+
+    // This connection's per-device session, carrying its identity (device name) and its own
+    // viewport/focus/fit state. The guard drops it from `ctx.sessions` on every exit path below —
+    // each `break`, every `?` early return, and a panic.
+    let sess = ctx
+        .open_session(crate::conn::ConnKind::Remote {
+            device: device_name.clone(),
+        })
+        .await;
+    let _session_guard = crate::conn::SessionGuard::new(ctx.clone(), sess.id);
 
     // Stamp last-seen once on connect for a named device, then at most once per minute below.
     let mut last_seen_stamp = Instant::now();
@@ -220,7 +229,7 @@ async fn handle_conn(
                     if req.method == "subscribe" {
                         forwarding = true;
                     }
-                    match rpc::dispatch(&ctx, &req.method, req.params).await {
+                    match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
                         Ok(value) => Response::ok(id, value),
                         Err(err) => Response::err(id, err),
                     }

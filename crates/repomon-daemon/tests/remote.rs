@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use repomon_core::{Config, Store};
+use repomon_daemon::conn::ConnKind;
 use repomon_daemon::{Ctx, remote, rpc};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -220,9 +221,11 @@ async fn bridge_kicks_a_revoked_token_mid_session() {
 async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);
+    // A session is required by the dispatch signature; these local-only RPCs don't touch it.
+    let sess = ctx.open_session(ConnKind::Local).await;
 
     // pair → {name, token, url}; seeds the auth cache.
-    let pair = rpc::dispatch(&ctx, "remote.pair", Some(json!({ "name": "phone" })))
+    let pair = rpc::dispatch(&ctx, &sess, "remote.pair", Some(json!({ "name": "phone" })))
         .await
         .unwrap();
     assert_eq!(pair["name"], json!("phone"));
@@ -235,28 +238,28 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     assert_eq!(ctx.remote_tokens.read().unwrap().len(), 1);
 
     // re-pair the same name is idempotent (same token, no second cache entry).
-    let again = rpc::dispatch(&ctx, "remote.pair", Some(json!({ "name": "phone" })))
+    let again = rpc::dispatch(&ctx, &sess, "remote.pair", Some(json!({ "name": "phone" })))
         .await
         .unwrap();
     assert_eq!(pair["token"], again["token"]);
     assert_eq!(ctx.remote_tokens.read().unwrap().len(), 1);
 
     // devices lists the device WITHOUT the token.
-    let devices = rpc::dispatch(&ctx, "remote.devices", None).await.unwrap();
+    let devices = rpc::dispatch(&ctx, &sess, "remote.devices", None).await.unwrap();
     let d0 = &devices.as_array().unwrap()[0];
     assert_eq!(d0["name"], json!("phone"));
     assert_eq!(d0["role"], json!("full"));
     assert!(d0.get("token").is_none(), "the listing never exposes the token");
 
     // revoke → {revoked:true}, and the auth cache empties.
-    let rev = rpc::dispatch(&ctx, "remote.revoke", Some(json!({ "name": "phone" })))
+    let rev = rpc::dispatch(&ctx, &sess, "remote.revoke", Some(json!({ "name": "phone" })))
         .await
         .unwrap();
     assert_eq!(rev["revoked"], json!(true));
     assert!(ctx.remote_tokens.read().unwrap().is_empty());
 
     // revoking again → {revoked:false}.
-    let rev2 = rpc::dispatch(&ctx, "remote.revoke", Some(json!({ "name": "phone" })))
+    let rev2 = rpc::dispatch(&ctx, &sess, "remote.revoke", Some(json!({ "name": "phone" })))
         .await
         .unwrap();
     assert_eq!(rev2["revoked"], json!(false));

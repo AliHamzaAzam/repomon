@@ -15,6 +15,9 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use std::sync::Arc;
+
+use crate::conn::ConnSession;
 use crate::{Ctx, ORCHESTRATOR_WINDOW};
 
 fn internal<E: std::fmt::Display>(e: E) -> RpcError {
@@ -514,7 +517,22 @@ struct OrchestratorTranscript {
 }
 
 /// Dispatch a single request to its handler.
-pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
+pub async fn dispatch(
+    ctx: &Ctx,
+    sess: &Arc<ConnSession>,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value, RpcError> {
+    // Agent-driving calls stamp this connection's last-interaction beat, which `agent.fit`'s
+    // remote-vs-remote arbitration reads (last-interaction-wins). Done here on the method name so
+    // the per-handler code needn't thread `sess`. `agent.fit` is deliberately absent: it stamps
+    // itself only when it actually applies a resize (see its handler).
+    if matches!(
+        method,
+        "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll" | "agent.answer"
+    ) {
+        *sess.last_interaction.lock().await = Some(std::time::Instant::now());
+    }
     match method {
         // ---- system ----
         // The local TUI calls this just before parking in a full-screen tmux attach (where it
@@ -1311,20 +1329,20 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
             Ok(Value::Null)
         }
         "agent.fit" => {
-            // The arbitrated resize for remote viewers: reflow the pane to the caller's grid
-            // ONLY while no live mediated viewer (the TUI's viewport focus, kept fresh by its
-            // heartbeat) owns the window's size. Always answers with the authoritative grid,
+            // The arbitrated resize for mediated viewers: reflow the pane to the caller's grid
+            // only when no other session with a fresher claim owns the window's size (a Local/TUI
+            // focus always wins; a remote peer wins only while its focus beat is fresh AND it drove
+            // the agent more recently than the caller). Always answers with the authoritative grid,
             // so a refused caller renders pinned at the shared size instead of fighting.
             let p: AgentResize = parse(params)?;
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            let owned = {
-                let focus = ctx.viewport_focus.lock().await;
-                let at = *ctx.viewport_focus_at.lock().await;
-                fit_owned(focus.as_ref(), at, &window, std::time::Instant::now())
-            };
-            if owned {
+            let now = std::time::Instant::now();
+            let caller = sess_snapshot(sess).await;
+            let others = other_session_snapshots(ctx, sess.id).await;
+            let allowed = fit_allowed(&caller, &others, &window, now);
+            if !allowed {
                 let tmux = ctx.tmux.clone();
                 let w = window.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&w))
@@ -1343,6 +1361,9 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
+            // The applied fit is this connection's most recent agent-driving act — stamp it so a
+            // later remote peer's fit yields to us (last-interaction-wins). Denied fits don't stamp.
+            *sess.last_interaction.lock().await = Some(now);
             Ok(json!({ "applied": true, "cols": cols, "rows": rows }))
         }
         "agent.scroll" => {
@@ -1582,17 +1603,19 @@ pub async fn dispatch(ctx: &Ctx, method: &str, params: Option<Value>) -> Result<
         }
         "viewport.set" => {
             let mut p: ViewportSet = parse(params)?;
-            *ctx.viewport.lock().await = p.lane_ids;
-            *ctx.viewport_focus.lock().await = p.focus_lane.zip(p.focus_window);
+            // Per connection now: each device writes its OWN viewport/focus into its session, and
+            // the capture loop streams the union across all live sessions. Wire shape unchanged.
+            *sess.viewport.lock().await = p.lane_ids;
+            *sess.viewport_focus.lock().await = p.focus_lane.zip(p.focus_window);
             // The focus heartbeat: `agent.fit` treats the focused window as size-owned while
-            // this is fresh. The TUI re-asserts its viewport every few seconds, so a crashed
-            // or closed TUI releases ownership when the beat stops.
-            *ctx.viewport_focus_at.lock().await = Some(std::time::Instant::now());
+            // this is fresh. A client re-asserts its viewport every few seconds, so a crashed
+            // or closed client releases ownership when the beat stops.
+            *sess.viewport_focus_at.lock().await = Some(std::time::Instant::now());
             // Only real terminal windows are streamable extras — anything else is dropped so a
             // client can't point the capture loop at arbitrary windows.
             p.windows
                 .retain(|w| TmuxRuntime::parse_term_window(w).is_some());
-            *ctx.viewport_windows.lock().await = p.windows;
+            *sess.viewport_windows.lock().await = p.windows;
             Ok(Value::Null)
         }
 
@@ -2408,26 +2431,88 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
     }
 }
 
-/// How long a viewport focus keeps owning its window's size after the last `viewport.set`.
-/// Three missed ~5s TUI heartbeats — generous against a busy tick, short enough that a
-/// closed/crashed TUI frees the pane for remote reflow within seconds.
-const FOCUS_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long a viewport focus keeps owning its window's size after the last `viewport.set`, and how
+/// long the capture loop treats a session's focus as cadence-boosting. Three missed ~5s client
+/// heartbeats — generous against a busy tick, short enough that a closed/crashed client frees the
+/// pane for reflow within seconds. `pub(crate)` so [`crate::Ctx::viewport_snapshot`] shares it.
+pub(crate) const FOCUS_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Whether a live mediated viewer owns `window`'s size (`agent.fit`'s arbitration): the
-/// viewport focus names this window and the viewport beat is fresh.
-fn fit_owned(
-    focus: Option<&(repomon_core::model::LaneId, String)>,
+/// The fit-arbitration-relevant slice of one session, snapshotted so [`fit_allowed`] is a pure
+/// function over plain data (and unit-testable without a live `Ctx`).
+struct SessSnapshot {
+    /// True for the local TUI connection; false for a remote (companion) connection.
+    local: bool,
+    /// The window this session focuses, if any (with its lane, unused by the arbitration).
+    focus: Option<(repomon_core::model::LaneId, String)>,
+    /// When this session last (re)asserted its viewport — its focus beat's freshness clock.
     focus_at: Option<std::time::Instant>,
+    /// When this session last drove an agent (for remote-vs-remote last-interaction-wins).
+    last_interaction: Option<std::time::Instant>,
+}
+
+async fn sess_snapshot(sess: &ConnSession) -> SessSnapshot {
+    SessSnapshot {
+        local: sess.is_local(),
+        focus: sess.viewport_focus.lock().await.clone(),
+        focus_at: *sess.viewport_focus_at.lock().await,
+        last_interaction: *sess.last_interaction.lock().await,
+    }
+}
+
+/// Snapshot every live session EXCEPT `caller_id` (the fit's caller never blocks itself).
+async fn other_session_snapshots(ctx: &Ctx, caller_id: u64) -> Vec<SessSnapshot> {
+    let sessions: Vec<Arc<ConnSession>> = ctx
+        .sessions
+        .lock()
+        .await
+        .values()
+        .filter(|s| s.id != caller_id)
+        .cloned()
+        .collect();
+    let mut out = Vec::with_capacity(sessions.len());
+    for s in &sessions {
+        out.push(sess_snapshot(s).await);
+    }
+    out
+}
+
+/// Whether `caller` may reflow `window` right now, given the other live sessions.
+///
+/// 1. Any OTHER Local (TUI) session with a fresh focus beat on `window` denies it (TUI precedence).
+/// 2. Any OTHER Remote session with a fresh focus beat on `window` AND a `last_interaction` newer
+///    than the caller's denies it (remote-vs-remote last-interaction-wins).
+/// 3. Otherwise it is allowed; the handler stamps the caller's `last_interaction` on apply.
+/// 4. Self-refit is always allowed — the caller is excluded from `others`, so it never blocks
+///    itself.
+fn fit_allowed(
+    caller: &SessSnapshot,
+    others: &[SessSnapshot],
     window: &str,
     now: std::time::Instant,
 ) -> bool {
-    let Some((_, focused)) = focus else {
-        return false;
-    };
-    if focused != window {
-        return false;
+    for o in others {
+        // Does this other session hold a FRESH focus beat on the target window?
+        let focuses_window = o.focus.as_ref().is_some_and(|(_, w)| w == window);
+        let fresh = o
+            .focus_at
+            .is_some_and(|at| now.duration_since(at) < FOCUS_OWNED_TTL);
+        if !(focuses_window && fresh) {
+            continue;
+        }
+        if o.local {
+            return false; // rule 1: TUI precedence
+        }
+        // rule 2: a remote peer wins only if it drove the agent more recently than the caller.
+        let peer_newer = match (o.last_interaction, caller.last_interaction) {
+            (Some(peer), Some(mine)) => peer > mine,
+            (Some(_), None) => true, // peer has driven, caller never has → peer is newer
+            (None, _) => false,      // peer never drove → it doesn't outrank the caller
+        };
+        if peer_newer {
+            return false;
+        }
     }
-    focus_at.is_some_and(|at| now.duration_since(at) < FOCUS_OWNED_TTL)
+    true
 }
 
 /// How long a managed agent's pane must sit unchanged — with no dialog up and its turn not
@@ -3502,22 +3587,75 @@ fn write_orchestrator_mcp_config(
 mod tests {
     use super::*;
 
+    fn fit_snap(
+        local: bool,
+        focus_window: Option<&str>,
+        focus_at: Option<std::time::Instant>,
+        last_interaction: Option<std::time::Instant>,
+    ) -> SessSnapshot {
+        SessSnapshot {
+            local,
+            focus: focus_window.map(|w| (7i64, w.to_string())),
+            focus_at,
+            last_interaction,
+        }
+    }
+
     #[test]
-    fn fit_ownership_follows_the_live_viewport_focus() {
+    fn fit_arbitration_across_sessions() {
         let now = std::time::Instant::now();
         let fresh = Some(now - std::time::Duration::from_secs(2));
         let stale = Some(now - std::time::Duration::from_secs(30));
-        let focus = Some((7i64, "lane-7".to_string()));
+        let earlier = Some(now - std::time::Duration::from_secs(10));
+        let later = Some(now - std::time::Duration::from_secs(1));
 
-        // A live focus on the same window owns its size.
-        assert!(fit_owned(focus.as_ref(), fresh, "lane-7", now));
-        // A different window is free.
-        assert!(!fit_owned(focus.as_ref(), fresh, "lane-9", now));
-        // A crashed/closed TUI stops owning once the viewport beat goes stale.
-        assert!(!fit_owned(focus.as_ref(), stale, "lane-7", now));
-        assert!(!fit_owned(focus.as_ref(), None, "lane-7", now));
-        // No focus at all — nothing is owned.
-        assert!(!fit_owned(None, fresh, "lane-7", now));
+        // No contenders: a lone caller always gets its fit.
+        let caller = fit_snap(false, None, None, None);
+        assert!(fit_allowed(&caller, &[], "lane-7", now));
+
+        // Self-refit: the caller is never in `others`, so even holding a fresh focus itself it is
+        // allowed. (An empty `others` models exclusion of self.)
+        let self_focus = fit_snap(true, Some("lane-7"), fresh, later);
+        assert!(fit_allowed(&self_focus, &[], "lane-7", now));
+
+        // Rule 1: another Local (TUI) session with a fresh focus beat on the window denies, and
+        // beats a remote caller regardless of interaction recency.
+        let tui = fit_snap(true, Some("lane-7"), fresh, None);
+        let remote_caller = fit_snap(false, None, None, later);
+        assert!(!fit_allowed(&remote_caller, &[tui], "lane-7", now));
+
+        // A Local focus on a DIFFERENT window doesn't block this window.
+        let tui_other = fit_snap(true, Some("lane-9"), fresh, None);
+        assert!(fit_allowed(&remote_caller, &[tui_other], "lane-7", now));
+
+        // Stale beat releases ownership: a crashed/closed TUI no longer blocks.
+        let tui_stale = fit_snap(true, Some("lane-7"), stale, None);
+        assert!(fit_allowed(&remote_caller, &[tui_stale], "lane-7", now));
+        let tui_no_beat = fit_snap(true, Some("lane-7"), None, None);
+        assert!(fit_allowed(&remote_caller, &[tui_no_beat], "lane-7", now));
+
+        // Rule 2, order A: a remote peer that interacted MORE recently than the caller wins.
+        let peer_newer = fit_snap(false, Some("lane-7"), fresh, later);
+        let caller_old = fit_snap(false, None, None, earlier);
+        assert!(!fit_allowed(&caller_old, &[peer_newer], "lane-7", now));
+
+        // Rule 2, order B: a remote peer that interacted LESS recently than the caller yields.
+        let peer_older = fit_snap(false, Some("lane-7"), fresh, earlier);
+        let caller_new = fit_snap(false, None, None, later);
+        assert!(fit_allowed(&caller_new, &[peer_older], "lane-7", now));
+
+        // A remote peer that has never driven the agent never outranks the caller.
+        let peer_idle = fit_snap(false, Some("lane-7"), fresh, None);
+        assert!(fit_allowed(&caller_old, &[peer_idle], "lane-7", now));
+
+        // A peer that HAS driven still wins over a caller that never has.
+        let peer_any = fit_snap(false, Some("lane-7"), fresh, earlier);
+        let caller_never = fit_snap(false, None, None, None);
+        assert!(!fit_allowed(&caller_never, &[peer_any], "lane-7", now));
+
+        // A remote peer with a STALE focus beat doesn't arbitrate, however recent its interaction.
+        let peer_stale = fit_snap(false, Some("lane-7"), stale, later);
+        assert!(fit_allowed(&caller_old, &[peer_stale], "lane-7", now));
     }
 
     #[test]
