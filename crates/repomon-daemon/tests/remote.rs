@@ -283,12 +283,15 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
         .await
         .unwrap();
     assert_eq!(pair["name"], json!("phone"));
-    assert!(pair["token"].as_str().unwrap().len() >= 32);
-    assert!(pair["url"].as_str().unwrap().starts_with("repomon://"));
-    assert!(
-        pair["url"].as_str().unwrap().contains("&name=phone"),
-        "the pairing url carries the device name"
-    );
+    let token = pair["token"].as_str().unwrap();
+    assert!(token.len() >= 32);
+    // The app parses the token as the ENTIRE fragment and the device name from a `?name=`
+    // query item; the shipped phone build knows only the fragment. So the name must ride as
+    // a query item BEFORE the fragment, and the fragment must be the bare token — appending
+    // `&name=` inside the fragment corrupted the token every named pairing stored (seen live:
+    // the iPad 401'd on every handshake with "seen never").
+    let url = pair["url"].as_str().unwrap();
+    assert_eq!(url, &format!("repomon://?name=phone#{token}"));
     assert_eq!(ctx.remote_tokens.read().unwrap().len(), 1);
 
     // re-pair the same name is idempotent (same token, no second cache entry).

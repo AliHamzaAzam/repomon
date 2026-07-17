@@ -59,8 +59,10 @@ pub async fn refresh_remote_tokens(ctx: &Ctx) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// The pairing URL the companion app scans: the same `repomon://<bind>#<token>` shape the legacy
-/// QR uses, with `&name=<urlencoded>` appended to the fragment so the app can label the connection.
+/// The pairing URL the companion app scans: `repomon://<bind>?name=<urlencoded>#<token>`. The
+/// device name is a QUERY item and the fragment is the bare token — both the current app and
+/// the legacy phone build take the entire fragment as the token, so splicing `&name=` into the
+/// fragment corrupted the stored token and every named pairing 401'd at the handshake.
 async fn remote_pair_url(ctx: &Ctx, dev: &RemoteDevice) -> String {
     let bind = ctx
         .config
@@ -71,9 +73,9 @@ async fn remote_pair_url(ctx: &Ctx, dev: &RemoteDevice) -> String {
         .clone()
         .unwrap_or_default();
     format!(
-        "repomon://{bind}#{}&name={}",
+        "repomon://{bind}?name={}#{}",
+        percent_encode(&dev.name),
         dev.token,
-        percent_encode(&dev.name)
     )
 }
 

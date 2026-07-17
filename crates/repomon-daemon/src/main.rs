@@ -158,8 +158,22 @@ async fn main() {
                     }
                     let ctx_r = ctx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = repomon_daemon::remote::serve_remote(ctx_r, &bind).await {
-                            tracing::error!("remote bridge failed: {e}");
+                        // Keep retrying, not just at startup: the bind is typically a Tailscale
+                        // IP, which isn't assignable until the tailnet interface is up — a
+                        // daemon started at login (or a Mac waking from sleep) raced it and the
+                        // bridge stayed dead until the next manual restart. Ok(()) means a
+                        // clean shutdown; any Err waits out a short delay and binds again.
+                        loop {
+                            match repomon_daemon::remote::serve_remote(ctx_r.clone(), &bind).await {
+                                Ok(()) => break,
+                                Err(e) => {
+                                    tracing::warn!("remote bridge failed (retrying in 15s): {e}");
+                                }
+                            }
+                            tokio::select! {
+                                _ = ctx_r.shutdown.notified() => break,
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
+                            }
                         }
                     });
                 }
