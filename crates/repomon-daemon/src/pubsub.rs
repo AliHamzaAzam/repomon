@@ -27,3 +27,56 @@ pub mod topic {
     /// The repomind orchestrator started/stopped (its `{running, agent, model, window}` status).
     pub const ORCHESTRATOR_STATUS: &str = "event.orchestrator.status";
 }
+
+/// Whether a connection whose byte-watched windows are `watched` should receive `value`.
+///
+/// Every topic forwards unchanged EXCEPT `event.agent.bytes`, which is per-connection: the event
+/// bus broadcasts one window's bytes to every subscriber, so each forwarding loop filters them to
+/// the connections that actually watch that window. A bytes event forwards only when its `window`
+/// param is in `watched`; a bytes event with no `window` param goes to nobody. Cheap and sync (a
+/// `std::sync::Mutex` read) so it adds no `await` on the event-forward hot path.
+pub fn deliver_to(value: &Value, watched: &std::collections::HashSet<String>) -> bool {
+    if value.get("method").and_then(Value::as_str) != Some(topic::AGENT_BYTES) {
+        return true;
+    }
+    match value
+        .get("params")
+        .and_then(|p| p.get("window"))
+        .and_then(Value::as_str)
+    {
+        Some(window) => watched.contains(window),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn watched(windows: &[&str]) -> std::collections::HashSet<String> {
+        windows.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn non_bytes_topics_always_forward() {
+        let ev = json!({ "method": topic::AGENT_STATUS, "params": { "window": "lane-9" } });
+        assert!(deliver_to(&ev, &watched(&[])));
+        assert!(deliver_to(&ev, &watched(&["lane-1"])));
+    }
+
+    #[test]
+    fn bytes_forward_only_to_watchers_of_that_window() {
+        let ev = json!({ "method": topic::AGENT_BYTES, "params": { "window": "lane-1", "data": "x" } });
+        assert!(deliver_to(&ev, &watched(&["lane-1"])));
+        assert!(deliver_to(&ev, &watched(&["lane-1", "lane-2"])));
+        assert!(!deliver_to(&ev, &watched(&["lane-2"])));
+        assert!(!deliver_to(&ev, &watched(&[])));
+    }
+
+    #[test]
+    fn bytes_without_a_window_go_to_nobody() {
+        let ev = json!({ "method": topic::AGENT_BYTES, "params": { "data": "x" } });
+        assert!(!deliver_to(&ev, &watched(&["lane-1"])));
+    }
+}

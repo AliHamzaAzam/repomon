@@ -170,8 +170,11 @@ pub struct Ctx {
     /// Per worktree: the dxkit loop ledger's mtime and the verdict parsed from its tail, so
     /// the overlay re-reads only when the gate actually ran again. Keyed by worktree path.
     pub gate_cache: Mutex<HashMap<PathBuf, GateCacheEntry>>,
-    /// The single active PTY byte watch (the Focus view's embedded renderer feed), if any.
-    pub bytes_watch: Mutex<Option<bytes_stream::BytesWatch>>,
+    /// Live PTY byte watches, keyed by window — the embedded renderer's feed. tmux allows one
+    /// `pipe-pane` per pane, so each window has exactly one shared pipe; the entry refcounts the
+    /// connections watching it (see [`bytes_stream`]). `Arc<Mutex<…>>` so an EOF reader thread can
+    /// clean up its own entry.
+    pub bytes_watches: bytes_stream::Watches,
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
@@ -280,7 +283,7 @@ impl Ctx {
             prompt_cache: Mutex::new(HashMap::new()),
             pane_seen: Mutex::new(HashMap::new()),
             gate_cache: Mutex::new(HashMap::new()),
-            bytes_watch: Mutex::new(None),
+            bytes_watches: Arc::new(Mutex::new(HashMap::new())),
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
@@ -321,12 +324,14 @@ impl Ctx {
     /// Remove a connection's session when it disconnects, so its viewport no longer contributes to
     /// the streamed union and its focus no longer arbitrates fits.
     pub async fn close_session(&self, id: u64) {
-        let Some(sess) = self.sessions.lock().await.remove(&id) else {
+        if self.sessions.lock().await.remove(&id).is_none() {
             return;
-        };
-        // A connection's byte watches die with it: task A4 releases each window in
-        // `sess.watched_bytes` from the shared byte-stream registry here, before the Arc drops.
-        let _ = &sess.watched_bytes;
+        }
+        // A connection's byte watches die with it: release every window this connection held from
+        // the shared byte-stream registry (stopping the pipes no other connection still watches).
+        // Keyed by connection id, so it cleans up whatever the session was watching without relying
+        // on `watched_bytes` being in sync.
+        crate::bytes_stream::unwatch_all(&self.tmux, &self.bytes_watches, id).await;
     }
 
     /// Union of every live session's stream targets, plus the set of windows any fresh-beat session

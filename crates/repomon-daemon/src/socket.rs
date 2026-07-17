@@ -127,7 +127,14 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
             }
             event = events.recv() => match event {
                 Ok(value) => {
-                    if forwarding {
+                    // Per-connection filtering: `event.agent.bytes` reaches only the connections
+                    // that watch its window (the pipe is shared and broadcast to all); every other
+                    // topic forwards unchanged. Sync std-Mutex read — no await added on this path.
+                    let deliver = {
+                        let watched = sess.watched_bytes.lock().unwrap();
+                        crate::pubsub::deliver_to(&value, &watched)
+                    };
+                    if forwarding && deliver {
                         if let Ok(bytes) = serde_json::to_vec::<Value>(&value) {
                             if protocol::write_frame(&mut write_half, &bytes).await.is_err() {
                                 break;

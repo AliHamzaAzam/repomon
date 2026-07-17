@@ -1142,26 +1142,30 @@ pub async fn dispatch(
         }
         "agent.watch_bytes" => {
             // The embedded renderer's feed: stream one pane's raw PTY bytes as
-            // `event.agent.bytes`. Single-watch semantics — a new `on` replaces the previous
-            // watch, `off` just stops it.
+            // `event.agent.bytes`. Refcounted per window and per connection: a window has one
+            // shared pipe (tmux allows only one pipe-pane per pane), this session joins/leaves its
+            // readership, and delivery is filtered per connection at the forwarding loops. A new
+            // `on` NEVER stops another session's watch; `on:false` releases only THIS session's.
             let p: AgentWatchBytes = parse(params)?;
-            let window = p
-                .window
-                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            crate::bytes_stream::stop(&ctx.tmux, &ctx.bytes_watch).await;
             if p.on {
-                crate::bytes_stream::start(
+                let window = p
+                    .window
+                    .clone()
+                    .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+                crate::bytes_stream::watch(
                     ctx.tmux.clone(),
                     ctx.events.clone(),
-                    &ctx.bytes_watch,
+                    &ctx.bytes_watches,
                     p.lane_id,
                     window.clone(),
+                    sess.id,
                 )
                 .await
                 .map_err(internal)?;
+                sess.watched_bytes.lock().unwrap().insert(window.clone());
                 // The ack carries the pane's grid so a remote emulator renders at exactly
                 // this size instead of resizing the real pane (which would squeeze a
-                // simultaneously attached TUI's mediated view).
+                // simultaneously attached TUI's mediated view). Shape UNCHANGED (iOS depends on it).
                 let tmux = ctx.tmux.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&window))
                     .await
@@ -1170,6 +1174,27 @@ pub async fn dispatch(
                     "cols": dims.map(|d| d.0),
                     "rows": dims.map(|d| d.1),
                 }));
+            }
+            // `on:false`. With an explicit window, release just that one. WITHOUT a window (the
+            // TUI's stop path always sends `{lane_id, on:false}` — even when it watched a
+            // non-default window), release every window THIS session watches that belongs to the
+            // lane, matched by the WatchEntry.lane field. Resolving a default window name here
+            // would orphan the real watch.
+            let targets: Vec<String> = match &p.window {
+                Some(window) => vec![window.clone()],
+                None => {
+                    let map = ctx.bytes_watches.lock().await;
+                    let watched = sess.watched_bytes.lock().unwrap();
+                    watched
+                        .iter()
+                        .filter(|w| map.get(*w).is_some_and(|e| e.lane == p.lane_id))
+                        .cloned()
+                        .collect()
+                }
+            };
+            for window in targets {
+                crate::bytes_stream::unwatch(&ctx.tmux, &ctx.bytes_watches, &window, sess.id).await;
+                sess.watched_bytes.lock().unwrap().remove(&window);
             }
             Ok(Value::Null)
         }
@@ -2451,11 +2476,18 @@ struct SessSnapshot {
 }
 
 async fn sess_snapshot(sess: &ConnSession) -> SessSnapshot {
+    // Bind each guard to its own local so it drops before the next lock: a struct literal would
+    // otherwise hold all three session guards live at once across the `.await`s (a lock-order
+    // footgun). Order doesn't matter here since they never overlap.
+    let local = sess.is_local();
+    let focus = sess.viewport_focus.lock().await.clone();
+    let focus_at = *sess.viewport_focus_at.lock().await;
+    let last_interaction = *sess.last_interaction.lock().await;
     SessSnapshot {
-        local: sess.is_local(),
-        focus: sess.viewport_focus.lock().await.clone(),
-        focus_at: *sess.viewport_focus_at.lock().await,
-        last_interaction: *sess.last_interaction.lock().await,
+        local,
+        focus,
+        focus_at,
+        last_interaction,
     }
 }
 
