@@ -175,9 +175,10 @@ pub struct Ctx {
     /// connections watching it (see [`bytes_stream`]). `Arc<Mutex<…>>` so an EOF reader thread can
     /// clean up its own entry.
     pub bytes_watches: bytes_stream::Watches,
-    /// Lanes currently paused on a usage limit, with their reset time — written by the
+    /// Agent windows currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
-    pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
+    /// Keyed by slot window (`lane-7-2`), not lane: each slot pauses independently.
+    pub rate_limits: Mutex<HashMap<String, auto_continue::RateLimit>>,
     /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
     /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a TUI is attached.
     pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,

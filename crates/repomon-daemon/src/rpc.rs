@@ -1452,8 +1452,12 @@ pub async fn dispatch(
                     off.remove(&p.lane_id);
                 } else {
                     off.insert(p.lane_id);
-                    // Drop any active pause so the lane reverts to its natural status now.
-                    ctx.rate_limits.lock().await.remove(&p.lane_id);
+                    // Drop any active pause (every slot window) so the lane reverts to its
+                    // natural status now.
+                    ctx.rate_limits
+                        .lock()
+                        .await
+                        .retain(|w, _| TmuxRuntime::lane_id_of(w) != Some(p.lane_id));
                 }
             }
             ctx.broadcast(
@@ -2295,11 +2299,32 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             }
         }
 
-        // Overlay a usage-limit pause onto the managed (non-external) session.
-        if let Some(rl) = rate_limits.get(&lane.id) {
-            let armed = global_auto && !auto_off.contains(&lane.id);
-            if armed {
-                if let Some(sess) = lane.agent_sessions.iter_mut().find(|s| !s.external) {
+        // Overlay usage-limit pauses onto the managed sessions, one per paused slot window.
+        // Matching by `tmux_window` marks the actual paused agent; before this, the overlay
+        // (like the watcher) only ever considered the lane's first slot.
+        let armed = global_auto && !auto_off.contains(&lane.id);
+        if armed {
+            for (window, rl) in rate_limits
+                .iter()
+                .filter(|(w, _)| TmuxRuntime::lane_id_of(w) == Some(lane.id))
+            {
+                let matched = lane
+                    .agent_sessions
+                    .iter()
+                    .any(|s| s.tmux_window.as_deref() == Some(window.as_str()));
+                let sess = if matched {
+                    lane.agent_sessions
+                        .iter_mut()
+                        .find(|s| s.tmux_window.as_deref() == Some(window.as_str()))
+                } else {
+                    // Window→session pairing is heuristic and can momentarily miss (fresh spawn,
+                    // placeholder session): fall back to the first managed session not already
+                    // marked, so the pause stays visible rather than vanishing.
+                    lane.agent_sessions
+                        .iter_mut()
+                        .find(|s| !s.external && s.status != AgentStatus::RateLimited)
+                };
+                if let Some(sess) = sess {
                     sess.status = AgentStatus::RateLimited;
                     sess.resume_at = rl.reset_at;
                 }
