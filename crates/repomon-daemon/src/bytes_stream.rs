@@ -21,12 +21,16 @@
 //!
 //! GENERATION / EOF race: lifecycle is EOF-driven — `pipe-pane` (off) or the window dying kills
 //! the `cat`, whose write end closing EOFs the reader, which exits and removes the fifo. Each
-//! fresh pipe (a first watcher creating a new entry) gets a globally-unique `generation`. On EOF
-//! the reader drops its own map entry ONLY if the entry's generation still matches the one it was
-//! started with. Without this, a rapid stop→start of the same window (the fifo path is
-//! deterministic per window) could have a dying reader delete the freshly-started entry, leaving
-//! `watched_bytes` pointing at a live window whose entry is gone — it would accept refs and stream
-//! nothing.
+//! fresh pipe (a first watcher creating a new entry) gets a globally-unique `generation`, and the
+//! generation is embedded in the fifo FILENAME, so two pipe instances of the same window never
+//! share a path. That makes the reader's EOF unlink inherently safe: it can only ever remove its
+//! own fifo, never a successor's — without the unique name, a rapid unwatch→rewatch of the same
+//! window could have the dying reader unlink the NEW pipe's fifo just before `cat > fifo` opens
+//! it, turning the fifo into a plain file that streams nothing while the fresh reader leaks. The
+//! reader additionally drops its own map entry ONLY if the entry's generation still matches the
+//! one it was started with; without that, the same race would delete the freshly-started entry,
+//! leaving `watched_bytes` pointing at a live window whose entry is gone — it would accept refs
+//! and stream nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -110,8 +114,14 @@ pub async fn watch(
     }
 
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    let fifo =
-        std::env::temp_dir().join(format!("repomon-bytes-{}-{window}.fifo", tmux.session()));
+    // The generation is part of the fifo NAME: pipe instances of the same window never collide on
+    // a path, so a superseded reader's EOF unlink can only ever remove its own fifo (see the
+    // module doc). The pre-mkfifo unlink still guards the one same-path case left — a leftover
+    // fifo from a previous daemon run (the counter restarts at 0).
+    let fifo = std::env::temp_dir().join(format!(
+        "repomon-bytes-{}-{window}-{generation}.fifo",
+        tmux.session()
+    ));
     let _ = std::fs::remove_file(&fifo);
     let ok = Command::new("mkfifo")
         .arg(&fifo)
@@ -133,9 +143,10 @@ pub async fn watch(
         },
     );
 
-    // Reader first: its open() is the rendezvous with cat's write-side open. On EOF it removes the
-    // fifo and drops its own entry, but only while that entry is still this pipe's (generation
-    // match) — a later watch of the same window supersedes it.
+    // Reader first: its open() is the rendezvous with cat's write-side open. On EOF it removes its
+    // fifo (safe unconditionally: the generation-unique name means it can only be its own, never a
+    // successor's) and drops its own entry, the latter only while the entry is still this pipe's
+    // (generation match) — a later watch of the same window supersedes it.
     {
         let window = window.clone();
         let fifo = fifo.clone();

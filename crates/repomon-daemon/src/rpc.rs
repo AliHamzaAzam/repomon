@@ -1184,7 +1184,14 @@ pub async fn dispatch(
                 Some(window) => vec![window.clone()],
                 None => {
                     let map = ctx.bytes_watches.lock().await;
-                    let watched = sess.watched_bytes.lock().unwrap();
+                    let mut watched = sess.watched_bytes.lock().unwrap();
+                    // Purge names whose registry entry already died (EOF-cleaned: the window
+                    // closed). There is nothing left to unwatch, but they must not linger in
+                    // `watched_bytes` either — a later window-name reuse would otherwise deliver
+                    // bytes this session never asked for. Lane-independent on purpose: a dead
+                    // entry's lane is unknowable (the entry is gone), and a dead name is stale for
+                    // every lane.
+                    watched.retain(|w| map.contains_key(w));
                     watched
                         .iter()
                         .filter(|w| map.get(*w).is_some_and(|e| e.lane == p.lane_id))

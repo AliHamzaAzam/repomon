@@ -494,3 +494,97 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         .args(["-L", &session, "kill-server"])
         .output();
 }
+
+/// The `agent.watch_bytes` handler through real dispatch: `on:true` starts real pipes and records
+/// the windows in the session; `{lane_id, on:false}` with NO window (the TUI's stop path) releases
+/// exactly this session's watches on that lane — matched by the WatchEntry.lane field, so a
+/// non-default window is found too — while another lane's watch survives. Also covers the
+/// stale-name purge: a watched name whose registry entry already died is dropped from
+/// `watched_bytes` so later window-name reuse can't deliver unrequested bytes. tmux-gated (the
+/// on:true path runs mkfifo + pipe-pane against real windows).
+#[tokio::test]
+async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
+    if !TmuxRuntime::available() {
+        eprintln!("tmux not available; skipping watch_bytes handler test");
+        return;
+    }
+    let session = format!("repomon-bytes-it-{}", std::process::id());
+    let config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+
+    // Real windows to pipe: two on lane 1 (default-named and a second slot), one on lane 2.
+    let cwd = std::env::temp_dir();
+    for w in ["lane-1", "lane-1-2", "lane-2"] {
+        ctx.tmux.spawn_named(w, &cwd, "sleep 30").expect("spawn window");
+    }
+
+    let sess = ctx.open_session(ConnKind::Local).await;
+
+    // Watch both lane-1 windows and the lane-2 window through the real handler.
+    for (lane, window) in [(1, "lane-1"), (1, "lane-1-2"), (2, "lane-2")] {
+        let ack = rpc::dispatch(
+            &ctx,
+            &sess,
+            "agent.watch_bytes",
+            Some(json!({ "lane_id": lane, "window": window, "on": true })),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("watch {window} errored: {e:?}"));
+        assert!(ack.get("cols").is_some(), "ack shape carries dims: {ack}");
+    }
+    {
+        let watched = sess.watched_bytes.lock().unwrap();
+        assert_eq!(watched.len(), 3, "on:true records each window: {watched:?}");
+    }
+    {
+        let map = ctx.bytes_watches.lock().await;
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["lane-1"].lane, 1);
+        assert_eq!(map["lane-1-2"].lane, 1);
+        assert_eq!(map["lane-2"].lane, 2);
+        for w in ["lane-1", "lane-1-2", "lane-2"] {
+            assert!(map[w].refs.contains(&sess.id), "{w} holds this conn's ref");
+        }
+    }
+
+    // A stale name: watched by the session, but its registry entry already died (EOF-cleaned).
+    sess.watched_bytes
+        .lock()
+        .unwrap()
+        .insert("lane-ghost".to_string());
+
+    // The TUI's stop shape: no window. Releases BOTH lane-1 windows (lane matched by entry field,
+    // so the non-default lane-1-2 is found too), leaves lane-2 alone, and purges the dead name.
+    rpc::dispatch(
+        &ctx,
+        &sess,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 1, "on": false })),
+    )
+    .await
+    .unwrap();
+
+    {
+        let map = ctx.bytes_watches.lock().await;
+        assert!(!map.contains_key("lane-1"), "lane 1's default window released");
+        assert!(!map.contains_key("lane-1-2"), "lane 1's second window released");
+        let survivor = map.get("lane-2").expect("lane 2's watch survives");
+        assert!(survivor.refs.contains(&sess.id));
+    }
+    {
+        let watched = sess.watched_bytes.lock().unwrap();
+        assert_eq!(
+            watched.iter().cloned().collect::<Vec<_>>(),
+            vec!["lane-2".to_string()],
+            "watched_bytes reflects the release, including the purged stale name"
+        );
+    }
+
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", &session, "kill-server"])
+        .output();
+}
