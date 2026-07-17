@@ -351,7 +351,8 @@ async fn remote_devices(config: &Config, socket: Option<PathBuf>) -> Result<()> 
     if devices.is_empty() {
         println!("no paired devices");
     } else {
-        let str_field = |d: &Value, k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let str_field =
+            |d: &Value, k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let name_w = devices
             .iter()
             .map(|d| str_field(d, "name").len())
