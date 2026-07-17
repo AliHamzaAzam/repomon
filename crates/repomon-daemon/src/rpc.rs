@@ -1635,6 +1635,18 @@ pub async fn dispatch(
         }
         "viewport.set" => {
             let mut p: ViewportSet = parse(params)?;
+            // Only real terminal windows are streamable extras — anything else is dropped so a
+            // client can't point the capture loop at arbitrary windows.
+            p.windows
+                .retain(|w| TmuxRuntime::parse_term_window(w).is_some());
+            // This handler is the single writer of the viewport fields, so it also rewrites the
+            // std-Mutex `output_filter` snapshot the event-forward loops read to filter
+            // `event.agent.output` (they must not await; see `ConnSession::output_filter`). Build
+            // it from the SAME values written to the tokio fields below so the two never diverge.
+            *sess.output_filter.lock().unwrap() = (
+                p.lane_ids.iter().copied().collect(),
+                p.windows.iter().cloned().collect(),
+            );
             // Per connection now: each device writes its OWN viewport/focus into its session, and
             // the capture loop streams the union across all live sessions. Wire shape unchanged.
             *sess.viewport.lock().await = p.lane_ids;
@@ -1643,10 +1655,6 @@ pub async fn dispatch(
             // this is fresh. A client re-asserts its viewport every few seconds, so a crashed
             // or closed client releases ownership when the beat stops.
             *sess.viewport_focus_at.lock().await = Some(std::time::Instant::now());
-            // Only real terminal windows are streamable extras — anything else is dropped so a
-            // client can't point the capture loop at arbitrary windows.
-            p.windows
-                .retain(|w| TmuxRuntime::parse_term_window(w).is_some());
             *sess.viewport_windows.lock().await = p.windows;
             Ok(Value::Null)
         }

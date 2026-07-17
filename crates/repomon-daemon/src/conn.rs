@@ -46,6 +46,14 @@ pub struct ConnSession {
     /// Windows this connection byte-watches. std Mutex: read on the event-forward hot path.
     /// (Populated by task A4; the field exists now so the struct is final.)
     pub watched_bytes: std::sync::Mutex<HashSet<String>>,
+    /// Snapshot of `(viewport lanes, viewport_windows)` used to filter `event.agent.output` on the
+    /// event-forward hot path. Deliberately duplicates the tokio `viewport`/`viewport_windows`
+    /// fields: those stay the source of truth for the async poll loop (`viewport_snapshot`), but
+    /// the forwarding loops must not `await`, so they read this std-Mutex mirror instead. The
+    /// `viewport.set` handler is the single writer and rewrites BOTH the tokio fields and this
+    /// snapshot together, so they never diverge. Empty at session creation, matching a connection
+    /// that has not yet asserted a viewport (it receives no output events).
+    pub output_filter: std::sync::Mutex<(HashSet<LaneId>, HashSet<String>)>,
     /// When this connection last drove an agent (send_input/signal/key/scroll/answer, and a fit
     /// that actually applied). `agent.fit`'s remote-vs-remote arbitration is last-interaction-wins.
     pub last_interaction: Mutex<Option<Instant>>,
@@ -61,6 +69,7 @@ impl ConnSession {
             viewport_focus_at: Mutex::new(None),
             viewport_windows: Mutex::new(Vec::new()),
             watched_bytes: std::sync::Mutex::new(HashSet::new()),
+            output_filter: std::sync::Mutex::new((HashSet::new(), HashSet::new())),
             last_interaction: Mutex::new(None),
         }
     }

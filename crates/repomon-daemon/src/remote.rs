@@ -249,11 +249,14 @@ async fn handle_conn(
             event = events.recv() => match event {
                 Ok(value) => {
                     // Per-connection filtering: `event.agent.bytes` reaches only the connections
-                    // that watch its window (the pipe is shared and broadcast to all); every other
-                    // topic forwards unchanged. Sync std-Mutex read, dropped before the await.
+                    // that watch its window, and `event.agent.output` only the connections whose
+                    // viewport covers its lane/window (the bus broadcasts both to every subscriber);
+                    // every other topic forwards unchanged. Sync std-Mutex reads, dropped before the
+                    // await.
                     let deliver = {
                         let watched = sess.watched_bytes.lock().unwrap();
-                        crate::pubsub::deliver_to(&value, &watched)
+                        let out = sess.output_filter.lock().unwrap();
+                        crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
                     };
                     if forwarding && deliver {
                         send_json(&mut sink, &value).await?;

@@ -359,6 +359,87 @@ async fn bytes_events_are_delivered_per_connection() {
     assert_eq!(i2["method"], json!("event.repo.changed"));
 }
 
+/// Sibling of `bytes_events_are_delivered_per_connection` for A5: two connections with DIFFERENT
+/// viewports each receive ONLY their own lane's `event.agent.output`, a third connection that never
+/// asserted a viewport receives NONE, and every connection still gets a non-output topic. This is
+/// the per-connection output filter at the forwarding loop, end to end over the real bridge. We seed
+/// each session's `output_filter` snapshot directly (the same snapshot `viewport.set` writes) so the
+/// test needs no live tmux.
+///
+/// The no-viewport case is the whole point of A5: TODAY's shipping iPhone app never calls
+/// `viewport.set` and never consumes `event.agent.output` (it polls `agent.capture`), so filtering
+/// it to nothing wastes none of its bandwidth and drops nothing it relies on.
+#[tokio::test]
+async fn output_events_are_delivered_per_connection() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let phone = ctx.store.remote_device_pair("phone").await.unwrap();
+    let ipad = ctx.store.remote_device_pair("ipad").await.unwrap();
+    let laptop = ctx.store.remote_device_pair("laptop").await.unwrap();
+    {
+        let mut toks = ctx.remote_tokens.write().unwrap();
+        toks.push((phone.token.clone(), Some("phone".into())));
+        toks.push((ipad.token.clone(), Some("ipad".into())));
+        toks.push((laptop.token.clone(), Some("laptop".into())));
+    }
+    let addr = serve(ctx.clone()).await;
+
+    let (mut ws_p, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", phone.token))
+        .await
+        .expect("phone connects");
+    let (mut ws_i, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", ipad.token))
+        .await
+        .expect("ipad connects");
+    let (mut ws_l, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", laptop.token))
+        .await
+        .expect("laptop connects");
+
+    // Phone's viewport covers lane 1, iPad's covers lane 2; laptop never asserts a viewport, so its
+    // `output_filter` stays at its empty session-creation zero-state.
+    session_for_device(&ctx, "phone").await.output_filter.lock().unwrap().0.insert(1);
+    session_for_device(&ctx, "ipad").await.output_filter.lock().unwrap().0.insert(2);
+
+    // Subscribe all three and drain the acks (forwarding is on once the ack returns).
+    for (ws, id) in [(&mut ws_p, 1u64), (&mut ws_i, 2u64), (&mut ws_l, 3u64)] {
+        ws.send(Message::text(
+            json!({"jsonrpc":"2.0","id":id,"method":"subscribe"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        let ack = recv_json(ws).await;
+        assert_eq!(ack["id"], json!(id));
+    }
+
+    // Output for each lane, then a non-output topic that must reach everyone.
+    ctx.broadcast(
+        "event.agent.output",
+        json!({ "lane_id": 1, "window": "lane-1", "content": "one" }),
+    );
+    ctx.broadcast(
+        "event.agent.output",
+        json!({ "lane_id": 2, "window": "lane-2", "content": "two" }),
+    );
+    ctx.broadcast("event.repo.changed", json!({ "hello": true }));
+
+    // The phone sees ONLY lane 1's output (lane 2's is filtered out), then the shared event.
+    let p1 = recv_json(&mut ws_p).await;
+    assert_eq!(p1["method"], json!("event.agent.output"));
+    assert_eq!(p1["params"]["lane_id"], json!(1));
+    let p2 = recv_json(&mut ws_p).await;
+    assert_eq!(p2["method"], json!("event.repo.changed"));
+
+    // The iPad sees ONLY lane 2's output, then the shared event.
+    let i1 = recv_json(&mut ws_i).await;
+    assert_eq!(i1["method"], json!("event.agent.output"));
+    assert_eq!(i1["params"]["lane_id"], json!(2));
+    let i2 = recv_json(&mut ws_i).await;
+    assert_eq!(i2["method"], json!("event.repo.changed"));
+
+    // The laptop, with no viewport, sees NEITHER output event — its first frame is the shared event.
+    let l1 = recv_json(&mut ws_l).await;
+    assert_eq!(l1["method"], json!("event.repo.changed"));
+}
+
 /// A connection's byte watches die with it: `close_session` runs `unwatch_all`, which drops the
 /// windows the connection solely watched and releases it from shared ones (which survive). Observed
 /// directly on the shared registry.
