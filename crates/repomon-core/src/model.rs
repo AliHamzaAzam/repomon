@@ -40,6 +40,19 @@ pub struct Repo {
     pub worktree_root_template: Option<String>,
 }
 
+/// A paired remote-access device: one named, individually-revocable bearer token minted at
+/// pairing. `token` is stored plaintext (same threat model as the legacy config-file token) and
+/// never crosses the remote bridge or `remote.devices` output. `role` is `"full"` today (the
+/// bridge's default-deny allowlist is the real authority); the column exists for future scoping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDevice {
+    pub name: String,
+    pub token: String,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
 /// A single worktree of a repo (the main checkout is also a worktree).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {

@@ -23,12 +23,18 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0003_devices.sql"),
     include_str!("../../migrations/0004_session_labels.sql"),
     include_str!("../../migrations/0005_lanes_autoincrement.sql"),
+    include_str!("../../migrations/0006_remote_devices.sql"),
 ];
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
 /// oldest are evicted, so a misbehaving/abusive client can't grow the table (or per-alert APNs
 /// fan-out) without bound.
 const MAX_DEVICES: usize = 32;
+
+/// Cap on paired remote devices. Unlike push tokens (evicted oldest-first), these are live access
+/// credentials, so pairing a new distinct device past the cap errors rather than silently evicting
+/// one — dropping a credential out from under an in-use device would lock it out without warning.
+const MAX_REMOTE_DEVICES: usize = 16;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -355,6 +361,79 @@ impl Store {
         .await
     }
 
+    // ---- remote devices ------------------------------------------------------
+
+    /// Mint-or-return a per-device remote token. Re-pairing an existing `name` returns the same
+    /// row unchanged (so re-showing the QR is idempotent); a new name mints a fresh 32-byte token
+    /// and inserts it. The table is capped at [`MAX_REMOTE_DEVICES`]: a new distinct name past the
+    /// cap errors rather than evicting, because these are live credentials.
+    pub async fn remote_device_pair(&self, name: &str) -> Result<RemoteDevice> {
+        let name = name.to_string();
+        self.call(move |c| {
+            // Existing device: return it as-is (a stable QR for the same phone).
+            if let Some(dev) = remote_device_by_name(c, &name)? {
+                return Ok(dev);
+            }
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))?;
+            if count as usize >= MAX_REMOTE_DEVICES {
+                return Err(Error::Other(format!(
+                    "remote device limit reached ({MAX_REMOTE_DEVICES}); revoke a device before pairing a new one"
+                )));
+            }
+            let now = Utc::now();
+            let token = generate_remote_token();
+            c.execute(
+                "INSERT INTO remote_devices(name, token, role, created_at, last_seen_at)
+                 VALUES(?1, ?2, 'full', ?3, NULL)",
+                params![name, token, to_iso(&now)],
+            )?;
+            Ok(RemoteDevice {
+                name,
+                token,
+                role: "full".into(),
+                created_at: now,
+                last_seen_at: None,
+            })
+        })
+        .await
+    }
+
+    /// All paired remote devices, oldest first (`created_at`, ties broken by insertion order).
+    pub async fn remote_device_list(&self) -> Result<Vec<RemoteDevice>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT name, token, role, created_at, last_seen_at FROM remote_devices \
+                 ORDER BY created_at, id",
+            )?;
+            let rows = stmt.query_map([], remote_device_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Revoke a device's token by name. `Ok(false)` when no such device exists.
+    pub async fn remote_device_revoke(&self, name: &str) -> Result<bool> {
+        let name = name.to_string();
+        self.call(move |c| {
+            let n = c.execute("DELETE FROM remote_devices WHERE name = ?1", params![name])?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
+    /// Stamp a device's `last_seen_at` to now. A no-op (not an error) for an unknown name.
+    pub async fn remote_device_seen(&self, name: &str) -> Result<()> {
+        let name = name.to_string();
+        self.call(move |c| {
+            c.execute(
+                "UPDATE remote_devices SET last_seen_at = ?2 WHERE name = ?1",
+                params![name, to_iso(&Utc::now())],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn list_lane_meta(&self) -> Result<Vec<LaneMeta>> {
         self.call(|c| {
             let mut stmt = c.prepare(
@@ -633,6 +712,40 @@ fn oid_col(row: &Row, idx: usize) -> rusqlite::Result<gix::ObjectId> {
     })
 }
 
+fn remote_device_from_row(r: &Row) -> rusqlite::Result<RemoteDevice> {
+    Ok(RemoteDevice {
+        name: r.get(0)?,
+        token: r.get(1)?,
+        role: r.get(2)?,
+        created_at: dt_col(r, 3)?,
+        last_seen_at: opt_dt_col(r, 4)?,
+    })
+}
+
+/// Look up a single remote device by its unique name, if present.
+fn remote_device_by_name(c: &Connection, name: &str) -> rusqlite::Result<Option<RemoteDevice>> {
+    match c.query_row(
+        "SELECT name, token, role, created_at, last_seen_at FROM remote_devices WHERE name = ?1",
+        params![name],
+        remote_device_from_row,
+    ) {
+        Ok(dev) => Ok(Some(dev)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A fresh 32-byte hex bearer token from the OS entropy pool. Mirrors the CLI's `remote enable`
+/// generator (`repomon-tui::cli::generate_token`), kept dependency-free by reading `/dev/urandom`.
+fn generate_remote_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .expect("read /dev/urandom");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
     Ok(Repo {
         id: r.get(0)?,
@@ -742,6 +855,86 @@ mod tests {
                 .any(|t| t == &format!("token-{:03}", MAX_DEVICES + 4))
         );
         assert!(!devices.iter().any(|t| t == "token-000"));
+    }
+
+    #[tokio::test]
+    async fn remote_device_pair_mints_or_returns() {
+        let s = store().await;
+        let a = s.remote_device_pair("phone").await.unwrap();
+        assert_eq!(a.name, "phone");
+        assert_eq!(a.role, "full");
+        assert!(a.token.len() >= 32, "token is 32+ bytes of entropy");
+        assert!(a.last_seen_at.is_none());
+        // Re-pairing the SAME name returns the identical row (a stable QR), no new insert.
+        let again = s.remote_device_pair("phone").await.unwrap();
+        assert_eq!(a.token, again.token);
+        assert_eq!(s.remote_device_list().await.unwrap().len(), 1);
+        // A different name mints a fresh, distinct token.
+        let b = s.remote_device_pair("ipad").await.unwrap();
+        assert_ne!(a.token, b.token);
+        assert_eq!(s.remote_device_list().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn remote_device_pair_caps_without_evicting() {
+        let s = store().await;
+        for i in 0..MAX_REMOTE_DEVICES {
+            s.remote_device_pair(&format!("dev-{i:02}")).await.unwrap();
+        }
+        // A NEW distinct name past the cap errors (credentials are never silently evicted).
+        assert!(s.remote_device_pair("one-too-many").await.is_err());
+        assert_eq!(
+            s.remote_device_list().await.unwrap().len(),
+            MAX_REMOTE_DEVICES
+        );
+        // Re-pairing an EXISTING name still works at the cap (returns the row, no insert).
+        assert!(s.remote_device_pair("dev-00").await.is_ok());
+        assert_eq!(
+            s.remote_device_list().await.unwrap().len(),
+            MAX_REMOTE_DEVICES
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_device_revoke_true_then_false() {
+        let s = store().await;
+        s.remote_device_pair("phone").await.unwrap();
+        assert!(s.remote_device_revoke("phone").await.unwrap(), "first revoke removes it");
+        assert!(
+            !s.remote_device_revoke("phone").await.unwrap(),
+            "revoking a gone device is false"
+        );
+        assert!(s.remote_device_list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_device_seen_stamps_last_seen() {
+        let s = store().await;
+        s.remote_device_pair("phone").await.unwrap();
+        assert!(s.remote_device_list().await.unwrap()[0].last_seen_at.is_none());
+        s.remote_device_seen("phone").await.unwrap();
+        assert!(
+            s.remote_device_list().await.unwrap()[0].last_seen_at.is_some(),
+            "last_seen_at is stamped"
+        );
+        // Stamping an unknown device is a harmless no-op (no error).
+        s.remote_device_seen("ghost").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_device_list_ordered_by_created() {
+        let s = store().await;
+        for name in ["first", "second", "third"] {
+            s.remote_device_pair(name).await.unwrap();
+        }
+        let names: Vec<String> = s
+            .remote_device_list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["first", "second", "third"]);
     }
 
     #[tokio::test]

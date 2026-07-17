@@ -144,19 +144,27 @@ async fn main() {
     {
         let remote = ctx.config.read().await.remote.clone();
         if remote.enabled {
-            match (remote.bind, remote.token) {
-                (Some(bind), Some(token)) if !token.is_empty() => {
+            match remote.bind {
+                Some(bind) => {
+                    // Seed the auth cache (paired device tokens + the legacy config token) before
+                    // the listener accepts, so the first handshake matches against a current set.
+                    // Under the mutate lock for consistency with pair/revoke (nothing races here yet,
+                    // but the choke point stays uniform).
+                    {
+                        let _guard = ctx.remote_mutate_lock.lock().await;
+                        if let Err(e) = repomon_daemon::rpc::refresh_remote_tokens(&ctx).await {
+                            tracing::error!("failed to seed remote tokens: {e:?}");
+                        }
+                    }
                     let ctx_r = ctx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            repomon_daemon::remote::serve_remote(ctx_r, &bind, token).await
-                        {
+                        if let Err(e) = repomon_daemon::remote::serve_remote(ctx_r, &bind).await {
                             tracing::error!("remote bridge failed: {e}");
                         }
                     });
                 }
-                _ => tracing::warn!(
-                    "[remote] enabled but bind/token missing — run `repomon remote enable`"
+                None => tracing::warn!(
+                    "[remote] enabled but bind missing — run `repomon remote enable`"
                 ),
             }
         }

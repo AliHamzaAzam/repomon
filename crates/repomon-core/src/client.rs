@@ -64,6 +64,13 @@ struct Inner {
     /// Params of the last successful `subscribe` call, if any. `reconnect` replays it on the new
     /// connection — the daemon only forwards events to connections that asked for them.
     subscribe_params: Mutex<Option<Option<Value>>>,
+    /// Params of the currently-active `agent.watch_bytes` (`on:true`), or `None` when the last watch
+    /// was turned off. Byte watches are per-connection on the daemon, so they die with the old
+    /// socket on a transparent reconnect; `reconnect` replays this right after `subscribe` so the
+    /// TUI's Focus-view emulator keeps streaming instead of freezing until the user re-enters Focus.
+    /// A single slot suffices: the TUI holds one live emulator at a time and always turns the
+    /// previous watch off (`on:false`) before starting the next.
+    active_watch: Mutex<Option<Value>>,
     /// Bumped every time `spawn_io` starts a new connection. A reader task captures its own
     /// epoch at spawn and only runs disconnect cleanup if it's still current, so a stale reader
     /// from a superseded connection can't clobber a healthy reconnect.
@@ -93,6 +100,7 @@ impl DaemonClient {
             connected: AtomicBool::new(false),
             reconnecting: tokio::sync::Mutex::new(()),
             subscribe_params: Mutex::new(None),
+            active_watch: Mutex::new(None),
             epoch: AtomicU64::new(0),
         });
         inner.spawn_io(stream);
@@ -136,6 +144,17 @@ impl DaemonClient {
                     }
                     if method == "subscribe" {
                         *self.inner.subscribe_params.lock().unwrap() = Some(params.clone());
+                    }
+                    if method == "agent.watch_bytes" {
+                        // Track the live watch so `reconnect` can re-assert it. `on:true` records
+                        // the params; `on:false` (the stop path) clears them.
+                        let on = params
+                            .as_ref()
+                            .and_then(|p| p.get("on"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        *self.inner.active_watch.lock().unwrap() =
+                            if on { params.clone() } else { None };
                     }
                     return Ok(resp.result.unwrap_or(Value::Null));
                 }
@@ -247,6 +266,20 @@ impl Inner {
                 let _ = out.send(bytes).await;
             }
         }
+
+        // Re-assert the active byte watch the same way: the daemon's watch was per-connection and
+        // died with the old socket, so without this the Focus emulator's stream stays dead until the
+        // user leaves and re-enters Focus. Same fire-and-forget path as the subscribe replay (the
+        // ack lands on an id nobody awaits and is harmlessly dropped by the reader).
+        let watch = self.active_watch.lock().unwrap().clone();
+        if let Some(params) = watch {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let req = Request::new(id, "agent.watch_bytes", Some(params));
+            if let Ok(bytes) = serde_json::to_vec(&req) {
+                let out = self.out_tx.lock().unwrap().clone();
+                let _ = out.send(bytes).await;
+            }
+        }
         Ok(())
     }
 }
@@ -307,6 +340,143 @@ mod tests {
         );
     }
 
+    /// A transparent reconnect must replay BOTH the subscription and the active byte watch, so the
+    /// Focus-view emulator's stream survives instead of freezing (Finding 3). We record the methods
+    /// the latest server-side connection sees; after forcing a reconnect, the fresh connection must
+    /// receive `subscribe` and the `on:true` `agent.watch_bytes` again before the triggering call.
+    #[tokio::test]
+    async fn reconnect_replays_subscribe_and_active_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        // Methods seen on the LATEST server-side connection (reset on each accept).
+        let latest: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let accepts = Arc::new(AtomicUsize::new(0));
+        {
+            let latest = latest.clone();
+            let accepts = accepts.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    accepts.fetch_add(1, Ordering::SeqCst);
+                    latest.lock().unwrap().clear();
+                    let latest = latest.clone();
+                    tokio::spawn(async move {
+                        let (mut rd, mut wr) = stream.into_split();
+                        while let Ok(Some(frame)) = read_frame(&mut rd).await {
+                            if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
+                                latest.lock().unwrap().push(req.method.clone());
+                                let _ =
+                                    write_message(&mut wr, &Response::ok(req.id, Value::Null)).await;
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        let client = DaemonClient::connect_inner(&sock, None).await.unwrap();
+        client
+            .call("subscribe", Some(serde_json::json!({ "topics": ["*"] })))
+            .await
+            .unwrap();
+        client
+            .call(
+                "agent.watch_bytes",
+                Some(serde_json::json!({ "lane_id": 1, "window": "lane-1", "on": true })),
+            )
+            .await
+            .unwrap();
+
+        // Force a reconnect: mark the connection dead so the next call opens a fresh socket, which
+        // must replay subscribe + the active watch before the ping.
+        client.inner.connected.store(false, Ordering::SeqCst);
+        client.call("ping", None).await.unwrap();
+
+        // Wait for the new connection's replay frames to land.
+        let mut ok = false;
+        for _ in 0..100 {
+            {
+                let seen = latest.lock().unwrap();
+                if seen.iter().any(|m| m == "subscribe")
+                    && seen.iter().any(|m| m == "agent.watch_bytes")
+                {
+                    ok = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            accepts.load(Ordering::SeqCst) >= 2,
+            "the reconnect opened a second connection"
+        );
+        assert!(
+            ok,
+            "the reconnect replayed subscribe and the active byte watch, got {:?}",
+            latest.lock().unwrap()
+        );
+    }
+
+    /// A watch turned off (`on:false`) must NOT be replayed on reconnect.
+    #[tokio::test]
+    async fn reconnect_does_not_replay_a_stopped_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let latest: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let latest = latest.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    latest.lock().unwrap().clear();
+                    let latest = latest.clone();
+                    tokio::spawn(async move {
+                        let (mut rd, mut wr) = stream.into_split();
+                        while let Ok(Some(frame)) = read_frame(&mut rd).await {
+                            if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
+                                latest.lock().unwrap().push(req.method.clone());
+                                let _ =
+                                    write_message(&mut wr, &Response::ok(req.id, Value::Null)).await;
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        let client = DaemonClient::connect_inner(&sock, None).await.unwrap();
+        client
+            .call(
+                "agent.watch_bytes",
+                Some(serde_json::json!({ "lane_id": 1, "window": "lane-1", "on": true })),
+            )
+            .await
+            .unwrap();
+        // Stop it — the active-watch slot must clear.
+        client
+            .call(
+                "agent.watch_bytes",
+                Some(serde_json::json!({ "lane_id": 1, "on": false })),
+            )
+            .await
+            .unwrap();
+
+        client.inner.connected.store(false, Ordering::SeqCst);
+        client.call("ping", None).await.unwrap();
+
+        // Give any (erroneous) replay time to arrive, then assert none did.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let seen = latest.lock().unwrap();
+        assert!(
+            !seen.iter().any(|m| m == "agent.watch_bytes"),
+            "a stopped watch must not be replayed, got {seen:?}"
+        );
+    }
+
     /// A reader task belonging to a since-superseded connection must not run disconnect cleanup
     /// on top of a healthy newer one. Drives `Inner::spawn_io` directly (bypassing `reconnect`'s
     /// serialization) to simulate the old reader noticing EOF only after the new connection is
@@ -327,6 +497,7 @@ mod tests {
             connected: AtomicBool::new(false),
             reconnecting: tokio::sync::Mutex::new(()),
             subscribe_params: Mutex::new(None),
+            active_watch: Mutex::new(None),
             epoch: AtomicU64::new(0),
         });
 

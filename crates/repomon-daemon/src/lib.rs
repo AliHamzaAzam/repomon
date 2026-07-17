@@ -6,6 +6,7 @@
 
 pub mod auto_continue;
 pub mod bytes_stream;
+pub mod conn;
 pub mod notify_watch;
 pub mod pubsub;
 pub mod push;
@@ -18,6 +19,7 @@ pub mod usage_watch;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use repomon_core::model::{Lane, LaneId};
@@ -25,6 +27,8 @@ use repomon_core::protocol::Notification;
 use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast};
+
+use conn::{ConnKind, ConnSession};
 
 pub use socket::serve;
 
@@ -133,18 +137,14 @@ pub struct Ctx {
     pub started: Instant,
     pub db_path: Option<PathBuf>,
     pub events: pubsub::EventTx,
-    /// Lanes the TUI currently has visible — fast-polled for output (M9).
-    pub viewport: Mutex<Vec<LaneId>>,
-    /// Which agent window the focused lane should stream, when the TUI has a specific session
-    /// selected (Tab in Focus/Split). Lanes not named here stream their first slot.
-    pub viewport_focus: Mutex<Option<(LaneId, String)>>,
-    /// When the viewport was last (re)asserted. The TUI heartbeats `viewport.set` every few
-    /// seconds; `agent.fit` treats the focused window as size-owned only while this is fresh,
-    /// so a closed or crashed TUI frees the pane for remote reflow within seconds.
-    pub viewport_focus_at: Mutex<Option<Instant>>,
-    /// Plain-terminal windows (`term-{lane}-{n}`) the TUI has visible as Grid tiles — streamed
-    /// alongside the lane panes, each tagged with its window in the output event.
-    pub viewport_windows: Mutex<Vec<String>>,
+    /// Every live client connection's per-device streaming state, keyed by connection id. The
+    /// local TUI and each companion app each register one on connect and drop it on disconnect;
+    /// the capture poll loop streams the union of their viewports (see [`Ctx::viewport_snapshot`])
+    /// and `agent.fit` arbitrates pane sizing across them. Replaces the old daemon-global viewport
+    /// slots, which a second device would clobber.
+    pub sessions: Mutex<HashMap<u64, Arc<ConnSession>>>,
+    /// Hands out monotonic connection ids for [`Ctx::open_session`].
+    pub next_conn: AtomicU64,
     /// Cache of how many live `claude` processes have each working dir (ps/lsof, 10s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
     pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
@@ -170,8 +170,11 @@ pub struct Ctx {
     /// Per worktree: the dxkit loop ledger's mtime and the verdict parsed from its tail, so
     /// the overlay re-reads only when the gate actually ran again. Keyed by worktree path.
     pub gate_cache: Mutex<HashMap<PathBuf, GateCacheEntry>>,
-    /// The single active PTY byte watch (the Focus view's embedded renderer feed), if any.
-    pub bytes_watch: Mutex<Option<bytes_stream::BytesWatch>>,
+    /// Live PTY byte watches, keyed by window — the embedded renderer's feed. tmux allows one
+    /// `pipe-pane` per pane, so each window has exactly one shared pipe; the entry refcounts the
+    /// connections watching it (see [`bytes_stream`]). `Arc<Mutex<…>>` so an EOF reader thread can
+    /// clean up its own entry.
+    pub bytes_watches: bytes_stream::Watches,
     /// Lanes currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     pub rate_limits: Mutex<HashMap<LaneId, auto_continue::RateLimit>>,
@@ -231,6 +234,21 @@ pub struct Ctx {
     /// command-center header stay live) and folded into `orchestrator_status_value`'s payload on
     /// change. See `notify_watch::check_orchestrator_attention`.
     pub orchestrator_attention: Mutex<(String, Option<String>)>,
+    /// The valid remote bearer tokens, each paired with its device name (`None` for the legacy
+    /// shared `[remote] token` from config). This is a **std** `RwLock`, not the tokio locks the
+    /// rest of `Ctx` uses, because it is read synchronously inside the tungstenite WebSocket
+    /// handshake callback (which is not an async context). Rebuilt from the store by
+    /// [`rpc::refresh_remote_tokens`] at startup and after every pair/revoke.
+    pub remote_tokens: std::sync::RwLock<Vec<(String, Option<String>)>>,
+    /// Serializes the *mutate-then-refresh* pair behind every `remote.pair` / `remote.revoke` (and
+    /// the startup seed). [`rpc::refresh_remote_tokens`] is read-then-write (read the store's device
+    /// list, then overwrite `remote_tokens`); running two of them concurrently races. Interleaving a
+    /// `remote.pair` and a `remote.revoke` can otherwise let the pair's stale post-mutation read land
+    /// AFTER the revoke's write, resurrecting a just-revoked token in the auth cache. Holding this
+    /// lock across the store mutation and the refresh makes each token change atomic. It is separate
+    /// from `remote_tokens`'s own (std) `RwLock`, which only guards a single read/write of the Vec —
+    /// not the compound mutate+rebuild transaction.
+    pub remote_mutate_lock: Mutex<()>,
     pub shutdown: Notify,
 }
 
@@ -266,17 +284,15 @@ impl Ctx {
             started: Instant::now(),
             db_path,
             events,
-            viewport: Mutex::new(Vec::new()),
-            viewport_focus: Mutex::new(None),
-            viewport_focus_at: Mutex::new(None),
-            viewport_windows: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
+            next_conn: AtomicU64::new(0),
             live_cwds: Mutex::new(None),
             cwds_sticky: Mutex::new(HashMap::new()),
             overlay_cache: Mutex::new(None),
             prompt_cache: Mutex::new(HashMap::new()),
             pane_seen: Mutex::new(HashMap::new()),
             gate_cache: Mutex::new(HashMap::new()),
-            bytes_watch: Mutex::new(None),
+            bytes_watches: Arc::new(Mutex::new(HashMap::new())),
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
@@ -292,6 +308,8 @@ impl Ctx {
             orchestrator_watched: Mutex::new(false),
             orchestrator_input_seen: Mutex::new(None),
             orchestrator_attention: Mutex::new(("none".to_string(), None)),
+            remote_tokens: std::sync::RwLock::new(Vec::new()),
+            remote_mutate_lock: Mutex::new(()),
             shutdown: Notify::new(),
         })
     }
@@ -301,6 +319,75 @@ impl Ctx {
     /// instead of waiting out the cache TTL.
     pub async fn invalidate_overlay(&self) {
         *self.overlay_cache.lock().await = None;
+    }
+
+    /// Register a new client connection's session and return it. Each transport calls this once on
+    /// connect (Local for the Unix socket, Remote for the bridge) and drops the session via
+    /// [`close_session`](Self::close_session) — or a `conn::SessionGuard` — on every exit path.
+    pub async fn open_session(self: &Arc<Self>, kind: ConnKind) -> Arc<ConnSession> {
+        let id = self.next_conn.fetch_add(1, Ordering::Relaxed);
+        let sess = Arc::new(ConnSession::new(id, kind));
+        self.sessions.lock().await.insert(id, sess.clone());
+        sess
+    }
+
+    /// Remove a connection's session when it disconnects, so its viewport no longer contributes to
+    /// the streamed union and its focus no longer arbitrates fits.
+    pub async fn close_session(&self, id: u64) {
+        if self.sessions.lock().await.remove(&id).is_none() {
+            return;
+        }
+        // A connection's byte watches die with it: release every window this connection held from
+        // the shared byte-stream registry (stopping the pipes no other connection still watches).
+        // Keyed by connection id, so it cleans up whatever the session was watching without relying
+        // on `watched_bytes` being in sync.
+        crate::bytes_stream::unwatch_all(&self.tmux, &self.bytes_watches, id).await;
+    }
+
+    /// Union of every live session's stream targets, plus the set of windows any fresh-beat session
+    /// focuses (those get the fast cadence and cursor capture). The capture poll loop drives itself
+    /// off this instead of the old daemon-global viewport slots.
+    ///
+    /// Single-connection equivalence (the wire-compat proof): with exactly one session, `targets`
+    /// is that session's viewport built exactly as the loop built it before (a `stream_window_for`
+    /// target per lane, then its filtered terminal windows, deduped by window), and `focused` is
+    /// `{its focus window}` when its beat is fresh — which a live client's `viewport.set` heartbeat
+    /// keeps it. So every observable capture is identical to before the per-connection refactor.
+    pub async fn viewport_snapshot(&self) -> ViewportSnapshot {
+        let now = Instant::now();
+        let sessions: Vec<Arc<ConnSession>> =
+            self.sessions.lock().await.values().cloned().collect();
+        let mut targets: Vec<(LaneId, String)> = Vec::new();
+        let mut focused: HashSet<String> = HashSet::new();
+        for sess in &sessions {
+            let lanes = sess.viewport.lock().await.clone();
+            let focus = sess.viewport_focus.lock().await.clone();
+            // One target per visible lane (its resolved window), deduped across sessions by window.
+            for lane in &lanes {
+                let w = stream_window_for(*lane, &focus);
+                if !targets.iter().any(|(_, tw)| tw == &w) {
+                    targets.push((*lane, w));
+                }
+            }
+            // Plain terminals the Grid tiles, each with the lane it belongs to. `viewport.set`
+            // already filtered these to valid `term-…` windows, so a session can't inject others.
+            for w in sess.viewport_windows.lock().await.iter() {
+                if let Some(lane) = TmuxRuntime::parse_term_window(w) {
+                    if !targets.iter().any(|(_, tw)| tw == w) {
+                        targets.push((lane, w.clone()));
+                    }
+                }
+            }
+            // A window is focused (fast cadence + cursor) if any FRESH-beat session focuses it.
+            let at = *sess.viewport_focus_at.lock().await;
+            let fresh = at.is_some_and(|t| now.duration_since(t) < rpc::FOCUS_OWNED_TTL);
+            if fresh {
+                if let Some((_, w)) = &focus {
+                    focused.insert(w.clone());
+                }
+            }
+        }
+        ViewportSnapshot { targets, focused }
     }
 
     /// Publish an `event.<topic>` notification to all subscribers.
@@ -318,7 +405,17 @@ impl Ctx {
     }
 }
 
-/// Viewport-aware output streaming: fast-poll the tmux panes the TUI currently has visible
+/// The capture poll loop's view of every live session, from [`Ctx::viewport_snapshot`].
+#[derive(Debug, Default, Clone)]
+pub struct ViewportSnapshot {
+    /// Every window to stream this tick — the union across sessions, deduped by window, each
+    /// tagged with the lane it belongs to for the output event payload.
+    pub targets: Vec<(LaneId, String)>,
+    /// Windows any fresh-beat session focuses: fast cadence floor/cap + cursor capture.
+    pub focused: HashSet<String>,
+}
+
+/// Viewport-aware output streaming: fast-poll the tmux panes any client currently has visible
 /// and push `event.agent.output` deltas. When nothing is visible, this is nearly free.
 pub async fn stream_output(ctx: Arc<Ctx>) {
     use std::collections::HashMap;
@@ -350,7 +447,8 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     const TYPING_WINDOW: Duration = Duration::from_millis(400);
     // Hard ceiling on captures per tick so entering a busy Grid (every pane "fresh" at once) can't
     // burst the whole viewport in one tick — the focused lane always goes first, the rest are
-    // serviced round-robin across ticks.
+    // serviced round-robin across ticks. A multi-device union is only larger, so the same cap just
+    // amortizes it across more ticks; no per-device budget is needed.
     const MAX_PER_TICK: usize = 3;
 
     let mut state: HashMap<String, St> = HashMap::new();
@@ -370,44 +468,31 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             let mut m = ctx.input_seen.lock().await;
             m.retain(|_, t| now.saturating_duration_since(*t) < TYPING_WINDOW);
         }
-        let lanes: Vec<LaneId> = ctx.viewport.lock().await.clone();
-        let extra_windows: Vec<String> = ctx.viewport_windows.lock().await.clone();
-        if lanes.is_empty() && extra_windows.is_empty() {
+        // The union of every live session's stream targets, plus the windows any fresh-beat
+        // session focuses. With one connection this is exactly that connection's viewport and
+        // focus window — see `Ctx::viewport_snapshot` for the single-connection equivalence proof.
+        let ViewportSnapshot { targets, focused } = ctx.viewport_snapshot().await;
+        if targets.is_empty() {
             state.clear();
             continue;
-        }
-        let focus = ctx.viewport_focus.lock().await.clone();
-        // One stream target per visible pane: each lane's resolved window, plus any plain
-        // terminals the Grid is tiling (each with the lane it belongs to for the event payload).
-        let mut targets: Vec<(LaneId, String)> = lanes
-            .iter()
-            .map(|&lane| (lane, stream_window_for(lane, &focus)))
-            .collect();
-        for w in &extra_windows {
-            if let Some(lane) = TmuxRuntime::parse_term_window(w) {
-                if !targets.iter().any(|(_, tw)| tw == w) {
-                    targets.push((lane, w.clone()));
-                }
-            }
         }
         state.retain(|w, _| targets.iter().any(|(_, tw)| tw == w));
         // Snapshot which lanes were typed into recently — they capture at frame-rate. The map was
         // just pruned above, so this is the live set of within-TYPING_WINDOW lanes.
         let typing_lanes: HashMap<LaneId, Instant> = ctx.input_seen.lock().await.clone();
 
-        // Service the focused pane first (so the per-tick cap never starves what the user is
-        // watching), then the rest from a rotating offset so every background pane gets a turn.
-        let focus_window = focus.as_ref().map(|(_, w)| w.clone());
+        // Service focused panes first (so the per-tick cap never starves what a user is watching),
+        // then the rest from a rotating offset so every background pane gets a turn.
         let n = targets.len();
         let mut order: Vec<(LaneId, String)> = Vec::with_capacity(n);
-        if let Some(fw) = &focus_window {
-            if let Some(t) = targets.iter().find(|(_, w)| w == fw) {
+        for t in &targets {
+            if focused.contains(&t.1) {
                 order.push(t.clone());
             }
         }
         for i in 0..n {
             let t = &targets[(rr + i) % n];
-            if Some(&t.1) != focus_window.as_ref() {
+            if !focused.contains(&t.1) {
                 order.push(t.clone());
             }
         }
@@ -415,7 +500,7 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
 
         let mut budget = MAX_PER_TICK;
         for (lane, window) in order {
-            let is_focused = focus_window.as_deref() == Some(window.as_str());
+            let is_focused = focused.contains(&window);
             // Cadence regime: a lane typed into within TYPING_WINDOW captures at frame-rate;
             // otherwise the focused pane is fast and background/Grid tiles slow.
             let typing = typing_lanes
@@ -617,6 +702,8 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
 
 #[cfg(test)]
 mod stream_tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -637,6 +724,95 @@ mod stream_tests {
         assert_eq!(
             stream_window_for(7, &Some((7, "term-7-1".into()))),
             "lane-7"
+        );
+    }
+
+    async fn test_ctx() -> Arc<Ctx> {
+        Ctx::new(Store::open_in_memory().unwrap(), Config::default(), None)
+    }
+
+    #[tokio::test]
+    async fn viewport_snapshot_single_session_equivalence() {
+        // One session's snapshot is exactly what the loop built before: a stream target per lane,
+        // then its terminal windows, and its fresh focus window is the sole focused window.
+        let ctx = test_ctx().await;
+        let s = ctx.open_session(ConnKind::Local).await;
+        *s.viewport.lock().await = vec![7, 9];
+        *s.viewport_focus.lock().await = Some((7, "lane-7-2".to_string()));
+        *s.viewport_focus_at.lock().await = Some(Instant::now());
+        *s.viewport_windows.lock().await = vec!["term-9-1".to_string()];
+
+        let snap = ctx.viewport_snapshot().await;
+        assert_eq!(
+            snap.targets,
+            vec![
+                (7, "lane-7-2".to_string()), // focused lane streams its selected window
+                (9, "lane-9".to_string()),   // other lane streams its first slot
+                (9, "term-9-1".to_string()), // the tiled terminal
+            ]
+        );
+        assert_eq!(
+            snap.focused,
+            HashSet::from(["lane-7-2".to_string()]),
+            "the sole fresh focus is the only focused window"
+        );
+    }
+
+    #[tokio::test]
+    async fn viewport_snapshot_unions_overlapping_viewports() {
+        // Two devices with an overlapping lane dedup by window, but each contributes its own extras.
+        let ctx = test_ctx().await;
+        let a = ctx.open_session(ConnKind::Local).await;
+        *a.viewport.lock().await = vec![7, 9];
+        *a.viewport_focus.lock().await = Some((7, "lane-7".to_string()));
+        *a.viewport_focus_at.lock().await = Some(Instant::now());
+
+        let b = ctx
+            .open_session(ConnKind::Remote { device: None })
+            .await;
+        *b.viewport.lock().await = vec![9, 12]; // 9 overlaps with A
+        *b.viewport_focus.lock().await = Some((12, "lane-12".to_string()));
+        *b.viewport_focus_at.lock().await = Some(Instant::now());
+
+        let snap = ctx.viewport_snapshot().await;
+        let windows: HashSet<String> = snap.targets.iter().map(|(_, w)| w.clone()).collect();
+        assert_eq!(
+            windows,
+            HashSet::from([
+                "lane-7".to_string(),
+                "lane-9".to_string(),
+                "lane-12".to_string(),
+            ]),
+            "the union covers every lane exactly once (lane 9 deduped)"
+        );
+        // lane 9 appears once despite being in both viewports.
+        assert_eq!(
+            snap.targets.iter().filter(|(_, w)| w == "lane-9").count(),
+            1
+        );
+        // Both fresh focuses union into the focused set.
+        assert_eq!(
+            snap.focused,
+            HashSet::from(["lane-7".to_string(), "lane-12".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn viewport_snapshot_focuses_only_fresh_beats() {
+        // A session that focuses a window but whose beat has gone stale (or was never stamped) does
+        // not contribute to the focused set — though its viewport still streams (it is a target).
+        let ctx = test_ctx().await;
+        let stale = ctx.open_session(ConnKind::Remote { device: None }).await;
+        *stale.viewport.lock().await = vec![7];
+        *stale.viewport_focus.lock().await = Some((7, "lane-7".to_string()));
+        *stale.viewport_focus_at.lock().await =
+            Some(Instant::now() - rpc::FOCUS_OWNED_TTL - Duration::from_secs(1));
+
+        let snap = ctx.viewport_snapshot().await;
+        assert_eq!(snap.targets, vec![(7, "lane-7".to_string())]);
+        assert!(
+            snap.focused.is_empty(),
+            "a stale beat streams its viewport but claims no fast-cadence focus"
         );
     }
 }

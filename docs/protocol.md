@@ -16,28 +16,62 @@ CLI which speaks this protocol.
 
 Companion apps (the iOS client) reach the daemon over a **WebSocket bridge** speaking the
 exact same JSON-RPC envelopes — one WS *text frame* per message, no length prefix. Disabled by
-default; `repomon remote enable` generates a bearer token, detects the Tailscale address, and
-writes `[remote] enabled/bind/token` to the config (apply with a daemon restart; pair a phone
-with `repomon remote pair`, which renders a `repomon://<host:port>#<token>` QR).
+default; `repomon remote enable` generates the legacy shared bearer token, detects the
+Tailscale address, and writes `[remote] enabled/bind/token` to the config (apply with a daemon
+restart).
 
-- **Auth:** checked before the upgrade completes — `Authorization: Bearer <token>` header or a
+- **Auth: per-device tokens.** `repomon remote pair --name <device>` mints that device its own
+  named, individually revocable token (re-running it for the same name re-shows the same
+  token rather than minting a second one; capped at 16 paired devices) and renders a
+  `repomon://<host:port>#<token>&name=<device>` QR. `repomon remote devices` lists paired
+  devices (name, role, created/last-seen — never the token); `repomon remote revoke <name>`
+  revokes one, and a live connection authenticated with that token is kicked on its very next
+  request with `-32000` `"device revoked"`. The legacy shared `[remote] token` from config
+  still authenticates exactly as before (it isn't a row in `remote.devices`'s list — the CLI
+  calls it out separately as the shared config token). `remote.pair`, `remote.devices`, and
+  `remote.revoke` are themselves local-socket only: no client can mint or enumerate tokens
+  over the same network it authenticates onto.
+- **Checked before the WS upgrade completes** — `Authorization: Bearer <token>` header or a
   `?token=<token>` query parameter; anything else gets a 401 and no connection.
-- **Bind it privately** (the Tailscale IP). The bridge is full-control: anyone holding the
-  token can read panes and type into agents.
+- **Bind it privately** (the Tailscale IP). Any paired device's token exercises the full
+  allowlist below.
 - `ping` → `"pong"` serves as an application-level keep-alive; events flow after `subscribe`
   exactly as on the Unix socket.
-- **Method allowlist (default-deny):** the bridge only dispatches reads and
-  interaction-with-existing-agents — anything else (host management, spawning, config,
-  terminal open/close, filesystem) answers `-32601` `"not permitted over remote bridge"`.
-  Since v0.4.1 that includes `agent.prompt`, `agent.answer` (verified dialog steering,
-  strictly safer than the blind `agent.key` it complements), `agent.watch_bytes`, and
-  `terminal.list_all`; since v0.4.2 `agent.fit` replaces `agent.resize` over the bridge —
-  the unconditional resize is local-only (a blind remote resize is exactly what squeezed
-  the TUI's mediated view), and `agent.fit` reflows the shared pane only while no live
-  TUI viewport owns it. Events themselves are forwarded unfiltered after `subscribe`. Note
-  `agent.watch_bytes` is single-watch daemon-wide: a remote client and a local TUI Focus view
-  contend for the one byte stream, last writer wins — the loser should fall back to
-  capture-based polling.
+- **Method allowlist (default-deny), full fleet control:** paired devices can read the fleet,
+  drive existing agents, AND spawn/stop/adopt agents and create/delete/merge lanes
+  (`agent.spawn`, `agent.stop`, `agent.adopt`, `agent.detect`, `lane.create`, `lane.delete`,
+  `lane.merge`, `lane.focus`, `lane.diff`), on top of everything previously allowed: reads,
+  `agent.prompt`/`agent.answer` (verified dialog steering), `agent.watch_bytes`,
+  `terminal.list_all`, `agent.fit`, and the orchestrator's status/transcript/send_input/key.
+  Still blocked: daemon lifecycle (`daemon.shutdown`), config/secrets (`config.get`,
+  `config.set`), host terminal + filesystem access (`terminal.open/close/target`,
+  `fs.browse`), the blind `agent.resize` (only the arbitrated `agent.fit` is reachable
+  remotely — an unconditional remote resize is exactly what squeezed the TUI's mediated
+  view), the orchestrator's `start`/`stop`/`watch`/`resize` (spawning/killing repomind and its
+  pane geometry stay local), and credential minting (`remote.*`). Anything else answers
+  `-32601` `"not permitted over remote bridge"`.
+- **Per-connection viewports and byte watches.** Each connection (Unix socket or WebSocket)
+  owns its own `viewport.set` state and its own `agent.watch_bytes` windows — an iPhone, an
+  iPad, and the Mac TUI can each hold a different view (or watch the same window) at once
+  without clobbering one another. The daemon polls and streams the *union* of every live
+  connection's viewport. `event.agent.bytes` is delivered only to the connections watching
+  that window; `event.agent.output` only to connections whose viewport covers the event's
+  lane, or names its terminal window — a connection that never calls `viewport.set` receives
+  no `event.agent.output` at all.
+- **`agent.watch_bytes` is per-window and refcounted, not single-watch.** `on:true` starts (or
+  joins) the shared pipe for that window and always acks with `{ cols, rows }`, the pane's
+  current grid. A connection may hold several windows at once; the same window watched by
+  several connections shares one underlying `pipe-pane` (tmux allows only one per pane), and
+  the pipe itself stops only once its last watcher leaves. `on:false` with a `window` releases
+  just that window for this connection; `on:false` without a `window` releases every window
+  this connection watches for the lane.
+- **Fit arbitration.** A local (TUI) session's fresh viewport focus always owns a window's
+  size. Among remote sessions actively focused on the same window, the one that most recently
+  drove the agent (`agent.send_input`/`signal`/`key`/`scroll`/`answer`, or an applied
+  `agent.fit`) wins.
+  Both kinds of ownership decay: the TUI heartbeats its viewport every ~5s and a focus lapses
+  15s after the last beat, so a crashed or closed client's hold releases within seconds. The
+  unconditional `agent.resize` stays local-only regardless of who's connected.
 
 ## Envelope
 
@@ -87,7 +121,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.send_input` | `{ lane_id, text, enter=true, window? }` | `null` (types text, then Enter unless `enter=false`; `window` targets one agent in a multi-agent lane) |
 | `agent.key` | `{ lane_id, key, literal=false, window? }` | `null` (one keystroke: literal char or key name; `window` targets one agent in a multi-agent lane) |
 | `agent.signal` | `{ lane_id, key, window? }` | `null` |
-| `agent.watch_bytes` | `{ lane_id, window?, on }` | on `on: true`, `{ cols, rows }` — the pane's current grid (`null`s when the window is gone); `null` on `off`. Streams the pane's raw PTY bytes (tmux `pipe-pane`) as `event.agent.bytes`. Single-watch: a new `on` replaces the previous watch. Render your emulator at the authoritative grid — the ack's, or the one `agent.fit` answers with: the pane is shared, and only `agent.fit` may reflow it remotely (a local TUI re-asserts its own size within seconds). The capture-based `viewport.set` streaming is unaffected. |
+| `agent.watch_bytes` | `{ lane_id, window?, on }` | on `on: true`, `{ cols, rows }` — the pane's current grid (`null`s when the window is gone); `null` on `off`. Streams the pane's raw PTY bytes (tmux `pipe-pane`) as `event.agent.bytes`, delivered only to connections watching that window. Per-connection and refcounted, not single-watch: a window has one shared pipe no matter how many connections watch it (tmux allows only one `pipe-pane` per pane); this connection may watch several windows at once. `on:false` with a `window` releases just that one; `on:false` without a `window` releases every window THIS connection watches for the lane. Render your emulator at the authoritative grid — the ack's, or the one `agent.fit` answers with: the pane is shared, and only `agent.fit` may reflow it remotely (a local TUI re-asserts its own size within seconds). The capture-based `viewport.set` streaming is unaffected. |
 | `agent.prompt` | `{ lane_id, window? }` | `{ dialog: PendingDialog\|null }` — fresh pane capture parsed for the interactive dialog actually on screen right now (never the sniff cache). `PendingDialog` = `{ title?, question, body?: [String], options: [{ number?, text }], selected? }`; `lane.list` carries the same object on `AgentSession.pending_dialog` alongside the `pending_prompt` summary. |
 | `agent.answer` | `{ lane_id, choice, window?, expect_summary? }` | `{ answered, sent }` — re-captures the pane, verifies a dialog is still up (and, when `expect_summary` is set, that it still summarizes to that string), then steers to `choice` (0-based) and confirms. On a stale view it does NOT send anything: error `-32010` (`no pending dialog` / `dialog changed`) with `error.data.dialog` carrying what's actually on screen (possibly `null`) so the client re-renders instead of re-fetching. Any input path (`send_input`/`key`/`signal`/`answer`) drops the window's sniff-cache entry, so an answered dialog can't be re-advertised for the rest of its TTL. |
 | `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
@@ -95,7 +129,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `session.rename` | `{ session_id, label? }` | `null` (set/clear a user label for a session, keyed by its durable transcript id; empty/absent `label` clears it; overlaid onto `AgentSession.custom_label`) |
 | `agent.target` | `{ lane_id, window? }` | `{ target, available }` (also resets the window to follow the attaching client's size) |
 | `agent.resize` | `{ lane_id, cols, rows, window? }` | `null` (resize the agent's pane so the mediated view reflows to fit; clamped to a floor) |
-| `agent.fit` | `{ lane_id, cols, rows, window? }` | `{ applied, cols, rows }` — the arbitrated resize for remote viewers: reflows the shared pane to the caller's grid ONLY while no live local viewport focus owns the window (the TUI heartbeats its viewport every ~5s; ownership lapses 15s after the last beat, and a clean TUI quit releases it immediately). Refused (`applied: false`) it answers with the pane's current grid so the caller renders pinned at the shared size instead of fighting. Poll it (~10s) to adapt when the TUI starts or stops viewing. |
+| `agent.fit` | `{ lane_id, cols, rows, window? }` | `{ applied, cols, rows }` — the arbitrated resize for remote viewers: reflows the shared pane to the caller's grid ONLY while no live local viewport focus owns the window (the TUI heartbeats its viewport every ~5s; ownership lapses 15s after the last beat, and a clean TUI quit releases it immediately) AND no other remote session that's also focused on this window right now drove the agent more recently than the caller (last-interaction-wins among remotes; an applied fit counts as an interaction). Refused (`applied: false`) it answers with the pane's current grid so the caller renders pinned at the shared size instead of fighting. Poll it (~10s) to adapt when the TUI starts or stops viewing. |
 | `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen — the client then scrolls the captured buffer itself) |
 | `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
@@ -103,9 +137,12 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `terminal.close` | `{ id }` | `null` |
 | `terminal.target` | `{ id }` | `{ target, available }` |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
-| `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored) |
+| `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored. Per-connection: each connection owns its own viewport and focus; the capture loop streams the union across every live connection, and `event.agent.output` is filtered to the connections whose viewport actually covers it) |
 | `subscribe` | `{ topics? }` | `null` |
 | `ping` | — | `"pong"` (remote keep-alive / connectivity probe) |
+| `remote.pair` | `{ name }` | `{ name, token, url }` — mints (or, for a name already paired, re-shows) that device's own revocable token and its `repomon://` pairing URL. Capped at 16 paired devices. Local socket only. |
+| `remote.devices` | — | `[{ name, role, created_at, last_seen_at? }]` — never includes the token. Local socket only. |
+| `remote.revoke` | `{ name }` | `{ revoked }` — `true` if a device by that name existed; drops it from the auth cache so live connections holding its token are kicked on their next request. Local socket only. |
 | `push.register` | `{ device_token }` | `null` (register an APNs device for push; idempotent) |
 | `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | — | `{ uptime_secs, repos, lanes, db_size_bytes, version }` |

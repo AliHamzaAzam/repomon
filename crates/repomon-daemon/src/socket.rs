@@ -80,6 +80,11 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
         }
     });
 
+    // This connection's per-device session (viewport/focus/fit state). The guard drops it from
+    // `ctx.sessions` on every exit path below (each `break`, plus a panic).
+    let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+    let _session_guard = crate::conn::SessionGuard::new(ctx.clone(), sess.id);
+
     // Every connection holds an event receiver, but only forwards once subscribed.
     let mut events = ctx.events.subscribe();
     let mut forwarding = false;
@@ -112,7 +117,7 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
                     forwarding = true;
                 }
                 let id = req.id;
-                let resp = match rpc::dispatch(&ctx, &req.method, req.params).await {
+                let resp = match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
                     Ok(value) => Response::ok(id, value),
                     Err(err) => Response::err(id, err),
                 };
@@ -122,7 +127,16 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
             }
             event = events.recv() => match event {
                 Ok(value) => {
-                    if forwarding {
+                    // Per-connection filtering: `event.agent.bytes` reaches only the connections
+                    // that watch its window, and `event.agent.output` only the connections whose
+                    // viewport covers its lane/window (the bus broadcasts both to every subscriber);
+                    // every other topic forwards unchanged. Sync std-Mutex reads — no await added.
+                    let deliver = {
+                        let watched = sess.watched_bytes.lock().unwrap();
+                        let out = sess.output_filter.lock().unwrap();
+                        crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
+                    };
+                    if forwarding && deliver {
                         if let Ok(bytes) = serde_json::to_vec::<Value>(&value) {
                             if protocol::write_frame(&mut write_half, &bytes).await.is_err() {
                                 break;

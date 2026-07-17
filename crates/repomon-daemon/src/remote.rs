@@ -9,15 +9,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use repomon_core::protocol::{MAX_FRAME_BYTES, Request, Response, RpcError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    ErrorResponse, Request as HsRequest, Response as HsResponse,
-};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request as HsRequest};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::{Ctx, rpc};
@@ -44,11 +43,12 @@ impl Drop for ConnGuard {
 }
 
 /// Methods the remote WebSocket bridge may invoke. **Default-deny**: anything not listed here
-/// (including any future RPC) is rejected over the network, so the bridge can't be used to manage
-/// the host. Allows read + interaction with *existing* agents and the companion's own push
-/// registration; blocks host-management (repo/lane/worktree mutation, agent spawn/adopt/stop,
-/// config writes, terminal/filesystem access, daemon shutdown) and secret-exposing reads
-/// (`config.get` can carry the remote token). The local Unix socket is unaffected.
+/// (including any future RPC) is rejected over the network, so the bridge can't be used to reach
+/// past what's listed. Paired devices get full fleet control: read the fleet, drive existing
+/// agents, and now spawn/stop/adopt agents and create/delete/merge lanes too. Still blocked:
+/// daemon lifecycle (`daemon.shutdown`), config/secrets (`config.get` can carry the remote token,
+/// `config.set`), host terminal + filesystem access (`terminal.open/close/target`, `fs.browse`),
+/// and credential minting (`remote.*`, local-only). The local Unix socket is unaffected.
 fn remote_method_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -74,11 +74,20 @@ fn remote_method_allowed(method: &str) -> bool {
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
         | "agent.target" | "agent.fit"
         | "agent.prompt" | "agent.answer" | "agent.watch_bytes"
+        // full fleet control: spawn/stop/adopt an agent, and manage the lanes they run in.
+        // agent.detect is a read (the spawn sheet's agent picker) — it's the only remote door to
+        // the configured agent list, since config.get stays blocked. lane.create's `path` param
+        // is optional, so no fs.browse is needed; the repo picker is the already-allowed
+        // repo.list.
+        | "agent.spawn" | "agent.stop" | "agent.adopt" | "agent.detect"
+        | "lane.create" | "lane.delete" | "lane.merge"
+        | "lane.diff" | "lane.focus"
         // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
         // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
         // process-spawn with caller-chosen autonomy/max_agents/prompt, so strictly higher privilege
-        // than the already-blocked agent.spawn. Remote tokens may chat with a running repomind but
-        // cannot start or stop it.
+        // than the already-allowed agent.spawn (which targets a known, already-configured agent
+        // rather than an arbitrary claude invocation). Remote tokens may chat with a running
+        // repomind but cannot start or stop it.
         | "orchestrator.status" | "orchestrator.transcript"
         | "orchestrator.send_input" | "orchestrator.key"
         // benign metadata
@@ -88,11 +97,12 @@ fn remote_method_allowed(method: &str) -> bool {
     )
 }
 
-/// Bind the WebSocket bridge and serve until shutdown is requested.
-pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::Result<()> {
+/// Bind the WebSocket bridge and serve until shutdown is requested. The set of valid tokens lives
+/// in `ctx.remote_tokens` (seeded from the store's paired devices plus the legacy config token, and
+/// refreshed on every pair/revoke), so no token is passed in here.
+pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     tracing::info!("remote bridge listening on ws://{bind}");
-    let token = Arc::new(token);
     let conns = Arc::new(AtomicUsize::new(0));
 
     loop {
@@ -107,10 +117,9 @@ pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::
                         continue; // `guard` drops here, undoing the increment
                     }
                     let ctx = ctx.clone();
-                    let token = token.clone();
                     tokio::spawn(async move {
                         let _guard = guard;
-                        if let Err(e) = handle_conn(ctx, stream, &token).await {
+                        if let Err(e) = handle_conn(ctx, stream).await {
                             tracing::debug!("remote conn {addr}: {e}");
                         }
                     });
@@ -122,23 +131,57 @@ pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str, token: String) -> std::io::
     Ok(())
 }
 
+/// How often a live connection re-stamps its device's `last_seen_at` (throttled, per connection).
+const LAST_SEEN_THROTTLE: Duration = Duration::from_secs(60);
+
 // `result_large_err`: the auth closure's Err type (a full http::Response) is dictated by
 // tungstenite's `Callback` contract — nothing to box here.
 #[allow(clippy::result_large_err)]
 async fn handle_conn(
     ctx: Arc<Ctx>,
     stream: TcpStream,
-    token: &str,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-    // Check the token during the handshake — an unauthorized client never completes the
-    // upgrade and learns nothing but "401".
+    // Check the token during the handshake — an unauthorized client never completes the upgrade
+    // and learns nothing but "401". The matching entry's identity (device name, `None` for the
+    // legacy shared token) and the token itself are captured out of the callback.
+    let mut identity: Option<(String, Option<String>)> = None;
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
-        |req: &HsRequest, resp| auth(req, resp, token),
+        |req: &HsRequest, resp| match authorize(req, &ctx) {
+            Some(hit) => {
+                identity = Some(hit);
+                Ok(resp)
+            }
+            None => {
+                let mut deny = ErrorResponse::new(Some("unauthorized".into()));
+                *deny.status_mut() =
+                    tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+                Err(deny)
+            }
+        },
         Some(remote_ws_config()),
     )
     .await?;
+    // Present because the handshake only completes on a match.
+    let (conn_token, device_name) =
+        identity.expect("authorized handshake must record an identity");
     let (mut sink, mut source) = ws.split();
+
+    // This connection's per-device session, carrying its identity (device name) and its own
+    // viewport/focus/fit state. The guard drops it from `ctx.sessions` on every exit path below —
+    // each `break`, every `?` early return, and a panic.
+    let sess = ctx
+        .open_session(crate::conn::ConnKind::Remote {
+            device: device_name.clone(),
+        })
+        .await;
+    let _session_guard = crate::conn::SessionGuard::new(ctx.clone(), sess.id);
+
+    // Stamp last-seen once on connect for a named device, then at most once per minute below.
+    let mut last_seen_stamp = Instant::now();
+    if let Some(name) = &device_name {
+        let _ = ctx.store.remote_device_seen(name).await;
+    }
 
     // Every connection holds an event receiver, but only forwards once subscribed —
     // mirroring the Unix-socket connection loop.
@@ -168,11 +211,25 @@ async fn handle_conn(
                     }
                 };
                 let id = req.id;
+                // Live revocation: if this connection's token has been revoked since the
+                // handshake (dropped from the auth cache), refuse this request and close.
+                if !token_present(&ctx, &conn_token) {
+                    let resp = Response::err(id, RpcError::new(-32000, "device revoked"));
+                    send_json(&mut sink, &resp).await?;
+                    break;
+                }
+                // Throttled last-seen refresh for named devices (at most once a minute).
+                if let Some(name) = &device_name {
+                    if last_seen_stamp.elapsed() >= LAST_SEEN_THROTTLE {
+                        last_seen_stamp = Instant::now();
+                        let _ = ctx.store.remote_device_seen(name).await;
+                    }
+                }
                 let resp = if remote_method_allowed(&req.method) {
                     if req.method == "subscribe" {
                         forwarding = true;
                     }
-                    match rpc::dispatch(&ctx, &req.method, req.params).await {
+                    match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
                         Ok(value) => Response::ok(id, value),
                         Err(err) => Response::err(id, err),
                     }
@@ -191,7 +248,25 @@ async fn handle_conn(
             }
             event = events.recv() => match event {
                 Ok(value) => {
-                    if forwarding {
+                    // Passive revocation: a device that stays silent still holds a live event
+                    // receiver, so the request-arm's revocation check never runs for it. Re-check
+                    // the token on every forward and drop the connection the moment it's gone —
+                    // otherwise a revoked-but-quiet device keeps receiving event.agent.bytes/output
+                    // forever. Sync std RwLock read, no await held.
+                    if !token_present(&ctx, &conn_token) {
+                        break;
+                    }
+                    // Per-connection filtering: `event.agent.bytes` reaches only the connections
+                    // that watch its window, and `event.agent.output` only the connections whose
+                    // viewport covers its lane/window (the bus broadcasts both to every subscriber);
+                    // every other topic forwards unchanged. Sync std-Mutex reads, dropped before the
+                    // await.
+                    let deliver = {
+                        let watched = sess.watched_bytes.lock().unwrap();
+                        let out = sess.output_filter.lock().unwrap();
+                        crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
+                    };
+                    if forwarding && deliver {
                         send_json(&mut sink, &value).await?;
                     }
                 }
@@ -217,23 +292,33 @@ where
     sink.send(Message::text(text)).await
 }
 
-/// The handshake gatekeeper: pass the upgrade through when the token matches, else 401.
-#[allow(clippy::result_large_err)] // the signature is tungstenite's Callback contract
-fn auth(req: &HsRequest, resp: HsResponse, token: &str) -> Result<HsResponse, ErrorResponse> {
-    if request_authorized(req, token) {
-        Ok(resp)
-    } else {
-        let mut deny = ErrorResponse::new(Some("unauthorized".into()));
-        *deny.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
-        Err(deny)
+/// Match the handshake's presented token against the auth cache. On a hit, returns
+/// `Some((token, device_name))` — `device_name` is `None` for the legacy shared config token — so
+/// the connection learns the identity it authenticated as. `None` means no valid token (→ 401).
+fn authorize(req: &HsRequest, ctx: &Ctx) -> Option<(String, Option<String>)> {
+    let presented = presented_token(req)?;
+    let tokens = ctx.remote_tokens.read().unwrap();
+    for (tok, name) in tokens.iter() {
+        if constant_time_eq(presented.as_bytes(), tok.as_bytes()) {
+            return Some((presented, name.clone()));
+        }
     }
+    None
 }
 
-/// Whether the handshake request carries the right token: `Authorization: Bearer <token>` or a
-/// `token=<token>` query parameter (for clients that can't set headers on a WS dial).
-fn request_authorized(req: &HsRequest, token: &str) -> bool {
-    let presented = req
-        .headers()
+/// Whether a token is still in the auth cache — the live-revocation check on each request.
+fn token_present(ctx: &Ctx, token: &str) -> bool {
+    ctx.remote_tokens
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(t, _)| constant_time_eq(token.as_bytes(), t.as_bytes()))
+}
+
+/// The token a handshake request carries: `Authorization: Bearer <token>` or a `token=<token>`
+/// query parameter (for clients that can't set headers on a WS dial).
+fn presented_token(req: &HsRequest) -> Option<String> {
+    req.headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -243,11 +328,7 @@ fn request_authorized(req: &HsRequest, token: &str) -> bool {
                 q.split('&')
                     .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
             })
-        });
-    match presented {
-        Some(p) => constant_time_eq(p.as_bytes(), token.as_bytes()),
-        None => false,
-    }
+        })
 }
 
 /// Compare two byte strings without early exit on the first mismatch (timing side channel).
@@ -271,19 +352,29 @@ mod tests {
     }
 
     #[test]
-    fn remote_allowlist_permits_read_and_interaction_only() {
-        // Read + interaction with existing agents, and the companion's own push registration.
+    fn remote_allowlist_permits_full_fleet_control() {
+        // Read, interact with, and now manage the fleet: spawn/stop/adopt agents, create/delete/
+        // merge lanes, plus the companion's own push registration.
         for m in [
             "ping",
             "repo.list",
             "lane.list",
             "lane.get",
+            "lane.create",
+            "lane.delete",
+            "lane.merge",
+            "lane.diff",
+            "lane.focus",
             "commit.recent",
             "agent.capture",
             "agent.transcript",
             "agent.prompt",
             "agent.answer",
             "agent.watch_bytes",
+            "agent.spawn",
+            "agent.stop",
+            "agent.adopt",
+            "agent.detect",
             "terminal.list_all",
             "agent.send_input",
             "agent.signal",
@@ -306,20 +397,16 @@ mod tests {
         ] {
             assert!(remote_method_allowed(m), "{m} should be allowed");
         }
-        // Host-management, dangerous, and secret-exposing methods are blocked over the bridge.
+        // Daemon lifecycle, config/secrets, host terminal + filesystem access, and credential
+        // minting stay blocked over the bridge even under full fleet control.
         for m in [
-            "agent.adopt",
-            "agent.spawn",
-            "agent.stop",
             "agent.resize",
+            "agent.add",
+            "agent.remove",
+            "agent.set_default",
             "repo.add",
             "repo.remove",
             "repo.discover",
-            "lane.create",
-            "lane.delete",
-            "lane.merge",
-            "lane.focus",
-            "lane.diff",
             "config.get",
             "config.set",
             "terminal.open",
@@ -327,14 +414,16 @@ mod tests {
             "terminal.target",
             "fs.browse",
             "daemon.shutdown",
-            "agent.add",
-            "agent.remove",
-            "agent.detect",
             "watcher.park",
             "orchestrator.watch",
             "orchestrator.resize",
             "orchestrator.start",
             "orchestrator.stop",
+            // upcoming local-only credential-minting RPCs (task A2) — must never be reachable
+            // over the remote bridge.
+            "remote.pair",
+            "remote.devices",
+            "remote.revoke",
             "some.future.method",
         ] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
