@@ -768,9 +768,7 @@ mod stream_tests {
         *a.viewport_focus.lock().await = Some((7, "lane-7".to_string()));
         *a.viewport_focus_at.lock().await = Some(Instant::now());
 
-        let b = ctx
-            .open_session(ConnKind::Remote { device: None })
-            .await;
+        let b = ctx.open_session(ConnKind::Remote { device: None }).await;
         *b.viewport.lock().await = vec![9, 12]; // 9 overlaps with A
         *b.viewport_focus.lock().await = Some((12, "lane-12".to_string()));
         *b.viewport_focus_at.lock().await = Some(Instant::now());

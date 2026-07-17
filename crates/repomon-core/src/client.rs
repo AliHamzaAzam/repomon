@@ -367,8 +367,8 @@ mod tests {
                         while let Ok(Some(frame)) = read_frame(&mut rd).await {
                             if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                                 latest.lock().unwrap().push(req.method.clone());
-                                let _ =
-                                    write_message(&mut wr, &Response::ok(req.id, Value::Null)).await;
+                                let _ = write_message(&mut wr, &Response::ok(req.id, Value::Null))
+                                    .await;
                             }
                         }
                     });
@@ -439,8 +439,8 @@ mod tests {
                         while let Ok(Some(frame)) = read_frame(&mut rd).await {
                             if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                                 latest.lock().unwrap().push(req.method.clone());
-                                let _ =
-                                    write_message(&mut wr, &Response::ok(req.id, Value::Null)).await;
+                                let _ = write_message(&mut wr, &Response::ok(req.id, Value::Null))
+                                    .await;
                             }
                         }
                     });

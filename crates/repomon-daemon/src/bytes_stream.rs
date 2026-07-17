@@ -84,11 +84,7 @@ fn release_ref(entry: &mut WatchEntry, conn_id: u64) -> bool {
 
 /// Whether the reader that started at `generation` still owns `window`'s entry — the EOF-cleanup
 /// guard. False if the entry is gone or has been superseded by a newer pipe. Pure.
-fn eof_entry_is_current(
-    map: &HashMap<String, WatchEntry>,
-    window: &str,
-    generation: u64,
-) -> bool {
+fn eof_entry_is_current(map: &HashMap<String, WatchEntry>, window: &str, generation: u64) -> bool {
     map.get(window).is_some_and(|e| e.generation == generation)
 }
 
@@ -213,7 +209,9 @@ pub async fn unwatch(tmux: &TmuxRuntime, watches: &Watches, window: &str, conn_i
     if !release_ref(entry, conn_id) {
         return; // other connections still share this window's pipe
     }
-    let entry = map.remove(window).expect("entry present under the same lock");
+    let entry = map
+        .remove(window)
+        .expect("entry present under the same lock");
     drop(map);
     let t = tmux.clone();
     let win = window.to_string();

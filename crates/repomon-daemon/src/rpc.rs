@@ -619,7 +619,9 @@ pub async fn dispatch(
             // hard-erroring) so a harmless client that fills it in still succeeds, while a hostile
             // one can't write outside the managed worktree root. The local Unix socket is unaffected.
             if !sess.is_local() && p.path.take().is_some() {
-                tracing::warn!("remote lane.create supplied a path; ignoring it (deriving template)");
+                tracing::warn!(
+                    "remote lane.create supplied a path; ignoring it (deriving template)"
+                );
             }
             let lane = ctx.lanes.create(p).await.map_err(internal)?;
             ctx.broadcast(crate::pubsub::topic::LANE_CREATED, json!({ "lane": lane }));

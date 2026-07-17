@@ -899,7 +899,10 @@ mod tests {
     async fn remote_device_revoke_true_then_false() {
         let s = store().await;
         s.remote_device_pair("phone").await.unwrap();
-        assert!(s.remote_device_revoke("phone").await.unwrap(), "first revoke removes it");
+        assert!(
+            s.remote_device_revoke("phone").await.unwrap(),
+            "first revoke removes it"
+        );
         assert!(
             !s.remote_device_revoke("phone").await.unwrap(),
             "revoking a gone device is false"
@@ -911,10 +914,16 @@ mod tests {
     async fn remote_device_seen_stamps_last_seen() {
         let s = store().await;
         s.remote_device_pair("phone").await.unwrap();
-        assert!(s.remote_device_list().await.unwrap()[0].last_seen_at.is_none());
+        assert!(
+            s.remote_device_list().await.unwrap()[0]
+                .last_seen_at
+                .is_none()
+        );
         s.remote_device_seen("phone").await.unwrap();
         assert!(
-            s.remote_device_list().await.unwrap()[0].last_seen_at.is_some(),
+            s.remote_device_list().await.unwrap()[0]
+                .last_seen_at
+                .is_some(),
             "last_seen_at is stamped"
         );
         // Stamping an unknown device is a harmless no-op (no error).

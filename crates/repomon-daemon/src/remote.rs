@@ -154,8 +154,7 @@ async fn handle_conn(
             }
             None => {
                 let mut deny = ErrorResponse::new(Some("unauthorized".into()));
-                *deny.status_mut() =
-                    tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+                *deny.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
                 Err(deny)
             }
         },
@@ -163,8 +162,7 @@ async fn handle_conn(
     )
     .await?;
     // Present because the handshake only completes on a match.
-    let (conn_token, device_name) =
-        identity.expect("authorized handshake must record an identity");
+    let (conn_token, device_name) = identity.expect("authorized handshake must record an identity");
     let (mut sink, mut source) = ws.split();
 
     // This connection's per-device session, carrying its identity (device name) and its own

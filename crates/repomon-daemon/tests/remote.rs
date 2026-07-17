@@ -53,7 +53,9 @@ async fn start_bridge(token: &str) -> (Arc<Ctx>, String) {
 }
 
 /// Read one JSON value from the socket (fails the test on a non-text or absent frame).
-async fn recv_json(ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin)) -> Value {
+async fn recv_json(
+    ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+) -> Value {
     match ws.next().await.unwrap().unwrap() {
         Message::Text(t) => serde_json::from_str(&t).unwrap(),
         m => panic!("unexpected frame: {m:?}"),
@@ -160,10 +162,9 @@ async fn bridge_authenticates_a_named_device_and_stamps_last_seen() {
         .push((dev.token.clone(), Some("phone".into())));
     let addr = serve(ctx.clone()).await;
 
-    let (mut ws, _) =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", dev.token))
-            .await
-            .expect("named-device token authorizes");
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", dev.token))
+        .await
+        .expect("named-device token authorizes");
     ws.send(Message::text(
         json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string(),
     ))
@@ -181,7 +182,10 @@ async fn bridge_authenticates_a_named_device_and_stamps_last_seen() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(stamped, "a named device's last_seen_at is stamped on connect");
+    assert!(
+        stamped,
+        "a named device's last_seen_at is stamped on connect"
+    );
 }
 
 #[tokio::test]
@@ -216,7 +220,10 @@ async fn bridge_kicks_a_revoked_token_mid_session() {
         ws.next().await,
         None | Some(Ok(Message::Close(_))) | Some(Err(_))
     );
-    assert!(closed, "the bridge closes the socket after a revoked request");
+    assert!(
+        closed,
+        "the bridge closes the socket after a revoked request"
+    );
 }
 
 /// Passive revocation: a device that subscribes and watches, then is revoked while sending NO
@@ -292,23 +299,38 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     assert_eq!(ctx.remote_tokens.read().unwrap().len(), 1);
 
     // devices lists the device WITHOUT the token.
-    let devices = rpc::dispatch(&ctx, &sess, "remote.devices", None).await.unwrap();
+    let devices = rpc::dispatch(&ctx, &sess, "remote.devices", None)
+        .await
+        .unwrap();
     let d0 = &devices.as_array().unwrap()[0];
     assert_eq!(d0["name"], json!("phone"));
     assert_eq!(d0["role"], json!("full"));
-    assert!(d0.get("token").is_none(), "the listing never exposes the token");
+    assert!(
+        d0.get("token").is_none(),
+        "the listing never exposes the token"
+    );
 
     // revoke → {revoked:true}, and the auth cache empties.
-    let rev = rpc::dispatch(&ctx, &sess, "remote.revoke", Some(json!({ "name": "phone" })))
-        .await
-        .unwrap();
+    let rev = rpc::dispatch(
+        &ctx,
+        &sess,
+        "remote.revoke",
+        Some(json!({ "name": "phone" })),
+    )
+    .await
+    .unwrap();
     assert_eq!(rev["revoked"], json!(true));
     assert!(ctx.remote_tokens.read().unwrap().is_empty());
 
     // revoking again → {revoked:false}.
-    let rev2 = rpc::dispatch(&ctx, &sess, "remote.revoke", Some(json!({ "name": "phone" })))
-        .await
-        .unwrap();
+    let rev2 = rpc::dispatch(
+        &ctx,
+        &sess,
+        "remote.revoke",
+        Some(json!({ "name": "phone" })),
+    )
+    .await
+    .unwrap();
     assert_eq!(rev2["revoked"], json!(false));
 }
 
@@ -501,12 +523,14 @@ async fn bytes_events_are_delivered_per_connection() {
     }
     let addr = serve(ctx.clone()).await;
 
-    let (mut ws_p, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", phone.token))
-        .await
-        .expect("phone connects");
-    let (mut ws_i, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", ipad.token))
-        .await
-        .expect("ipad connects");
+    let (mut ws_p, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", phone.token))
+            .await
+            .expect("phone connects");
+    let (mut ws_i, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", ipad.token))
+            .await
+            .expect("ipad connects");
 
     // Each connection watches a different window.
     session_for_device(&ctx, "phone")
@@ -584,20 +608,35 @@ async fn output_events_are_delivered_per_connection() {
     }
     let addr = serve(ctx.clone()).await;
 
-    let (mut ws_p, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", phone.token))
-        .await
-        .expect("phone connects");
-    let (mut ws_i, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", ipad.token))
-        .await
-        .expect("ipad connects");
-    let (mut ws_l, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", laptop.token))
-        .await
-        .expect("laptop connects");
+    let (mut ws_p, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", phone.token))
+            .await
+            .expect("phone connects");
+    let (mut ws_i, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", ipad.token))
+            .await
+            .expect("ipad connects");
+    let (mut ws_l, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/?token={}", laptop.token))
+            .await
+            .expect("laptop connects");
 
     // Phone's viewport covers lane 1, iPad's covers lane 2; laptop never asserts a viewport, so its
     // `output_filter` stays at its empty session-creation zero-state.
-    session_for_device(&ctx, "phone").await.output_filter.lock().unwrap().0.insert(1);
-    session_for_device(&ctx, "ipad").await.output_filter.lock().unwrap().0.insert(2);
+    session_for_device(&ctx, "phone")
+        .await
+        .output_filter
+        .lock()
+        .unwrap()
+        .0
+        .insert(1);
+    session_for_device(&ctx, "ipad")
+        .await
+        .output_filter
+        .lock()
+        .unwrap()
+        .0
+        .insert(2);
 
     // Subscribe all three and drain the acks (forwarding is on once the ack returns).
     for (ws, id) in [(&mut ws_p, 1u64), (&mut ws_i, 2u64), (&mut ws_l, 3u64)] {
@@ -685,7 +724,9 @@ async fn close_session_releases_only_this_connections_watches() {
         !map.contains_key("lane-2"),
         "A's solo window is stopped when A disconnects"
     );
-    let shared = map.get("lane-1").expect("B still watches the shared window");
+    let shared = map
+        .get("lane-1")
+        .expect("B still watches the shared window");
     assert_eq!(
         shared.refs.iter().copied().collect::<Vec<_>>(),
         vec![b.id],
@@ -800,7 +841,9 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     // Real windows to pipe: two on lane 1 (default-named and a second slot), one on lane 2.
     let cwd = std::env::temp_dir();
     for w in ["lane-1", "lane-1-2", "lane-2"] {
-        ctx.tmux.spawn_named(w, &cwd, "sleep 30").expect("spawn window");
+        ctx.tmux
+            .spawn_named(w, &cwd, "sleep 30")
+            .expect("spawn window");
     }
 
     let sess = ctx.open_session(ConnKind::Local).await;
@@ -851,8 +894,14 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
 
     {
         let map = ctx.bytes_watches.lock().await;
-        assert!(!map.contains_key("lane-1"), "lane 1's default window released");
-        assert!(!map.contains_key("lane-1-2"), "lane 1's second window released");
+        assert!(
+            !map.contains_key("lane-1"),
+            "lane 1's default window released"
+        );
+        assert!(
+            !map.contains_key("lane-1-2"),
+            "lane 1's second window released"
+        );
         let survivor = map.get("lane-2").expect("lane 2's watch survives");
         assert!(survivor.refs.contains(&sess.id));
     }

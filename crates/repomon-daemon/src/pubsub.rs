@@ -112,7 +112,8 @@ mod tests {
 
     #[test]
     fn bytes_forward_only_to_watchers_of_that_window() {
-        let ev = json!({ "method": topic::AGENT_BYTES, "params": { "window": "lane-1", "data": "x" } });
+        let ev =
+            json!({ "method": topic::AGENT_BYTES, "params": { "window": "lane-1", "data": "x" } });
         let (_, ol, ow) = nothing();
         assert!(deliver_to(&ev, &windows(&["lane-1"]), &ol, &ow));
         assert!(deliver_to(&ev, &windows(&["lane-1", "lane-2"]), &ol, &ow));
