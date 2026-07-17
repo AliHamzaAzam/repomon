@@ -25,6 +25,17 @@ async fn serve(ctx: Arc<Ctx>) -> String {
     addr
 }
 
+/// As `serve`, but with an explicit (short) pre-upgrade handshake deadline so the deadline test is
+/// fast and deterministic instead of waiting the 10s production default.
+async fn serve_with_timeout(ctx: Arc<Ctx>, handshake_timeout: Duration) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        remote::serve_remote_on_with_timeout(ctx, listener, handshake_timeout).await
+    });
+    addr
+}
+
 async fn start_bridge(token: &str) -> (Arc<Ctx>, String) {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);
@@ -260,6 +271,77 @@ async fn handshake_bad_token_gets_401_and_closes() {
         .expect("the server closes the socket within 2s")
         .expect("read after 401");
     assert_eq!(n, 0, "the connection must be closed after a 401");
+}
+
+/// An authenticated client offering an unsupported `Sec-WebSocket-Version` gets a 426 that
+/// advertises the version the bridge speaks (RFC 6455 §4.4), not a bare 400.
+#[tokio::test]
+async fn handshake_bad_version_gets_426_with_supported_version() {
+    let (_ctx, addr) = start_bridge("sekrit-token").await;
+    let request = format!(
+        "GET /?token=sekrit-token HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {SAMPLE_KEY}\r\n\
+         Sec-WebSocket-Version: 8\r\n\
+         \r\n"
+    );
+    let (_stream, resp) = raw_handshake(&addr, &request).await;
+    assert!(
+        resp.starts_with("HTTP/1.1 426 "),
+        "an unsupported version must get 426 Upgrade Required: {resp:?}"
+    );
+    assert!(
+        resp.contains("\r\nSec-WebSocket-Version: 13\r\n"),
+        "the 426 must advertise the supported version: {resp:?}"
+    );
+}
+
+/// A peer that connects and then dribbles half a request line (never completing the head) must be
+/// dropped by the pre-upgrade handshake deadline rather than held open forever. The slot it briefly
+/// occupied must be freed, so a later legit handshake still succeeds. Uses a short injected deadline
+/// (200ms) so the test is fast and deterministic; production uses the 10s default.
+#[tokio::test]
+async fn handshake_deadline_drops_a_dribbling_client_and_frees_the_slot() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    ctx.remote_tokens
+        .write()
+        .unwrap()
+        .push(("tok".to_string(), None));
+    let addr = serve_with_timeout(ctx.clone(), Duration::from_millis(200)).await;
+
+    // Connect and send only a partial request head (no terminating CRLFCRLF), then go quiet.
+    let mut dribble = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    dribble
+        .write_all(b"GET /?token=tok HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        .await
+        .unwrap();
+    dribble.flush().await.unwrap();
+
+    // The server closes it once the deadline elapses: the next read returns EOF (0 bytes), well
+    // within a generous ceiling that still catches a never-closing socket.
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(5), dribble.read(&mut buf))
+        .await
+        .expect("the server drops a dribbling client within the deadline")
+        .expect("read after the server closes");
+    assert_eq!(
+        n, 0,
+        "a client that never completes the handshake is disconnected by the deadline"
+    );
+
+    // A subsequent legit handshake still succeeds — the dribbling client's slot was freed.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token=tok"))
+        .await
+        .expect("a legit client connects after the dribbling one is reaped");
+    ws.send(Message::text(
+        json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv_json(&mut ws).await["result"], json!("pong"));
 }
 
 #[tokio::test]
