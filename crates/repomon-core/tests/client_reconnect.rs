@@ -1,6 +1,3 @@
-//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
-#![cfg(unix)]
-
 //! Regression test for the "daemon connection closed" bug.
 //!
 //! The daemon reaps idle client connections after 120s (see `repomon-daemon` socket.rs). A
@@ -12,12 +9,12 @@ use std::time::Duration;
 
 use repomon_core::client::DaemonClient;
 use repomon_core::protocol::{Notification, Request, Response, read_frame, write_message};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use serde_json::json;
-use tokio::net::{UnixListener, UnixStream};
 
 /// Answer every request frame on `stream` with `Response::ok(id, "pong")` until the peer closes.
-async fn serve_pings(stream: UnixStream) {
-    let (mut rd, mut wr) = stream.into_split();
+async fn serve_pings(stream: IpcStream) {
+    let (mut rd, mut wr) = tokio::io::split(stream);
     while let Ok(Some(frame)) = read_frame(&mut rd).await {
         if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
             let resp = Response::ok(req.id, json!("pong"));
@@ -32,21 +29,23 @@ async fn serve_pings(stream: UnixStream) {
 async fn call_reconnects_after_daemon_drops_connection() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("daemon.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let mut listener = transport::listen(&Endpoint::from_path(&sock))
+        .await
+        .unwrap();
 
     // Mock daemon: serve exactly one ping on the first connection, then drop it (the 120s reap).
     // A correct client reconnects, and the second connection is served normally.
     tokio::spawn(async move {
-        let (s1, _) = listener.accept().await.unwrap();
+        let s1 = listener.accept().await.unwrap();
         {
-            let (mut rd, mut wr) = s1.into_split();
+            let (mut rd, mut wr) = tokio::io::split(s1);
             if let Ok(Some(frame)) = read_frame(&mut rd).await {
                 let req: Request = serde_json::from_slice(&frame).unwrap();
                 let _ = write_message(&mut wr, &Response::ok(req.id, json!("pong"))).await;
             }
             // s1 is dropped here -> the client's connection closes, simulating the reap.
         }
-        let (s2, _) = listener.accept().await.unwrap();
+        let s2 = listener.accept().await.unwrap();
         serve_pings(s2).await;
     });
 
@@ -71,8 +70,8 @@ async fn call_reconnects_after_daemon_drops_connection() {
 /// Answer every request by id, and if the request is `subscribe`, also push one
 /// `event.test` notification — standing in for the daemon's per-connection `forwarding` flag
 /// (only connections that sent `subscribe` get events; see `repomon-daemon` socket.rs).
-async fn serve_and_notify_on_subscribe(stream: UnixStream) {
-    let (mut rd, mut wr) = stream.into_split();
+async fn serve_and_notify_on_subscribe(stream: IpcStream) {
+    let (mut rd, mut wr) = tokio::io::split(stream);
     while let Ok(Some(frame)) = read_frame(&mut rd).await {
         let Ok(req) = serde_json::from_slice::<Request>(&frame) else {
             continue;
@@ -96,15 +95,17 @@ async fn serve_and_notify_on_subscribe(stream: UnixStream) {
 async fn subscribe_survives_reconnect() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("daemon.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let mut listener = transport::listen(&Endpoint::from_path(&sock))
+        .await
+        .unwrap();
 
     // Mock daemon: connection 1 acks the `subscribe` call (like the real daemon) and is then
     // dropped, simulating the 120s reap. Connection 2 is where the client must replay
     // `subscribe` on its own — the daemon only forwards events on connections that asked.
     tokio::spawn(async move {
-        let (s1, _) = listener.accept().await.unwrap();
+        let s1 = listener.accept().await.unwrap();
         {
-            let (mut rd, mut wr) = s1.into_split();
+            let (mut rd, mut wr) = tokio::io::split(s1);
             if let Ok(Some(frame)) = read_frame(&mut rd).await {
                 let req: Request = serde_json::from_slice(&frame).unwrap();
                 assert_eq!(req.method, "subscribe");
@@ -112,7 +113,7 @@ async fn subscribe_survives_reconnect() {
             }
             // s1 is dropped here -> the client's connection closes, simulating the reap.
         }
-        let (s2, _) = listener.accept().await.unwrap();
+        let s2 = listener.accept().await.unwrap();
         serve_and_notify_on_subscribe(s2).await;
     });
 

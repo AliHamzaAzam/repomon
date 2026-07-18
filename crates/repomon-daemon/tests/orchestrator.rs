@@ -1,6 +1,3 @@
-//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
-#![cfg(unix)]
-
 //! Orchestrator lifecycle: a genuine `orchestrator.start` (no window pre-exists) must record the
 //! requested autonomy on the session; a tmux window named `orchestrator` that survives a daemon
 //! (re)start must be adopted by `orchestrator.start` rather than duplicated, with its autonomy
@@ -13,13 +10,25 @@ use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::{Ctx, serve};
 use serde_json::json;
-use tokio::net::UnixStream;
+
+/// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
+/// check doesn't port: Windows named pipes have no filesystem presence.)
+async fn connect_retry(sock: &std::path::Path) -> IpcStream {
+    for _ in 0..100 {
+        if let Ok(s) = transport::connect(&Endpoint::from_path(sock)).await {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon endpoint {} never came up", sock.display());
+}
 
 async fn call(
-    stream: &mut UnixStream,
+    stream: &mut IpcStream,
     id: u64,
     method: &str,
     params: Option<serde_json::Value>,
@@ -60,13 +69,7 @@ async fn orchestrator_adopts_a_surviving_window() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // A genuine `orchestrator.start` below writes its `--mcp-config` file under
     // `config::config_dir()`; redirect that to a tempdir so the test doesn't touch the

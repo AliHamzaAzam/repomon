@@ -1,6 +1,3 @@
-//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
-#![cfg(unix)]
-
 //! The codex orchestrator backend, exercised through the daemon's own RPC surface: a start with
 //! `agent: "codex"` must record the codex backend with no session id (codex can't pin one),
 //! `orchestrator.transcript` must read as an empty chat (codex's on-disk session format is not
@@ -15,13 +12,25 @@ use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::{Ctx, serve};
 use serde_json::json;
-use tokio::net::UnixStream;
+
+/// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
+/// check doesn't port: Windows named pipes have no filesystem presence.)
+async fn connect_retry(sock: &std::path::Path) -> IpcStream {
+    for _ in 0..100 {
+        if let Ok(s) = transport::connect(&Endpoint::from_path(sock)).await {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon endpoint {} never came up", sock.display());
+}
 
 async fn call(
-    stream: &mut UnixStream,
+    stream: &mut IpcStream,
     id: u64,
     method: &str,
     params: Option<serde_json::Value>,
@@ -58,17 +67,11 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
     let cfg_home = tempfile::tempdir().expect("tempdir");
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", cfg_home.path());
     }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // An agent with no MCP client can't drive the fleet: loud invalid_params, nothing spawned.
     let r = call(
