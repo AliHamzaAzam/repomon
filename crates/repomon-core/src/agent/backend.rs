@@ -220,6 +220,15 @@ pub trait SessionBackend: Send + Sync {
     /// whole server — is already gone.
     fn close_byte_stream(&self, window: &str) -> Result<()>;
 
+    /// How many live Claude CLI processes have each working directory, when the backend has
+    /// an authoritative view of its agent processes (the Windows hosts *own* their children).
+    /// `None` means "no view here — use the platform process probe instead", which is what
+    /// tmux answers: on unix the daemon scans ps/lsof//proc itself, catching external
+    /// sessions too. Used by the daemon's liveness probe (`rpc::live_cwds_cached`).
+    fn live_agent_cwds(&self) -> Option<std::collections::HashMap<PathBuf, usize>> {
+        None
+    }
+
     // ---- provided helpers (backend-agnostic, built on `list_windows` + the shared lane/window
     // naming convention, which is identical across backends) ----
 
@@ -259,5 +268,13 @@ mod tests {
         assert_eq!(CaptureOpts::visible().last_lines, None);
         assert_eq!(CaptureOpts::last(45).last_lines, Some(45));
         assert_eq!(CaptureOpts::default(), CaptureOpts::visible());
+    }
+
+    #[test]
+    fn live_agent_cwds_defaults_to_probe_unavailable() {
+        // Backends without an authoritative process view (tmux) answer `None`, which the
+        // daemon's liveness probe already treats as "don't filter" — the safe degradation.
+        let rt = TmuxRuntime::new("repomon-live-cwds-test");
+        assert!(rt.live_agent_cwds().is_none());
     }
 }

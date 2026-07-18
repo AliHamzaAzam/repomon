@@ -69,12 +69,39 @@ enum ListenerInner {
     #[cfg(windows)]
     Pipe {
         name: String,
+        /// The per-user security descriptor every instance is created with (see
+        /// [`pipe_instance`]): local IPC must not be reachable by other users.
+        security: repomon_host::dacl::PipeSecurity,
         /// The pre-created pipe instance the next client will hit. Windows named pipes have no
         /// single listening object: each accepted connection consumes one server instance, so
         /// `accept` creates the following instance *before* handing the connected one out —
         /// that way there is never a window with no instance for a client to reach.
         next: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     },
+}
+
+/// Create one server instance of the daemon pipe with the explicit current-user-only DACL
+/// (same policy as the agent hosts' pipes — PROTOCOL.md §3): owner = current user, DACL
+/// protected, generic-all for that SID only. The default named-pipe DACL is not acceptable
+/// for the daemon's control channel. `first` additionally claims the name exclusively
+/// (`FILE_FLAG_FIRST_PIPE_INSTANCE`), mirroring the unix bind conflict.
+#[cfg(windows)]
+fn pipe_instance(
+    name: &str,
+    security: &repomon_host::dacl::PipeSecurity,
+    first: bool,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    let mut attrs = security.attributes();
+    unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(
+                name,
+                &mut attrs as *mut _ as *mut std::ffi::c_void,
+            )
+    }
 }
 
 /// A bound local IPC listener. Obtain with [`listen`], then call [`IpcListener::accept`].
@@ -103,14 +130,13 @@ pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
         }
         #[cfg(windows)]
         Endpoint::Pipe(name) => {
-            use tokio::net::windows::named_pipe::ServerOptions;
-            let first = ServerOptions::new()
-                .first_pipe_instance(true)
-                .reject_remote_clients(true)
-                .create(name)?;
+            let security =
+                repomon_host::dacl::PipeSecurity::current_user_only().map_err(io::Error::other)?;
+            let first = pipe_instance(name, &security, true)?;
             Ok(IpcListener {
                 inner: ListenerInner::Pipe {
                     name: name.clone(),
+                    security,
                     next: Some(first),
                 },
             })
@@ -128,21 +154,19 @@ impl IpcListener {
                 Ok(IpcStream::Unix(stream))
             }
             #[cfg(windows)]
-            ListenerInner::Pipe { name, next } => {
-                use tokio::net::windows::named_pipe::ServerOptions;
+            ListenerInner::Pipe {
+                name,
+                security,
+                next,
+            } => {
                 let server = match next.take() {
                     Some(server) => server,
                     // The previous accept failed to pre-create an instance (e.g. a transient
                     // resource error); retry here rather than being wedged forever.
-                    None => ServerOptions::new()
-                        .reject_remote_clients(true)
-                        .create(&*name)?,
+                    None => pipe_instance(name, security, false)?,
                 };
                 server.connect().await?;
-                *next = ServerOptions::new()
-                    .reject_remote_clients(true)
-                    .create(&*name)
-                    .ok();
+                *next = pipe_instance(name, security, false).ok();
                 Ok(IpcStream::PipeServer(server))
             }
         }

@@ -47,6 +47,9 @@ pub struct Dispatcher {
     screen: Screen,
     pty: Box<dyn PtyIo>,
     last_activity: i64,
+    /// Up to 3 trailing output bytes carried between chunks so a DSR query split across a read
+    /// boundary is still detected (see [`Dispatcher::answer_dsr`]).
+    dsr_tail: Vec<u8>,
 }
 
 impl Dispatcher {
@@ -57,6 +60,7 @@ impl Dispatcher {
             screen,
             pty,
             last_activity,
+            dsr_tail: Vec::new(),
         }
     }
 
@@ -64,6 +68,32 @@ impl Dispatcher {
     pub fn process_output(&mut self, bytes: &[u8], now: i64) {
         self.screen.process(bytes);
         self.last_activity = now;
+        self.answer_dsr(bytes);
+    }
+
+    /// Answer DSR cursor-position reports (`ESC [ 6 n`) in the output stream.
+    ///
+    /// ConPTY emits one at startup as part of its `PSUEDOCONSOLE_INHERIT_CURSOR` handshake (and
+    /// interactive apps query the cursor mid-run) and withholds further output until the
+    /// terminal replies with a CPR (`ESC [ row ; col R`, 1-based) on the PTY input. This host IS
+    /// the terminal, so without this reply ConPTY stalls and no application output ever appears.
+    fn answer_dsr(&mut self, bytes: &[u8]) {
+        const DSR_CPR: &[u8] = b"\x1b[6n";
+        let mut scan = std::mem::take(&mut self.dsr_tail);
+        scan.extend_from_slice(bytes);
+        let hits = scan
+            .windows(DSR_CPR.len())
+            .filter(|w| *w == DSR_CPR)
+            .count();
+        for _ in 0..hits {
+            let (col, row, _) = self.screen.cursor();
+            let reply = format!("\x1b[{};{}R", row + 1, col + 1);
+            let _ = self.pty.write(reply.as_bytes());
+        }
+        // Carry the last few bytes so a sequence straddling the next read is still matched; a
+        // partial (< 4 bytes) tail can never itself complete a match, so nothing double-counts.
+        let keep = scan.len().min(DSR_CPR.len() - 1);
+        self.dsr_tail = scan.split_off(scan.len() - keep);
     }
 
     /// The full current-screen replay for a new byte subscriber's first frame.
@@ -447,6 +477,44 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&huge).unwrap();
         assert_eq!(v["id"], 7);
         assert!(v["err"].as_str().unwrap().contains("frame limit"));
+    }
+
+    #[test]
+    fn dsr_cursor_query_is_answered_with_a_cpr() {
+        // ConPTY's inherit-cursor handshake sends `ESC [ 6 n` and blocks output until the
+        // terminal replies with the cursor position; the host must answer on the PTY input.
+        let (mut d, calls) = dispatcher();
+        d.process_output(b"\x1b[6n", 41);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Write(b"\x1b[1;1R".to_vec())],
+            "fresh screen cursor at 0,0 replies 1;1 (1-based CPR)"
+        );
+
+        // A query after some output reports the live cursor position.
+        calls.lock().unwrap().clear();
+        d.process_output(b"abc\x1b[6n", 42);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Write(b"\x1b[1;4R".to_vec())],
+            "cursor after 'abc' is col 3 (0-based) -> 1;4"
+        );
+    }
+
+    #[test]
+    fn dsr_query_split_across_reads_is_still_answered() {
+        let (mut d, calls) = dispatcher();
+        d.process_output(b"hi\x1b[6", 41); // sequence straddles the read boundary
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no reply until the full sequence arrives"
+        );
+        d.process_output(b"n", 42);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Write(b"\x1b[1;3R".to_vec())],
+            "boundary-split CPR answered once; cursor after 'hi' is col 2 -> 1;3"
+        );
     }
 
     #[test]
