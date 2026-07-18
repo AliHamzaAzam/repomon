@@ -514,12 +514,20 @@ fn generate_token() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The machine's Tailscale IPv4, via the `tailscale` CLI (PATH, then the Mac app bundle).
+/// Candidate `tailscale` binaries: PATH first, then the platform's default install
+/// location (the Mac app bundle, or the Windows Program Files directory).
+fn tailscale_candidates() -> [&'static str; 2] {
+    let fallback = if cfg!(windows) {
+        r"C:\Program Files\Tailscale\tailscale.exe"
+    } else {
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    };
+    ["tailscale", fallback]
+}
+
+/// The machine's Tailscale IPv4, via the `tailscale` CLI.
 fn tailscale_ip() -> Option<String> {
-    for bin in [
-        "tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ] {
+    for bin in tailscale_candidates() {
         if let Ok(out) = std::process::Command::new(bin).args(["ip", "-4"]).output() {
             if out.status.success() {
                 let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -792,6 +800,20 @@ mod tests {
     #[test]
     fn shell_init_rejects_unsupported_shell() {
         assert!(super::shell_init(clap_complete::Shell::Elvish).is_err());
+    }
+
+    #[test]
+    fn tailscale_candidates_path_then_platform_fallback() {
+        let [first, fallback] = super::tailscale_candidates();
+        assert_eq!(first, "tailscale");
+        if cfg!(windows) {
+            assert_eq!(fallback, r"C:\Program Files\Tailscale\tailscale.exe");
+        } else {
+            assert_eq!(
+                fallback,
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            );
+        }
     }
 
     #[test]
