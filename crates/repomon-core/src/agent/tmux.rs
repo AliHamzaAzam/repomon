@@ -8,9 +8,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 use crate::model::LaneId;
+
+use super::backend::{
+    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, SessionBackend, SpawnSpec,
+    WindowActivity,
+};
 
 /// A handle to a managed tmux session. Cheap to clone.
 #[derive(Clone, Debug)]
@@ -650,6 +656,214 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Render a [`SpawnSpec`] to the single shell command string tmux runs via `sh -c`:
+/// `K='v' … program 'arg1' 'arg2'`. The program is the user-configured command line and is
+/// passed through verbatim (it may legitimately be a shell fragment); env assignments and
+/// extra args are single-quoted via [`shell_quote`].
+fn render_spawn_command(spec: &SpawnSpec) -> String {
+    let mut cmd = String::new();
+    for (k, v) in &spec.env {
+        cmd.push_str(k);
+        cmd.push('=');
+        cmd.push_str(&shell_quote(v));
+        cmd.push(' ');
+    }
+    cmd.push_str(&spec.program);
+    for a in &spec.args {
+        cmd.push(' ');
+        cmd.push_str(&shell_quote(a));
+    }
+    cmd
+}
+
+/// Largest chunk a byte stream delivers per channel message — keeps single `event.agent.bytes`
+/// events bounded while a busy pane floods.
+const BYTE_STREAM_CHUNK: usize = 16 * 1024;
+
+/// Monotonic tag baked into every byte-stream fifo NAME, so two pipe instances of the same
+/// window never share a path — a superseded reader's EOF unlink can then only ever remove its
+/// own fifo, never a successor's (see `repomon-daemon`'s `bytes_stream` module doc for the
+/// rapid unwatch→rewatch race this kills).
+static NEXT_STREAM_TAG: AtomicU64 = AtomicU64::new(0);
+
+impl SessionBackend for TmuxRuntime {
+    fn available(&self) -> bool {
+        TmuxRuntime::available()
+    }
+
+    fn label(&self) -> String {
+        self.session.clone()
+    }
+
+    fn session_exists(&self) -> bool {
+        TmuxRuntime::session_exists(self)
+    }
+
+    fn claim_or_verify_owner(&self, me: &str) -> OwnerState {
+        if TmuxRuntime::claim_or_verify_owner(self, me) {
+            OwnerState::Owned
+        } else {
+            OwnerState::OwnedByOther
+        }
+    }
+
+    fn list_windows(&self) -> Result<Vec<String>> {
+        TmuxRuntime::list_windows(self)
+    }
+
+    fn list_windows_with_activity(&self) -> Result<Vec<WindowActivity>> {
+        Ok(TmuxRuntime::list_windows_with_activity(self)?
+            .into_iter()
+            .map(|(name, cwd, last_activity)| WindowActivity {
+                name,
+                cwd,
+                last_activity,
+            })
+            .collect())
+    }
+
+    fn spawn(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String> {
+        TmuxRuntime::spawn(self, lane, &spec.cwd, &render_spawn_command(spec))
+    }
+
+    fn spawn_named(&self, window: &str, spec: &SpawnSpec) -> Result<String> {
+        TmuxRuntime::spawn_named(self, window, &spec.cwd, &render_spawn_command(spec))
+    }
+
+    fn open_named(&self, window: &str, cwd: &Path) -> Result<String> {
+        TmuxRuntime::open_named(self, window, cwd)
+    }
+
+    fn capture_named(&self, window: &str, opts: CaptureOpts) -> Result<String> {
+        TmuxRuntime::capture_named(self, window, opts.last_lines)
+    }
+
+    fn cursor_named(&self, window: &str) -> Option<Cursor> {
+        TmuxRuntime::cursor_named(self, window).map(|(col, row)| Cursor { col, row })
+    }
+
+    fn size_named(&self, window: &str) -> Option<(u16, u16)> {
+        TmuxRuntime::size_named(self, window)
+    }
+
+    fn resize_named(&self, window: &str, cols: u16, rows: u16) -> Result<()> {
+        TmuxRuntime::resize_named(self, window, cols, rows)
+    }
+
+    fn follow_client_named(&self, window: &str) -> Result<()> {
+        TmuxRuntime::follow_client_named(self, window)
+    }
+
+    fn alternate_on_named(&self, window: &str) -> bool {
+        TmuxRuntime::alternate_on_named(self, window)
+    }
+
+    fn scroll_wheel_named(&self, window: &str, up: bool, ticks: u32) -> Result<()> {
+        TmuxRuntime::scroll_wheel_named(self, window, up, ticks)
+    }
+
+    fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {
+        TmuxRuntime::send_literal_named(self, window, text)
+    }
+
+    fn send_text_named(&self, window: &str, text: &str) -> Result<()> {
+        TmuxRuntime::send_text_named(self, window, text)
+    }
+
+    fn send_key_named(&self, window: &str, key: &str) -> Result<()> {
+        TmuxRuntime::send_key_named(self, window, key)
+    }
+
+    fn kill_named(&self, window: &str) -> Result<()> {
+        TmuxRuntime::kill_named(self, window)
+    }
+
+    fn configure(&self) {
+        TmuxRuntime::configure(self)
+    }
+
+    fn target_named(&self, window: &str) -> String {
+        TmuxRuntime::target_named(self, window)
+    }
+
+    fn exact_target_named(&self, window: &str) -> String {
+        self.exact_target(window)
+    }
+
+    fn attach_command(&self, target: &str) -> AttachCommand {
+        AttachCommand {
+            program: "tmux".to_string(),
+            args: vec![
+                "-L".to_string(),
+                self.session.clone(),
+                "attach".to_string(),
+                "-t".to_string(),
+                target.to_string(),
+            ],
+        }
+    }
+
+    /// The fifo + `pipe-pane` rendezvous, absorbed from the daemon's old `bytes_stream::watch`:
+    /// create a uniquely-named fifo, start the reader thread FIRST (its `open()` is the
+    /// rendezvous with `cat`'s write-side open — tmux buffers pane output behind a stalled
+    /// pipe), then point `pipe-pane` at it. On EOF (pipe turned off or window died) the reader
+    /// removes its fifo — inherently safe: the tag-unique name means it can only ever be its
+    /// own, never a successor's — and drops the sender, closing the stream.
+    fn open_byte_stream(&self, window: &str) -> Result<ByteStream> {
+        let tag = NEXT_STREAM_TAG.fetch_add(1, Ordering::Relaxed);
+        let fifo = std::env::temp_dir().join(format!(
+            "repomon-bytes-{}-{window}-{tag}.fifo",
+            self.session
+        ));
+        // The pre-mkfifo unlink guards the one same-path case left — a leftover fifo from a
+        // previous daemon run (the tag counter restarts at 0).
+        let _ = std::fs::remove_file(&fifo);
+        let ok = Command::new("mkfifo")
+            .arg(&fifo)
+            .output()
+            .map_err(Error::Io)?
+            .status
+            .success();
+        if !ok {
+            return Err(Error::Agent(format!("mkfifo {} failed", fifo.display())));
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let Ok(mut f) = std::fs::File::open(&fifo) else {
+                    return;
+                };
+                let mut buf = vec![0u8; BYTE_STREAM_CHUNK];
+                loop {
+                    match f.read(&mut buf) {
+                        Ok(0) | Err(_) => break, // EOF: pipe turned off or window died
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).is_err() {
+                                break; // consumer gone — stop pumping
+                            }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&fifo);
+            });
+        }
+        if let Err(e) = self.pipe_pane_named(window, &fifo) {
+            // The pipe never started: remove the fifo so it can't linger. (The reader, still
+            // blocked on open(), is a pre-existing leak parity — no `cat` ever opens the write
+            // side, same as before this moved out of the daemon.)
+            let _ = std::fs::remove_file(&fifo);
+            return Err(e);
+        }
+        Ok(ByteStream { rx })
+    }
+
+    fn close_byte_stream(&self, window: &str) -> Result<()> {
+        self.pipe_pane_off_named(window)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +872,42 @@ mod tests {
     fn quotes_for_shell() {
         assert_eq!(shell_quote("hello"), "'hello'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn renders_spawn_specs_to_sh_command_strings() {
+        // Program alone passes through verbatim (it may be a user-configured shell fragment).
+        let bare = SpawnSpec::new("env -u CLAUDE_CONFIG_DIR claude", "/tmp");
+        assert_eq!(render_spawn_command(&bare), "env -u CLAUDE_CONFIG_DIR claude");
+        // Args are single-quoted and appended — byte-identical to the old
+        // `format!("{command} {}", shell_quote(task))` assembly.
+        let with_task = SpawnSpec::new("claude", "/tmp").arg("fix the bug");
+        assert_eq!(render_spawn_command(&with_task), "claude 'fix the bug'");
+        let quoted = SpawnSpec::new("claude", "/tmp").arg("it's tricky");
+        assert_eq!(render_spawn_command(&quoted), r"claude 'it'\''s tricky'");
+        // Env pairs become leading KEY='value' assignments.
+        let mut with_env = SpawnSpec::new("claude", "/tmp");
+        with_env.env.push(("FOO".into(), "a b".into()));
+        assert_eq!(render_spawn_command(&with_env), "FOO='a b' claude");
+    }
+
+    #[test]
+    fn backend_attach_command_matches_the_tmux_invocation() {
+        let rt = TmuxRuntime::new("repomon");
+        let cmd = SessionBackend::attach_command(&rt, "repomon:=lane-7");
+        assert_eq!(cmd.program, "tmux");
+        assert_eq!(
+            cmd.args,
+            vec!["-L", "repomon", "attach", "-t", "repomon:=lane-7"]
+        );
+    }
+
+    #[test]
+    fn backend_targets_match_the_inherent_formats() {
+        let rt = TmuxRuntime::new("repomon");
+        assert_eq!(SessionBackend::target_named(&rt, "term-1-1"), "repomon:term-1-1");
+        assert_eq!(rt.exact_target_named("lane-7"), "repomon:=lane-7");
+        assert_eq!(SessionBackend::label(&rt), "repomon");
     }
 
     #[test]
