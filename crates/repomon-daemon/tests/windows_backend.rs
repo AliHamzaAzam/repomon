@@ -37,6 +37,32 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// TEMP instrumentation: like `wait_for`, but on timeout dumps every `host-debug-*.log` the
+/// host wrote under `dir` so CI shows which ConPTY→screen stage broke.
+fn wait_for_dump(what: &str, dir: &Path, mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut dump = String::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("host-debug-"))
+            {
+                let body = std::fs::read_to_string(&p).unwrap_or_default();
+                dump.push_str(&format!("\n=== {} ===\n{body}", p.display()));
+            }
+        }
+    }
+    panic!("timed out waiting for {what}; host logs:{dump}");
+}
+
 fn capture(b: &WindowsBackend, window: &str) -> String {
     b.capture_named(window, CaptureOpts::visible())
         .unwrap_or_default()
@@ -59,7 +85,7 @@ fn spawn_capture_input_kill_roundtrip() {
         .unwrap();
     assert_eq!(target, format!("{}:=lane-1", b.label()));
     assert!(b.has_window(1));
-    wait_for("initial output", || {
+    wait_for_dump("initial output", dir.path(), || {
         capture(&b, "lane-1").contains("HELLO_REPOMON")
     });
 

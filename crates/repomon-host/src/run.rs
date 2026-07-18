@@ -1,11 +1,35 @@
 //! Host process assembly (Windows only): parse the spawn contract, start the ConPTY child,
 //! register, and serve until the child dies or a `kill` arrives.
 
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser as _;
 use tokio::sync::broadcast;
+
+/// TEMP instrumentation: append a line to `<data_dir>\host-debug-<window>.log` when
+/// `REPOMON_HOST_DEBUG` is set. Used to pin which stage of the ConPTY→screen path breaks on CI.
+fn dlog(path: &Option<PathBuf>, msg: &str) {
+    if let Some(p) = path
+        && let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+    {
+        let _ = writeln!(f, "[pid {} @ {}] {msg}", std::process::id(), epoch_now());
+    }
+}
+
+fn debug_log_path(data_dir: &std::path::Path, window: &str) -> Option<PathBuf> {
+    // TEMP: unconditional during CI evidence-gathering (data_dir is a per-test tempdir).
+    let safe: String = window
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    Some(data_dir.join(format!("host-debug-{safe}.log")))
+}
 
 use crate::cli::HostArgs;
 use crate::dacl::PipeSecurity;
@@ -35,14 +59,34 @@ fn run(args: HostArgs) -> anyhow::Result<ExitCode> {
         .split_first()
         .expect("clap enforces a non-empty command");
 
-    let spawned = pty::spawn_child(
+    let data_dir = registry::data_dir();
+    let dbg = debug_log_path(&data_dir, &args.window);
+    dlog(
+        &dbg,
+        &format!(
+            "run start: program={program:?} args={program_args:?} cwd={:?} cols={} rows={}",
+            args.cwd, args.cols, args.rows
+        ),
+    );
+
+    let spawned = match pty::spawn_child(
         program,
         program_args,
         &args.cwd,
         &args.env,
         args.cols,
         args.rows,
-    )?;
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            dlog(&dbg, &format!("spawn_child FAILED: {e:#}"));
+            return Err(e);
+        }
+    };
+    dlog(
+        &dbg,
+        &format!("spawn_child ok: child_pid={}", spawned.child_pid),
+    );
     let started_at = epoch_now();
 
     let meta = HostMeta {
@@ -56,7 +100,6 @@ fn run(args: HostArgs) -> anyhow::Result<ExitCode> {
         started_at,
     };
 
-    let data_dir = registry::data_dir();
     let registry_path = registry::registry_path(&data_dir, &args.session, &args.window);
     let pipe = registry::pipe_name(&args.session, &args.window);
 
@@ -85,13 +128,14 @@ fn run(args: HostArgs) -> anyhow::Result<ExitCode> {
         registry_path: registry_path.clone(),
     });
 
-    spawn_reader_thread(spawned.reader, ctx.clone());
+    spawn_reader_thread(spawned.reader, ctx.clone(), dbg.clone());
     spawn_waiter_thread(spawned.child, registry_path.clone());
 
     let security = PipeSecurity::current_user_only()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    dlog(&dbg, &format!("serving pipe={pipe}"));
     runtime.block_on(async move {
         // Listen first, then register: a registry entry implies a connectable pipe
         // (PROTOCOL.md §8).
@@ -105,14 +149,41 @@ fn run(args: HostArgs) -> anyhow::Result<ExitCode> {
 /// Drain ConPTY output: feed the vt100 screen (bumping `last_activity`) and fan the raw
 /// chunk out to byte subscribers. EOF means the child is gone — the waiter thread owns the
 /// shutdown.
-fn spawn_reader_thread(mut reader: Box<dyn std::io::Read + Send>, ctx: Arc<ServerCtx>) {
+fn spawn_reader_thread(
+    mut reader: Box<dyn std::io::Read + Send>,
+    ctx: Arc<ServerCtx>,
+    dbg: Option<PathBuf>,
+) {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        let mut reads: u64 = 0;
         loop {
             match reader.read(&mut buf) {
-                Ok(0) | Err(_) => return,
+                Ok(0) => {
+                    dlog(
+                        &dbg,
+                        &format!("reader EOF after {reads} reads, {total} bytes"),
+                    );
+                    return;
+                }
+                Err(e) => {
+                    dlog(&dbg, &format!("reader ERR after {total} bytes: {e}"));
+                    return;
+                }
                 Ok(n) => {
                     let chunk = &buf[..n];
+                    total += n as u64;
+                    reads += 1;
+                    if reads <= 5 {
+                        dlog(
+                            &dbg,
+                            &format!(
+                                "reader read #{reads} n={n}: {:?}",
+                                String::from_utf8_lossy(&chunk[..n.min(120)])
+                            ),
+                        );
+                    }
                     {
                         let mut dispatcher = ctx.dispatcher.lock().expect("dispatcher lock");
                         dispatcher.process_output(chunk, epoch_now());
