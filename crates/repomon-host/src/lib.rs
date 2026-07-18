@@ -9,6 +9,7 @@
 //! Everything protocol- and screen-shaped is cross-platform and tested on every OS; only the
 //! ConPTY spawn, the named-pipe server, and the pipe DACL are `cfg(windows)`.
 
+pub mod cli;
 pub mod codec;
 pub mod dispatch;
 pub mod keys;
