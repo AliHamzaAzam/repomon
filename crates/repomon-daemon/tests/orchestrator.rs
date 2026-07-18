@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! Orchestrator lifecycle: a genuine `orchestrator.start` (no window pre-exists) must record the
 //! requested autonomy on the session; a tmux window named `orchestrator` that survives a daemon
 //! (re)start must be adopted by `orchestrator.start` rather than duplicated, with its autonomy

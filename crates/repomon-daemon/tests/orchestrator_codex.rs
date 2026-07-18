@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! The codex orchestrator backend, exercised through the daemon's own RPC surface: a start with
 //! `agent: "codex"` must record the codex backend with no session id (codex can't pin one),
 //! `orchestrator.transcript` must read as an empty chat (codex's on-disk session format is not

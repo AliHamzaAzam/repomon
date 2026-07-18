@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! End-to-end: start the daemon on a temp socket and exercise the JSON-RPC surface.
 
 use std::path::Path;

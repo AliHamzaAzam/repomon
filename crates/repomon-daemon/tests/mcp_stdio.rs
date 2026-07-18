@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! End-to-end: a real `repomond mcp` child process speaking MCP over stdio against a real
 //! in-process daemon. This is the orchestrator's actual transport, so it's the one place we
 //! exercise the whole chain: daemon socket -> `repomond mcp` -> newline-delimited JSON-RPC.

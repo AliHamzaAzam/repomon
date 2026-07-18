@@ -7,23 +7,46 @@
 
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use repomon_core::protocol::{self, Request, Response, RpcError};
+#[cfg(unix)]
 use serde_json::Value;
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use tokio::sync::broadcast::error::RecvError;
+#[cfg(unix)]
 use tokio::sync::mpsc;
 
-use crate::{Ctx, rpc};
+use crate::Ctx;
+#[cfg(unix)]
+use crate::rpc;
 
 /// How long the reader will wait on a silent socket before tearing itself down. A half-open client
 /// (gone away but still holding the fd) otherwise parks the reader task forever, leaking one task
 /// per reconnect. Generous — well past the TUI's 1s `lane.list` poll, so a healthy idle client is
 /// never dropped; the connection task simply re-accepts on the next request.
+#[cfg(unix)]
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Windows stub until the named-pipe transport lands (next PR in this track): the local IPC
+/// server cannot bind yet, so it fails with a clear error instead of failing to compile.
+#[cfg(windows)]
+pub async fn serve(_ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "serving local IPC at {} is not yet supported on Windows (the named-pipe transport lands in a follow-up PR)",
+            socket_path.display()
+        ),
+    ))
+}
+
 /// Bind the socket and serve until shutdown is requested.
+#[cfg(unix)]
 pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -52,6 +75,7 @@ pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
     let (mut read_half, mut write_half) = stream.into_split();
 

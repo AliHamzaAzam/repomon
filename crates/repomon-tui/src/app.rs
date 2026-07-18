@@ -5821,6 +5821,8 @@ mod tests {
     /// `apply_orchestrator_status` doesn't touch the network — it just needs *a* connected
     /// `DaemonClient` to build an `App` around (`App::new` has no other constructor). A listener
     /// that accepts once and goes quiet is enough; no daemon RPC is exercised.
+    /// Unix-only until the client is generic over the IPC transport (next PR in this track).
+    #[cfg(unix)]
     async fn app_with_dummy_client() -> App {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
@@ -5835,6 +5837,7 @@ mod tests {
         App::new(client)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn apply_orchestrator_status_parses_attention_and_headline() {
         let mut app = app_with_dummy_client().await;
@@ -5883,6 +5886,7 @@ mod tests {
         assert_eq!(app.orch_attention, None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn orchestrator_attention_edge_is_suppressed_by_view_and_settings() {
         // Deliberately never flips both `notify_enabled` and `notify_needs_you` on together here:
@@ -5925,6 +5929,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn orchestrator_popup_is_seeded_not_fired_on_first_application() {
         // Cold start: repomind is already awaiting attention (e.g. it raised a permission dialog
@@ -5966,6 +5971,8 @@ mod tests {
 
     /// A hand-built lane for cursor/routing tests — deserialized so the `oid_hex` head field
     /// doesn't need a `gix` literal. No daemon involved; tests mutate `agent_sessions` directly.
+    /// Unix-only with its only consumer (`app_on_lane_7`) until the transport PR lands.
+    #[cfg(unix)]
     fn test_lane(id: i64) -> Lane {
         serde_json::from_value(json!({
             "id": id,
@@ -5987,6 +5994,8 @@ mod tests {
 
     /// An app looking at one lane whose first agent runs in `lane-7` — the state right before
     /// a second agent is spawned. Row 0 is the pinned repomind row, so `selected = 1`.
+    /// Unix-only until the client is generic over the IPC transport (next PR in this track).
+    #[cfg(unix)]
     async fn app_on_lane_7() -> App {
         let mut app = app_with_dummy_client().await;
         let mut lane = test_lane(7);
@@ -5997,6 +6006,7 @@ mod tests {
         app
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn typing_right_after_spawn_targets_the_new_window() {
         let mut app = app_on_lane_7().await;
@@ -6016,6 +6026,7 @@ mod tests {
         assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn spawn_focus_intent_survives_a_typing_burst_then_lands_on_the_new_agent() {
         let mut app = app_on_lane_7().await;
@@ -6041,6 +6052,7 @@ mod tests {
         assert_eq!(app.selected_window().as_deref(), Some("lane-7-2"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn spawn_focus_intent_expires_only_after_sustained_refreshes() {
         let mut app = app_on_lane_7().await;
@@ -6063,6 +6075,7 @@ mod tests {
         assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn tab_during_the_spawn_gap_cancels_the_focus_intent() {
         let mut app = app_on_lane_7().await;

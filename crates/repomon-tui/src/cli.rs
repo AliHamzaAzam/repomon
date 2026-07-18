@@ -504,13 +504,11 @@ fn attach_tmux_target(target: &str) -> Result<()> {
     }
 }
 
-/// A fresh 32-byte hex bearer token from the OS entropy pool (no extra deps).
+/// A fresh 32-byte hex bearer token from the OS entropy pool (`getrandom`, portable across
+/// unix and Windows).
 fn generate_token() -> String {
     let mut buf = [0u8; 32];
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("read /dev/urandom");
+    getrandom::fill(&mut buf).expect("OS entropy source");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

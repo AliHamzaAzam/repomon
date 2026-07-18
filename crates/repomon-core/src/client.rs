@@ -22,17 +22,24 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::protocol::{Notification, Request, Response, read_frame, write_frame};
+use crate::protocol::{Notification, Request, Response};
+#[cfg(unix)]
+use crate::protocol::{read_frame, write_frame};
 
 /// Keepalive cadence. Must stay comfortably under the daemon's 120s idle-connection reaper so an
 /// otherwise-silent client (e.g. the MCP bridge, which mostly just receives events) is never reaped.
@@ -50,6 +57,9 @@ pub struct DaemonClient {
     inner: Arc<Inner>,
 }
 
+// On Windows the connect/reconnect paths are stubbed out until the named-pipe transport lands,
+// so some fields (`path`, `epoch`) are only read by unix-gated code.
+#[cfg_attr(windows, allow(dead_code))]
 struct Inner {
     path: PathBuf,
     pending: Pending,
@@ -83,6 +93,18 @@ impl DaemonClient {
         Self::connect_inner(path, Some(KEEPALIVE_INTERVAL)).await
     }
 
+    /// Windows stub until the named-pipe transport lands (next PR in this track): connecting is
+    /// not yet possible, so every entry point fails with a clear error instead of failing to
+    /// compile the whole workspace.
+    #[cfg(windows)]
+    async fn connect_inner(path: &Path, _keepalive: Option<Duration>) -> Result<Self> {
+        Err(anyhow!(
+            "connecting to the daemon at {} is not yet supported on Windows (the named-pipe transport lands in a follow-up PR)",
+            path.display()
+        ))
+    }
+
+    #[cfg(unix)]
     async fn connect_inner(path: &Path, keepalive: Option<Duration>) -> Result<Self> {
         let stream = UnixStream::connect(path)
             .await
@@ -193,6 +215,7 @@ impl DaemonClient {
 impl Inner {
     /// Spawn the reader + writer tasks for `stream`, install its outbound channel, and mark the
     /// connection live. Reused for the initial connect and every reconnect.
+    #[cfg(unix)]
     fn spawn_io(self: &Arc<Self>, stream: UnixStream) {
         let (mut rd, mut wr) = stream.into_split();
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -239,8 +262,18 @@ impl Inner {
         });
     }
 
+    /// Windows stub until the named-pipe transport lands: see [`DaemonClient::connect_inner`].
+    #[cfg(windows)]
+    async fn reconnect(self: &Arc<Self>) -> Result<()> {
+        Err(anyhow!(
+            "reconnecting to the daemon at {} is not yet supported on Windows (the named-pipe transport lands in a follow-up PR)",
+            self.path.display()
+        ))
+    }
+
     /// Re-establish the connection. Serialized so concurrent callers open one socket; a no-op if
     /// another caller already reconnected.
+    #[cfg(unix)]
     async fn reconnect(self: &Arc<Self>) -> Result<()> {
         let _guard = self.reconnecting.lock().await;
         if self.connected.load(Ordering::SeqCst) {
@@ -286,6 +319,7 @@ impl Inner {
 
 /// Keepalive: ping under the daemon's idle reaper so a quiet client is never dropped. Exits when
 /// the last `DaemonClient` is dropped (the `Weak` stops upgrading).
+#[cfg(unix)]
 async fn keepalive_loop(weak: Weak<Inner>, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -299,7 +333,8 @@ async fn keepalive_loop(weak: Weak<Inner>, interval: Duration) {
     }
 }
 
-#[cfg(test)]
+// Unix-only until the client is generic over the IPC transport (next PR in this track).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::protocol::write_message;

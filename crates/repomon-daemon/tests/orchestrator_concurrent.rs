@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! Two `orchestrator.start` calls racing on separate connections must resolve to a single
 //! orchestrator: one spawn, both responses describing the same session. Before the handler held
 //! the session lock across its check → spawn → record sequence, the second caller could observe
