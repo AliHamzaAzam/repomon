@@ -127,9 +127,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shim.cmd"), "@echo off\r\n").unwrap();
         let path_var = std::env::join_paths([dir.path()]).unwrap();
-        assert_eq!(
-            find_in(&path_var, "shim"),
-            Some(dir.path().join("shim.cmd"))
+        // PATHEXT candidates carry the list's (upper)case; NTFS matches case-insensitively,
+        // so compare the same way instead of pinning the extension's case.
+        let found = find_in(&path_var, "shim").expect("shim.cmd is found via PATHEXT");
+        let want = dir.path().join("shim.cmd");
+        assert!(
+            found
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&want.to_string_lossy()),
+            "found {found:?}, want (case-insensitive) {want:?}"
         );
     }
 
