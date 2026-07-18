@@ -32,6 +32,7 @@ globset = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 repomon-host = { path = "../repomon-host" }
 base64 = { workspace = true }
+tauri-winrt-notification = "0.8"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_IO",
