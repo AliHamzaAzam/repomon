@@ -5527,9 +5527,49 @@ fn write_clipboard_png(path: &std::path::Path) -> bool {
     String::from_utf8_lossy(&out.stdout).trim() == "ok"
 }
 
+/// A PowerShell single-quoted string literal: embedded single quotes double, nothing else
+/// is special (unlike double quotes, no `$`/backtick expansion of the path).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ps_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The Windows PowerShell script that saves the clipboard's image to `path` as PNG.
+/// `Get-Clipboard -Format Image` is Windows PowerShell 5.1 syntax (repomon-core's argv
+/// builder always invokes `powershell`, never `pwsh`, which dropped `-Format`). Exits 1
+/// when the clipboard holds no image, matching the wl-paste/xclip contract.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_clipboard_png_script(path: &str) -> String {
+    format!(
+        "Add-Type -AssemblyName System.Drawing;\
+         $img = Get-Clipboard -Format Image;\
+         if ($null -eq $img) {{ exit 1 }};\
+         $img.Save({}, [System.Drawing.Imaging.ImageFormat]::Png)",
+        ps_single_quote(path)
+    )
+}
+
+/// Write the clipboard's image to `path` as PNG via `(Get-Clipboard -Format Image).Save(...)`.
+#[cfg(windows)]
+fn write_clipboard_png(path: &std::path::Path) -> bool {
+    use std::process::{Command, Stdio};
+    let argv = repomon_core::clipboard::windows_powershell_argv(&windows_clipboard_png_script(
+        &path.to_string_lossy(),
+    ));
+    Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && path.exists()
+}
+
 /// Write the clipboard's image to `path` as PNG. Tries `wl-paste`, then `xclip`; both exit
 /// non-zero when the clipboard holds no image target.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn write_clipboard_png(path: &std::path::Path) -> bool {
     use std::process::{Command, Stdio};
     let candidates: [&[&str]; 2] = [
@@ -5652,6 +5692,28 @@ mod tests {
         // No target → no attach.
         assert!(AttachSpec::from_response(&serde_json::json!({ "target": "" })).is_none());
         assert!(AttachSpec::from_response(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn ps_single_quote_doubles_embedded_quotes() {
+        assert_eq!(
+            ps_single_quote(r"C:\Users\me\tmp.png"),
+            r"'C:\Users\me\tmp.png'"
+        );
+        assert_eq!(ps_single_quote("o'brien.png"), "'o''brien.png'");
+        assert_eq!(ps_single_quote(""), "''");
+    }
+
+    #[test]
+    fn windows_clipboard_png_script_saves_clipboard_image_to_the_quoted_path() {
+        let script = windows_clipboard_png_script(r"C:\t\a'b.png");
+        // Windows PowerShell 5.1 syntax (pwsh 7 dropped -Format Image).
+        assert!(script.contains("Get-Clipboard -Format Image"));
+        // No image on the clipboard must exit non-zero, like wl-paste/xclip do.
+        assert!(script.contains("exit 1"));
+        // PNG output at the single-quoted (escaped) path.
+        assert!(script.contains(r"'C:\t\a''b.png'"));
+        assert!(script.contains("ImageFormat]::Png"));
     }
 
     #[test]
