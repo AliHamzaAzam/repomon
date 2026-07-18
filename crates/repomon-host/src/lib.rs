@@ -10,6 +10,7 @@
 //! ConPTY spawn, the named-pipe server, and the pipe DACL are `cfg(windows)`.
 
 pub mod codec;
+pub mod dispatch;
 pub mod keys;
 pub mod protocol;
 pub mod registry;
