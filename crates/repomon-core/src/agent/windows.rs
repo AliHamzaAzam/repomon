@@ -489,7 +489,7 @@ mod host_backend {
                     }
                 }
             }
-            live.sort_by(|a, b| a.hello.started_at.cmp(&b.hello.started_at));
+            live.sort_by_key(|a| a.hello.started_at);
             live
         }
 
