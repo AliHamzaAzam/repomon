@@ -9,6 +9,8 @@
 //! Everything protocol- and screen-shaped is cross-platform and tested on every OS; only the
 //! ConPTY spawn, the named-pipe server, and the pipe DACL are `cfg(windows)`.
 
+pub mod codec;
+
 /// Real entry point on Windows (the non-Windows binary is a hard stub).
 #[cfg(windows)]
 pub fn windows_main() -> std::process::ExitCode {
