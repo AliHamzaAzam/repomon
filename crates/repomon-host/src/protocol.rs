@@ -27,11 +27,23 @@ pub enum Op {
     Cursor,
     Size,
     AlternateOn,
-    Resize { cols: u16, rows: u16 },
-    SendLiteral { text: String },
-    SendText { text: String },
-    SendKey { key: String },
-    ScrollWheel { up: bool, ticks: u32 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    SendLiteral {
+        text: String,
+    },
+    SendText {
+        text: String,
+    },
+    SendKey {
+        key: String,
+    },
+    ScrollWheel {
+        up: bool,
+        ticks: u32,
+    },
     SubscribeBytes,
     Kill,
 }
@@ -108,7 +120,10 @@ impl Response {
     }
 
     pub fn err(id: u64, message: impl Into<String>) -> ErrResponse {
-        ErrResponse { id, err: message.into() }
+        ErrResponse {
+            id,
+            err: message.into(),
+        }
     }
 }
 
@@ -146,7 +161,10 @@ pub fn parse_request(payload: &[u8]) -> Result<Request, ParseError> {
             let id = serde_json::from_slice::<serde_json::Value>(payload)
                 .ok()
                 .and_then(|v| v.get("id").and_then(serde_json::Value::as_u64));
-            Err(ParseError { id, message: e.to_string() })
+            Err(ParseError {
+                id,
+                message: e.to_string(),
+            })
         }
     }
 }
@@ -162,37 +180,102 @@ mod tests {
     #[test]
     fn request_wire_shapes_are_frozen() {
         let cases: Vec<(Request, &str)> = vec![
-            (Request { id: 1, op: Op::Hello }, r#"{"id":1,"op":"hello"}"#),
             (
-                Request { id: 2, op: Op::Capture { lines: Some(500) } },
+                Request {
+                    id: 1,
+                    op: Op::Hello,
+                },
+                r#"{"id":1,"op":"hello"}"#,
+            ),
+            (
+                Request {
+                    id: 2,
+                    op: Op::Capture { lines: Some(500) },
+                },
                 r#"{"id":2,"op":"capture","lines":500}"#,
             ),
-            (Request { id: 2, op: Op::Capture { lines: None } }, r#"{"id":2,"op":"capture"}"#),
-            (Request { id: 3, op: Op::Cursor }, r#"{"id":3,"op":"cursor"}"#),
-            (Request { id: 4, op: Op::Size }, r#"{"id":4,"op":"size"}"#),
-            (Request { id: 5, op: Op::AlternateOn }, r#"{"id":5,"op":"alternate_on"}"#),
             (
-                Request { id: 6, op: Op::Resize { cols: 190, rows: 45 } },
+                Request {
+                    id: 2,
+                    op: Op::Capture { lines: None },
+                },
+                r#"{"id":2,"op":"capture"}"#,
+            ),
+            (
+                Request {
+                    id: 3,
+                    op: Op::Cursor,
+                },
+                r#"{"id":3,"op":"cursor"}"#,
+            ),
+            (
+                Request {
+                    id: 4,
+                    op: Op::Size,
+                },
+                r#"{"id":4,"op":"size"}"#,
+            ),
+            (
+                Request {
+                    id: 5,
+                    op: Op::AlternateOn,
+                },
+                r#"{"id":5,"op":"alternate_on"}"#,
+            ),
+            (
+                Request {
+                    id: 6,
+                    op: Op::Resize {
+                        cols: 190,
+                        rows: 45,
+                    },
+                },
                 r#"{"id":6,"op":"resize","cols":190,"rows":45}"#,
             ),
             (
-                Request { id: 7, op: Op::SendLiteral { text: "y".into() } },
+                Request {
+                    id: 7,
+                    op: Op::SendLiteral { text: "y".into() },
+                },
                 r#"{"id":7,"op":"send_literal","text":"y"}"#,
             ),
             (
-                Request { id: 8, op: Op::SendText { text: "continue".into() } },
+                Request {
+                    id: 8,
+                    op: Op::SendText {
+                        text: "continue".into(),
+                    },
+                },
                 r#"{"id":8,"op":"send_text","text":"continue"}"#,
             ),
             (
-                Request { id: 9, op: Op::SendKey { key: "C-c".into() } },
+                Request {
+                    id: 9,
+                    op: Op::SendKey { key: "C-c".into() },
+                },
                 r#"{"id":9,"op":"send_key","key":"C-c"}"#,
             ),
             (
-                Request { id: 10, op: Op::ScrollWheel { up: true, ticks: 3 } },
+                Request {
+                    id: 10,
+                    op: Op::ScrollWheel { up: true, ticks: 3 },
+                },
                 r#"{"id":10,"op":"scroll_wheel","up":true,"ticks":3}"#,
             ),
-            (Request { id: 11, op: Op::SubscribeBytes }, r#"{"id":11,"op":"subscribe_bytes"}"#),
-            (Request { id: 12, op: Op::Kill }, r#"{"id":12,"op":"kill"}"#),
+            (
+                Request {
+                    id: 11,
+                    op: Op::SubscribeBytes,
+                },
+                r#"{"id":11,"op":"subscribe_bytes"}"#,
+            ),
+            (
+                Request {
+                    id: 12,
+                    op: Op::Kill,
+                },
+                r#"{"id":12,"op":"kill"}"#,
+            ),
         ];
         for (req, golden) in cases {
             assert_eq!(to_json(&req), golden);
@@ -228,11 +311,24 @@ mod tests {
             r#"{"id":2,"ok":{"text":"hi"}}"#
         );
         assert_eq!(
-            to_json(&Response::ok(3, &CursorOk { col: 12, row: 4, visible: true })),
+            to_json(&Response::ok(
+                3,
+                &CursorOk {
+                    col: 12,
+                    row: 4,
+                    visible: true
+                }
+            )),
             r#"{"id":3,"ok":{"col":12,"row":4,"visible":true}}"#
         );
         assert_eq!(
-            to_json(&Response::ok(4, &SizeOk { cols: 220, rows: 50 })),
+            to_json(&Response::ok(
+                4,
+                &SizeOk {
+                    cols: 220,
+                    rows: 50
+                }
+            )),
             r#"{"id":4,"ok":{"cols":220,"rows":50}}"#
         );
         assert_eq!(
@@ -265,7 +361,13 @@ mod tests {
     fn unknown_fields_are_ignored() {
         // Additive-extension rule: peers must ignore fields they don't know.
         let req = parse_request(br#"{"id":4,"op":"size","future_hint":true}"#).unwrap();
-        assert_eq!(req, Request { id: 4, op: Op::Size });
+        assert_eq!(
+            req,
+            Request {
+                id: 4,
+                op: Op::Size
+            }
+        );
     }
 
     #[test]

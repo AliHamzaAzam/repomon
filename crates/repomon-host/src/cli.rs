@@ -47,18 +47,32 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<HostArgs, clap::Error> {
-        HostArgs::try_parse_from(
-            std::iter::once("repomon-agent-host").chain(args.iter().copied()),
-        )
+        HostArgs::try_parse_from(std::iter::once("repomon-agent-host").chain(args.iter().copied()))
     }
 
     #[test]
     fn full_spawn_line_parses() {
         let a = parse(&[
-            "--session", "repomon", "--window", "lane-3-1", "--cwd", "C:\\work",
-            "--owner", "tok", "--cols", "190", "--rows", "45",
-            "--env", "FOO=bar", "--env", "BAZ=qux=quux",
-            "--", "claude", "--permission-mode", "plan",
+            "--session",
+            "repomon",
+            "--window",
+            "lane-3-1",
+            "--cwd",
+            "C:\\work",
+            "--owner",
+            "tok",
+            "--cols",
+            "190",
+            "--rows",
+            "45",
+            "--env",
+            "FOO=bar",
+            "--env",
+            "BAZ=qux=quux",
+            "--",
+            "claude",
+            "--permission-mode",
+            "plan",
         ])
         .unwrap();
         assert_eq!(a.session, "repomon");
@@ -68,7 +82,10 @@ mod tests {
         assert_eq!((a.cols, a.rows), (190, 45));
         assert_eq!(
             a.env,
-            vec![("FOO".to_string(), "bar".to_string()), ("BAZ".to_string(), "qux=quux".to_string())],
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("BAZ".to_string(), "qux=quux".to_string())
+            ],
             "value may contain '='"
         );
         assert_eq!(a.command, vec!["claude", "--permission-mode", "plan"]);
@@ -76,7 +93,17 @@ mod tests {
 
     #[test]
     fn size_defaults_to_tmux_parity_220_by_50() {
-        let a = parse(&["--session", "s", "--window", "w", "--cwd", "/x", "--", "cmd.exe"]).unwrap();
+        let a = parse(&[
+            "--session",
+            "s",
+            "--window",
+            "w",
+            "--cwd",
+            "/x",
+            "--",
+            "cmd.exe",
+        ])
+        .unwrap();
         assert_eq!((a.cols, a.rows), (220, 50));
         assert_eq!(a.owner, None);
         assert!(a.env.is_empty());
@@ -91,7 +118,16 @@ mod tests {
     #[test]
     fn env_without_equals_is_rejected() {
         let r = parse(&[
-            "--session", "s", "--window", "w", "--cwd", "/x", "--env", "NOEQUALS", "--", "cmd",
+            "--session",
+            "s",
+            "--window",
+            "w",
+            "--cwd",
+            "/x",
+            "--env",
+            "NOEQUALS",
+            "--",
+            "cmd",
         ]);
         assert!(r.is_err());
     }

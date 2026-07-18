@@ -5,9 +5,7 @@
 
 use serde::Serialize;
 
-use crate::protocol::{
-    self, AlternateOk, CaptureOk, CursorOk, HelloInfo, Op, Response, SizeOk,
-};
+use crate::protocol::{self, AlternateOk, CaptureOk, CursorOk, HelloInfo, Op, Response, SizeOk};
 use crate::screen::Screen;
 
 /// The PTY side of an op, as the dispatcher sees it. The Windows server implements this
@@ -54,7 +52,12 @@ pub struct Dispatcher {
 impl Dispatcher {
     pub fn new(meta: HostMeta, screen: Screen, pty: Box<dyn PtyIo>) -> Self {
         let last_activity = meta.started_at;
-        Self { meta, screen, pty, last_activity }
+        Self {
+            meta,
+            screen,
+            pty,
+            last_activity,
+        }
     }
 
     /// Feed a chunk of PTY output (`now` = epoch seconds), tmux `#{window_activity}` parity.
@@ -74,7 +77,10 @@ impl Dispatcher {
         let req = match protocol::parse_request(payload) {
             Ok(req) => req,
             Err(e) => {
-                return (to_vec(&Response::err(e.id.unwrap_or(0), e.message)), Effect::None);
+                return (
+                    to_vec(&Response::err(e.id.unwrap_or(0), e.message)),
+                    Effect::None,
+                );
             }
         };
         let id = req.id;
@@ -99,19 +105,35 @@ impl Dispatcher {
                 Effect::None,
             ),
             Op::Capture { lines } => (
-                to_vec(&Response::ok(id, &CaptureOk { text: self.screen.capture(lines) })),
+                to_vec(&Response::ok(
+                    id,
+                    &CaptureOk {
+                        text: self.screen.capture(lines),
+                    },
+                )),
                 Effect::None,
             ),
             Op::Cursor => {
                 let (col, row, visible) = self.screen.cursor();
-                (to_vec(&Response::ok(id, &CursorOk { col, row, visible })), Effect::None)
+                (
+                    to_vec(&Response::ok(id, &CursorOk { col, row, visible })),
+                    Effect::None,
+                )
             }
             Op::Size => {
                 let (cols, rows) = self.screen.size();
-                (to_vec(&Response::ok(id, &SizeOk { cols, rows })), Effect::None)
+                (
+                    to_vec(&Response::ok(id, &SizeOk { cols, rows })),
+                    Effect::None,
+                )
             }
             Op::AlternateOn => (
-                to_vec(&Response::ok(id, &AlternateOk { on: self.screen.alternate_on() })),
+                to_vec(&Response::ok(
+                    id,
+                    &AlternateOk {
+                        on: self.screen.alternate_on(),
+                    },
+                )),
                 Effect::None,
             ),
             Op::Resize { cols, rows } => match self.pty.resize(cols, rows) {
@@ -120,7 +142,10 @@ impl Dispatcher {
                     self.screen.resize(cols, rows);
                     (to_vec(&Response::empty_ok(id)), Effect::None)
                 }
-                Err(e) => (to_vec(&Response::err(id, format!("resize: {e:#}"))), Effect::None),
+                Err(e) => (
+                    to_vec(&Response::err(id, format!("resize: {e:#}"))),
+                    Effect::None,
+                ),
             },
             Op::SendLiteral { text } => (self.write_ok(id, text.as_bytes()), Effect::None),
             Op::SendText { text } => {
@@ -130,7 +155,10 @@ impl Dispatcher {
             }
             Op::SendKey { key } => match crate::keys::key_to_bytes(&key) {
                 Some(bytes) => (self.write_ok(id, &bytes), Effect::None),
-                None => (to_vec(&Response::err(id, format!("unknown key {key:?}"))), Effect::None),
+                None => (
+                    to_vec(&Response::err(id, format!("unknown key {key:?}"))),
+                    Effect::None,
+                ),
             },
             Op::ScrollWheel { up, ticks } => {
                 if ticks == 0 {
@@ -144,7 +172,10 @@ impl Dispatcher {
             Op::SubscribeBytes => (to_vec(&Response::empty_ok(id)), Effect::StartStream),
             Op::Kill => match self.pty.kill() {
                 Ok(()) => (to_vec(&Response::empty_ok(id)), Effect::Shutdown),
-                Err(e) => (to_vec(&Response::err(id, format!("kill: {e:#}"))), Effect::Shutdown),
+                Err(e) => (
+                    to_vec(&Response::err(id, format!("kill: {e:#}"))),
+                    Effect::Shutdown,
+                ),
             },
         };
         (payload, effect)
@@ -182,7 +213,10 @@ mod tests {
 
     impl PtyIo for FakePty {
         fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(PtyCall::Write(bytes.to_vec()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(PtyCall::Write(bytes.to_vec()));
             Ok(())
         }
         fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
@@ -208,7 +242,10 @@ mod tests {
             owner: "tok123".into(),
             started_at: 40,
         };
-        (Dispatcher::new(meta, crate::screen::Screen::new(80, 24), Box::new(pty)), calls)
+        (
+            Dispatcher::new(meta, crate::screen::Screen::new(80, 24), Box::new(pty)),
+            calls,
+        )
     }
 
     fn handle(d: &mut Dispatcher, req: &str) -> (serde_json::Value, Effect) {
@@ -251,10 +288,16 @@ mod tests {
         let (v, _) = handle(&mut d, r#"{"id":2,"op":"capture"}"#);
         assert!(v["ok"]["text"].as_str().unwrap().starts_with("hi there"));
         let (v, _) = handle(&mut d, r#"{"id":3,"op":"cursor"}"#);
-        assert_eq!((v["ok"]["col"].as_u64(), v["ok"]["row"].as_u64()), (Some(8), Some(0)));
+        assert_eq!(
+            (v["ok"]["col"].as_u64(), v["ok"]["row"].as_u64()),
+            (Some(8), Some(0))
+        );
         assert_eq!(v["ok"]["visible"], true);
         let (v, _) = handle(&mut d, r#"{"id":4,"op":"size"}"#);
-        assert_eq!((v["ok"]["cols"].as_u64(), v["ok"]["rows"].as_u64()), (Some(80), Some(24)));
+        assert_eq!(
+            (v["ok"]["cols"].as_u64(), v["ok"]["rows"].as_u64()),
+            (Some(80), Some(24))
+        );
         let (v, _) = handle(&mut d, r#"{"id":5,"op":"alternate_on"}"#);
         assert_eq!(v["ok"]["on"], false);
     }
@@ -264,23 +307,35 @@ mod tests {
         let (mut d, calls) = dispatcher();
         let (v, _) = handle(&mut d, r#"{"id":6,"op":"resize","cols":100,"rows":30}"#);
         assert_eq!(v["ok"], serde_json::json!({}));
-        assert_eq!(calls.lock().unwrap().as_slice(), &[PtyCall::Resize(100, 30)]);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Resize(100, 30)]
+        );
         let (v, _) = handle(&mut d, r#"{"id":7,"op":"size"}"#);
-        assert_eq!((v["ok"]["cols"].as_u64(), v["ok"]["rows"].as_u64()), (Some(100), Some(30)));
+        assert_eq!(
+            (v["ok"]["cols"].as_u64(), v["ok"]["rows"].as_u64()),
+            (Some(100), Some(30))
+        );
     }
 
     #[test]
     fn send_literal_writes_exact_bytes() {
         let (mut d, calls) = dispatcher();
         handle(&mut d, r#"{"id":7,"op":"send_literal","text":"y"}"#);
-        assert_eq!(calls.lock().unwrap().as_slice(), &[PtyCall::Write(b"y".to_vec())]);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Write(b"y".to_vec())]
+        );
     }
 
     #[test]
     fn send_text_appends_carriage_return() {
         let (mut d, calls) = dispatcher();
         handle(&mut d, r#"{"id":8,"op":"send_text","text":"continue"}"#);
-        assert_eq!(calls.lock().unwrap().as_slice(), &[PtyCall::Write(b"continue\r".to_vec())]);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Write(b"continue\r".to_vec())]
+        );
     }
 
     #[test]
@@ -288,19 +343,35 @@ mod tests {
         let (mut d, calls) = dispatcher();
         let (v, _) = handle(&mut d, r#"{"id":9,"op":"send_key","key":"C-c"}"#);
         assert_eq!(v["ok"], serde_json::json!({}));
-        assert_eq!(calls.lock().unwrap().as_slice(), &[PtyCall::Write(vec![0x03])]);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PtyCall::Write(vec![0x03])]
+        );
 
         let (v, _) = handle(&mut d, r#"{"id":10,"op":"send_key","key":"Fnord"}"#);
         assert!(v["err"].as_str().unwrap().contains("Fnord"));
-        assert_eq!(calls.lock().unwrap().len(), 1, "no write for an unknown key");
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "no write for an unknown key"
+        );
     }
 
     #[test]
     fn scroll_wheel_writes_sgr_sequences() {
         let (mut d, calls) = dispatcher();
-        handle(&mut d, r#"{"id":11,"op":"scroll_wheel","up":true,"ticks":2}"#);
-        handle(&mut d, r#"{"id":12,"op":"scroll_wheel","up":false,"ticks":1}"#);
-        handle(&mut d, r#"{"id":13,"op":"scroll_wheel","up":true,"ticks":0}"#);
+        handle(
+            &mut d,
+            r#"{"id":11,"op":"scroll_wheel","up":true,"ticks":2}"#,
+        );
+        handle(
+            &mut d,
+            r#"{"id":12,"op":"scroll_wheel","up":false,"ticks":1}"#,
+        );
+        handle(
+            &mut d,
+            r#"{"id":13,"op":"scroll_wheel","up":true,"ticks":0}"#,
+        );
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[

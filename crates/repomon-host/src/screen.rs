@@ -17,7 +17,9 @@ pub struct Screen {
 
 impl Screen {
     pub fn new(cols: u16, rows: u16) -> Self {
-        Self { parser: vt100::Parser::new(rows, cols, HISTORY_LIMIT) }
+        Self {
+            parser: vt100::Parser::new(rows, cols, HISTORY_LIMIT),
+        }
     }
 
     /// Feed raw PTY output bytes.
@@ -40,7 +42,12 @@ impl Screen {
             // live screen.
             for k in (1..=take).rev() {
                 self.parser.set_scrollback(k);
-                let row = self.parser.screen().rows_formatted(0, cols).next().unwrap_or_default();
+                let row = self
+                    .parser
+                    .screen()
+                    .rows_formatted(0, cols)
+                    .next()
+                    .unwrap_or_default();
                 out.push(String::from_utf8_lossy(&row).into_owned());
             }
         }
@@ -117,14 +124,20 @@ mod tests {
         }
         // 31 rows used (trailing prompt row) on a 24-row screen → 7 rows of scrollback.
         let visible = s.capture(None);
-        assert!(!visible.contains("line-0"), "line-0 scrolled out: {visible:?}");
+        assert!(
+            !visible.contains("line-0"),
+            "line-0 scrolled out: {visible:?}"
+        );
 
         let with_history = s.capture(Some(10));
         let lines: Vec<&str> = with_history.split('\n').collect();
         assert_eq!(lines.len(), 24 + 7, "clamped to available scrollback");
         assert_eq!(lines[0], "line-0");
         assert_eq!(lines[6], "line-6");
-        assert_eq!(lines[7], "line-7", "visible screen follows history seamlessly");
+        assert_eq!(
+            lines[7], "line-7",
+            "visible screen follows history seamlessly"
+        );
 
         // Asking for less history than available takes the newest rows.
         let two = s.capture(Some(2));
@@ -142,7 +155,10 @@ mod tests {
         let _ = s.capture(Some(5));
         // A later plain capture must see the live (bottom) view, not a scrolled one.
         let visible = s.capture(None);
-        assert!(visible.contains("line-29"), "back at the live view: {visible:?}");
+        assert!(
+            visible.contains("line-29"),
+            "back at the live view: {visible:?}"
+        );
     }
 
     #[test]
@@ -151,7 +167,7 @@ mod tests {
         s.process(b"abc");
         assert_eq!(s.cursor(), (3, 0, true), "(col, row, visible)");
         s.process(b"\x1b[?25l");
-        assert_eq!(s.cursor().2, false, "hidden cursor reports visible=false");
+        assert!(!s.cursor().2, "hidden cursor reports visible=false");
         s.process(b"\x1b[?25h\x1b[5;11H");
         assert_eq!(s.cursor(), (10, 4, true), "0-based col/row");
     }
@@ -185,7 +201,11 @@ mod tests {
         fresh.process(&replay);
         let (orig, copy) = (s.parser.screen(), fresh.screen());
         assert_eq!(copy.contents(), orig.contents(), "text converges");
-        assert_eq!(copy.cursor_position(), orig.cursor_position(), "cursor converges");
+        assert_eq!(
+            copy.cursor_position(),
+            orig.cursor_position(),
+            "cursor converges"
+        );
         assert_eq!(
             copy.cell(1, 2).unwrap().fgcolor(),
             orig.cell(1, 2).unwrap().fgcolor(),

@@ -10,7 +10,11 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// Wrap a JSON payload in the wire framing: 4-byte little-endian length + payload.
 pub fn encode_frame(json: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + json.len());
-    out.extend_from_slice(&u32::try_from(json.len()).expect("frame length fits u32").to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(json.len())
+            .expect("frame length fits u32")
+            .to_le_bytes(),
+    );
     out.extend_from_slice(json);
     out
 }
@@ -55,7 +59,11 @@ pub struct FrameTooLarge(pub usize);
 
 impl std::fmt::Display for FrameTooLarge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "frame of {} bytes exceeds the {MAX_FRAME}-byte limit", self.0)
+        write!(
+            f,
+            "frame of {} bytes exceeds the {MAX_FRAME}-byte limit",
+            self.0
+        )
     }
 }
 
@@ -91,10 +99,17 @@ mod tests {
         for (i, b) in frame.iter().enumerate() {
             dec.extend(&[*b]);
             if i < frame.len() - 1 {
-                assert_eq!(dec.next_frame().unwrap(), None, "premature frame at byte {i}");
+                assert_eq!(
+                    dec.next_frame().unwrap(),
+                    None,
+                    "premature frame at byte {i}"
+                );
             }
         }
-        assert_eq!(dec.next_frame().unwrap().as_deref(), Some(b"{\"id\":2}".as_slice()));
+        assert_eq!(
+            dec.next_frame().unwrap().as_deref(),
+            Some(b"{\"id\":2}".as_slice())
+        );
     }
 
     #[test]
@@ -103,8 +118,14 @@ mod tests {
         bytes.extend_from_slice(&encode_frame(b"{\"id\":2}"));
         let mut dec = FrameDecoder::new();
         dec.extend(&bytes);
-        assert_eq!(dec.next_frame().unwrap().as_deref(), Some(b"{\"id\":1}".as_slice()));
-        assert_eq!(dec.next_frame().unwrap().as_deref(), Some(b"{\"id\":2}".as_slice()));
+        assert_eq!(
+            dec.next_frame().unwrap().as_deref(),
+            Some(b"{\"id\":1}".as_slice())
+        );
+        assert_eq!(
+            dec.next_frame().unwrap().as_deref(),
+            Some(b"{\"id\":2}".as_slice())
+        );
         assert_eq!(dec.next_frame().unwrap(), None);
     }
 

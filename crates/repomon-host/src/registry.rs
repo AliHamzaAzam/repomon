@@ -32,7 +32,10 @@ pub fn pipe_name(session: &str, window: &str) -> String {
 
 /// `<data_dir>\hosts\<session>\<window>.json` (PROTOCOL.md §8).
 pub fn registry_path(data_dir: &Path, session: &str, window: &str) -> PathBuf {
-    data_dir.join("hosts").join(session).join(format!("{window}.json"))
+    data_dir
+        .join("hosts")
+        .join(session)
+        .join(format!("{window}.json"))
 }
 
 /// repomon's data dir, mirroring `repomon_core::config::data_dir()` exactly (the host must
@@ -57,7 +60,10 @@ fn data_dir_from(override_var: Option<String>) -> PathBuf {
 /// directories. A crash can leave a `.tmp` file but never a torn JSON.
 pub fn write_atomic(path: &Path, entry: &RegistryEntry) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "registry path has no parent")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "registry path has no parent",
+        )
     })?;
     std::fs::create_dir_all(parent)?;
     let json = serde_json::to_vec(entry).expect("registry entry serializes");
@@ -110,7 +116,10 @@ mod tests {
 
     #[test]
     fn pipe_name_matches_protocol() {
-        assert_eq!(pipe_name("repomon", "lane-3-1"), r"\\.\pipe\repomon-repomon-lane-3-1");
+        assert_eq!(
+            pipe_name("repomon", "lane-3-1"),
+            r"\\.\pipe\repomon-repomon-lane-3-1"
+        );
     }
 
     #[test]
@@ -118,7 +127,10 @@ mod tests {
         let p = registry_path(std::path::Path::new("/data"), "repomon", "lane-3-1");
         assert_eq!(
             p,
-            std::path::Path::new("/data").join("hosts").join("repomon").join("lane-3-1.json")
+            std::path::Path::new("/data")
+                .join("hosts")
+                .join("repomon")
+                .join("lane-3-1.json")
         );
     }
 
@@ -137,8 +149,7 @@ mod tests {
         let path = registry_path(dir.path(), &e.session, &e.window);
         write_atomic(&path, &e).unwrap();
 
-        let back: RegistryEntry =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let back: RegistryEntry = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back, e);
 
         // No temp litter next to the file.
@@ -158,7 +169,11 @@ mod tests {
         let with = data_dir_from(Some("C:\\override".into()));
         assert_eq!(with, std::path::PathBuf::from("C:\\override"));
         let empty = data_dir_from(Some(String::new()));
-        assert_ne!(empty, std::path::PathBuf::from(""), "empty override is ignored");
+        assert_ne!(
+            empty,
+            std::path::PathBuf::from(""),
+            "empty override is ignored"
+        );
     }
 
     #[test]

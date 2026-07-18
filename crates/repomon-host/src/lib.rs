@@ -17,9 +17,14 @@ pub mod protocol;
 pub mod registry;
 pub mod screen;
 
-/// Real entry point on Windows (the non-Windows binary is a hard stub).
 #[cfg(windows)]
-pub fn windows_main() -> std::process::ExitCode {
-    eprintln!("repomon-agent-host: not yet implemented");
-    std::process::ExitCode::FAILURE
-}
+pub mod dacl;
+#[cfg(windows)]
+pub mod pty;
+#[cfg(windows)]
+mod run;
+#[cfg(windows)]
+pub mod server;
+
+#[cfg(windows)]
+pub use run::windows_main;
