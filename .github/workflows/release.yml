@@ -76,16 +76,15 @@ jobs:
     # Runs on tag pushes AND on workflow_dispatch from any branch, so the Windows
     # packaging can be exercised before the release flow is finalized.
     #
-    # Draft status: both matrix legs are continue-on-error until the native Windows
-    # port (Tracks A/B/C) has merged and the workspace actually builds on
-    # x86_64-pc-windows-msvc. Wave 3 (Track G) flips the x86_64 leg to required.
-    # aarch64-pc-windows-msvc stays best-effort (stretch target).
+    # The native Windows port has landed and the workspace builds and tests green on
+    # x86_64-pc-windows-msvc, so that leg is required. aarch64-pc-windows-msvc stays
+    # best-effort (stretch target, allowed to fail).
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            experimental: true # TODO(Track G): flip to false once the Windows port lands
+            experimental: false
           - target: aarch64-pc-windows-msvc
             experimental: true # stretch target, allowed to fail
     continue-on-error: ${{ matrix.experimental }}
