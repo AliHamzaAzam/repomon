@@ -1,4 +1,5 @@
-//! Daemon service management (launchd on macOS, systemd user units on Linux).
+//! Daemon service management (launchd on macOS, systemd user units on Linux, a Task Scheduler
+//! logon task on Windows).
 //!
 //! Lives in `repomon-core` because the `repomon daemon …` subcommands run from the TUI
 //! binary and must drive install/start/stop without depending on the daemon crate. A
@@ -145,10 +146,12 @@ pub fn schtasks_args(op: TaskOp) -> Vec<&'static str> {
 /// The `schtasks /Create` argv registering the logon task (`/SC ONLOGON`; `/F` overwrites a
 /// stale registration, the parity of the launchd bootout-before-bootstrap dance).
 pub fn schtasks_create_args(task_run: &str) -> Vec<String> {
-    ["/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", task_run, "/F"]
-        .into_iter()
-        .map(String::from)
-        .collect()
+    [
+        "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", task_run, "/F",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 /// Extract the status field ("Ready", "Running", …) from `schtasks /Query /FO CSV /NH` output:
@@ -367,13 +370,82 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+mod platform {
+    use super::*;
+    use std::process::Command;
+
+    /// The task's path in the Task Scheduler library — no file on disk, but callers print it
+    /// after install the way the Unix arms print the plist/unit path.
+    pub fn service_file_path() -> PathBuf {
+        PathBuf::from(format!(r"\{TASK_NAME}"))
+    }
+
+    fn schtasks(args: &[&str]) -> Result<String> {
+        let out = Command::new("schtasks")
+            .args(args)
+            .output()
+            .map_err(Error::Io)?;
+        if !out.status.success() {
+            return Err(Error::Other(format!(
+                "schtasks {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn schtasks_op(op: TaskOp) -> Result<String> {
+        schtasks(&schtasks_args(op))
+    }
+
+    pub fn install(program: &Path, socket: &Path) -> Result<()> {
+        std::fs::create_dir_all(log_dir())?;
+        let run = task_run_command(program, socket);
+        let args = schtasks_create_args(&run);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        schtasks(&argv)?;
+        // Start it now too — parity with launchd bootstrap and `systemctl enable --now`.
+        schtasks_op(TaskOp::Run)?;
+        Ok(())
+    }
+
+    pub fn uninstall() -> Result<()> {
+        if schtasks_op(TaskOp::Query).is_err() {
+            // Not installed — nothing to do, like the Unix arms.
+            return Ok(());
+        }
+        let _ = schtasks_op(TaskOp::End);
+        schtasks_op(TaskOp::Delete)?;
+        Ok(())
+    }
+
+    pub fn start() -> Result<()> {
+        // End-then-run = start-or-restart, the parity of `launchctl kickstart -k`.
+        let _ = schtasks_op(TaskOp::End);
+        schtasks_op(TaskOp::Run).map(|_| ())
+    }
+
+    pub fn stop() -> Result<()> {
+        schtasks_op(TaskOp::End).map(|_| ())
+    }
+
+    pub fn status() -> Result<String> {
+        match schtasks_op(TaskOp::Query) {
+            Err(_) => Ok("not installed".to_string()),
+            Ok(out) => Ok(parse_query_status(&out).unwrap_or_else(|| "unknown".to_string())),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use super::*;
 
     fn unsupported() -> Error {
         Error::Other(
-            "service management is supported on macOS (launchd) and Linux (systemd user units)"
+            "service management is supported on macOS (launchd), Linux (systemd user units), and Windows (Task Scheduler)"
                 .into(),
         )
     }
@@ -409,7 +481,8 @@ pub fn log_file() -> PathBuf {
 pub fn repomond_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let cand = dir.join("repomond");
+            // EXE_SUFFIX is ".exe" on Windows and "" on Unix.
+            let cand = dir.join(format!("repomond{}", std::env::consts::EXE_SUFFIX));
             if cand.exists() {
                 return cand;
             }
