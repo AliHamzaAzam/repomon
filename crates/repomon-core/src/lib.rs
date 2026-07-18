@@ -27,6 +27,8 @@ pub mod traits;
 pub mod transport;
 pub mod watch;
 
+#[cfg(windows)]
+pub use agent::WindowsBackend;
 pub use agent::{AgentMonitor, ClaudeMonitor, SessionBackend, TmuxRuntime};
 pub use config::Config;
 pub use error::{Error, Result};
