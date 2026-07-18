@@ -13,6 +13,11 @@ use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
+// Lives in `src/attach_client.rs` (declared here to keep `lib.rs` untouched — it is a
+// cross-track conflict hotspot during the native-Windows waves).
+#[path = "attach_client.rs"]
+pub mod attach_client;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Register a repository.
@@ -63,6 +68,8 @@ pub enum Command {
         /// An initial goal to start repomind with (optional).
         prompt: Option<String>,
     },
+    /// (Windows) Attach this console to an agent host window — raw proxy; F12 detaches.
+    AttachHost { window: String },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
         /// Shell to generate completions for.
@@ -206,6 +213,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             model,
             prompt,
         } => handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt).await?,
+        Command::AttachHost { window } => attach_client::run(&config.tmux_session, &window).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
