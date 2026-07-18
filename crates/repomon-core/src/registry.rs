@@ -128,7 +128,8 @@ mod tests {
                 p.strip_prefix(root.canonicalize().unwrap())
                     .unwrap_or(p)
                     .to_string_lossy()
-                    .into_owned()
+                    // Normalize so the assertions below hold on Windows too.
+                    .replace('\\', "/")
             })
             .collect();
         assert!(names.iter().any(|n| n == "a"), "found {names:?}");
