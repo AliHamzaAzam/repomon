@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
@@ -10,7 +11,6 @@ use repomon_core::model::{
     CreateLaneParams, Lane, RemoteDevice, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
-use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
 use repomon_core::{Indexer, TmuxRuntime, analytics, session};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -1105,7 +1105,9 @@ pub async fn dispatch(
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
             let tmux = ctx.backend.clone();
-            let opts = CaptureOpts { last_lines: p.lines };
+            let opts = CaptureOpts {
+                last_lines: p.lines,
+            };
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
@@ -1226,7 +1228,8 @@ pub async fn dispatch(
                 }
             };
             for window in targets {
-                crate::bytes_stream::unwatch(&ctx.backend, &ctx.bytes_watches, &window, sess.id).await;
+                crate::bytes_stream::unwatch(&ctx.backend, &ctx.bytes_watches, &window, sess.id)
+                    .await;
                 sess.watched_bytes.lock().unwrap().remove(&window);
             }
             Ok(Value::Null)

@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use repomon_core::TmuxRuntime;
-use repomon_core::agent::{UsageLimit, detect_usage_limit, menu_select_keys};
 use repomon_core::agent::backend::CaptureOpts;
+use repomon_core::agent::{UsageLimit, detect_usage_limit, menu_select_keys};
 use repomon_core::model::LaneId;
 
 use crate::{Ctx, pubsub};
@@ -202,7 +202,9 @@ pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
         for (window, lane) in windows {
             let tmuxc = ctx.backend.clone();
             let win = window.clone();
-            let capture = tokio::task::spawn_blocking(move || tmuxc.capture_named(&win, CaptureOpts::last(120)));
+            let capture = tokio::task::spawn_blocking(move || {
+                tmuxc.capture_named(&win, CaptureOpts::last(120))
+            });
             // Bound the capture so one wedged pane can't freeze the serialized per-window scan
             // and stall auto-continue for every other agent. On timeout (or any error) skip this
             // window this tick and try again next time.

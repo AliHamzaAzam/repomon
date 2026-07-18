@@ -269,7 +269,9 @@ fn probe_once(
             break;
         }
         sleep(Duration::from_millis(500));
-        let pane = tmux.capture_named(window, CaptureOpts::visible()).unwrap_or_default();
+        let pane = tmux
+            .capture_named(window, CaptureOpts::visible())
+            .unwrap_or_default();
         match probe_state(&pane, spec) {
             ProbeState::Ready => {
                 ready = true;
@@ -301,7 +303,9 @@ fn probe_once(
                     break 'attempts;
                 }
                 sleep(Duration::from_millis(450));
-                let pane = tmux.capture_named(window, CaptureOpts::visible()).unwrap_or_default();
+                let pane = tmux
+                    .capture_named(window, CaptureOpts::visible())
+                    .unwrap_or_default();
                 if let Some(r) = (spec.parse)(&pane) {
                     report = Some(r);
                     break 'attempts;

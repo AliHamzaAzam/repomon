@@ -878,7 +878,10 @@ mod tests {
     fn renders_spawn_specs_to_sh_command_strings() {
         // Program alone passes through verbatim (it may be a user-configured shell fragment).
         let bare = SpawnSpec::new("env -u CLAUDE_CONFIG_DIR claude", "/tmp");
-        assert_eq!(render_spawn_command(&bare), "env -u CLAUDE_CONFIG_DIR claude");
+        assert_eq!(
+            render_spawn_command(&bare),
+            "env -u CLAUDE_CONFIG_DIR claude"
+        );
         // Args are single-quoted and appended — byte-identical to the old
         // `format!("{command} {}", shell_quote(task))` assembly.
         let with_task = SpawnSpec::new("claude", "/tmp").arg("fix the bug");
@@ -905,7 +908,10 @@ mod tests {
     #[test]
     fn backend_targets_match_the_inherent_formats() {
         let rt = TmuxRuntime::new("repomon");
-        assert_eq!(SessionBackend::target_named(&rt, "term-1-1"), "repomon:term-1-1");
+        assert_eq!(
+            SessionBackend::target_named(&rt, "term-1-1"),
+            "repomon:term-1-1"
+        );
         assert_eq!(rt.exact_target_named("lane-7"), "repomon:=lane-7");
         assert_eq!(SessionBackend::label(&rt), "repomon");
     }

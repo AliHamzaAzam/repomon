@@ -22,9 +22,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use repomon_core::agent::backend::{CaptureOpts, SessionBackend};
 use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
-use repomon_core::agent::backend::{CaptureOpts, SessionBackend};
 use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast};
@@ -269,7 +269,8 @@ impl Ctx {
     ) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
-        let backend: Arc<dyn SessionBackend> = Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
+        let backend: Arc<dyn SessionBackend> =
+            Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
         // Make any already-running session attach-native (mouse, clipboard, deep scrollback);
         // spawns reapply it, but an existing tmux server outlives a daemon restart.
         if backend.session_exists() {
@@ -542,9 +543,9 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             })
             .await
             {
-                    Ok(Ok(c)) => c,
-                    _ => continue,
-                };
+                Ok(Ok(c)) => c,
+                _ => continue,
+            };
             // Only the focused pane carries a cursor (the TUI renders it where you're typing) — one
             // extra tmux fork on a single pane, never on background/Grid tiles.
             let cursor = if is_focused {
