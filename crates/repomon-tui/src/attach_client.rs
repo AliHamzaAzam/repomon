@@ -57,7 +57,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Value>
         Err(e) => return Err(e.into()),
     }
     let len = u32::from_le_bytes(len);
-    ensure!(len <= MAX_FRAME, "frame length {len} exceeds 16 MiB — corrupt connection");
+    ensure!(
+        len <= MAX_FRAME,
+        "frame length {len} exceeds 16 MiB — corrupt connection"
+    );
     let mut payload = vec![0u8; len as usize];
     r.read_exact(&mut payload)
         .await
@@ -90,7 +93,10 @@ pub fn parse_response(v: &Value, id: u64) -> Result<Value> {
         .get("id")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("response without an id: {v}"))?;
-    ensure!(got == id, "response id {got} does not match request id {id}");
+    ensure!(
+        got == id,
+        "response id {got} does not match request id {id}"
+    );
     if let Some(err) = v.get("err").and_then(Value::as_str) {
         bail!("host error: {err}");
     }
@@ -693,7 +699,10 @@ mod tests {
             req_send_literal(7, "y"),
             json!({"id": 7, "op": "send_literal", "text": "y"})
         );
-        assert_eq!(req_subscribe(11), json!({"id": 11, "op": "subscribe_bytes"}));
+        assert_eq!(
+            req_subscribe(11),
+            json!({"id": 11, "op": "subscribe_bytes"})
+        );
     }
 
     // ---- response parsing (§5) ----
@@ -759,10 +768,7 @@ mod tests {
                 .is_err()
         );
         let mut st = StreamState::new(11);
-        assert!(
-            st.on_frame(&json!({"id": 11, "err": "nope"}))
-                .is_err()
-        );
+        assert!(st.on_frame(&json!({"id": 11, "err": "nope"})).is_err());
     }
 
     // ---- input scanner: raw VT stdin bytes -> send_literal actions + F12 detach ----

@@ -213,9 +213,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             model,
             prompt,
         } => handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt).await?,
-        Command::AttachHost { window } => {
-            attach_client::run(&config.tmux_session, &window).await?
-        }
+        Command::AttachHost { window } => attach_client::run(&config.tmux_session, &window).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
