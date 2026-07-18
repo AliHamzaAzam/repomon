@@ -109,6 +109,60 @@ pub fn systemctl_user_args(op: ServiceOp) -> Vec<&'static str> {
     }
 }
 
+/// The Task Scheduler task name (Windows twin of [`LABEL`] / [`UNIT_NAME`]).
+pub const TASK_NAME: &str = "RepomonDaemon";
+
+/// The `/TR` command line for the logon task: `"program" --socket "socket"`. Both sides are
+/// quoted so `C:\Program Files\…` paths and pipe names survive Task Scheduler's re-parse.
+pub fn task_run_command(program: &Path, socket: &Path) -> String {
+    format!(
+        r#""{program}" --socket "{socket}""#,
+        program = program.display(),
+        socket = socket.display(),
+    )
+}
+
+/// The operations `repomon daemon …` drives through `schtasks` (Windows twin of [`ServiceOp`]).
+pub enum TaskOp {
+    Delete,
+    Run,
+    End,
+    Query,
+}
+
+/// The `schtasks` argv for an operation — pure, so the shapes are testable on every platform.
+/// Query uses `/FO CSV /NH` because the status field's *position* is locale-independent even
+/// where `/FO LIST`'s labels are not.
+pub fn schtasks_args(op: TaskOp) -> Vec<&'static str> {
+    match op {
+        TaskOp::Delete => vec!["/Delete", "/TN", TASK_NAME, "/F"],
+        TaskOp::Run => vec!["/Run", "/TN", TASK_NAME],
+        TaskOp::End => vec!["/End", "/TN", TASK_NAME],
+        TaskOp::Query => vec!["/Query", "/TN", TASK_NAME, "/FO", "CSV", "/NH"],
+    }
+}
+
+/// The `schtasks /Create` argv registering the logon task (`/SC ONLOGON`; `/F` overwrites a
+/// stale registration, the parity of the launchd bootout-before-bootstrap dance).
+pub fn schtasks_create_args(task_run: &str) -> Vec<String> {
+    ["/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", task_run, "/F"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+/// Extract the status field ("Ready", "Running", …) from `schtasks /Query /FO CSV /NH` output:
+/// the last field of the first row (`"TaskName","Next Run Time","Status"`).
+pub fn parse_query_status(csv: &str) -> Option<String> {
+    let row = csv.lines().find(|l| !l.trim().is_empty())?;
+    let status = row.rsplit(',').next()?.trim().trim_matches('"').trim();
+    if status.is_empty() {
+        None
+    } else {
+        Some(status.to_string())
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
@@ -417,5 +471,53 @@ mod tests {
     #[test]
     fn service_file_is_the_user_unit() {
         assert!(service_file_path().ends_with("systemd/user/repomon.service"));
+    }
+
+    #[test]
+    fn schtasks_create_argv_is_a_logon_task() {
+        let run = task_run_command(
+            Path::new(r"C:\Users\u\.cargo\bin\repomond.exe"),
+            Path::new(r"\\.\pipe\repomon-u"),
+        );
+        assert_eq!(
+            run,
+            r#""C:\Users\u\.cargo\bin\repomond.exe" --socket "\\.\pipe\repomon-u""#
+        );
+        let args = schtasks_create_args(&run);
+        assert_eq!(
+            args,
+            [
+                "/Create",
+                "/TN",
+                "RepomonDaemon",
+                "/SC",
+                "ONLOGON",
+                "/TR",
+                run.as_str(),
+                "/F"
+            ]
+        );
+    }
+
+    #[test]
+    fn schtasks_argv_shapes() {
+        assert_eq!(
+            schtasks_args(TaskOp::Delete),
+            ["/Delete", "/TN", "RepomonDaemon", "/F"]
+        );
+        assert_eq!(schtasks_args(TaskOp::Run), ["/Run", "/TN", "RepomonDaemon"]);
+        assert_eq!(schtasks_args(TaskOp::End), ["/End", "/TN", "RepomonDaemon"]);
+        assert_eq!(
+            schtasks_args(TaskOp::Query),
+            ["/Query", "/TN", "RepomonDaemon", "/FO", "CSV", "/NH"]
+        );
+    }
+
+    #[test]
+    fn query_status_parses_csv_row() {
+        let csv = "\"RepomonDaemon\",\"7/19/2026 9:00:00 AM\",\"Ready\"\r\n";
+        assert_eq!(parse_query_status(csv).as_deref(), Some("Ready"));
+        assert_eq!(parse_query_status(""), None);
+        assert_eq!(parse_query_status("\r\n"), None);
     }
 }
