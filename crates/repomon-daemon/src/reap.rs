@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use repomon_core::agent::backend::OwnerState;
 use repomon_core::agent::tmux::TmuxRuntime;
 use repomon_core::model::LaneId;
 
@@ -90,7 +91,7 @@ fn canonical(p: &Path) -> PathBuf {
 /// worktree) and `rpc::agent.stop` (killing a live one on request) — same window-death
 /// bookkeeping either way, so a stopped agent's session can never be read back as still live.
 pub(crate) async fn kill_and_forget(ctx: &Ctx, window: &str) {
-    let tmux = ctx.tmux.clone();
+    let tmux = ctx.backend.clone();
     let w = window.to_string();
     let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&w)).await;
     ctx.last_good_windows.lock().await.retain(|w| w != window);
@@ -109,7 +110,7 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         .map(|l| (l.id, canonical(&l.worktree.path)))
         .collect();
 
-    let tmux = ctx.tmux.clone();
+    let tmux = ctx.backend.clone();
     let raw = match tokio::task::spawn_blocking(move || tmux.list_windows_with_activity()).await {
         Ok(Ok(w)) => w,
         _ => return,
@@ -117,10 +118,10 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
     let now = chrono::Utc::now().timestamp();
     let windows: Vec<Win> = raw
         .into_iter()
-        .map(|(name, cwd, activity)| Win {
-            name,
-            cwd: canonical(&cwd),
-            active: now.saturating_sub(activity) < RUNNING_GRACE.as_secs() as i64,
+        .map(|w| Win {
+            name: w.name,
+            cwd: canonical(&w.cwd),
+            active: now.saturating_sub(w.last_activity) < RUNNING_GRACE.as_secs() as i64,
         })
         .collect();
 
@@ -137,10 +138,11 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
     // sessions bug). The owner token is this daemon's db path: stable across restarts (so the real
     // daemon reclaims its own stamp) and distinct per instance (so a stray never matches).
     let me = owner_token(ctx);
-    let tmux_g = ctx.tmux.clone();
+    let tmux_g = ctx.backend.clone();
     let me_g = me.clone();
     let owns = tokio::task::spawn_blocking(move || tmux_g.claim_or_verify_owner(&me_g))
         .await
+        .map(|state| state == OwnerState::Owned)
         .unwrap_or(false);
 
     let orphans = orphan_lane_windows(&windows, &lane_paths);
@@ -151,7 +153,7 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         tracing::warn!(
             ?orphans,
             owner = %me,
-            session = ctx.tmux.session(),
+            session = %ctx.backend.label(),
             "another repomond owns this tmux server; skipping reap (would kill its windows)"
         );
         return;

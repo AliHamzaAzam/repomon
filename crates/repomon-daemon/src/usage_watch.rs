@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use repomon_core::TmuxRuntime;
+use repomon_core::SessionBackend;
+use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
 use repomon_core::agent::{self, UsageReport, parse_codex_status, parse_usage};
 
 use crate::Ctx;
@@ -103,14 +104,14 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
         let accounts = accounts();
         let live: HashSet<String> = accounts.iter().map(|a| a.key.clone()).collect();
         for acct in accounts {
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let window = probe_window(&acct.label);
             let cwd = probe_cwd();
             let spec = acct.spec;
             let cancel = Cancel::new(PROBE_TIMEOUT);
             let probe_cancel = cancel.clone();
             let probe = tokio::task::spawn_blocking(move || {
-                probe_once(&tmux, &window, &cwd, &spec, &probe_cancel)
+                probe_once(&*tmux, &window, &cwd, &spec, &probe_cancel)
             });
             let report = match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
                 Ok(join) => join.ok().flatten(),
@@ -248,7 +249,7 @@ fn probe_window(label: &str) -> String {
 /// dismiss and kill the window. Blocking (tmux IO + waits) — call from `spawn_blocking`. Returns
 /// `None` on any failure (the caller keeps the previous reading).
 fn probe_once(
-    tmux: &TmuxRuntime,
+    tmux: &dyn SessionBackend,
     window: &str,
     cwd: &Path,
     spec: &ProbeSpec,
@@ -257,7 +258,8 @@ fn probe_once(
     use std::thread::sleep;
 
     let _ = tmux.kill_named(window);
-    tmux.spawn_named(window, cwd, &spec.command).ok()?;
+    tmux.spawn_named(window, &SpawnSpec::new(spec.command.clone(), cwd))
+        .ok()?;
 
     let mut ready = false;
     for _ in 0..40 {
@@ -267,7 +269,7 @@ fn probe_once(
             break;
         }
         sleep(Duration::from_millis(500));
-        let pane = tmux.capture_named(window, None).unwrap_or_default();
+        let pane = tmux.capture_named(window, CaptureOpts::visible()).unwrap_or_default();
         match probe_state(&pane, spec) {
             ProbeState::Ready => {
                 ready = true;
@@ -299,7 +301,7 @@ fn probe_once(
                     break 'attempts;
                 }
                 sleep(Duration::from_millis(450));
-                let pane = tmux.capture_named(window, None).unwrap_or_default();
+                let pane = tmux.capture_named(window, CaptureOpts::visible()).unwrap_or_default();
                 if let Some(r) = (spec.parse)(&pane) {
                     report = Some(r);
                     break 'attempts;
@@ -334,6 +336,8 @@ fn probe_state(pane: &str, spec: &ProbeSpec) -> ProbeState {
 
 #[cfg(test)]
 mod tests {
+    use repomon_core::TmuxRuntime;
+
     use super::*;
 
     #[test]
