@@ -12,6 +12,7 @@
 pub mod codec;
 pub mod keys;
 pub mod protocol;
+pub mod screen;
 
 /// Real entry point on Windows (the non-Windows binary is a hard stub).
 #[cfg(windows)]
