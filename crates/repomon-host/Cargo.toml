@@ -1,0 +1,39 @@
+[package]
+name = "repomon-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Per-agent host process for repomon on Windows: owns a ConPTY + agent child + a server-side vt100 screen, serves a named-pipe control protocol, and survives daemon restarts (the tmux-server equivalent)."
+
+[[bin]]
+name = "repomon-agent-host"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+vt100 = { workspace = true }
+base64 = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+# Declared here (not in workspace.dependencies) so Track C's only root-manifest
+# touch is the members list — parallel tracks may edit workspace.dependencies.
+getrandom = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true }
+portable-pty = "0.9"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
