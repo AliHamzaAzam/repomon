@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use repomon_core::TmuxRuntime;
+use repomon_core::agent::backend::CaptureOpts;
 use repomon_core::agent::{UsageLimit, detect_usage_limit, menu_select_keys};
 use repomon_core::model::LaneId;
 
@@ -183,7 +184,7 @@ pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
             (cfg.auto_continue, cfg.auto_continue_message.clone())
         };
 
-        let tmux = ctx.tmux.clone();
+        let tmux = ctx.backend.clone();
         let names = match tokio::task::spawn_blocking(move || tmux.list_windows()).await {
             Ok(Ok(v)) => v,
             _ => continue,
@@ -199,9 +200,11 @@ pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
         let now = Utc::now();
 
         for (window, lane) in windows {
-            let tmuxc = ctx.tmux.clone();
+            let tmuxc = ctx.backend.clone();
             let win = window.clone();
-            let capture = tokio::task::spawn_blocking(move || tmuxc.capture_named(&win, Some(120)));
+            let capture = tokio::task::spawn_blocking(move || {
+                tmuxc.capture_named(&win, CaptureOpts::last(120))
+            });
             // Bound the capture so one wedged pane can't freeze the serialized per-window scan
             // and stall auto-continue for every other agent. On timeout (or any error) skip this
             // window this tick and try again next time.
@@ -273,7 +276,7 @@ async fn apply(
             // Walk the cursor to "Stop and wait …" and confirm — the exact keys were derived
             // from the menu's on-screen positions. A short gap between keys lets the menu's
             // renderer keep up with repeated arrows.
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let win = window.to_string();
             let _ = tokio::task::spawn_blocking(move || {
                 for (i, key) in keys.iter().enumerate() {
@@ -290,7 +293,7 @@ async fn apply(
             }
         }
         Action::Send => {
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let msg = message.to_string();
             let win = window.to_string();
             let _ = tokio::task::spawn_blocking(move || tmux.send_text_named(&win, &msg)).await;

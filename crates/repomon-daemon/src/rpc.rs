@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
@@ -999,7 +1000,7 @@ pub async fn dispatch(
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             // Resolve the chosen name to a command: a config custom wins, then an autodetected
             // Claude variant (e.g. claude-work → `CLAUDE_CONFIG_DIR=… claude`), else the kind.
-            let mut command = {
+            let command = {
                 let cfg = ctx.config.read().await;
                 if let Some(c) = cfg.agents.get(&p.agent) {
                     c.clone()
@@ -1012,12 +1013,13 @@ pub async fn dispatch(
                     AgentKind::from_kind_str(&p.agent).command().to_string()
                 }
             };
+            let mut spec = SpawnSpec::new(command, path);
             if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
-                command = format!("{command} {}", shell_quote(task));
+                spec = spec.arg(task);
             }
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &path, &command))
+            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
@@ -1055,29 +1057,33 @@ pub async fn dispatch(
                     return Err(RpcError::invalid_params("invalid session_id"));
                 }
             }
-            let detect = path.clone();
             let session_id = p.session_id.clone();
-            let command = tokio::task::spawn_blocking(move || {
+            let spec = tokio::task::spawn_blocking(move || {
                 // Which account (config dir) the session belongs to, and how to resume it.
                 let (config_dir, resume) = match &session_id {
                     Some(sid) => (
-                        agent::claude::config_base_for_session(&detect, sid).flatten(),
-                        // Validated above; quote anyway as defense-in-depth.
-                        format!("--resume {}", agent::tmux::shell_quote(sid)),
+                        agent::claude::config_base_for_session(&path, sid).flatten(),
+                        // Validated above; the backend quotes args as defense-in-depth anyway.
+                        vec!["--resume".to_string(), sid.clone()],
                     ),
                     None => (
-                        agent::claude::summary_for(&detect).and_then(|s| s.config_dir),
-                        "--continue".to_string(),
+                        agent::claude::summary_for(&path).and_then(|s| s.config_dir),
+                        vec!["--continue".to_string()],
                     ),
                 };
                 let base = adopt_base_command(&default_agent, &customs, &config_dir);
-                format!("{base} {resume}")
+                SpawnSpec {
+                    program: base,
+                    args: resume,
+                    cwd: path,
+                    env: Vec::new(),
+                }
             })
             .await
             .map_err(internal)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &path, &command))
+            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
@@ -1098,12 +1104,14 @@ pub async fn dispatch(
         }
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
-            let tmux = ctx.tmux.clone();
-            let lines = p.lines;
+            let tmux = ctx.backend.clone();
+            let opts = CaptureOpts {
+                last_lines: p.lines,
+            };
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            let content = tokio::task::spawn_blocking(move || tmux.capture_named(&window, lines))
+            let content = tokio::task::spawn_blocking(move || tmux.capture_named(&window, opts))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
@@ -1111,7 +1119,7 @@ pub async fn dispatch(
         }
         "agent.send_input" => {
             let p: AgentInput = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let (lane, text, enter) = (p.lane_id, p.text, p.enter);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             let win = window.clone();
@@ -1130,7 +1138,7 @@ pub async fn dispatch(
         }
         "agent.signal" => {
             let p: AgentSignal = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let (lane, key) = (p.lane_id, p.key);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             let win = window.clone();
@@ -1143,7 +1151,7 @@ pub async fn dispatch(
         }
         "agent.key" => {
             let p: AgentKey = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let (lane, key, literal) = (p.lane_id, p.key, p.literal);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             let win = window.clone();
@@ -1173,7 +1181,7 @@ pub async fn dispatch(
                     .clone()
                     .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
                 crate::bytes_stream::watch(
-                    ctx.tmux.clone(),
+                    ctx.backend.clone(),
                     ctx.events.clone(),
                     &ctx.bytes_watches,
                     p.lane_id,
@@ -1186,7 +1194,7 @@ pub async fn dispatch(
                 // The ack carries the pane's grid so a remote emulator renders at exactly
                 // this size instead of resizing the real pane (which would squeeze a
                 // simultaneously attached TUI's mediated view). Shape UNCHANGED (iOS depends on it).
-                let tmux = ctx.tmux.clone();
+                let tmux = ctx.backend.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&window))
                     .await
                     .map_err(internal)?;
@@ -1220,21 +1228,22 @@ pub async fn dispatch(
                 }
             };
             for window in targets {
-                crate::bytes_stream::unwatch(&ctx.tmux, &ctx.bytes_watches, &window, sess.id).await;
+                crate::bytes_stream::unwatch(&ctx.backend, &ctx.bytes_watches, &window, sess.id)
+                    .await;
                 sess.watched_bytes.lock().unwrap().remove(&window);
             }
             Ok(Value::Null)
         }
         "agent.prompt" => {
             let p: AgentPrompt = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             let win = window.clone();
             // A fresh capture, not the sniff cache: the popup must show what's on the pane NOW.
             let dialog = tokio::task::spawn_blocking(move || {
-                tmux.capture_named(&win, Some(45))
+                tmux.capture_named(&win, CaptureOpts::last(45))
                     .map(|pane| agent::prompt::detect_dialog(&pane))
             })
             .await
@@ -1248,7 +1257,7 @@ pub async fn dispatch(
         }
         "agent.answer" => {
             let p: AgentAnswer = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
@@ -1258,7 +1267,7 @@ pub async fn dispatch(
             let cap_tmux = tmux.clone();
             let dialog = tokio::task::spawn_blocking(move || {
                 cap_tmux
-                    .capture_named(&win, Some(45))
+                    .capture_named(&win, CaptureOpts::last(45))
                     .map(|pane| agent::prompt::detect_dialog(&pane))
             })
             .await
@@ -1323,7 +1332,7 @@ pub async fn dispatch(
             // read this agent back as still live while waiting out `resolve_windows`'s
             // total-vanish debounce. See `reap::kill_and_forget`.
             crate::reap::kill_and_forget(ctx, &window).await;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let remaining = tokio::task::spawn_blocking(move || {
                 tmux.windows_for(lane).unwrap_or_default().len()
             })
@@ -1348,7 +1357,7 @@ pub async fn dispatch(
         }
         "agent.target" => {
             let p: AgentTarget = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
@@ -1363,12 +1372,13 @@ pub async fn dispatch(
             })
             .await
             .map_err(internal)?;
-            let target = format!("{}:={}", ctx.tmux.session(), window);
-            Ok(json!({ "target": target, "available": available }))
+            let target = ctx.backend.exact_target_named(&window);
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
         "agent.resize" => {
             let p: AgentResize = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
@@ -1395,7 +1405,7 @@ pub async fn dispatch(
             let others = other_session_snapshots(ctx, sess.id).await;
             let allowed = fit_allowed(&caller, &others, &window, now);
             if !allowed {
-                let tmux = ctx.tmux.clone();
+                let tmux = ctx.backend.clone();
                 let w = window.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&w))
                     .await
@@ -1407,7 +1417,7 @@ pub async fn dispatch(
                 }));
             }
             let (cols, rows) = (p.cols.max(20), p.rows.max(4));
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let w = window.clone();
             tokio::task::spawn_blocking(move || tmux.resize_named(&w, cols, rows))
                 .await
@@ -1420,7 +1430,7 @@ pub async fn dispatch(
         }
         "agent.scroll" => {
             let p: AgentScroll = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let lane = p.lane_id;
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             let (up, ticks) = (p.up, p.ticks.min(40));
@@ -1476,7 +1486,7 @@ pub async fn dispatch(
             let p: LaneId = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             let prefix = format!("term-{}-", p.lane_id);
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             // Next free sequence for this lane's terminals.
             let existing = {
                 let t = tmux.clone();
@@ -1499,12 +1509,13 @@ pub async fn dispatch(
                     .map_err(internal)?
                     .map_err(internal)?
             };
-            Ok(json!({ "id": name, "target": target }))
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "id": name, "target": target, "attach": attach }))
         }
         "terminal.list" => {
             let p: LaneId = parse(params)?;
             let prefix = format!("term-{}-", p.lane_id);
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let wins = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
                 .await
                 .map_err(internal)?;
@@ -1518,7 +1529,7 @@ pub async fn dispatch(
         "terminal.list_all" => {
             // Every lane's open plain terminals — what the Grid tiles. Fleet-wide (unlike
             // `terminal.list`) so one call covers every visible lane.
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let wins = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
                 .await
                 .map_err(internal)?;
@@ -1539,19 +1550,21 @@ pub async fn dispatch(
         }
         "terminal.close" => {
             let p: TerminalId = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let id = p.id;
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&id)).await;
             Ok(Value::Null)
         }
         "terminal.target" => {
             let p: TerminalId = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let id = p.id.clone();
             let available = tokio::task::spawn_blocking(move || tmux.has_named(&id))
                 .await
                 .map_err(internal)?;
-            Ok(json!({ "target": ctx.tmux.target_named(&p.id), "available": available }))
+            let target = ctx.backend.target_named(&p.id);
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
 
         // ---- interactive repo browser ----
@@ -1843,7 +1856,7 @@ pub async fn dispatch(
             // A window may survive a daemon restart (tmux outlives us). Adopt it instead of
             // spawning a duplicate `orchestrator` window.
             {
-                let tmux = ctx.tmux.clone();
+                let tmux = ctx.backend.clone();
                 let exists =
                     tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
                         .await
@@ -1910,13 +1923,12 @@ pub async fn dispatch(
             };
             // cwd = the user's home, so repomind starts from there rather than the daemon's cwd.
             let home = config::home();
-            let tmux = ctx.tmux.clone();
-            tokio::task::spawn_blocking(move || {
-                tmux.spawn_named(ORCHESTRATOR_WINDOW, &home, &command)
-            })
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
+            let spec = SpawnSpec::new(command, home);
+            let tmux = ctx.backend.clone();
+            tokio::task::spawn_blocking(move || tmux.spawn_named(ORCHESTRATOR_WINDOW, &spec))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
             let session = crate::OrchestratorSession {
                 agent,
                 model,
@@ -1937,7 +1949,7 @@ pub async fn dispatch(
             // first against nothing, or kills the fully-recorded window — never a window that a
             // mid-flight start is about to record (which would leave an untracked orphan running).
             let mut orch = ctx.orchestrator.lock().await;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(ORCHESTRATOR_WINDOW)).await;
             // Unlike `agent.stop` (see `reap::kill_and_forget`), no cache reconciliation is needed
             // after this kill: `prompt_cache` only ever holds lane-window sniffs (`overlay_agents`
@@ -1958,7 +1970,7 @@ pub async fn dispatch(
         "orchestrator.target" => {
             // Clear + broadcast stopped if the window died, so a stale "running" can't linger.
             reconcile_orchestrator(ctx).await;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             // Restore client-follow sizing before the attaching terminal renders it (mirrors
             // `agent.target`).
             let available = tokio::task::spawn_blocking(move || {
@@ -1967,8 +1979,9 @@ pub async fn dispatch(
             })
             .await
             .map_err(internal)?;
-            let target = format!("{}:={}", ctx.tmux.session(), ORCHESTRATOR_WINDOW);
-            Ok(json!({ "target": target, "available": available }))
+            let target = ctx.backend.exact_target_named(ORCHESTRATOR_WINDOW);
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
         "orchestrator.send_input" => {
             let p: OrchestratorInput = parse(params)?;
@@ -1979,7 +1992,7 @@ pub async fn dispatch(
                     "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
                 ));
             }
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let (text, enter) = (p.text, p.enter);
             tokio::task::spawn_blocking(move || {
                 if enter {
@@ -2005,7 +2018,7 @@ pub async fn dispatch(
                     "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
                 ));
             }
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let (key, literal) = (p.key, p.literal);
             tokio::task::spawn_blocking(move || {
                 if literal {
@@ -2033,7 +2046,7 @@ pub async fn dispatch(
         // `agent.resize`; `orchestrator.target` restores client-follow before a real attach.
         "orchestrator.resize" => {
             let p: OrchestratorResize = parse(params)?;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             // Clamp to a sane floor so a momentary tiny layout can't shrink the window to nothing.
             let (cols, rows) = (p.cols.max(20), p.rows.max(4));
             tokio::task::spawn_blocking(move || tmux.resize_named(ORCHESTRATOR_WINDOW, cols, rows))
@@ -2045,6 +2058,15 @@ pub async fn dispatch(
 
         other => Err(RpcError::method_not_found(other)),
     }
+}
+
+/// The optional `attach` field of the `agent.target` / `terminal.target` /
+/// `orchestrator.target` responses: the exact command a client should run in a real terminal
+/// to attach to `target`, so clients stop hard-coding `tmux … attach` themselves. Additive —
+/// older clients keep deriving the tmux invocation from `target` alone.
+fn attach_json(backend: &dyn repomon_core::SessionBackend, target: &str) -> Value {
+    let cmd = backend.attach_command(target);
+    json!({ "program": cmd.program, "args": cmd.args })
 }
 
 /// Overlay live agent sessions onto lanes: rich status from the monitors (Claude transcript,
@@ -2138,7 +2160,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let metas = ctx.store.list_lane_meta().await.unwrap_or_default();
     // User-set session labels (keyed by transcript session_id), overlaid below.
     let labels = ctx.store.list_session_labels().await.unwrap_or_default();
-    let tmux = ctx.tmux.clone();
+    let tmux = ctx.backend.clone();
     // Distinguish a *failed* probe from a genuinely empty server: on failure reuse the last-good
     // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
     // every managed agent — that flips sessions to `external`, detaches the focused TUI, and fires
@@ -2429,7 +2451,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             }
         }
         if !misses.is_empty() {
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let miss_windows: Vec<String> =
                 misses.iter().map(|&i| candidates[i].2.clone()).collect();
             // Each fresh capture yields the parsed dialog AND a content hash — the hash feeds
@@ -2438,7 +2460,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 tokio::task::spawn_blocking(move || {
                     miss_windows
                         .iter()
-                        .map(|w| match tmux.capture_named(w, Some(45)) {
+                        .map(|w| match tmux.capture_named(w, CaptureOpts::last(45)) {
                             Ok(pane) => {
                                 use std::hash::{Hash, Hasher};
                                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -3441,7 +3463,7 @@ pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
     if ctx.orchestrator.lock().await.is_none() {
         return false;
     }
-    let tmux = ctx.tmux.clone();
+    let tmux = ctx.backend.clone();
     // On a probe failure keep the session: don't declare it dead on a transient tmux hiccup.
     let alive = tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
         .await

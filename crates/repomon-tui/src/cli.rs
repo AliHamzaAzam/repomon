@@ -475,17 +475,41 @@ async fn handle_orchestrate(
         ));
     }
 
-    attach_tmux_target(&target)
+    attach_tmux_target(&target, resp.get("attach"))
 }
 
-/// Attach this process to a `session:window` target on repomon's dedicated tmux socket (the socket
-/// label is the session name). `$TMUX` is dropped so this works even from inside tmux. On unix we
-/// `exec` tmux so it owns the terminal directly (like a raw attach); detaching ends the command.
-fn attach_tmux_target(target: &str) -> Result<()> {
-    let socket_label = target.split(':').next().unwrap_or("repomon");
-    let mut cmd = std::process::Command::new("tmux");
-    cmd.args(["-L", socket_label, "attach", "-t", target])
-        .env_remove("TMUX");
+/// Attach this process to a `session:window` target. Prefers the daemon-provided attach command
+/// (the optional `attach` response field: `{ program, args }`); falls back to the classic tmux
+/// invocation on repomon's dedicated socket (the socket label is the session name — the target's
+/// prefix) for daemons without the field. `$TMUX` is dropped so this works even from inside tmux.
+/// On unix we `exec` the attach program so it owns the terminal directly (like a raw attach);
+/// detaching ends the command.
+fn attach_tmux_target(target: &str, attach: Option<&Value>) -> Result<()> {
+    let parsed = attach.and_then(|a| {
+        let program = a.get("program")?.as_str()?.to_string();
+        let args = a
+            .get("args")?
+            .as_array()?
+            .iter()
+            .map(|s| Some(s.as_str()?.to_string()))
+            .collect::<Option<Vec<_>>>()?;
+        Some((program, args))
+    });
+    let (program, args) = parsed.unwrap_or_else(|| {
+        let socket_label = target.split(':').next().unwrap_or("repomon");
+        (
+            "tmux".to_string(),
+            vec![
+                "-L".to_string(),
+                socket_label.to_string(),
+                "attach".to_string(),
+                "-t".to_string(),
+                target.to_string(),
+            ],
+        )
+    });
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).env_remove("TMUX");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

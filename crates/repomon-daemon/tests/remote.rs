@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
+use repomon_core::agent::backend::SpawnSpec;
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::bytes_stream::WatchEntry;
 use repomon_daemon::conn::{ConnKind, ConnSession};
@@ -907,7 +908,6 @@ async fn close_session_releases_only_this_connections_watches() {
             "lane-1".to_string(),
             WatchEntry {
                 lane: 1,
-                fifo: std::env::temp_dir().join("repomon-test-a4-1.fifo"),
                 refs: [a.id, b.id].into_iter().collect(),
                 generation: 0,
             },
@@ -917,7 +917,6 @@ async fn close_session_releases_only_this_connections_watches() {
             "lane-2".to_string(),
             WatchEntry {
                 lane: 2,
-                fifo: std::env::temp_dir().join("repomon-test-a4-2.fifo"),
                 refs: [a.id].into_iter().collect(),
                 generation: 1,
             },
@@ -961,8 +960,8 @@ async fn fit_arbitrates_between_two_remote_sessions() {
 
     // A real, uncontested window for the apply case.
     let cwd = std::env::temp_dir();
-    ctx.tmux
-        .spawn_named("lane-2", &cwd, "sleep 30")
+    ctx.backend
+        .spawn_named("lane-2", &SpawnSpec::new("sleep 30", &cwd))
         .expect("spawn uncontested window");
 
     let a = ctx
@@ -1048,8 +1047,8 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     // Real windows to pipe: two on lane 1 (default-named and a second slot), one on lane 2.
     let cwd = std::env::temp_dir();
     for w in ["lane-1", "lane-1-2", "lane-2"] {
-        ctx.tmux
-            .spawn_named(w, &cwd, "sleep 30")
+        ctx.backend
+            .spawn_named(w, &SpawnSpec::new("sleep 30", &cwd))
             .expect("spawn window");
     }
 

@@ -27,7 +27,7 @@ pub mod traits;
 pub mod transport;
 pub mod watch;
 
-pub use agent::{AgentMonitor, ClaudeMonitor, TmuxRuntime};
+pub use agent::{AgentMonitor, ClaudeMonitor, SessionBackend, TmuxRuntime};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use indexer::Indexer;

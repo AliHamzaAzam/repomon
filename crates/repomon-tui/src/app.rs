@@ -414,8 +414,9 @@ pub struct App {
     /// Last terminal title emitted (OSC 2), to skip redundant writes.
     last_title: String,
     attach_request: Option<LaneId>,
-    /// A tmux target (e.g. a terminal window) the loop should attach to next.
-    attach_target: Option<String>,
+    /// An attach the loop should perform next (e.g. a terminal window): the target plus the
+    /// command to run for it.
+    attach_target: Option<AttachSpec>,
     /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
     input_suspended: Arc<AtomicBool>,
     /// Set by the reader thread once it has actually entered its paused branch — so an attach waits
@@ -3606,7 +3607,7 @@ impl App {
                     .and_then(|a| a.as_bool())
                     .unwrap_or(false);
                 if available && !target.is_empty() {
-                    self.attach_target = Some(target);
+                    self.attach_target = Some(AttachSpec::from_parts(target, v.get("attach")));
                 } else {
                     self.status = "repomind isn't running yet".into();
                 }
@@ -3707,8 +3708,8 @@ impl App {
             .call("terminal.target", Some(json!({ "id": window })))
             .await
         {
-            if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
-                self.attach_target = Some(t.to_string());
+            if let Some(spec) = AttachSpec::from_response(&v) {
+                self.attach_target = Some(spec);
             }
         }
     }
@@ -4085,8 +4086,8 @@ impl App {
             .await
         {
             Ok(v) => {
-                if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
-                    self.attach_target = Some(t.to_string());
+                if let Some(spec) = AttachSpec::from_response(&v) {
+                    self.attach_target = Some(spec);
                 }
                 self.terminals_lane = None; // refetch the list after we return
             }
@@ -4111,8 +4112,8 @@ impl App {
                     .call("terminal.target", Some(json!({ "id": name })))
                     .await;
                 if let Ok(v) = resp {
-                    if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
-                        self.attach_target = Some(t.to_string());
+                    if let Some(spec) = AttachSpec::from_response(&v) {
+                        self.attach_target = Some(spec);
                     }
                 }
             }
@@ -5094,8 +5095,8 @@ async fn event_loop(
             while in_rx.try_recv().is_ok() {} // drop anything queued before the reader parked
             continue;
         }
-        if let Some(target) = app.attach_target.take() {
-            do_attach_target(terminal, app, &target).await;
+        if let Some(spec) = app.attach_target.take() {
+            do_attach_target(terminal, app, &spec).await;
             while in_rx.try_recv().is_ok() {}
             continue;
         }
@@ -5193,25 +5194,27 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
             Some(json!({ "lane_id": lane, "window": window })),
         )
         .await;
-    let (target, available) = match resp {
-        Ok(v) => (
-            v.get("target")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string(),
-            v.get("available")
-                .and_then(|a| a.as_bool())
-                .unwrap_or(false),
-        ),
+    let v = match resp {
+        Ok(v) => v,
         Err(e) => {
             app.status = format!("attach failed: {e}");
             return;
         }
     };
+    let target = v
+        .get("target")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let available = v
+        .get("available")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false);
     if !available || target.is_empty() {
         app.status = "no agent running in this lane".into();
         return;
     }
+    let spec = AttachSpec::from_parts(target, v.get("attach"));
     app.input_suspended.store(true, Ordering::Relaxed);
     // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
     // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
@@ -5221,7 +5224,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     disable_mouse();
     ratatui::restore();
     let keepalive = spawn_attach_keepalive(&app.client);
-    tmux_attach(&target);
+    run_attach(&spec);
     keepalive.abort();
     // Diagnostic: time the terminal re-init + first paint after a detach. None of these touch the
     // daemon, so a stall here (vs a slow RPC) points at ratatui::init / drain / draw rather than the
@@ -5257,9 +5260,9 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     }
 }
 
-/// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.
-async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target: &str) {
-    if target.is_empty() {
+/// Suspend the TUI, attach to an arbitrary target (e.g. a plain terminal), then re-enter.
+async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, spec: &AttachSpec) {
+    if spec.target.is_empty() {
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
@@ -5270,7 +5273,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     disable_mouse();
     ratatui::restore();
     let keepalive = spawn_attach_keepalive(&app.client);
-    tmux_attach(target);
+    run_attach(spec);
     keepalive.abort();
     *terminal = ratatui::init();
     enable_bracketed_paste();
@@ -5307,7 +5310,7 @@ const DETACH_MSG_CLEANUP: &str = "\x1b[1A\x1b[2K\r";
 /// the full ~15s client timeout (confirmed: silent connection closed at exactly 120.0s). A
 /// `watcher.park` ping every 45s keeps the connection live AND re-asserts the parked state, so the
 /// daemon keeps owning desktop popups. The runtime is multi-threaded, so this task runs on another
-/// worker while `tmux_attach` blocks the event loop's worker; the client's reader task (still
+/// worker while `run_attach` blocks the event loop's worker; the client's reader task (still
 /// draining the socket while parked) resolves each ping's response. Abort it on return.
 fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> {
     let client = client.clone();
@@ -5321,15 +5324,76 @@ fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> 
     })
 }
 
-/// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
-/// the session name). `$TMUX` is dropped so this works even when repomon runs inside tmux —
-/// otherwise tmux refuses to attach ("sessions should be nested with care").
-fn tmux_attach(target: &str) {
-    let socket = target.split(':').next().unwrap_or("repomon");
+/// How to go "all the way in" to a window from the real terminal: the daemon-provided attach
+/// command when the response carried one (the optional `attach` field of the `*.target`
+/// responses — the backend knows how to attach to itself), else the classic tmux invocation
+/// derived from the target (older daemons without the field).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttachSpec {
+    /// The `session:window` target, kept for logging.
+    target: String,
+    program: String,
+    args: Vec<String>,
+}
+
+impl AttachSpec {
+    /// From a `*.target`-shaped response: `{ target, attach? }`. `None` without a non-empty
+    /// target (the caller's availability checks still apply).
+    fn from_response(v: &serde_json::Value) -> Option<Self> {
+        let target = v.get("target")?.as_str()?;
+        if target.is_empty() {
+            return None;
+        }
+        Some(Self::from_parts(target.to_string(), v.get("attach")))
+    }
+
+    /// Build from a known target plus the response's optional `attach` field.
+    fn from_parts(target: String, attach: Option<&serde_json::Value>) -> Self {
+        if let Some((program, args)) = attach.and_then(parse_attach_field) {
+            return AttachSpec {
+                target,
+                program,
+                args,
+            };
+        }
+        // Fallback: repomon's dedicated tmux socket is labelled with the session name — the
+        // target's prefix (exactly what this client always ran before the `attach` field).
+        let socket = target.split(':').next().unwrap_or("repomon").to_string();
+        AttachSpec {
+            program: "tmux".into(),
+            args: vec![
+                "-L".into(),
+                socket,
+                "attach".into(),
+                "-t".into(),
+                target.clone(),
+            ],
+            target,
+        }
+    }
+}
+
+/// Parse the `attach` response field (`{ program, args }`) if well-formed.
+fn parse_attach_field(a: &serde_json::Value) -> Option<(String, Vec<String>)> {
+    let program = a.get("program")?.as_str()?.to_string();
+    let args = a
+        .get("args")?
+        .as_array()?
+        .iter()
+        .map(|s| Some(s.as_str()?.to_string()))
+        .collect::<Option<Vec<_>>>()?;
+    Some((program, args))
+}
+
+/// Run the attach command in the real terminal. `$TMUX` is dropped so a tmux-backed attach
+/// works even when repomon runs inside tmux — otherwise tmux refuses to attach ("sessions
+/// should be nested with care").
+fn run_attach(spec: &AttachSpec) {
+    let target = &spec.target;
     tui_log(&format!("attach -> {target}"));
     let start = std::time::Instant::now();
-    let status = std::process::Command::new("tmux")
-        .args(["-L", socket, "attach", "-t", target])
+    let status = std::process::Command::new(&spec.program)
+        .args(&spec.args)
         .env_remove("TMUX")
         .status();
     // Log when (and how) the attach ended so an *unexpected* detach is traceable after the fact:
@@ -5552,6 +5616,43 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_spec_prefers_the_daemon_provided_command() {
+        // A modern daemon's `*.target` response carries the exact attach invocation.
+        let v = serde_json::json!({
+            "target": "repomon:=lane-7",
+            "available": true,
+            "attach": { "program": "tmux", "args": ["-L", "repomon", "attach", "-t", "repomon:=lane-7"] },
+        });
+        let spec = AttachSpec::from_response(&v).expect("target present");
+        assert_eq!(spec.target, "repomon:=lane-7");
+        assert_eq!(spec.program, "tmux");
+        assert_eq!(
+            spec.args,
+            vec!["-L", "repomon", "attach", "-t", "repomon:=lane-7"]
+        );
+    }
+
+    #[test]
+    fn attach_spec_falls_back_to_the_classic_tmux_invocation() {
+        // An older daemon without the `attach` field: derive `tmux -L <session> attach -t <target>`
+        // from the target's session prefix, exactly as this client always did.
+        let v = serde_json::json!({ "target": "mysess:=lane-1", "available": true });
+        let spec = AttachSpec::from_response(&v).expect("target present");
+        assert_eq!(spec.program, "tmux");
+        assert_eq!(
+            spec.args,
+            vec!["-L", "mysess", "attach", "-t", "mysess:=lane-1"]
+        );
+        // A malformed `attach` field (wrong shape) also falls back rather than erroring.
+        let bad = serde_json::json!({ "target": "s:=w", "attach": { "program": 7 } });
+        let spec = AttachSpec::from_response(&bad).expect("target present");
+        assert_eq!(spec.program, "tmux");
+        // No target → no attach.
+        assert!(AttachSpec::from_response(&serde_json::json!({ "target": "" })).is_none());
+        assert!(AttachSpec::from_response(&serde_json::json!({})).is_none());
+    }
 
     #[test]
     fn detach_cleanup_erases_line_in_place_not_fullscreen() {

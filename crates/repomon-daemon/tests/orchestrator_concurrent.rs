@@ -116,7 +116,7 @@ async fn concurrent_starts_spawn_exactly_one_orchestrator() {
         .expect("start b must report the spawned session's id");
     assert_eq!(ida, idb, "both starts must resolve to one session");
 
-    let windows = ctx.tmux.list_windows().unwrap();
+    let windows = ctx.backend.list_windows().unwrap();
     let count = windows.iter().filter(|w| *w == "orchestrator").count();
     assert_eq!(
         count, 1,

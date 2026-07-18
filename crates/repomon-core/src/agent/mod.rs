@@ -7,6 +7,7 @@
 //! daemon also falls back to "is the tmux window alive?".
 
 pub mod attention;
+pub mod backend;
 pub mod claude;
 pub mod gate;
 pub mod limit;
@@ -22,6 +23,10 @@ use chrono::{DateTime, Utc};
 
 use crate::model::{AgentKind, AgentStatus};
 
+pub use backend::{
+    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, SessionBackend, SpawnSpec,
+    WindowActivity,
+};
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
 pub use tmux::{TmuxRuntime, shell_quote};
