@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! End-to-end TUI test: embedded daemon -> client -> App -> rendered Fleet frame.
 
 use std::path::Path;

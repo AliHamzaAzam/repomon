@@ -237,7 +237,10 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
 }
 
 /// Write the chosen path to `$REPOMON_CD_FD` (or stdout) for the shell wrapper to cd into.
+/// The fd handoff is unix-only; on Windows the path just goes to stdout (a `REPOMON_CD_FILE`
+/// temp-file handoff for PowerShell lands with the shell-integration track).
 fn emit_cd(path: &Path) {
+    #[cfg(unix)]
     if let Ok(fd_str) = std::env::var("REPOMON_CD_FD") {
         if let Ok(fd) = fd_str.parse::<i32>() {
             use std::io::Write;

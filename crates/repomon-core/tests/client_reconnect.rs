@@ -1,3 +1,6 @@
+//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
+#![cfg(unix)]
+
 //! Regression test for the "daemon connection closed" bug.
 //!
 //! The daemon reaps idle client connections after 120s (see `repomon-daemon` socket.rs). A

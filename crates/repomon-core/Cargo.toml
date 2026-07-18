@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+getrandom = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 globset = { workspace = true }

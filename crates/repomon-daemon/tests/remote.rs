@@ -635,8 +635,18 @@ async fn remote_lane_create_ignores_caller_path() {
         .await;
     let outside = tempfile::tempdir().unwrap();
     // Canonicalize the base: the daemon returns canonical worktree paths, and on macOS the tempdir
-    // lives under a `/private` symlink, so a raw join wouldn't compare equal.
+    // lives under a `/private` symlink, so a raw join wouldn't compare equal. On Windows,
+    // `canonicalize` yields a `\\?\` verbatim path that git refuses to create directories
+    // under, so strip the prefix (path comparisons below are component-wise and unaffected).
     let outside_base = std::fs::canonicalize(outside.path()).unwrap();
+    #[cfg(windows)]
+    let outside_base = PathBuf::from(
+        outside_base
+            .to_string_lossy()
+            .strip_prefix(r"\\?\")
+            .map(str::to_owned)
+            .unwrap_or_else(|| outside_base.to_string_lossy().into_owned()),
+    );
     let evil_path = outside_base.join("pwned");
     let lane = rpc::dispatch(
         &ctx,

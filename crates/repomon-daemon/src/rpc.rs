@@ -3951,22 +3951,28 @@ mod tests {
         // The default account launches with `env -u CLAUDE_CONFIG_DIR claude` (no `CLAUDE_CONFIG_DIR=`
         // prefix), so it reads back as the *default* account (None).
         assert_eq!(command_account("env -u CLAUDE_CONFIG_DIR claude"), None);
-        // A hand-written pin to the default base also normalizes to the default account (defensive).
-        let default = agent::claude::default_config_base();
-        assert_eq!(
-            command_account(&format!("CLAUDE_CONFIG_DIR={} claude", default.display())),
-            None
-        );
-        // shell_quote wraps the path in single quotes; the parse must see through them — both for
-        // a variant account...
+        // A hand-written pin to the default base also normalizes to the default account
+        // (defensive). Unix-only assertions: these launch strings are POSIX shell words built
+        // for the tmux backend, and the parser correctly treats `\` as a shell escape — which
+        // a native Windows default base (`C:\Users\...`) would trip over. Windows agents get
+        // structured commands (no shell strings) with the session-backend work.
+        #[cfg(unix)]
+        {
+            let default = agent::claude::default_config_base();
+            assert_eq!(
+                command_account(&format!("CLAUDE_CONFIG_DIR={} claude", default.display())),
+                None
+            );
+            // ...and a quoted default base is still the default account.
+            assert_eq!(
+                command_account(&format!("CLAUDE_CONFIG_DIR='{}' claude", default.display())),
+                None
+            );
+        }
+        // shell_quote wraps the path in single quotes; the parse must see through them.
         assert_eq!(
             command_account("CLAUDE_CONFIG_DIR='/h/.claude-work' claude"),
             Some(PathBuf::from("/h/.claude-work"))
-        );
-        // ...and for a quoted default base (still the default account).
-        assert_eq!(
-            command_account(&format!("CLAUDE_CONFIG_DIR='{}' claude", default.display())),
-            None
         );
         // A shell-quoted config dir containing spaces must parse as one whole path, not split on
         // the inner space (shell_quote wraps it, so command_account must honor the quoting).
