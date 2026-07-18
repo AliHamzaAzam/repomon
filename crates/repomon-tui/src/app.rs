@@ -3922,18 +3922,42 @@ impl App {
                 match self.client.call("lane.create", Some(params)).await {
                     Ok(lane) => {
                         // Spin up the chosen agent in the new lane straight away.
-                        if let Some(id) = lane.get("id").and_then(|v| v.as_i64()) {
-                            let _ = self
-                                .client
-                                .call(
-                                    "agent.spawn",
-                                    Some(json!({ "lane_id": id, "agent": agent })),
-                                )
-                                .await;
-                        }
-                        self.status = format!("created lane {} + spawned {agent}", self.nl_branch);
-                        self.view = View::Fleet;
+                        let spawned = match lane.get("id").and_then(|v| v.as_i64()) {
+                            Some(id) => Some((
+                                id,
+                                self.client
+                                    .call(
+                                        "agent.spawn",
+                                        Some(json!({ "lane_id": id, "agent": agent })),
+                                    )
+                                    .await,
+                            )),
+                            None => None,
+                        };
+                        // Refresh BEFORE landing so the new lane exists in `self.lanes` for the
+                        // fleet-cursor move.
                         self.refresh().await;
+                        match spawned {
+                            // Land on the new agent typing-ready — creating it IS opening it.
+                            Some((id, Ok(v))) => {
+                                self.status =
+                                    format!("created lane {} + spawned {agent}", self.nl_branch);
+                                let window =
+                                    v.get("window").and_then(|w| w.as_str()).map(str::to_string);
+                                self.land_on_spawned(id, window);
+                            }
+                            // No agent to type to — stay on the fleet, but say why (this error
+                            // was previously swallowed).
+                            Some((_, Err(e))) => {
+                                self.status =
+                                    format!("created lane {}; spawn failed: {e}", self.nl_branch);
+                                self.view = View::Fleet;
+                            }
+                            None => {
+                                self.status = format!("created lane {}", self.nl_branch);
+                                self.view = View::Fleet;
+                            }
+                        }
                     }
                     Err(e) => self.status = format!("create failed: {e}"),
                 }
@@ -3964,10 +3988,25 @@ impl App {
         self.view = View::SpawnPick;
     }
 
-    /// Spawn `agent` into `lane`: on success drop into Focus on the *new* agent, ready to drive
-    /// it. The daemon surfaces the new window right away (a window-only placeholder until its
-    /// transcript lands), so an immediate refresh plus the pending-focus intent put the cursor on
-    /// it instead of leaving you on the lane's existing agent.
+    /// Land on a just-spawned agent, typing-ready: select its lane in the fleet, arm the
+    /// pending-focus intent (which also routes keys to the window before its session shows up
+    /// in `lane.list` — see [`Self::selected_window`]), and enter Focus with insert mode on —
+    /// creating an agent needs no manual open before talking to it.
+    fn land_on_spawned(&mut self, lane: LaneId, window: Option<String>) {
+        self.select_lane_session(lane, None);
+        if let Some(w) = window {
+            self.pending_focus_window = Some((lane, w));
+            self.pending_focus_ticks = 0;
+        }
+        self.reset_scroll(); // live tail, mirroring what `i` does
+        self.view = View::Focus;
+        self.focus_insert = true;
+    }
+
+    /// Spawn `agent` into `lane`: on success drop into Focus on the *new* agent with insert on,
+    /// typing straight to it. The daemon surfaces the new window right away (a window-only
+    /// placeholder until its transcript lands), so an immediate refresh plus the pending-focus
+    /// intent put the cursor on it instead of leaving you on the lane's existing agent.
     async fn do_spawn(&mut self, id: LaneId, agent: &str) {
         match self
             .client
@@ -3979,12 +4018,8 @@ impl App {
         {
             Ok(v) => {
                 self.status = format!("spawned {agent}");
-                self.view = View::Focus;
-                self.focus_insert = false;
-                if let Some(window) = v.get("window").and_then(|w| w.as_str()) {
-                    self.pending_focus_window = Some((id, window.to_string()));
-                    self.pending_focus_ticks = 0;
-                }
+                let window = v.get("window").and_then(|w| w.as_str()).map(str::to_string);
+                self.land_on_spawned(id, window);
                 self.refresh_lanes().await;
             }
             Err(e) => self.status = format!("spawn failed: {e}"),
@@ -6060,6 +6095,46 @@ mod tests {
             "a window that never appears must not pin routing forever"
         );
         // With the intent gone, routing falls back to the actually-selected session.
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
+    }
+
+    #[tokio::test]
+    async fn spawn_lands_in_focus_typing_ready() {
+        let mut app = app_on_lane_7().await;
+        // `e` on lane 7 spawned a second agent into window lane-7-2.
+        app.land_on_spawned(7, Some("lane-7-2".into()));
+        assert_eq!(app.view, View::Focus);
+        assert!(
+            app.focus_insert,
+            "typing must reach the agent with no `i` press"
+        );
+        assert_eq!(app.pending_focus_window, Some((7, "lane-7-2".into())));
+        // Keys route to the new window even before its session shows up in lane.list.
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7-2"));
+    }
+
+    #[tokio::test]
+    async fn new_lane_landing_moves_the_fleet_cursor_to_the_new_lane() {
+        let mut app = app_on_lane_7().await;
+        // A New Lane submit just created lane 8 and spawned its agent (window lane-8); the
+        // lane is in the refreshed list but its session hasn't appeared yet.
+        app.lanes.push(test_lane(8));
+        app.land_on_spawned(8, Some("lane-8".into()));
+        assert_eq!(app.selected_lane().map(|l| l.id), Some(8));
+        assert_eq!(app.view, View::Focus);
+        assert!(app.focus_insert);
+        assert_eq!(app.selected_window().as_deref(), Some("lane-8"));
+    }
+
+    #[tokio::test]
+    async fn landing_without_a_window_still_opens_focus_insert() {
+        let mut app = app_on_lane_7().await;
+        // A malformed spawn response (no window name): no intent to arm, but the user still
+        // lands typing-ready on the lane's selected session.
+        app.land_on_spawned(7, None);
+        assert_eq!(app.view, View::Focus);
+        assert!(app.focus_insert);
+        assert!(app.pending_focus_window.is_none());
         assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
     }
 
