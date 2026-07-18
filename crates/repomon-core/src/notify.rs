@@ -521,6 +521,34 @@ pub fn notify_send_args(title: &str, body: &str, sound: bool) -> Vec<String> {
     args
 }
 
+/// What a Windows toast will show and whether it carries the system toast audio. Like
+/// [`notify_send_args`], the builder is pure and compiled everywhere so the shape is tested on
+/// every platform; only the delivery (`show_toast`) is `cfg(windows)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastSpec {
+    pub title: String,
+    pub body: String,
+    /// Play the default toast sound with the popup — this *is* the Windows sound path (the
+    /// afplay/paplay equivalent): toast audio, not a separate player process.
+    pub audible: bool,
+}
+
+/// The toast for a regular notification: title/body verbatim, audio iff `sound` is on.
+pub fn toast_spec(title: &str, body: &str, sound: bool) -> ToastSpec {
+    ToastSpec {
+        title: title.to_string(),
+        body: body.to_string(),
+        audible: sound,
+    }
+}
+
+/// The toast behind [`play_chime`]'s Windows arm. WinRT has no bare play-a-sound API — toast
+/// audio only plays attached to a toast — so the Settings sound preview posts a minimal,
+/// always-audible toast instead (which also *shows* what an audible alert will look like).
+pub fn chime_toast_spec() -> ToastSpec {
+    toast_spec("repomon", "Notification sound", true)
+}
+
 /// The local chime player, probed once per process: canberra (plays the themed event sound),
 /// else `paplay` with a freedesktop sound file that exists. `None` = no way to play a sound.
 #[cfg(not(target_os = "macos"))]
@@ -582,6 +610,23 @@ mod tests {
         let args = notify_send_args("T", "B", false);
         assert!(!args.iter().any(|a| a.contains("sound-name")));
         assert_eq!(&args[args.len() - 3..], ["--", "T", "B"]);
+    }
+
+    #[test]
+    fn toast_spec_carries_text_and_audibility() {
+        let t = toast_spec("Title", "Body", true);
+        assert_eq!(t.title, "Title");
+        assert_eq!(t.body, "Body");
+        assert!(t.audible);
+        assert!(!toast_spec("T", "B", false).audible);
+    }
+
+    #[test]
+    fn chime_toast_spec_is_always_audible() {
+        let t = chime_toast_spec();
+        assert!(t.audible, "a chime preview must carry toast audio");
+        assert_eq!(t.title, "repomon");
+        assert!(!t.body.is_empty());
     }
 
     /// A snapshot state with the stall flag off — the common case in transition tests.
