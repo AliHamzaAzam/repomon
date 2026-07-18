@@ -131,6 +131,15 @@ fn spawn_daemon(socket: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    // Windows twin: detach from the console and its Ctrl-C group so closing the terminal
+    // (or Ctrl-C in it) doesn't take the daemon down with it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     cmd.spawn()
         .with_context(|| format!("starting daemon `{}`", program.display()))?;
     Ok(())
@@ -186,7 +195,10 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
     let db = config::db_path();
     let store = Store::open(&db).with_context(|| format!("opening store at {}", db.display()))?;
     let ctx = Ctx::new(store, config.clone(), Some(db));
+    #[cfg(unix)]
     let socket = std::env::temp_dir().join(format!("repomon-embedded-{}.sock", std::process::id()));
+    #[cfg(windows)]
+    let socket = PathBuf::from(format!(r"\\.\pipe\repomon-embedded-{}", std::process::id()));
 
     let mut watcher = Watcher::new().ok();
     if let Some(w) = watcher.as_mut() {

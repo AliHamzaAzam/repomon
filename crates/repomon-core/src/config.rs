@@ -276,7 +276,9 @@ impl Config {
     }
 }
 
-fn home() -> PathBuf {
+/// The user's home directory (portable — `$HOME` on unix, the profile dir on Windows).
+/// Shared by every path that used to read `$HOME` directly.
+pub fn home() -> PathBuf {
     directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
@@ -324,9 +326,23 @@ pub fn socket_path(cfg: &Config) -> PathBuf {
 }
 
 fn current_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "user".to_string())
+    current_user_from(
+        std::env::var("USER").ok(),
+        std::env::var("LOGNAME").ok(),
+        std::env::var("USERNAME").ok(),
+    )
+}
+
+/// `USER`/`LOGNAME` are the unix conventions; `USERNAME` is the Windows one. Factored pure so
+/// the fallback order is unit-testable without mutating the process environment.
+fn current_user_from(
+    user: Option<String>,
+    logname: Option<String>,
+    username: Option<String>,
+) -> String {
+    user.or(logname)
+        .or(username)
+        .unwrap_or_else(|| "user".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -334,7 +350,14 @@ fn default_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/repomon-{}.sock", current_user()))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn default_socket_path() -> PathBuf {
+    // Interpreted as a named-pipe name by `crate::transport` (already in canonical
+    // `\\.\pipe\` form, so it passes through `pipe_name_from_path` verbatim).
+    PathBuf::from(format!(r"\\.\pipe\repomon-{}", current_user()))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn default_socket_path() -> PathBuf {
     if let Ok(x) = std::env::var("XDG_RUNTIME_DIR") {
         if !x.is_empty() {
@@ -441,6 +464,26 @@ mod tests {
         assert!(!leftover_tmp, "a .tmp file was left behind after save");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_user_fallback_order() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(current_user_from(s("ali"), s("log"), s("win")), "ali");
+        assert_eq!(current_user_from(None, s("log"), s("win")), "log");
+        assert_eq!(current_user_from(None, None, s("win")), "win");
+        assert_eq!(current_user_from(None, None, None), "user");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_socket_path_is_a_pipe_name() {
+        let p = default_socket_path();
+        let s = p.to_string_lossy();
+        assert!(
+            s.starts_with(r"\\.\pipe\repomon-"),
+            "expected a \\\\.\\pipe\\repomon-<user> name, got {s}"
+        );
     }
 
     #[test]

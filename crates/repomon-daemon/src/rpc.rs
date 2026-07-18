@@ -10,7 +10,7 @@ use repomon_core::model::{
     CreateLaneParams, Lane, RemoteDevice, RepoId, TimeRange,
 };
 use repomon_core::protocol::RpcError;
-use repomon_core::{Indexer, TmuxRuntime, analytics, session};
+use repomon_core::{Indexer, TmuxRuntime, analytics, config, session};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -1908,10 +1908,8 @@ pub async fn dispatch(
                     None,
                 ),
             };
-            // cwd = $HOME, so repomind starts from the user's home rather than the daemon's cwd.
-            let home = std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/"));
+            // cwd = the user's home, so repomind starts from there rather than the daemon's cwd.
+            let home = config::home();
             let tmux = ctx.tmux.clone();
             tokio::task::spawn_blocking(move || {
                 tmux.spawn_named(ORCHESTRATOR_WINDOW, &home, &command)
@@ -2761,13 +2759,10 @@ fn vanish_reason(
     }
 }
 
-/// List the subdirectories of `start` (default: $HOME) for the repo browser, marking which
-/// are git repos and which are already registered.
+/// List the subdirectories of `start` (default: the user's home) for the repo browser, marking
+/// which are git repos and which are already registered.
 fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>) -> BrowseResult {
-    let path = start
-        .filter(|p| p.is_dir())
-        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/"));
+    let path = start.filter(|p| p.is_dir()).unwrap_or_else(config::home);
     let path = path.canonicalize().unwrap_or(path);
     let parent = path.parent().map(Path::to_path_buf);
 
@@ -3089,11 +3084,19 @@ fn reuse_per_path_on_failure<T: Clone>(
     }
 }
 
+/// Windows: there is no ps/lsof//proc probe yet — the session-backend track gives hosts an
+/// authoritative child-alive answer. `None` means "probe unavailable, don't filter", the same
+/// safe degradation the unix arms use when `ps` fails.
+#[cfg(windows)]
+fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
+    None
+}
+
 /// How many live `claude` CLI processes have each working directory. claude doesn't hold its
 /// transcript open, but its cwd is the worktree it runs in — so the count per worktree bounds
 /// how many of that worktree's sessions are actually running. `None` if the probe couldn't
 /// run (then we don't filter); `Some({})` means no claude is running.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     use std::process::Command;
     // Enumerate `claude` processes via `ps`, matching the executable basename. `pgrep -x claude`
@@ -3427,8 +3430,7 @@ fn pick_orchestrator_transcript_in(
 pub(crate) fn pick_orchestrator_transcript(
     session_id: Option<&str>,
 ) -> Option<agent::TranscriptSummary> {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-    pick_orchestrator_transcript_in(&home, session_id)
+    pick_orchestrator_transcript_in(&config::home(), session_id)
 }
 
 /// Drop a stale orchestrator session: if we think one is running but its tmux window is gone (killed

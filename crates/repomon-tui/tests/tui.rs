@@ -1,16 +1,11 @@
-//! Unix-only until the daemon/client speak the portable IPC transport (next PR in this track).
-#![cfg(unix)]
-
 //! End-to-end TUI test: embedded daemon -> client -> App -> rendered Fleet frame.
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 
 use repomon_core::{Config, Store};
 use repomon_daemon::{Ctx, serve};
 use repomon_tui::app::App;
-use repomon_tui::client::DaemonClient;
 use repomon_tui::render_to_string;
 use serde_json::json;
 
@@ -80,13 +75,9 @@ async fn waiting_badges_distinguish_attention() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let client = DaemonClient::connect(&sock).await.expect("connect");
+    let client = repomon_tui::connect_with_retry(&sock, 100)
+        .await
+        .expect("connect");
 
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
@@ -255,13 +246,9 @@ async fn peek_popup_shows_the_dialog_and_queue() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let client = DaemonClient::connect(&sock).await.expect("connect");
+    let client = repomon_tui::connect_with_retry(&sock, 100)
+        .await
+        .expect("connect");
 
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
@@ -351,13 +338,9 @@ async fn grid_tiles_plain_shell_terminals() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let client = DaemonClient::connect(&sock).await.expect("connect");
+    let client = repomon_tui::connect_with_retry(&sock, 100)
+        .await
+        .expect("connect");
 
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
@@ -428,13 +411,9 @@ async fn focus_renders_the_embedded_emulator() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let client = DaemonClient::connect(&sock).await.expect("connect");
+    let client = repomon_tui::connect_with_retry(&sock, 100)
+        .await
+        .expect("connect");
 
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
@@ -496,14 +475,9 @@ async fn renders_fleet_with_a_registered_repo() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let client = DaemonClient::connect(&sock).await.expect("connect");
+    let client = repomon_tui::connect_with_retry(&sock, 100)
+        .await
+        .expect("connect");
 
     // Register a repo through the daemon.
     let repo_dir = tempfile::tempdir().unwrap();

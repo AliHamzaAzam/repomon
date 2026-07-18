@@ -1,4 +1,5 @@
-//! The Unix-domain-socket JSON-RPC server.
+//! The local-IPC JSON-RPC server (a Unix domain socket on unix, a named pipe on Windows —
+//! see `repomon_core::transport`).
 //!
 //! Each connection runs a dedicated reader task (so `read_frame`, which isn't
 //! cancel-safe, always runs to completion) that feeds incoming frames over an mpsc. The
@@ -7,62 +8,35 @@
 
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 use repomon_core::protocol::{self, Request, Response, RpcError};
-#[cfg(unix)]
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use serde_json::Value;
-#[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
-#[cfg(unix)]
 use tokio::sync::broadcast::error::RecvError;
-#[cfg(unix)]
 use tokio::sync::mpsc;
 
-use crate::Ctx;
-#[cfg(unix)]
-use crate::rpc;
+use crate::{Ctx, rpc};
 
 /// How long the reader will wait on a silent socket before tearing itself down. A half-open client
 /// (gone away but still holding the fd) otherwise parks the reader task forever, leaking one task
 /// per reconnect. Generous — well past the TUI's 1s `lane.list` poll, so a healthy idle client is
 /// never dropped; the connection task simply re-accepts on the next request.
-#[cfg(unix)]
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Windows stub until the named-pipe transport lands (next PR in this track): the local IPC
-/// server cannot bind yet, so it fails with a clear error instead of failing to compile.
-#[cfg(windows)]
-pub async fn serve(_ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        format!(
-            "serving local IPC at {} is not yet supported on Windows (the named-pipe transport lands in a follow-up PR)",
-            socket_path.display()
-        ),
-    ))
-}
-
-/// Bind the socket and serve until shutdown is requested.
-#[cfg(unix)]
+/// Bind the local IPC endpoint and serve until shutdown is requested. `socket_path` is the
+/// socket file on unix and is interpreted as a named-pipe name on Windows (stale-file cleanup
+/// and parent-dir creation happen inside `transport::listen`; pipes need neither).
 pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Clear a stale socket from a previous run.
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
-    }
-    let listener = UnixListener::bind(socket_path)?;
+    let endpoint = Endpoint::from_path(socket_path);
+    let mut listener = transport::listen(&endpoint).await?;
     tracing::info!("listening on {}", socket_path.display());
 
     loop {
         tokio::select! {
             _ = ctx.shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _addr)) => {
+                Ok(stream) => {
                     let ctx = ctx.clone();
                     tokio::spawn(async move { handle_conn(ctx, stream).await });
                 }
@@ -71,13 +45,14 @@ pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
         }
     }
 
+    // Remove the socket file so the next daemon start binds cleanly (pipes vanish on close).
+    #[cfg(unix)]
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
 
-#[cfg(unix)]
-async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
-    let (mut read_half, mut write_half) = stream.into_split();
+async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
 
     // Reader task: read_frame to completion, hand frames to the connection task.
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(128);

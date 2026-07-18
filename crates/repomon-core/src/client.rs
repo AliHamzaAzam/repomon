@@ -22,24 +22,17 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-#[cfg(unix)]
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-#[cfg(unix)]
-use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::protocol::{Notification, Request, Response};
-#[cfg(unix)]
-use crate::protocol::{read_frame, write_frame};
+use crate::protocol::{Notification, Request, Response, read_frame, write_frame};
+use crate::transport::{self, Endpoint, IpcStream};
 
 /// Keepalive cadence. Must stay comfortably under the daemon's 120s idle-connection reaper so an
 /// otherwise-silent client (e.g. the MCP bridge, which mostly just receives events) is never reaped.
@@ -57,9 +50,6 @@ pub struct DaemonClient {
     inner: Arc<Inner>,
 }
 
-// On Windows the connect/reconnect paths are stubbed out until the named-pipe transport lands,
-// so some fields (`path`, `epoch`) are only read by unix-gated code.
-#[cfg_attr(windows, allow(dead_code))]
 struct Inner {
     path: PathBuf,
     pending: Pending,
@@ -93,20 +83,8 @@ impl DaemonClient {
         Self::connect_inner(path, Some(KEEPALIVE_INTERVAL)).await
     }
 
-    /// Windows stub until the named-pipe transport lands (next PR in this track): connecting is
-    /// not yet possible, so every entry point fails with a clear error instead of failing to
-    /// compile the whole workspace.
-    #[cfg(windows)]
-    async fn connect_inner(path: &Path, _keepalive: Option<Duration>) -> Result<Self> {
-        Err(anyhow!(
-            "connecting to the daemon at {} is not yet supported on Windows (the named-pipe transport lands in a follow-up PR)",
-            path.display()
-        ))
-    }
-
-    #[cfg(unix)]
     async fn connect_inner(path: &Path, keepalive: Option<Duration>) -> Result<Self> {
-        let stream = UnixStream::connect(path)
+        let stream = transport::connect(&Endpoint::from_path(path))
             .await
             .with_context(|| format!("connecting to daemon at {}", path.display()))?;
 
@@ -215,9 +193,8 @@ impl DaemonClient {
 impl Inner {
     /// Spawn the reader + writer tasks for `stream`, install its outbound channel, and mark the
     /// connection live. Reused for the initial connect and every reconnect.
-    #[cfg(unix)]
-    fn spawn_io(self: &Arc<Self>, stream: UnixStream) {
-        let (mut rd, mut wr) = stream.into_split();
+    fn spawn_io(self: &Arc<Self>, stream: IpcStream) {
+        let (mut rd, mut wr) = tokio::io::split(stream);
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(128);
         *self.out_tx.lock().unwrap() = out_tx;
         self.connected.store(true, Ordering::SeqCst);
@@ -262,24 +239,14 @@ impl Inner {
         });
     }
 
-    /// Windows stub until the named-pipe transport lands: see [`DaemonClient::connect_inner`].
-    #[cfg(windows)]
-    async fn reconnect(self: &Arc<Self>) -> Result<()> {
-        Err(anyhow!(
-            "reconnecting to the daemon at {} is not yet supported on Windows (the named-pipe transport lands in a follow-up PR)",
-            self.path.display()
-        ))
-    }
-
     /// Re-establish the connection. Serialized so concurrent callers open one socket; a no-op if
     /// another caller already reconnected.
-    #[cfg(unix)]
     async fn reconnect(self: &Arc<Self>) -> Result<()> {
         let _guard = self.reconnecting.lock().await;
         if self.connected.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let stream = UnixStream::connect(&self.path)
+        let stream = transport::connect(&Endpoint::from_path(&self.path))
             .await
             .with_context(|| format!("reconnecting to daemon at {}", self.path.display()))?;
         self.spawn_io(stream);
@@ -319,7 +286,6 @@ impl Inner {
 
 /// Keepalive: ping under the daemon's idle reaper so a quiet client is never dropped. Exits when
 /// the last `DaemonClient` is dropped (the `Weak` stops upgrading).
-#[cfg(unix)]
 async fn keepalive_loop(weak: Weak<Inner>, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -333,26 +299,26 @@ async fn keepalive_loop(weak: Weak<Inner>, interval: Duration) {
     }
 }
 
-// Unix-only until the client is generic over the IPC transport (next PR in this track).
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::write_message;
     use std::sync::atomic::AtomicUsize;
-    use tokio::net::UnixListener;
 
     /// A keepalive client must ping an idle connection on its own, so the daemon never reaps it.
     #[tokio::test]
     async fn keepalive_pings_idle_connection() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
 
         let pings = Arc::new(AtomicUsize::new(0));
         let pings_srv = pings.clone();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (mut rd, mut wr) = stream.into_split();
+            let stream = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
             while let Ok(Some(frame)) = read_frame(&mut rd).await {
                 if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                     if req.method == "ping" {
@@ -383,7 +349,9 @@ mod tests {
     async fn reconnect_replays_subscribe_and_active_watch() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
 
         // Methods seen on the LATEST server-side connection (reset on each accept).
         let latest: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -393,12 +361,12 @@ mod tests {
             let accepts = accepts.clone();
             tokio::spawn(async move {
                 loop {
-                    let (stream, _) = listener.accept().await.unwrap();
+                    let stream = listener.accept().await.unwrap();
                     accepts.fetch_add(1, Ordering::SeqCst);
                     latest.lock().unwrap().clear();
                     let latest = latest.clone();
                     tokio::spawn(async move {
-                        let (mut rd, mut wr) = stream.into_split();
+                        let (mut rd, mut wr) = tokio::io::split(stream);
                         while let Ok(Some(frame)) = read_frame(&mut rd).await {
                             if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                                 latest.lock().unwrap().push(req.method.clone());
@@ -459,18 +427,20 @@ mod tests {
     async fn reconnect_does_not_replay_a_stopped_watch() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
 
         let latest: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let latest = latest.clone();
             tokio::spawn(async move {
                 loop {
-                    let (stream, _) = listener.accept().await.unwrap();
+                    let stream = listener.accept().await.unwrap();
                     latest.lock().unwrap().clear();
                     let latest = latest.clone();
                     tokio::spawn(async move {
-                        let (mut rd, mut wr) = stream.into_split();
+                        let (mut rd, mut wr) = tokio::io::split(stream);
                         while let Ok(Some(frame)) = read_frame(&mut rd).await {
                             if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                                 latest.lock().unwrap().push(req.method.clone());
@@ -518,8 +488,8 @@ mod tests {
     /// already live.
     #[tokio::test]
     async fn stale_reader_does_not_clobber_new_connection() {
-        let (a_client, a_server) = UnixStream::pair().unwrap();
-        let (b_client, _b_server) = UnixStream::pair().unwrap();
+        let (a_client, a_server) = IpcStream::pair();
+        let (b_client, _b_server) = IpcStream::pair();
 
         let (events_tx, _rx) = broadcast::channel(8);
         let (placeholder, _) = mpsc::channel(1);
