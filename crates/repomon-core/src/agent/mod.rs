@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod text;
 pub mod tmux;
 pub mod usage;
+pub mod windows;
 
 use std::path::Path;
 use std::time::Duration;
@@ -30,6 +31,8 @@ pub use backend::{
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
 pub use tmux::{TmuxRuntime, shell_quote};
+#[cfg(windows)]
+pub use windows::WindowsBackend;
 pub use usage::{AccountUsage, UsageReport, UsageWindow, parse_codex_status, parse_usage};
 
 /// How recently a file must have changed for its agent to count as "running".
