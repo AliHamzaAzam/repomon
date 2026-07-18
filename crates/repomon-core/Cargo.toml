@@ -25,5 +25,8 @@ notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 globset = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.8"
+
 [dev-dependencies]
 tempfile = { workspace = true }

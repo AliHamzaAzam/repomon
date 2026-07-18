@@ -394,14 +394,17 @@ pub fn play_chime() {
             .arg(NOTIFY_SOUND_FILE)
             .output();
     });
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    std::thread::spawn(|| show_toast(chime_toast_spec()));
+    #[cfg(not(any(target_os = "macos", windows)))]
     std::thread::spawn(play_sound_blocking);
 }
 
 /// Fire a native desktop notification, best-effort and without blocking the caller (the actual
-/// `osascript`/`notify-send` invocation runs on a detached thread). `click_focus` makes the popup
-/// click-to-focus the terminal when `terminal-notifier` is installed (macOS only — on Linux
-/// there is no portable way to focus a terminal from a background process, so it's ignored).
+/// `osascript`/`notify-send`/WinRT-toast delivery runs on a detached thread). `click_focus` makes
+/// the popup click-to-focus the terminal when `terminal-notifier` is installed (macOS only — on
+/// Linux there is no portable way to focus a terminal from a background process, and on Windows
+/// toast activation would need a registered AUMID/COM handler, so it's ignored on both).
 pub fn send_native(title: &str, body: &str, sound: bool, click_focus: bool) {
     let (title, body) = (title.to_string(), body.to_string());
     std::thread::spawn(move || {
@@ -490,10 +493,29 @@ fn terminal_bundle_id(term_program: &str) -> Option<&'static str> {
     }
 }
 
+/// Deliver as a WinRT toast. Sound rides on the toast itself (`audible` → the default toast
+/// audio) — the Windows counterpart of the afplay/paplay chime, with no separate player process.
+#[cfg(windows)]
+fn run_native(title: &str, body: &str, sound: bool, _click_focus: bool) {
+    show_toast(toast_spec(title, body, sound));
+}
+
+/// Post a [`ToastSpec`] via the WinRT toast API, best-effort (delivery runs under the PowerShell
+/// AUMID so an unpackaged binary can toast without registering its own app id).
+#[cfg(windows)]
+fn show_toast(spec: ToastSpec) {
+    use tauri_winrt_notification::{Sound, Toast};
+    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
+        .title(&spec.title)
+        .text1(&spec.body)
+        .sound(spec.audible.then_some(Sound::Default))
+        .show();
+}
+
 /// Deliver via `notify-send` (libnotify/DBus). The `sound-name` hint covers desktops that honor
 /// it; the local player in [`play_sound_blocking`] covers the rest. Both are best-effort no-ops
 /// on headless boxes.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn run_native(title: &str, body: &str, sound: bool, _click_focus: bool) {
     let _ = std::process::Command::new("notify-send")
         .args(notify_send_args(title, body, sound))
@@ -551,7 +573,7 @@ pub fn chime_toast_spec() -> ToastSpec {
 
 /// The local chime player, probed once per process: canberra (plays the themed event sound),
 /// else `paplay` with a freedesktop sound file that exists. `None` = no way to play a sound.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn sound_argv() -> Option<&'static [String]> {
     fn locate() -> Option<Vec<String>> {
         let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect();
@@ -575,7 +597,7 @@ fn sound_argv() -> Option<&'static [String]> {
 }
 
 /// Play the notification chime through whatever player this box has, if any.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn play_sound_blocking() {
     if let Some(argv) = sound_argv() {
         let _ = std::process::Command::new(&argv[0])
