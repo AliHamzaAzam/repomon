@@ -1370,7 +1370,8 @@ pub async fn dispatch(
             .await
             .map_err(internal)?;
             let target = ctx.backend.exact_target_named(&window);
-            Ok(json!({ "target": target, "available": available }))
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
         "agent.resize" => {
             let p: AgentResize = parse(params)?;
@@ -1505,7 +1506,8 @@ pub async fn dispatch(
                     .map_err(internal)?
                     .map_err(internal)?
             };
-            Ok(json!({ "id": name, "target": target }))
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "id": name, "target": target, "attach": attach }))
         }
         "terminal.list" => {
             let p: LaneId = parse(params)?;
@@ -1557,7 +1559,9 @@ pub async fn dispatch(
             let available = tokio::task::spawn_blocking(move || tmux.has_named(&id))
                 .await
                 .map_err(internal)?;
-            Ok(json!({ "target": ctx.backend.target_named(&p.id), "available": available }))
+            let target = ctx.backend.target_named(&p.id);
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
 
         // ---- interactive repo browser ----
@@ -1975,7 +1979,8 @@ pub async fn dispatch(
             .await
             .map_err(internal)?;
             let target = ctx.backend.exact_target_named(ORCHESTRATOR_WINDOW);
-            Ok(json!({ "target": target, "available": available }))
+            let attach = attach_json(&*ctx.backend, &target);
+            Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
         "orchestrator.send_input" => {
             let p: OrchestratorInput = parse(params)?;
@@ -2052,6 +2057,15 @@ pub async fn dispatch(
 
         other => Err(RpcError::method_not_found(other)),
     }
+}
+
+/// The optional `attach` field of the `agent.target` / `terminal.target` /
+/// `orchestrator.target` responses: the exact command a client should run in a real terminal
+/// to attach to `target`, so clients stop hard-coding `tmux … attach` themselves. Additive —
+/// older clients keep deriving the tmux invocation from `target` alone.
+fn attach_json(backend: &dyn repomon_core::SessionBackend, target: &str) -> Value {
+    let cmd = backend.attach_command(target);
+    json!({ "program": cmd.program, "args": cmd.args })
 }
 
 /// Overlay live agent sessions onto lanes: rich status from the monitors (Claude transcript,
