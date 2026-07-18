@@ -10,6 +10,7 @@
 //! ConPTY spawn, the named-pipe server, and the pipe DACL are `cfg(windows)`.
 
 pub mod codec;
+pub mod keys;
 pub mod protocol;
 
 /// Real entry point on Windows (the non-Windows binary is a hard stub).
