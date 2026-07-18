@@ -178,7 +178,7 @@ impl Dispatcher {
                 ),
             },
         };
-        (payload, effect)
+        (cap_frame(id, payload), effect)
     }
 
     fn write_ok(&mut self, id: u64, bytes: &[u8]) -> Vec<u8> {
@@ -186,6 +186,20 @@ impl Dispatcher {
             Ok(()) => to_vec(&Response::empty_ok(id)),
             Err(e) => to_vec(&Response::err(id, format!("write: {e:#}"))),
         }
+    }
+}
+
+/// PROTOCOL.md §4 binds both directions to [`crate::codec::MAX_FRAME`]: a response that
+/// would overflow it (a pathological deep-history capture) becomes an `err` instead of a
+/// frame the client must treat as corrupt.
+fn cap_frame(id: u64, payload: Vec<u8>) -> Vec<u8> {
+    if payload.len() > crate::codec::MAX_FRAME {
+        to_vec(&Response::err(
+            id,
+            "response exceeds the 16 MiB frame limit",
+        ))
+    } else {
+        payload
     }
 }
 
@@ -415,6 +429,24 @@ mod tests {
         assert_eq!(v["id"], 0);
         assert!(v["err"].is_string());
         assert!(matches!(effect, Effect::None));
+    }
+
+    #[test]
+    fn oversized_response_payloads_become_errors() {
+        // PROTOCOL.md §4 binds BOTH directions to the 16 MiB frame limit; a pathological
+        // capture (50k history lines of escapes) must not make the host emit a frame the
+        // client is required to treat as corrupt.
+        let small = cap_frame(7, br#"{"id":7,"ok":{}}"#.to_vec());
+        assert_eq!(
+            small,
+            br#"{"id":7,"ok":{}}"#.to_vec(),
+            "small payloads pass through"
+        );
+
+        let huge = cap_frame(7, vec![b'x'; crate::codec::MAX_FRAME + 1]);
+        let v: serde_json::Value = serde_json::from_slice(&huge).unwrap();
+        assert_eq!(v["id"], 7);
+        assert!(v["err"].as_str().unwrap().contains("frame limit"));
     }
 
     #[test]
