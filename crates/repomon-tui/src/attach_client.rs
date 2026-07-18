@@ -148,6 +148,108 @@ impl StreamState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Input scanner: raw VT stdin bytes -> protocol input actions
+// ---------------------------------------------------------------------------
+
+/// The VT sequence F12 produces under `ENABLE_VIRTUAL_TERMINAL_INPUT`. F12 is the local
+/// detach key (tmux parity) and is never forwarded to the agent.
+pub const DETACH_SEQ: &[u8] = b"\x1b[24~";
+
+/// What a chunk of raw stdin bytes turns into.
+#[derive(Debug)]
+pub enum InputAction {
+    /// Forward as a `send_literal` frame (§7.7) — the console's VT input translation already
+    /// produced canonical byte sequences, so literal forwarding is byte-exact attach parity.
+    Literal(String),
+    /// F12: detach locally, leaving the agent running.
+    Detach,
+}
+
+/// Splits a raw stdin byte stream into `send_literal` text and F12 detach events.
+///
+/// Holds back (a) any buffer tail that is a strict prefix of [`DETACH_SEQ`] and (b) any
+/// incomplete trailing UTF-8 character, so sequences split across reads reassemble. The
+/// runtime calls [`InputScanner::flush`] after a short idle timeout so a bare Esc keypress
+/// (a strict prefix of the detach sequence) still reaches the agent promptly.
+#[derive(Default)]
+pub struct InputScanner {
+    pending: Vec<u8>,
+}
+
+impl InputScanner {
+    /// Feed a chunk of raw bytes; returns the completed actions, in input order.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<InputAction> {
+        self.pending.extend_from_slice(bytes);
+        let buf = std::mem::take(&mut self.pending);
+        let mut actions = Vec::new();
+        let mut lit: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < buf.len() {
+            let rest = &buf[i..];
+            if rest.starts_with(DETACH_SEQ) {
+                emit_literal(&mut actions, &mut lit);
+                actions.push(InputAction::Detach);
+                i += DETACH_SEQ.len();
+            } else if DETACH_SEQ.starts_with(rest) {
+                // The whole remainder is a strict prefix of the detach sequence: hold it
+                // back until more bytes (or a flush) decide what it is.
+                break;
+            } else {
+                lit.push(buf[i]);
+                i += 1;
+            }
+        }
+        if i < buf.len() {
+            self.pending = buf[i..].to_vec();
+        } else {
+            // Hold back an incomplete trailing UTF-8 character so a scalar split across
+            // reads is forwarded whole.
+            let cut = utf8_complete_len(&lit);
+            self.pending = lit.split_off(cut);
+        }
+        emit_literal(&mut actions, &mut lit);
+        actions
+    }
+
+    /// Forward whatever is held back (idle-timeout path, e.g. a bare Esc keypress).
+    pub fn flush(&mut self) -> Option<InputAction> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let held = std::mem::take(&mut self.pending);
+        Some(InputAction::Literal(
+            String::from_utf8_lossy(&held).into_owned(),
+        ))
+    }
+
+    /// Whether bytes are held back (the runtime arms the flush timer off this).
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+fn emit_literal(actions: &mut Vec<InputAction>, lit: &mut Vec<u8>) {
+    if !lit.is_empty() {
+        actions.push(InputAction::Literal(
+            String::from_utf8_lossy(lit).into_owned(),
+        ));
+        lit.clear();
+    }
+}
+
+/// Length of the longest prefix of `bytes` that ends on a UTF-8 character boundary; the
+/// remainder (at most 3 bytes) is an incomplete trailing character.
+fn utf8_complete_len(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        // Invalid (not merely incomplete) UTF-8: forward everything and let the lossy
+        // conversion replace the bad bytes.
+        Err(_) => bytes.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +417,90 @@ mod tests {
             st.on_frame(&json!({"id": 11, "err": "nope"}))
                 .is_err()
         );
+    }
+
+    // ---- input scanner: raw VT stdin bytes -> send_literal actions + F12 detach ----
+
+    fn literals(actions: &[InputAction]) -> Vec<String> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                InputAction::Literal(s) => Some(s.clone()),
+                InputAction::Detach => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scanner_passes_plain_text_through() {
+        let mut sc = InputScanner::default();
+        let actions = sc.push(b"hello\r");
+        assert_eq!(literals(&actions), vec!["hello\r"]);
+        assert!(!sc.has_pending());
+    }
+
+    #[test]
+    fn scanner_detects_f12_alone_as_detach() {
+        let mut sc = InputScanner::default();
+        let actions = sc.push(b"\x1b[24~");
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], InputAction::Detach));
+    }
+
+    #[test]
+    fn scanner_keeps_text_around_detach_in_order() {
+        let mut sc = InputScanner::default();
+        let actions = sc.push(b"abc\x1b[24~def");
+        assert!(matches!(&actions[0], InputAction::Literal(s) if s == "abc"));
+        assert!(matches!(actions[1], InputAction::Detach));
+        assert!(matches!(&actions[2], InputAction::Literal(s) if s == "def"));
+    }
+
+    #[test]
+    fn scanner_detects_f12_split_at_every_boundary() {
+        let seq = b"\x1b[24~";
+        for cut in 1..seq.len() {
+            let mut sc = InputScanner::default();
+            let first = sc.push(&seq[..cut]);
+            assert!(first.is_empty(), "cut {cut}: prefix must be held back");
+            assert!(sc.has_pending());
+            let second = sc.push(&seq[cut..]);
+            assert_eq!(second.len(), 1, "cut {cut}");
+            assert!(matches!(second[0], InputAction::Detach), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn scanner_flush_forwards_a_lone_escape() {
+        // A bare Esc keypress is a strict prefix of the detach sequence; after the
+        // idle timeout the runtime flushes it through as input.
+        let mut sc = InputScanner::default();
+        assert!(sc.push(b"\x1b").is_empty());
+        assert!(sc.has_pending());
+        let flushed = sc.flush();
+        assert!(matches!(&flushed, Some(InputAction::Literal(s)) if s == "\x1b"));
+        assert!(!sc.has_pending());
+        assert!(sc.flush().is_none());
+    }
+
+    #[test]
+    fn scanner_reassembles_utf8_split_across_reads() {
+        let bytes = "héllo".as_bytes(); // é = 0xC3 0xA9
+        let mut sc = InputScanner::default();
+        let first = sc.push(&bytes[..2]); // "h" + first byte of é
+        assert_eq!(literals(&first), vec!["h"]);
+        assert!(sc.has_pending());
+        let second = sc.push(&bytes[2..]);
+        assert_eq!(literals(&second), vec!["éllo"]);
+        assert!(!sc.has_pending());
+    }
+
+    #[test]
+    fn scanner_forwards_non_detach_escape_sequences_verbatim() {
+        // Arrow keys etc. arrive as VT sequences under ENABLE_VIRTUAL_TERMINAL_INPUT
+        // and must reach the agent unmodified.
+        let mut sc = InputScanner::default();
+        let actions = sc.push(b"\x1b[A\x1b[B");
+        assert_eq!(literals(&actions), vec!["\x1b[A\x1b[B"]);
     }
 }
