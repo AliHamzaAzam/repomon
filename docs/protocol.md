@@ -127,15 +127,15 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
 | `session.rename` | `{ session_id, label? }` | `null` (set/clear a user label for a session, keyed by its durable transcript id; empty/absent `label` clears it; overlaid onto `AgentSession.custom_label`) |
-| `agent.target` | `{ lane_id, window? }` | `{ target, available }` (also resets the window to follow the attaching client's size) |
+| `agent.target` | `{ lane_id, window? }` | `{ target, available, attach? }` (also resets the window to follow the attaching client's size; `attach` — optional, additive — is `{ program, args }`, the exact command to run in a real terminal to attach; clients without it keep deriving the tmux invocation from `target`) |
 | `agent.resize` | `{ lane_id, cols, rows, window? }` | `null` (resize the agent's pane so the mediated view reflows to fit; clamped to a floor) |
 | `agent.fit` | `{ lane_id, cols, rows, window? }` | `{ applied, cols, rows }` — the arbitrated resize for remote viewers: reflows the shared pane to the caller's grid ONLY while no live local viewport focus owns the window (the TUI heartbeats its viewport every ~5s; ownership lapses 15s after the last beat, and a clean TUI quit releases it immediately) AND no other remote session that's also focused on this window right now drove the agent more recently than the caller (last-interaction-wins among remotes; an applied fit counts as an interaction). Refused (`applied: false`) it answers with the pane's current grid so the caller renders pinned at the shared size instead of fighting. Poll it (~10s) to adapt when the TUI starts or stops viewing. |
 | `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen — the client then scrolls the captured buffer itself) |
-| `terminal.open` | `{ lane_id }` | `{ id, target }` (a new plain shell window in the worktree) |
+| `terminal.open` | `{ lane_id }` | `{ id, target, attach? }` (a new plain shell window in the worktree; `attach` as in `agent.target`) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
 | `terminal.list_all` | — | `[{ lane_id, id }]` (every lane's open terminals, sorted — what the Grid tiles) |
 | `terminal.close` | `{ id }` | `null` |
-| `terminal.target` | `{ id }` | `{ target, available }` |
+| `terminal.target` | `{ id }` | `{ target, available, attach? }` (`attach` as in `agent.target`) |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
 | `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored. Per-connection: each connection owns its own viewport and focus; the capture loop streams the union across every live connection, and `event.agent.output` is filtered to the connections whose viewport actually covers it) |
 | `subscribe` | `{ topics? }` | `null` |
@@ -152,7 +152,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts. Always `[]` while `backend` is `"codex"` — codex's on-disk session format is not parsed; treat it as "no chat view for this backend" and render the `event.orchestrator.output` pane stream instead, never as an error/loading state) |
 | `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window wired to the repomon MCP server; idempotent; re-spawns if the prior window died. `agent` picks the backend: a Claude account / custom agent name / `codex`; an agent with no MCP client — e.g. `aider` — is rejected with `invalid_params` instead of spawning a broken window) |
 | `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (kill the orchestrator window) |
-| `orchestrator.target` | — | `{ target, available }` (attach target for the orchestrator window; resets it to follow the attaching client's size) |
+| `orchestrator.target` | — | `{ target, available, attach? }` (attach target for the orchestrator window; resets it to follow the attaching client's size; `attach` as in `agent.target`) |
 | `orchestrator.send_input` | `{ text, enter=true }` | `null` (type an instruction to repomind, then Enter unless `enter=false`) |
 | `orchestrator.key` | `{ key, literal=false }` | `null` (one keystroke to repomind: literal char or key name) |
 | `orchestrator.watch` | `{ on }` | `null` (gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
