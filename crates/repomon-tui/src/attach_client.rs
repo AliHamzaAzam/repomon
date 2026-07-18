@@ -250,6 +250,352 @@ fn utf8_complete_len(bytes: &[u8]) -> usize {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// `repomon attach-host <window>` on non-Windows: agents run under tmux there.
+#[cfg(not(windows))]
+pub async fn run(_session: &str, _window: &str) -> Result<()> {
+    bail!(
+        "`repomon attach-host` is Windows-only: it attaches to a repomon-agent-host named \
+         pipe. On macOS/Linux agents run under tmux — attach from the TUI instead."
+    )
+}
+
+/// Attach the current console to the host serving `session`/`window` (raw byte proxy).
+#[cfg(windows)]
+pub async fn run(session: &str, window: &str) -> Result<()> {
+    windows_impl::run(session, window).await
+}
+
+// ---------------------------------------------------------------------------
+// Windows runtime
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod windows_impl {
+    use std::io::{Read as _, Write as _};
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, Result, bail};
+    use serde_json::Value;
+    use tokio::io::{ReadHalf, WriteHalf};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+    use tokio::sync::mpsc;
+
+    use super::{InputAction, InputScanner, StreamEvent, StreamState};
+
+    /// How long to keep retrying `ERROR_PIPE_BUSY` before giving up on a connect.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Idle time before held-back stdin bytes (e.g. a bare Esc keypress) flush through.
+    const ESC_FLUSH: Duration = Duration::from_millis(50);
+    /// Console size poll cadence; `resize` is last-client-wins (§7.6).
+    const RESIZE_POLL: Duration = Duration::from_millis(200);
+    /// All pipe-server instances are busy; retry shortly (winerror `ERROR_PIPE_BUSY`).
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    enum Outcome {
+        /// F12: leave the agent running.
+        Detached,
+        /// The host exited (agent gone) — pipe EOF on the stream connection.
+        Closed,
+    }
+
+    pub async fn run(session: &str, window: &str) -> Result<()> {
+        let pipe = super::pipe_name(session, window);
+
+        // Control connection: hello / resize / send_literal, request-response forever.
+        // Input cannot share the stream connection — after `subscribe_bytes` the host
+        // ignores client frames on it (§5), so we hold two connections (§2 allows this).
+        let (r, w) = tokio::io::split(connect(&pipe).await?);
+        let mut ctrl = Ctrl { r, w, next_id: 0 };
+        let hello = ctrl.request(super::req_hello).await?;
+        let proto = hello.get("proto").and_then(Value::as_u64).unwrap_or(0);
+        if proto != 1 {
+            bail!("host speaks protocol version {proto}; this client speaks 1");
+        }
+
+        // From here we own the console: VT modes + UTF-8 codepages, restored on exit.
+        let guard = console::VtGuard::activate()
+            .context("`repomon attach-host` needs an interactive console")?;
+
+        // Impose our size first (last-client-wins), *then* subscribe, so the replay
+        // frame is rendered at the size it is about to be displayed at.
+        let mut last_size = console_size();
+        if let Some((cols, rows)) = last_size {
+            report(ctrl.request(|id| super::req_resize(id, cols, rows)).await);
+        }
+
+        // Stream connection: `subscribe_bytes`; the first frame is a full-screen replay.
+        let (mut sr, mut sw) = tokio::io::split(connect(&pipe).await?);
+        let mut state = StreamState::new(1);
+        super::write_frame(&mut sw, &super::req_subscribe(1)).await?;
+
+        {
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "\x1b]0;repomon: {window}\x07");
+            let _ = out.flush();
+        }
+
+        // Dedicated mirror task: a slow control round-trip must never stall output.
+        let mut mirror = tokio::spawn(async move {
+            loop {
+                match super::read_frame(&mut sr).await? {
+                    None => return Ok::<(), anyhow::Error>(()), // host exited
+                    Some(v) => match state.on_frame(&v)? {
+                        StreamEvent::Ack => {}
+                        StreamEvent::Bytes(b) => {
+                            let mut out = std::io::stdout().lock();
+                            out.write_all(&b)?;
+                            out.flush()?;
+                        }
+                    },
+                }
+            }
+        });
+
+        // Raw stdin pump on a plain thread (console reads are blocking). With VT input
+        // enabled the console delivers canonical VT byte sequences here.
+        let (tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut scanner = InputScanner::default();
+        let mut resize_tick = tokio::time::interval(RESIZE_POLL);
+        let mut stdin_open = true;
+        let outcome = loop {
+            let flush_timer = tokio::time::sleep(ESC_FLUSH);
+            tokio::pin!(flush_timer);
+            tokio::select! {
+                res = &mut mirror => {
+                    match res {
+                        Ok(Ok(())) => break Outcome::Closed,
+                        Ok(Err(e)) => return Err(e.context("byte stream failed")),
+                        Err(e) => return Err(anyhow::Error::new(e).context("mirror task failed")),
+                    }
+                }
+                chunk = stdin_rx.recv(), if stdin_open => match chunk {
+                    // stdin is gone; keep mirroring output (view-only), like tmux.
+                    None => stdin_open = false,
+                    Some(bytes) => {
+                        if forward(&mut ctrl, scanner.push(&bytes)).await? {
+                            break Outcome::Detached;
+                        }
+                    }
+                },
+                _ = &mut flush_timer, if scanner.has_pending() => {
+                    forward(&mut ctrl, scanner.flush().into_iter().collect()).await?;
+                }
+                _ = resize_tick.tick() => {
+                    let size = console_size();
+                    if size.is_some() && size != last_size {
+                        last_size = size;
+                        let (cols, rows) = size.expect("checked is_some");
+                        report(ctrl.request(|id| super::req_resize(id, cols, rows)).await);
+                    }
+                }
+            }
+        };
+
+        mirror.abort();
+        // The agent may have left the console on the alternate screen; come back to a
+        // sane primary screen before the guard restores the original modes.
+        {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(b"\x1b[?1049l\x1b[?25h\x1b[0m\r\n");
+            let _ = out.flush();
+        }
+        drop(guard);
+        match outcome {
+            Outcome::Detached => println!("[repomon] detached — agent keeps running"),
+            Outcome::Closed => println!("[repomon] window {window:?} closed (agent exited)"),
+        }
+        Ok(())
+    }
+
+    /// The control connection: one in-flight request at a time (the host answers in
+    /// order, §5), with client-chosen incrementing ids.
+    struct Ctrl {
+        r: ReadHalf<NamedPipeClient>,
+        w: WriteHalf<NamedPipeClient>,
+        next_id: u64,
+    }
+
+    impl Ctrl {
+        async fn request(&mut self, build: impl FnOnce(u64) -> Value) -> Result<Value> {
+            self.next_id += 1;
+            let id = self.next_id;
+            super::write_frame(&mut self.w, &build(id)).await?;
+            match super::read_frame(&mut self.r).await? {
+                None => bail!("host closed the control connection"),
+                Some(v) => super::parse_response(&v, id),
+            }
+        }
+    }
+
+    /// Send scanner actions to the host. Returns `true` on detach. Connection failures
+    /// are fatal; a host-side `err` on one input frame is reported and skipped.
+    async fn forward(ctrl: &mut Ctrl, actions: Vec<InputAction>) -> Result<bool> {
+        for action in actions {
+            match action {
+                InputAction::Detach => return Ok(true),
+                InputAction::Literal(text) => {
+                    match ctrl.request(|id| super::req_send_literal(id, &text)).await {
+                        Ok(_) => {}
+                        Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
+                            return Err(e.context("control connection failed"));
+                        }
+                        Err(e) => report::<Value>(Err(e)),
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Non-fatal host/request errors go to stderr; the attach keeps running.
+    fn report<T>(res: Result<T>) {
+        if let Err(e) = res {
+            eprintln!("repomon attach-host: {e}");
+        }
+    }
+
+    /// Connect to a host pipe, retrying `ERROR_PIPE_BUSY` (all server instances taken).
+    async fn connect(pipe: &str) -> Result<NamedPipeClient> {
+        let start = Instant::now();
+        loop {
+            match ClientOptions::new().open(pipe) {
+                Ok(c) => return Ok(c),
+                Err(e)
+                    if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                        && start.elapsed() < CONNECT_TIMEOUT =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "can't connect to {pipe} — is the agent's host process running?"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Current console size in (cols, rows), if there is a console.
+    fn console_size() -> Option<(u16, u16)> {
+        ratatui::crossterm::terminal::size().ok()
+    }
+
+    /// Console-mode plumbing via a tiny hand-rolled kernel32 binding (keeps the crate
+    /// free of new Windows dependencies; `cargo check` needs no import libraries).
+    mod console {
+        use anyhow::{Result, bail};
+        use core::ffi::c_void;
+
+        type Handle = *mut c_void;
+
+        const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+        const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
+        const ENABLE_WRAP_AT_EOL_OUTPUT: u32 = 0x0002;
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+        const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
+        const CP_UTF8: u32 = 65001;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(std_handle: u32) -> Handle;
+            fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
+            fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
+            fn GetConsoleCP() -> u32;
+            fn GetConsoleOutputCP() -> u32;
+            fn SetConsoleCP(codepage: u32) -> i32;
+            fn SetConsoleOutputCP(codepage: u32) -> i32;
+        }
+
+        /// RAII console state: VT-raw stdin (`ENABLE_VIRTUAL_TERMINAL_INPUT` only — no
+        /// line buffering, echo, or Ctrl-C processing), VT-processing stdout, UTF-8
+        /// codepages both ways. Everything is restored on drop.
+        pub struct VtGuard {
+            stdin: Handle,
+            stdout: Handle,
+            in_mode: u32,
+            out_mode: u32,
+            in_cp: u32,
+            out_cp: u32,
+        }
+
+        // SAFETY: the wrapped values are process-global console pseudo-handles that are
+        // not thread-affine; the guard only reads/sets console modes with them.
+        unsafe impl Send for VtGuard {}
+
+        impl VtGuard {
+            pub fn activate() -> Result<Self> {
+                unsafe {
+                    let stdin = GetStdHandle(STD_INPUT_HANDLE);
+                    let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+                    let mut in_mode = 0u32;
+                    let mut out_mode = 0u32;
+                    if GetConsoleMode(stdin, &mut in_mode) == 0
+                        || GetConsoleMode(stdout, &mut out_mode) == 0
+                    {
+                        bail!("stdin/stdout is not attached to a console");
+                    }
+                    let guard = Self {
+                        stdin,
+                        stdout,
+                        in_mode,
+                        out_mode,
+                        in_cp: GetConsoleCP(),
+                        out_cp: GetConsoleOutputCP(),
+                    };
+                    if SetConsoleMode(stdin, ENABLE_VIRTUAL_TERMINAL_INPUT) == 0 {
+                        bail!("couldn't enable VT input on stdin");
+                    }
+                    let out_want = out_mode
+                        | ENABLE_PROCESSED_OUTPUT
+                        | ENABLE_WRAP_AT_EOL_OUTPUT
+                        | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                        | DISABLE_NEWLINE_AUTO_RETURN;
+                    if SetConsoleMode(stdout, out_want) == 0 {
+                        SetConsoleMode(stdin, in_mode);
+                        bail!("couldn't enable VT processing on stdout");
+                    }
+                    // UTF-8 codepages so raw stdin reads hand us UTF-8 for send_literal.
+                    SetConsoleCP(CP_UTF8);
+                    SetConsoleOutputCP(CP_UTF8);
+                    Ok(guard)
+                }
+            }
+        }
+
+        impl Drop for VtGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    SetConsoleMode(self.stdin, self.in_mode);
+                    SetConsoleMode(self.stdout, self.out_mode);
+                    SetConsoleCP(self.in_cp);
+                    SetConsoleOutputCP(self.out_cp);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +839,15 @@ mod tests {
         let second = sc.push(&bytes[2..]);
         assert_eq!(literals(&second), vec!["éllo"]);
         assert!(!sc.has_pending());
+    }
+
+    // ---- entry point ----
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn run_bails_with_a_windows_only_error_on_unix() {
+        let err = run("repomon", "lane-1-1").await.unwrap_err();
+        assert!(err.to_string().contains("Windows"), "err: {err}");
     }
 
     #[test]
