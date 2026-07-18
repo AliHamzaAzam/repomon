@@ -70,7 +70,7 @@ pub enum Command {
     },
     /// Print shell integration (cd-on-exit) for `eval "$(repomon shell-init zsh)"`.
     ShellInit {
-        /// Shell: zsh, bash, or fish.
+        /// Shell: zsh, bash, fish, or powershell.
         shell: clap_complete::Shell,
     },
     /// Write a roff man page to stdout (used by the Homebrew formula).
@@ -708,6 +708,24 @@ repomon() {
 }
 "#;
 
+const POWERSHELL_CD_WRAPPER: &str = r#"# repomon shell integration: cd into a lane's worktree on exit.
+# Add to $PROFILE: repomon shell-init powershell | Out-String | Invoke-Expression
+function repomon {
+    $bin = (Get-Command -Name repomon -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1).Source
+    if (-not $bin) { Write-Error 'repomon: binary not found on PATH'; return }
+    $tmp = [System.IO.Path]::GetTempFileName()
+    $env:REPOMON_CD_FILE = $tmp
+    try { & $bin @args }
+    finally { Remove-Item Env:\REPOMON_CD_FILE -ErrorAction SilentlyContinue }
+    $dir = Get-Content -LiteralPath $tmp -TotalCount 1 -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+    if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) {
+        Set-Location -LiteralPath $dir
+    }
+}
+"#;
+
 const FISH_CD_WRAPPER: &str = r#"# repomon shell integration: cd into a lane's worktree on exit.
 function repomon
     set -l tmp (mktemp)
@@ -722,9 +740,10 @@ pub fn shell_init(shell: clap_complete::Shell) -> Result<String> {
     let snippet = match shell {
         clap_complete::Shell::Zsh | clap_complete::Shell::Bash => POSIX_CD_WRAPPER,
         clap_complete::Shell::Fish => FISH_CD_WRAPPER,
+        clap_complete::Shell::PowerShell => POWERSHELL_CD_WRAPPER,
         other => {
             return Err(anyhow!(
-                "shell-init: unsupported shell '{other}'; use zsh, bash, or fish"
+                "shell-init: unsupported shell '{other}'; use zsh, bash, fish, or powershell"
             ));
         }
     };
@@ -761,8 +780,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_init_powershell_defines_wrapper() {
+        let out = super::shell_init(clap_complete::Shell::PowerShell).unwrap();
+        assert!(out.contains("function repomon"));
+        assert!(out.contains("$env:REPOMON_CD_FILE"));
+        assert!(out.contains("Set-Location"));
+        // The wrapper must invoke the real binary, not recurse into the function.
+        assert!(out.contains("-CommandType Application"));
+    }
+
+    #[test]
     fn shell_init_rejects_unsupported_shell() {
-        assert!(super::shell_init(clap_complete::Shell::PowerShell).is_err());
+        assert!(super::shell_init(clap_complete::Shell::Elvish).is_err());
     }
 
     #[test]
