@@ -733,6 +733,9 @@ impl App {
                 // Forget remembered agent selections for lanes that no longer exist.
                 self.session_memory
                     .retain(|id, _| self.lanes.iter().any(|l| l.id == *id));
+                // A successful fetch is one real chance for a just-spawned window to have
+                // appeared — the only clock the spawn-focus give-up may tick on.
+                self.age_pending_focus();
                 // Run notification edge-detection only on a *successful* fetch. Seeding off a
                 // failed first call (empty lanes) would make the next good refresh treat every
                 // running agent as a fresh transition — the startup storm seeding prevents.
@@ -1669,6 +1672,22 @@ impl App {
         }
     }
 
+    /// Age the spawn-focus intent by one *data refresh*: called from `refresh_lanes` on a
+    /// successful fetch, so [`PENDING_FOCUS_GIVE_UP_TICKS`] measures ~1s lane refreshes — the
+    /// cadence the window can actually appear at — rather than event-loop iterations (which a
+    /// burst of typing runs hundreds of per second). Resolution (and the drop on navigating to
+    /// another lane) stays in [`Self::sync_session_cursor`].
+    fn age_pending_focus(&mut self) {
+        if self.pending_focus_window.is_none() {
+            return;
+        }
+        self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
+        if self.pending_focus_ticks > PENDING_FOCUS_GIVE_UP_TICKS {
+            self.pending_focus_window = None;
+            self.pending_focus_ticks = 0;
+        }
+    }
+
     /// Keep the session cursor in range: reset to 0 when the selected lane changes, and clamp
     /// to the number of sessions on that lane.
     fn sync_session_cursor(&mut self) {
@@ -1699,11 +1718,12 @@ impl App {
                         return;
                     }
                     None => {
-                        self.pending_focus_ticks = self.pending_focus_ticks.saturating_add(1);
-                        if self.pending_focus_ticks > PENDING_FOCUS_GIVE_UP_TICKS {
-                            self.pending_focus_window = None;
-                            self.pending_focus_ticks = 0;
-                        }
+                        // Not in the list yet (transcript/window lag) — keep waiting. Expiry is
+                        // counted per data refresh in `age_pending_focus`, NOT here: this runs
+                        // once per event-loop iteration (i.e. per keystroke), so counting here
+                        // let a typing burst right after `e` burn the give-up budget before the
+                        // window had any chance to appear — dropping the intent and leaving the
+                        // keys routed at the lane's previous agent.
                     }
                 }
             } else {
@@ -1895,6 +1915,16 @@ impl App {
     /// captures, stops, and attaches are routed. `None` falls back to the lane's first slot
     /// (external/inferred sessions have no window of their own).
     fn selected_window(&self) -> Option<String> {
+        // A just-spawned agent routes immediately: `agent.spawn` already returned its window
+        // name, but the session takes a beat to show up in `lane.list` (overlay lag) — until
+        // then `session_idx` still points at the lane's previous agent, and keys typed right
+        // after `e` would land in the wrong pane (or, via the daemon's `None` fallback, in the
+        // lane's FIRST window). The cursor follows once the window appears (`sync_session_cursor`).
+        if let Some((lane, w)) = &self.pending_focus_window {
+            if self.selected_lane().map(|l| l.id) == Some(*lane) {
+                return Some(w.clone());
+            }
+        }
         self.selected_lane()
             .and_then(|l| l.agent_sessions.get(self.session_idx))
             .and_then(|s| s.tmux_window.clone())
@@ -1943,6 +1973,10 @@ impl App {
         if n <= 1 {
             return;
         }
+        // An explicit Tab overrides a pending spawn-focus snap — otherwise the cursor would
+        // appear to move while `selected_window()` kept routing keys at the pending window.
+        self.pending_focus_window = None;
+        self.pending_focus_ticks = 0;
         self.session_idx = if forward {
             (self.session_idx + 1) % n
         } else {
@@ -5928,5 +5962,121 @@ mod tests {
         );
         // The seed call itself must never fire, regardless of what a genuine edge would do.
         assert!(!app.orch_popup_should_fire(true, false));
+    }
+
+    /// A hand-built lane for cursor/routing tests — deserialized so the `oid_hex` head field
+    /// doesn't need a `gix` literal. No daemon involved; tests mutate `agent_sessions` directly.
+    fn test_lane(id: i64) -> Lane {
+        serde_json::from_value(json!({
+            "id": id,
+            "repo": { "id": 1, "path": "/tmp/r", "name": "r",
+                      "added_at": "2026-01-01T00:00:00Z", "worktree_root_template": null },
+            "worktree": { "id": 1, "repo_id": 1, "path": "/tmp/r/main", "branch": "main",
+                          "head": "0000000000000000000000000000000000000000",
+                          "is_main": true, "name": "main" },
+            "state": { "worktree_id": 1,
+                       "head": "0000000000000000000000000000000000000000",
+                       "branch": "main", "upstream": null, "ahead": 0, "behind": 0,
+                       "dirty": { "staged": 0, "unstaged": 0, "untracked": 0 },
+                       "last_commit_at": null },
+            "agent_sessions": [],
+            "last_activity_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    /// An app looking at one lane whose first agent runs in `lane-7` — the state right before
+    /// a second agent is spawned. Row 0 is the pinned repomind row, so `selected = 1`.
+    async fn app_on_lane_7() -> App {
+        let mut app = app_with_dummy_client().await;
+        let mut lane = test_lane(7);
+        lane.agent_sessions = vec![managed("lane-7", Some("uuid-a"))];
+        app.lanes = vec![lane];
+        app.selected = 1;
+        app.sync_session_cursor();
+        app
+    }
+
+    #[tokio::test]
+    async fn typing_right_after_spawn_targets_the_new_window() {
+        let mut app = app_on_lane_7().await;
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
+
+        // `agent.spawn` just returned window lane-7-2, but its session hasn't shown up in
+        // `lane.list` yet (overlay lag). Keys typed in this gap must go to the NEW agent.
+        app.pending_focus_window = Some((7, "lane-7-2".into()));
+        assert_eq!(
+            app.selected_window().as_deref(),
+            Some("lane-7-2"),
+            "insert-mode keys must route to the just-spawned agent, not the old selection"
+        );
+
+        // An intent for a different lane must not hijack this lane's routing.
+        app.pending_focus_window = Some((8, "lane-8-2".into()));
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
+    }
+
+    #[tokio::test]
+    async fn spawn_focus_intent_survives_a_typing_burst_then_lands_on_the_new_agent() {
+        let mut app = app_on_lane_7().await;
+        app.pending_focus_window = Some((7, "lane-7-2".into()));
+
+        // Each keystroke runs one event-loop iteration (one cursor sync). A quick burst of
+        // typing must not expire the intent — only sustained lane refreshes may (the window
+        // hasn't had a chance to appear until at least one refresh lands).
+        for _ in 0..20 {
+            app.sync_session_cursor();
+        }
+        assert!(
+            app.pending_focus_window.is_some(),
+            "a typing burst dropped the spawn-focus intent before the window could appear"
+        );
+        assert_eq!(app.session_idx, 0, "cursor waits until the window appears");
+
+        // The window-only placeholder lands in lane.list → the cursor snaps onto it.
+        app.lanes[0].agent_sessions.push(managed("lane-7-2", None));
+        app.sync_session_cursor();
+        assert_eq!(app.session_idx, 1);
+        assert!(app.pending_focus_window.is_none());
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7-2"));
+    }
+
+    #[tokio::test]
+    async fn spawn_focus_intent_expires_only_after_sustained_refreshes() {
+        let mut app = app_on_lane_7().await;
+        // A spawn whose window never materializes (e.g. the agent died on launch): the intent
+        // must still expire — on the refresh clock, so ~PENDING_FOCUS_GIVE_UP_TICKS seconds.
+        app.pending_focus_window = Some((7, "lane-7-99".into()));
+        for _ in 0..PENDING_FOCUS_GIVE_UP_TICKS {
+            app.age_pending_focus();
+            assert!(
+                app.pending_focus_window.is_some(),
+                "must keep waiting through the grace refreshes"
+            );
+        }
+        app.age_pending_focus();
+        assert!(
+            app.pending_focus_window.is_none(),
+            "a window that never appears must not pin routing forever"
+        );
+        // With the intent gone, routing falls back to the actually-selected session.
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
+    }
+
+    #[tokio::test]
+    async fn tab_during_the_spawn_gap_cancels_the_focus_intent() {
+        let mut app = app_on_lane_7().await;
+        app.lanes[0].agent_sessions.push(managed("lane-7-2", None));
+        app.pending_focus_window = Some((7, "lane-7-2".into()));
+
+        // An explicit Tab is the user overriding the spawn's focus snap: the intent must die,
+        // or the cursor would appear to move while keys still route to the pending window.
+        app.cycle_session(true);
+        assert!(
+            app.pending_focus_window.is_none(),
+            "explicit session navigation must cancel the spawn-focus intent"
+        );
+        assert_eq!(app.session_idx, 1);
+        assert_eq!(app.selected_window().as_deref(), Some("lane-7-2"));
     }
 }
