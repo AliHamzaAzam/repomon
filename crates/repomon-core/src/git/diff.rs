@@ -28,6 +28,9 @@ pub struct LaneDiff {
     pub committed_stat: String,
     /// `git diff HEAD --stat` — staged + unstaged changes.
     pub uncommitted_stat: String,
+    /// Count of untracked files (`git ls-files --others --exclude-standard`), computed live
+    /// with the stats above — never a cached scan, so one snapshot is self-consistent.
+    pub untracked: usize,
 }
 
 /// Compute `worktree_path`'s [`LaneDiff`] against `base` (a branch name resolvable from the
@@ -52,6 +55,10 @@ pub fn lane_diff(worktree_path: &Path, base: &str) -> Result<LaneDiff> {
 
     let committed_stat = run(worktree_path, &["diff", "--stat", &range])?;
     let uncommitted_stat = run(worktree_path, &["diff", "HEAD", "--stat"])?;
+    let untracked = run(worktree_path, &["ls-files", "--others", "--exclude-standard"])?
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
 
     Ok(LaneDiff {
         base: base.to_string(),
@@ -60,6 +67,7 @@ pub fn lane_diff(worktree_path: &Path, base: &str) -> Result<LaneDiff> {
         commits_truncated,
         committed_stat,
         uncommitted_stat,
+        untracked,
     })
 }
 
@@ -163,8 +171,29 @@ mod tests {
             "uncommitted_stat was: {:?}",
             d.uncommitted_stat
         );
+        assert_eq!(d.untracked, 0); // a tracked-file edit is not an untracked file
 
         let _ = dir; // keep the main repo tempdir alive for the duration of the test
+    }
+
+    #[test]
+    fn counts_untracked_files_live() {
+        let (dir, wt_parent) = repo_with_lane_worktree();
+        let wt_path = wt_parent.path().join("feat");
+
+        std::fs::write(wt_path.join("scratch.txt"), "x\n").unwrap();
+        std::fs::write(wt_path.join("notes.txt"), "y\n").unwrap();
+
+        let d = lane_diff(&wt_path, "main").unwrap();
+        assert_eq!(d.untracked, 2);
+
+        // Ignored files don't count (--exclude-standard honors .gitignore).
+        std::fs::write(wt_path.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(wt_path.join("ignored.txt"), "z\n").unwrap();
+        let d = lane_diff(&wt_path, "main").unwrap();
+        assert_eq!(d.untracked, 3); // scratch, notes, and the new .gitignore itself
+
+        let _ = dir;
     }
 
     #[test]

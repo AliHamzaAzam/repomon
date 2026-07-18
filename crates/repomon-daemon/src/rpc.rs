@@ -1293,7 +1293,9 @@ pub async fn dispatch(
                 "commits": d.commits,
                 "committed_stat": d.committed_stat,
                 "uncommitted_stat": d.uncommitted_stat,
-                "untracked": lane.state.dirty.untracked,
+                // d.untracked, not lane.state.dirty.untracked: the cached scan can lag the
+                // live stats computed above, and one lane.diff snapshot must be self-consistent.
+                "untracked": d.untracked,
             });
             if d.commits_truncated {
                 result["commits_truncated"] = json!(true);
