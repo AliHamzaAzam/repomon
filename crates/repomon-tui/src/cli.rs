@@ -13,6 +13,11 @@ use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
+// Lives in `src/attach_client.rs` (declared here to keep `lib.rs` untouched — it is a
+// cross-track conflict hotspot during the native-Windows waves).
+#[path = "attach_client.rs"]
+pub mod attach_client;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Register a repository.
