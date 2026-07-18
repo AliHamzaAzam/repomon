@@ -3106,14 +3106,6 @@ fn reuse_per_path_on_failure<T: Clone>(
     }
 }
 
-/// Windows: there is no ps/lsof//proc probe yet — the session-backend track gives hosts an
-/// authoritative child-alive answer. `None` means "probe unavailable, don't filter", the same
-/// safe degradation the unix arms use when `ps` fails.
-#[cfg(windows)]
-fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
-    None
-}
-
 /// How many live `claude` CLI processes have each working directory. claude doesn't hold its
 /// transcript open, but its cwd is the worktree it runs in — so the count per worktree bounds
 /// how many of that worktree's sessions are actually running. `None` if the probe couldn't
@@ -3240,11 +3232,23 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
             }
         }
     }
-    let map = match tokio::task::spawn_blocking(live_claude_cwds)
+    // Windows has no ps/lsof//proc scan: the hosts *own* the agent children, so the backend
+    // answers authoritatively (a live host implies a live child in that cwd). Unix keeps the
+    // platform process probe, which also catches sessions started outside repomon.
+    #[cfg(windows)]
+    let fresh = {
+        let backend = ctx.backend.clone();
+        tokio::task::spawn_blocking(move || backend.live_agent_cwds())
+            .await
+            .ok()
+            .flatten()
+    };
+    #[cfg(not(windows))]
+    let fresh = tokio::task::spawn_blocking(live_claude_cwds)
         .await
         .ok()
-        .flatten()
-    {
+        .flatten();
+    let map = match fresh {
         Some(m) => m,
         None => {
             // The probe couldn't run (ps/lsof spawn failed under load, /proc unreadable).

@@ -269,10 +269,28 @@ impl Ctx {
     ) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
+        #[cfg(unix)]
         let backend: Arc<dyn SessionBackend> =
             Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
+        #[cfg(windows)]
+        let backend: Arc<dyn SessionBackend> = {
+            // Owner identity mirrors `reap::owner_token`: the db path — stable across
+            // restarts (so this daemon re-adopts its own hosts) and distinct per instance
+            // (so a stray test daemon's hosts are never adopted, reaped, or killed).
+            let me = db_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("pid:{}", std::process::id()));
+            Arc::new(repomon_core::WindowsBackend::new(
+                config.tmux_session.clone(),
+                me,
+                config::data_dir(),
+            ))
+        };
         // Make any already-running session attach-native (mouse, clipboard, deep scrollback);
-        // spawns reapply it, but an existing tmux server outlives a daemon restart.
+        // spawns reapply it, but an existing backend server (a tmux server, or detached
+        // Windows host processes) outlives a daemon restart — on Windows this scan is the
+        // re-adoption pass.
         if backend.session_exists() {
             backend.configure();
         }

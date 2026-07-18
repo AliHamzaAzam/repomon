@@ -20,13 +20,16 @@ use super::backend::AttachCommand;
 // Pure logic (all OSes)
 // ---------------------------------------------------------------------------
 
+/// Environment overrides parsed out of a spawn program string (`KEY=VALUE` prefixes).
+pub type EnvPairs = Vec<(String, String)>;
+
 /// Split a [`SpawnSpec`](super::backend::SpawnSpec) `program` string into environment
 /// assignments and an argv. On Unix the program is a shell fragment run via `sh -c`; there is
 /// no shell on Windows, so the backend parses the common shapes itself: leading `KEY=VALUE`
 /// tokens become environment overrides (`CLAUDE_CONFIG_DIR='…' claude`), and the rest is
 /// whitespace-split with single/double quotes respected (quotes group, backslashes are plain
 /// path characters). An empty program is an error.
-pub fn split_spawn_program(program: &str) -> Result<(Vec<(String, String)>, Vec<String>)> {
+pub fn split_spawn_program(program: &str) -> Result<(EnvPairs, Vec<String>)> {
     let tokens = tokenize(program);
     let mut env: Vec<(String, String)> = Vec::new();
     let mut argv: Vec<String> = Vec::new();
@@ -124,13 +127,13 @@ pub fn host_spawn_args(
 }
 
 /// `session:window` — same shape as the tmux target so clients treat both opaquely.
-fn target_of(session: &str, window: &str) -> String {
+pub fn target_of(session: &str, window: &str) -> String {
     format!("{session}:{window}")
 }
 
 /// `session:=window` — the exact-match form (tmux parity; the `=` is inert here but keeps the
 /// format identical across backends).
-fn exact_target_of(session: &str, window: &str) -> String {
+pub fn exact_target_of(session: &str, window: &str) -> String {
     format!("{session}:={window}")
 }
 
