@@ -6099,11 +6099,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_lands_in_focus_typing_ready() {
+    async fn spawn_lands_in_split_typing_ready() {
         let mut app = app_on_lane_7().await;
         // `e` on lane 7 spawned a second agent into window lane-7-2.
         app.land_on_spawned(7, Some("lane-7-2".into()));
-        assert_eq!(app.view, View::Focus);
+        assert_eq!(app.view, View::Split);
         assert!(
             app.focus_insert,
             "typing must reach the agent with no `i` press"
@@ -6121,18 +6121,18 @@ mod tests {
         app.lanes.push(test_lane(8));
         app.land_on_spawned(8, Some("lane-8".into()));
         assert_eq!(app.selected_lane().map(|l| l.id), Some(8));
-        assert_eq!(app.view, View::Focus);
+        assert_eq!(app.view, View::Split);
         assert!(app.focus_insert);
         assert_eq!(app.selected_window().as_deref(), Some("lane-8"));
     }
 
     #[tokio::test]
-    async fn landing_without_a_window_still_opens_focus_insert() {
+    async fn landing_without_a_window_still_opens_split_insert() {
         let mut app = app_on_lane_7().await;
         // A malformed spawn response (no window name): no intent to arm, but the user still
         // lands typing-ready on the lane's selected session.
         app.land_on_spawned(7, None);
-        assert_eq!(app.view, View::Focus);
+        assert_eq!(app.view, View::Split);
         assert!(app.focus_insert);
         assert!(app.pending_focus_window.is_none());
         assert_eq!(app.selected_window().as_deref(), Some("lane-7"));
