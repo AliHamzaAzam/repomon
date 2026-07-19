@@ -34,6 +34,12 @@ use crate::notify::{self, NotifEvent, NotifKind};
 use crate::theme::Theme;
 use crate::view;
 
+// The Windows attach pop-out (Track F). Declared here — like `cli::attach_client` — so `lib.rs`
+// stays untouched; the pure-logic argv/launcher helpers are reachable (and dead-code-free) on
+// every OS because `app` is a public module.
+#[path = "popout.rs"]
+pub mod popout;
+
 /// How long an in-app notification banner stays up before reverting to the footer hints.
 pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
 /// Don't re-fire the same session's notification within this window (suppresses status flapping).
@@ -5184,7 +5190,10 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // skips the event-loop's post-burst flush.
     app.flush_pending_input().await;
     // Stop the embedded byte stream while attached: the real terminal shows the pane, and the
-    // sync block re-establishes the emulator on return.
+    // sync block re-establishes the emulator on return. On Windows the attach pops out into a
+    // separate window (below) instead of taking over this terminal, so the embedded render stays
+    // up and the stream keeps running.
+    #[cfg(not(windows))]
     app.stop_emu().await;
     let window = app.selected_window();
     let resp = app
@@ -5215,6 +5224,15 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         return;
     }
     let spec = AttachSpec::from_parts(target, v.get("attach"));
+    // Windows: pop the agent out into a WT tab / new console and return — the TUI never suspends.
+    // A no-op on Unix, where the tmux-style suspend/attach path below runs unchanged.
+    let title = app
+        .selected_lane()
+        .map(lane_popout_title)
+        .unwrap_or_else(|| popout_title(&spec));
+    if attach_via_popout(app, &spec, &title) {
+        return;
+    }
     app.input_suspended.store(true, Ordering::Relaxed);
     // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
     // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
@@ -5263,6 +5281,11 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
 /// Suspend the TUI, attach to an arbitrary target (e.g. a plain terminal), then re-enter.
 async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, spec: &AttachSpec) {
     if spec.target.is_empty() {
+        return;
+    }
+    // Windows: pop out into a separate terminal and return (no-op on Unix — the tmux path runs).
+    let title = popout_title(spec);
+    if attach_via_popout(app, spec, &title) {
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
@@ -5383,6 +5406,50 @@ fn parse_attach_field(a: &serde_json::Value) -> Option<(String, Vec<String>)> {
         .map(|s| Some(s.as_str()?.to_string()))
         .collect::<Option<Vec<_>>>()?;
     Some((program, args))
+}
+
+/// Windows: pop the agent out into a *separate* terminal (a Windows Terminal tab, or a new
+/// console when `wt.exe` isn't on PATH) rather than handing over the TUI's terminal, and return
+/// `true` so the caller skips the whole tmux-style suspend/attach/reinit dance. The FleetView
+/// keeps running — including the embedded focus-view render — beside the popped-out window
+/// (plan decision #2: embedded + external window). `title` labels the new tab.
+///
+/// On macOS/Linux this is a no-op returning `false`, so the existing in-terminal attach path
+/// runs unchanged.
+#[cfg(windows)]
+fn attach_via_popout(app: &mut App, spec: &AttachSpec, title: &str) -> bool {
+    match popout::launch(title, &spec.program, &spec.args) {
+        Ok(()) => {
+            app.status = format!("popped {title} out into a new terminal; it's still running")
+        }
+        Err(e) => app.status = format!("couldn't pop out the attach: {e}"),
+    }
+    true
+}
+
+/// macOS/Linux: never pop out — attach in the current terminal (the tmux path below).
+#[cfg(not(windows))]
+fn attach_via_popout(_app: &mut App, _spec: &AttachSpec, _title: &str) -> bool {
+    false
+}
+
+/// A pop-out tab title for a lane agent: the lane's worktree name (`main` for the primary).
+fn lane_popout_title(lane: &Lane) -> String {
+    if lane.worktree.is_main {
+        "main".to_string()
+    } else {
+        lane.worktree.name.clone()
+    }
+}
+
+/// A concise tab title for a popped-out attach: the window name the client attaches to
+/// (`attach-host <window>` → `<window>`), falling back to the raw target.
+fn popout_title(spec: &AttachSpec) -> String {
+    spec.args
+        .last()
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| spec.target.clone())
 }
 
 /// Run the attach command in the real terminal. `$TMUX` is dropped so a tmux-backed attach
