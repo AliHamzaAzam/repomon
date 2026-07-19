@@ -51,6 +51,45 @@ pub struct OverlaySession {
     pub worktree: PathBuf,
 }
 
+/// Generation-guarded `lane.list` overlay cache. A fresh scan captures [`Self::generation`]
+/// before doing slow transcript/tmux work and may publish only if no structural invalidation
+/// happened meanwhile. This prevents an older notify-watcher scan from republishing a pre-spawn
+/// snapshot after `agent.spawn` cleared the cache.
+pub struct OverlayCache {
+    generation: u64,
+    entry: Option<(Instant, Vec<Lane>)>,
+}
+
+impl OverlayCache {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            entry: None,
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn entry(&self) -> Option<&(Instant, Vec<Lane>)> {
+        self.entry.as_ref()
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.entry = None;
+    }
+
+    pub(crate) fn publish(&mut self, generation: u64, lanes: Vec<Lane>) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.entry = Some((Instant::now(), lanes));
+        true
+    }
+}
+
 /// The dedicated tmux window the repomind orchestrator runs in. Deliberately NOT a `lane-*` name,
 /// so it stays invisible to the lane overlay/reaper and never shows in `lane.list`. Shared by
 /// `rpc` (the RPC dispatch), `notify_watch` (the attention/pane watcher), and this module's own
@@ -163,7 +202,7 @@ pub struct Ctx {
     /// The composite `lane.list` overlay (lanes + live agent sessions), cached for a short TTL so
     /// many clients polling every ~1s don't each re-run the tmux/lsof/transcript scan. Invalidated
     /// on structural changes (spawn/adopt/stop/lane create/delete) so user actions show at once.
-    pub overlay_cache: Mutex<Option<(Instant, Vec<Lane>)>>,
+    pub overlay_cache: Mutex<OverlayCache>,
     /// Single-flight guard for the overlay recompute. Serializes fresh rebuilds so that when several
     /// callers miss the TTL cache at once (two clients polling `lane.list` plus the notify watcher),
     /// exactly one runs the expensive scan and the rest reuse its result instead of stampeding.
@@ -335,7 +374,7 @@ impl Ctx {
             next_conn: AtomicU64::new(0),
             live_cwds: Mutex::new(None),
             cwds_sticky: Mutex::new(HashMap::new()),
-            overlay_cache: Mutex::new(None),
+            overlay_cache: Mutex::new(OverlayCache::new()),
             overlay_flight: Mutex::new(()),
             prompt_cache: Mutex::new(HashMap::new()),
             pane_seen: Mutex::new(HashMap::new()),
@@ -365,7 +404,7 @@ impl Ctx {
     /// change (spawn / adopt / stop / lane create / delete) so the action shows up immediately
     /// instead of waiting out the cache TTL.
     pub async fn invalidate_overlay(&self) {
-        *self.overlay_cache.lock().await = None;
+        self.overlay_cache.lock().await.invalidate();
     }
 
     /// Register a new client connection's session and return it. Each transport calls this once on
@@ -790,6 +829,26 @@ mod stream_tests {
             stream_window_for(7, &Some((7, "term-7-1".into()))),
             "lane-7"
         );
+    }
+
+    #[test]
+    fn invalidation_rejects_an_in_flight_overlay_publish() {
+        let mut cache = OverlayCache::new();
+        let stale_generation = cache.generation();
+        assert!(cache.publish(stale_generation, Vec::new()));
+
+        // `agent.spawn` invalidates while a notify-watcher scan that captured the old
+        // generation is still running. That scan must not republish its pre-spawn snapshot.
+        cache.invalidate();
+        assert!(!cache.publish(stale_generation, Vec::new()));
+        assert!(
+            cache.entry().is_none(),
+            "a scan started before invalidation must leave the cache empty"
+        );
+
+        let current_generation = cache.generation();
+        assert!(cache.publish(current_generation, Vec::new()));
+        assert!(cache.entry().is_some());
     }
 
     async fn test_ctx() -> Arc<Ctx> {
