@@ -5,15 +5,11 @@
 
 ## Problem
 
-Creating an agent leaves a manual step before you can talk to it:
+Creating an agent must open it without hiding the fleet context. The earlier implementation
+misread "open" as the full-screen Focus view, which removes the sidebar.
 
-- `e` spawn (Fleet/Split/Focus, with or without the picker) lands in Focus on the
-  new agent but with insert mode off — you must press `i` before typing.
-- New Lane + agent (`submit_new_lane`) spawns the agent, then returns to **Fleet**
-  with no selection change: you must find the lane, open Focus, and press `i`.
-
-The user's intent: after creating an agent, land in the Focus view with `INSERT`
-active — typing goes straight to the new agent, zero extra keypresses.
+The user's intent: after creating an agent, land in the Split view with the fleet sidebar
+visible and `INSERT` active — typing goes straight to the new agent, zero extra keypresses.
 
 ## Design
 
@@ -24,7 +20,7 @@ Extract `do_spawn`'s post-spawn landing into one helper on `App`:
 ```rust
 /// Land on a just-spawned agent, typing-ready: select its lane in the fleet,
 /// arm the pending-focus intent (which also routes keys to the window before
-/// lane.list shows it), and enter Focus with insert mode on.
+/// lane.list shows it), and enter Split with insert mode on.
 fn land_on_spawned(&mut self, lane: LaneId, window: Option<String>)
 ```
 
@@ -37,15 +33,14 @@ Behavior:
    appears in `lane.list`, and `selected_window()` routes keystrokes to it
    immediately (PR #65).
 3. `reset_scroll()` — show the live tail, mirroring what `i` does today.
-4. `view = View::Focus`, `focus_insert = true`.
+4. `view = View::Split`, `focus_insert = true`.
 
 `focus_managed` needs no handling: `check_focus_alive` derives it per tick.
 
 ### Call sites
 
-- **`do_spawn`** (all `e`-spawn paths): replace the current inline landing
-  (`view = Focus; focus_insert = false; pending_focus_window = …`) with the
-  helper. Net behavior change: insert mode starts on.
+- **`do_spawn`** (all `e`-spawn paths): use the shared helper so the new
+  agent opens in Split with insert mode on.
 - **`submit_new_lane`**: capture the `agent.spawn` response instead of
   discarding it (`let _ =`). On spawn success: keep the status line, `refresh()`
   first (so the new lane exists in `self.lanes` for `select_lane_session`),
@@ -66,18 +61,18 @@ Unit tests in `app.rs::tests` using the existing dummy-client harness
 `submit_new_lane` stay thin):
 
 1. **`e`-spawn landing:** `land_on_spawned(7, Some("lane-7-2"))` → view is
-   Focus, `focus_insert` on, `pending_focus_window` armed,
+   Split, `focus_insert` on, `pending_focus_window` armed,
    `selected_window() == "lane-7-2"` before the session appears in `lane.list`.
 2. **New-lane landing:** app with two lanes, selection on the first;
    `land_on_spawned(8, Some("lane-8"))` → fleet selection moves to lane 8,
-   Focus + insert on, keys route to `lane-8`.
-3. **No window (spawn response malformed):** lands in Focus + insert with no
+   Split + insert on, keys route to `lane-8`.
+3. **No window (spawn response malformed):** lands in Split + insert with no
    pending intent, routing falls back to the selected session.
 
 Existing PR #65 tests already cover intent resolution, expiry, and Tab cancel.
 
 ## Out of scope
 
-- Full tmux attach on spawn (rejected: heavier than the Focus view the user
-  chose; attaching mid-boot is janky).
+- Full tmux attach on spawn (rejected: heavier than the mediated Split view;
+  attaching mid-boot is janky and hides the sidebar).
 - Auto-insert when merely *navigating* to an agent (only creation opens it).

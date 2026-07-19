@@ -384,10 +384,8 @@ pub struct App {
     /// shows up in `lane.list` — so a fresh spawn lands you on the *new* agent, not the old one.
     /// Cleared when matched (or after a few refreshes if the window never appears).
     pending_focus_window: Option<(LaneId, String)>,
+    /// Successful data refreshes spent waiting for [`Self::pending_focus_window`] to appear.
     pending_focus_ticks: u8,
-    /// The `refresh_gen` the last pending-focus miss was counted against — the give-up
-    /// clock ticks per data refresh, not per event-loop iteration.
-    pending_focus_gen: u64,
     /// Plain shell terminals open for the selected lane (tmux window names).
     pub terminals: Vec<String>,
     terminals_lane: Option<LaneId>,
@@ -591,7 +589,6 @@ impl App {
             session_memory: HashMap::new(),
             pending_focus_window: None,
             pending_focus_ticks: 0,
-            pending_focus_gen: u64::MAX,
             terminals: Vec::new(),
             terminals_lane: None,
             term_windows: Vec::new(),
@@ -4072,8 +4069,8 @@ impl App {
 
     /// Land on a just-spawned agent, typing-ready: select its lane in the fleet, arm the
     /// pending-focus intent (which also routes keys to the window before its session shows up
-    /// in `lane.list` — see [`Self::selected_window`]), and enter Focus with insert mode on —
-    /// creating an agent needs no manual open before talking to it.
+    /// in `lane.list` — see [`Self::selected_window`]), and enter Split with insert mode on —
+    /// creating an agent needs no manual open before talking to it while the sidebar stays visible.
     fn land_on_spawned(&mut self, lane: LaneId, window: Option<String>) {
         self.select_lane_session(lane, None);
         if let Some(w) = window {
@@ -4081,11 +4078,11 @@ impl App {
             self.pending_focus_ticks = 0;
         }
         self.reset_scroll(); // live tail, mirroring what `i` does
-        self.view = View::Focus;
+        self.view = View::Split;
         self.focus_insert = true;
     }
 
-    /// Spawn `agent` into `lane`: on success drop into Focus on the *new* agent with insert on,
+    /// Spawn `agent` into `lane`: on success drop into Split on the *new* agent with insert on,
     /// typing straight to it. The daemon surfaces the new window right away (a window-only
     /// placeholder until its transcript lands), so an immediate refresh plus the pending-focus
     /// intent put the cursor on it instead of leaving you on the lane's existing agent.
