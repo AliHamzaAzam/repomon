@@ -372,7 +372,7 @@ impl TmuxRuntime {
 
     /// Launch `command` for `lane` in `cwd` in the lane's first *free* agent slot — a running
     /// agent is never killed, so spawning again runs a second agent side by side. Returns the
-    /// new window's exact target.
+    /// bare window name accepted by the named-window operations.
     pub fn spawn(&self, lane: LaneId, cwd: &Path, command: &str) -> Result<String> {
         let taken = self.windows_for(lane).unwrap_or_default();
         // Allocate above the highest live slot rather than refilling a freed low one: slot
@@ -423,7 +423,7 @@ impl TmuxRuntime {
             ])?;
         }
         self.configure();
-        Ok(self.exact_target(&window))
+        Ok(window)
     }
 
     /// Capture the pane's text, including ANSI color escapes (`-e`).
