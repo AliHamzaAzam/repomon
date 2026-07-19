@@ -385,6 +385,9 @@ pub struct App {
     /// Cleared when matched (or after a few refreshes if the window never appears).
     pending_focus_window: Option<(LaneId, String)>,
     pending_focus_ticks: u8,
+    /// The `refresh_gen` the last pending-focus miss was counted against — the give-up
+    /// clock ticks per data refresh, not per event-loop iteration.
+    pending_focus_gen: u64,
     /// Plain shell terminals open for the selected lane (tmux window names).
     pub terminals: Vec<String>,
     terminals_lane: Option<LaneId>,
@@ -588,6 +591,7 @@ impl App {
             session_memory: HashMap::new(),
             pending_focus_window: None,
             pending_focus_ticks: 0,
+            pending_focus_gen: u64::MAX,
             terminals: Vec::new(),
             terminals_lane: None,
             term_windows: Vec::new(),
@@ -1763,7 +1767,16 @@ impl App {
             }) = self.selected_row()
             {
                 let lane_id = self.selected_lane().map(|l| l.id);
-                if self.session_idx != s || self.session_lane != lane_id {
+                // Same agent? Compare by identity, not raw index — the daemon re-sorts
+                // `agent_sessions` as agents take turns, so the same agent's row carries a
+                // new index after every re-sort; wiping the scrollback for that would kick
+                // the user out of what they were reading.
+                let same_agent = self.session_lane == lane_id
+                    && self.session_ref.as_ref().and_then(|r| {
+                        self.selected_lane()
+                            .and_then(|l| session_index_for_ref(&l.agent_sessions, r))
+                    }) == Some(s);
+                if !same_agent {
                     self.reset_scroll();
                 }
                 self.session_lane = lane_id;
@@ -4995,10 +5008,11 @@ fn session_rank(
     }
 }
 
-/// A stable identity for one agent session within a lane, used to remember which agent a lane
-/// had selected across a switch away and back. The persistent `id` is `0` for daemon-overlaid
-/// placeholders so it can't be used; the managed tmux window (preferred) and the Claude
-/// transcript id are the durable handles the rest of the app already keys on.
+/// A stable identity for one agent session within a lane — the session cursor's anchor and
+/// the per-lane selection memory. The persistent `id` is `0` for daemon-overlaid
+/// placeholders so it can't be used; the Claude transcript id (preferred — UUIDs are never
+/// reused, while slot names are recycled on respawn) and the managed tmux window (the
+/// placeholder fallback) are the durable handles. See [`agent_session_ref`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionRef {
     Window(String),
@@ -5060,11 +5074,14 @@ fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
 }
 
 /// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
+/// Transcript id first — UUIDs are never reused, while slot names (`lane-7-2`) are recycled on
+/// respawn, so a long-held `Window` ref could resolve to a brand-new different agent. The
+/// window is the fallback for just-spawned placeholders whose `.jsonl` hasn't appeared yet.
 fn agent_session_ref(s: &AgentSession) -> Option<SessionRef> {
-    if let Some(w) = &s.tmux_window {
-        Some(SessionRef::Window(w.clone()))
+    if let Some(id) = &s.session_id {
+        Some(SessionRef::Transcript(id.clone()))
     } else {
-        s.session_id.clone().map(SessionRef::Transcript)
+        s.tmux_window.clone().map(SessionRef::Window)
     }
 }
 
@@ -5717,10 +5734,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_ref_prefers_window_then_transcript() {
-        // A managed agent keys on its window even when it also has a transcript id.
+    fn agent_session_ref_prefers_transcript_then_window() {
+        // A transcript-backed agent keys on its transcript id even when it also has a window:
+        // transcript UUIDs are never reused, while slot names like `lane-7-2` are recycled on
+        // respawn — a remembered Window ref could resolve to a brand-new different agent.
         assert_eq!(
             agent_session_ref(&managed("lane-7-2", Some("uuid-1"))),
+            Some(SessionRef::Transcript("uuid-1".into()))
+        );
+        // A just-spawned placeholder (window, no `.jsonl` yet) falls back to its window.
+        assert_eq!(
+            agent_session_ref(&managed("lane-7-2", None)),
             Some(SessionRef::Window("lane-7-2".into()))
         );
         // An external/transcript-only session keys on the transcript id.
@@ -5909,6 +5933,60 @@ mod tests {
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
         // A later reorder still can't move the cursor off the spawned agent.
         app.lanes[0].agent_sessions = vec![a, b];
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    #[tokio::test]
+    async fn expanded_row_resort_keeps_scroll_on_same_agent() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = true;
+        let (a, b) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
+        // Land the fleet cursor on b's sub-row (rows: orchestrator, header, sub, sub).
+        app.select_lane_session(1, Some(SessionRef::Transcript("sid-b".into())));
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        app.scroll = 7;
+        // The daemon re-sorts; refresh_lanes re-anchors the row by identity — same agent,
+        // new raw index. That must not read as a switch and wipe the scrollback position.
+        app.lanes[0].agent_sessions = vec![b.clone(), a.clone()];
+        app.select_lane_session(1, Some(SessionRef::Transcript("sid-b".into())));
+        app.sync_session_cursor();
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+        assert_eq!(
+            app.scroll, 7,
+            "a re-sort of the same agent must keep the scroll"
+        );
+        // A real move to the other agent still resets it.
+        app.cycle_session(true);
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn pending_focus_survives_input_burst() {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let (a, _) = two_agents();
+        app.lanes = vec![fake_lane(1, vec![a.clone()])];
+        app.selected = 1;
+        app.sync_session_cursor();
+        // An agent was just spawned; its window hasn't shown up in lane.list yet.
+        app.pending_focus_window = Some((1, "lane-1-2".to_string()));
+        // A burst of input events re-runs the sync many times against the SAME snapshot:
+        // the give-up clock counts data refreshes, not event-loop iterations.
+        for _ in 0..20 {
+            app.sync_session_cursor();
+        }
+        assert!(
+            app.pending_focus_window.is_some(),
+            "spawn-focus intent must survive an input burst"
+        );
+        // The window appears on the next refresh: the cursor lands on it.
+        app.lanes[0].agent_sessions = vec![a, managed("lane-1-2", None)];
+        app.refresh_gen = app.refresh_gen.wrapping_add(1);
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
     }
