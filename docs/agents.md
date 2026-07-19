@@ -1,20 +1,26 @@
 # Agents
 
-repomon runs every agent the same way — each in its own durable tmux window — but it learns
+repomon runs every agent the same way (each in its own durable session window), but it learns
 each agent's *status* differently, because each CLI stores its session state differently.
 
 ## How agents run
 
 When you spawn an agent (New Lane, the `e` key, or `agent.spawn`), the daemon launches its
-CLI in a tmux window named `lane-<id>` inside the configured session (default `repomon`):
+CLI in a window named `lane-<id>` inside the configured session (default `repomon`). On
+macOS/Linux that window is a tmux window:
 
 ```
 tmux new-window -t repomon -n lane-7 -c <worktree> '<agent-binary> [task]'
 ```
 
-The daemon reads output with `capture-pane`, sends input with `send-keys`, and `attach`
-gives you the raw session. Because tmux owns the process, the agent survives the daemon and
-the TUI. The spawned kind is recorded on the lane so repomon can identify it later.
+On **Windows** there is no tmux: the daemon spawns a detached host process,
+`repomon-agent-host.exe`, per window (`\\.\pipe\repomon-<session>-<window>`). The host owns a
+ConPTY child and a server-side terminal emulator with scrollback, and it plays the exact
+durability role tmux plays on Unix. Either way the daemon reads output with `capture_named`
+(`capture-pane` / host `capture`), sends input with `send_*` (`send-keys` / host `send_text`),
+and attach hands you the raw session. Because the session backend owns the process (a tmux
+server or a detached host), the agent survives the daemon and the TUI. The spawned kind is
+recorded on the lane so repomon can identify it later.
 
 Several agents can run in the **same** worktree at once: a second spawn (or adopting an
 external session into an occupied lane) takes the next slot — `lane-<id>-2`, `lane-<id>-3`,
@@ -92,6 +98,19 @@ exactly as it would standalone.
 > Why attach rather than emulate? The in-app view is a `capture-pane` *picture* plus
 > `send-keys`; it can't carry a nested terminal's scroll wheel or real clipboard-image paste.
 > Attaching hands you the actual PTY, so the focused agent is indistinguishable from native.
+
+#### On Windows
+
+There is no tmux to hand off, so attach works in two layers. The **embedded focus view**
+renders the agent from the host's server-side terminal (`capture` + `cursor` + `alternate_on`)
+and forwards input the same way it does on Unix. For a genuine terminal, `↵`/`→`/`a` **pops
+out** the agent into a new Windows Terminal tab running `repomon attach-host <window>`, a raw
+byte proxy that subscribes to the host's byte stream (`subscribe_bytes`), pipes your keystrokes
+back, and tracks console resizes. Because a subscribed connection ignores client frames, the
+attach client opens a second control connection for input and resize while the first streams
+the pane. **Press `F12` to detach** (tmux-parity); detaching leaves the agent running in its
+host process. If Windows Terminal (`wt.exe`) is not available the client falls back to a new
+console window.
 
 ### Quick mediated type — `i`
 
