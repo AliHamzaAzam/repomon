@@ -407,9 +407,10 @@ mod windows_impl {
                 }
                 _ = resize_tick.tick() => {
                     let size = console_size();
-                    if size.is_some() && size != last_size {
+                    if size != last_size
+                        && let Some((cols, rows)) = size
+                    {
                         last_size = size;
-                        let (cols, rows) = size.expect("checked is_some");
                         report(ctrl.request(|id| super::req_resize(id, cols, rows)).await);
                     }
                 }
