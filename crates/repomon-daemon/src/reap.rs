@@ -93,7 +93,10 @@ pub(crate) async fn kill_and_forget(ctx: &Ctx, window: &str) {
     let tmux = ctx.tmux.clone();
     let w = window.to_string();
     let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&w)).await;
-    ctx.last_good_windows.lock().await.retain(|w| w != window);
+    ctx.last_good_windows
+        .lock()
+        .await
+        .retain(|w| w.name != window);
     ctx.prompt_cache.lock().await.remove(window);
     ctx.invalidate_overlay().await;
 }

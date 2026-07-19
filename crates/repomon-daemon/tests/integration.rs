@@ -7,7 +7,7 @@ use std::time::Duration;
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::{Ctx, serve};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::net::UnixStream;
 
 fn git(dir: &Path, args: &[&str]) {
@@ -187,13 +187,28 @@ async fn daemon_spawns_and_drives_an_agent() {
         "agent.spawn errored: {:?}",
         spawned.error
     );
+    let spawned_window = spawned
+        .result
+        .as_ref()
+        .and_then(|v| v.get("window"))
+        .and_then(Value::as_str)
+        .expect("agent.spawn returns a window");
+    assert_eq!(
+        spawned_window,
+        TmuxRuntime::window_name(lane_id),
+        "agent.spawn must return the bare window name accepted by named-window RPCs"
+    );
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     call(
         &mut stream,
         4,
         "agent.send_input",
-        Some(json!({ "lane_id": lane_id, "text": "echo HELLO_FROM_AGENT_XYZ" })),
+        Some(json!({
+            "lane_id": lane_id,
+            "window": spawned_window,
+            "text": "echo HELLO_FROM_AGENT_XYZ"
+        })),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(600)).await;
