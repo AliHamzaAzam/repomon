@@ -2209,8 +2209,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let auto_off = ctx.auto_continue_off.lock().await.clone();
     let global_auto = ctx.config.read().await.auto_continue;
 
-    // Sticky bindings established this tick, stamped as `@repomon_session` after the loop.
-    let mut new_bindings: Vec<(u64, String, String)> = Vec::new();
+    // Per-lane binding candidates + their probe-window pools, resolved against pane
+    // evidence and stamped as `@repomon_session` after the loop.
+    let mut stamp_batches: Vec<StampBatch> = Vec::new();
     for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
         // The lane's managed agent windows, in slot order. A window only exists while its
         // agent's process lives (tmux closes it on exit), so it doubles as proof of liveness
@@ -2252,7 +2253,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // whenever two agents swapped activity rank, which moved names, panes, and usage
             // accounts between rows.
             let pairing = pair_transcripts_to_windows(&summaries, &lane_windows, now);
-            new_bindings.extend(pairing.new_bindings);
+            if !pairing.new_bindings.is_empty() {
+                stamp_batches.push((pairing.new_bindings, pairing.probe));
+            }
             for (s, win) in summaries.into_iter().zip(pairing.assignment) {
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
@@ -2364,19 +2367,33 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         }
     }
 
-    // Persist the sticky bindings established this tick: stamp `@repomon_session` on each
-    // window so the pairing survives daemon restarts and activity-order flips. Rare — once
-    // per agent lifetime — so this adds no forks to a steady-state overlay. Stamped by
-    // window ID (never reused), and only on fresh-probe ticks (see `probe_ok`). Concurrent
-    // overlay ticks can still cross-stamp in a sub-second window; a wrong winner is caught
-    // by the supersession rule in `pair_transcripts_to_windows` once the real transcript
-    // starts writing.
-    if probe_ok && !new_bindings.is_empty() {
+    // Persist the sticky bindings established this tick — but only where the pane PROVES
+    // the pairing: each candidate transcript's last-message fingerprint must be visible in
+    // exactly one of its lane's unclaimed panes (`confirmed_stamps`). Activity rank alone
+    // mis-stamped when several transcripts were fresh at once (live incident: two agents'
+    // names swapped and stayed swapped), and a wrong sticky stamp wedges until superseded.
+    // An unconfirmed candidate simply returns next tick — the pairing stamps itself once
+    // the agent's turn is visible on screen. Rare (once per agent lifetime), so the capture
+    // forks don't touch steady-state ticks. Skipped when the window probe failed
+    // (`probe_ok`): a last-good snapshot lags the stamps by a generation.
+    if probe_ok && !stamp_batches.is_empty() {
         let tmux = ctx.tmux.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            for (wid, name, sid) in new_bindings {
-                if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
-                    tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
+            for (cands, probe) in stamp_batches {
+                if cands.iter().all(|c| c.needle.is_none()) {
+                    continue;
+                }
+                let panes: Vec<(u64, String, String)> = probe
+                    .into_iter()
+                    .map(|(wid, name)| {
+                        let text = tmux.capture_named(&name, Some(60)).unwrap_or_default();
+                        (wid, name, normalize_fingerprint(&text))
+                    })
+                    .collect();
+                for (wid, name, sid) in confirmed_stamps(&cands, &panes) {
+                    if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
+                        tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
+                    }
                 }
             }
         })
@@ -2582,19 +2599,95 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
 /// pane for reflow within seconds. `pub(crate)` so [`crate::Ctx::viewport_snapshot`] shares it.
 pub(crate) const FOCUS_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// A transcript that should get a sticky binding this tick, pending pane evidence: the
+/// fingerprint of its last message must be visible in exactly one of the lane's unclaimed
+/// panes before anything is stamped. Activity rank proved able to guess wrong when several
+/// transcripts were fresh at once, and a wrong sticky stamp wedges until superseded — so the
+/// pane, not the rank, picks the window.
+struct BindingCandidate {
+    sid: String,
+    /// Normalized fingerprint of the transcript's last message ([`message_fingerprint`]);
+    /// `None` (no message yet / too short) means no evidence — the candidate simply returns
+    /// next tick.
+    needle: Option<String>,
+}
+
+/// One lane's binding candidates plus the probe-window pool they may stamp onto.
+type StampBatch = (Vec<BindingCandidate>, Vec<(u64, String)>);
+
 /// A lane's transcript↔window pairing for one overlay tick ([`pair_transcripts_to_windows`]).
 struct Pairing {
     /// Per input summary (order preserved): the managed window it runs in; `None` = external.
     assignment: Vec<Option<String>>,
-    /// Sticky bindings established this tick — `(window_id, window_name, session_id)` to
-    /// stamp as `@repomon_session` so they survive daemon restarts and activity-order flips.
-    /// Stamped by window ID: a slot NAME recycled between the probe and the stamp must not
-    /// inherit the old transcript's binding.
-    new_bindings: Vec<(u64, String, String)>,
+    /// Transcripts to bind this tick, pending pane confirmation ([`confirmed_stamps`]).
+    new_bindings: Vec<BindingCandidate>,
+    /// The windows a new binding may land on — everything pass 1 didn't claim, `(window_id,
+    /// name)`. Stamps target the window ID: a slot NAME recycled between the probe and the
+    /// stamp must not inherit the old transcript's binding.
+    probe: Vec<(u64, String)>,
     /// Live managed windows no transcript claimed, newest (highest window id) first. The
     /// first is the placeholder target for a just-spawned agent whose `.jsonl` hasn't
     /// appeared yet (at most one, per the `SessKey::Fallback` model).
     unpaired: Vec<String>,
+}
+
+/// Collapse text to lowercase ASCII alphanumerics. Makes fingerprint matching immune to
+/// tmux line wrapping, markdown styling (the pane renderer strips `**`/`_` markers), ANSI
+/// spacing, and case.
+fn normalize_fingerprint(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Minimum normalized length before a fingerprint is distinctive enough to act on.
+const FINGERPRINT_MIN: usize = 24;
+/// How much of the normalized TAIL to keep — after a long reply scrolls, its tail is what
+/// stays visible above the input box.
+const FINGERPRINT_LEN: usize = 64;
+
+/// The pane fingerprint of a transcript's last message, or `None` when there is no message
+/// or it is too short to be distinctive.
+fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
+    let n = normalize_fingerprint(last_message?);
+    if n.len() < FINGERPRINT_MIN {
+        return None;
+    }
+    // Byte slicing is safe: the normalized form is pure ASCII.
+    Some(n[n.len().saturating_sub(FINGERPRINT_LEN)..].to_string())
+}
+
+/// Which stamps the pane evidence supports: each candidate with a fingerprint is stamped on
+/// the single probe window whose (normalized) pane contains it. No match, several matching
+/// panes, or several candidates matching the same pane → no stamp for those involved; the
+/// candidates return next tick once the screens disambiguate. Returns `(wid, name, sid)`.
+fn confirmed_stamps(
+    cands: &[BindingCandidate],
+    panes: &[(u64, String, String)],
+) -> Vec<(u64, String, String)> {
+    // Every needle↔pane hit, as (candidate index, pane index).
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    for (ci, c) in cands.iter().enumerate() {
+        let Some(needle) = &c.needle else { continue };
+        for (pi, (_, _, text)) in panes.iter().enumerate() {
+            if text.contains(needle.as_str()) {
+                hits.push((ci, pi));
+            }
+        }
+    }
+    // Keep only 1:1 matches — a candidate seen in several panes, or a pane claimed by
+    // several candidates, proves nothing yet.
+    hits.iter()
+        .filter(|&&(ci, pi)| {
+            hits.iter().filter(|(c, _)| *c == ci).count() == 1
+                && hits.iter().filter(|(_, p)| *p == pi).count() == 1
+        })
+        .map(|&(ci, pi)| {
+            let (wid, name, _) = &panes[pi];
+            (*wid, name.clone(), cands[ci].sid.clone())
+        })
+        .collect()
 }
 
 /// Pair a lane's kept transcripts (newest-first) with its live managed windows by STICKY
@@ -2637,9 +2730,11 @@ fn pair_transcripts_to_windows(
     // Supersession: a claude process rotates its transcript id in place (`/clear`, a
     // fork-on-resume), leaving its window bound to a dead transcript while the live
     // continuation has no window. When more FRESH unclaimed transcripts exist than free
-    // windows to receive them, release claims whose transcript has gone quiet — coldest
-    // first — so pass 2 can re-bind those windows to the transcripts actually writing. A
-    // claim on a fresh transcript is never released, so an idle fleet can't be shuffled.
+    // windows to receive them, release claims whose transcript has gone quiet — WARMEST
+    // first: the transcript that stopped writing most recently is the one that just rotated
+    // into the newcomer, while a long-cold one is simply an idle agent whose window must not
+    // be given away. A claim on a fresh transcript is never released, so an idle fleet
+    // can't be shuffled.
     let fresh_unclaimed = summaries
         .iter()
         .enumerate()
@@ -2650,7 +2745,7 @@ fn pair_transcripts_to_windows(
         let mut stale_wis: Vec<usize> = (0..windows.len())
             .filter(|&wi| claim[wi].is_some_and(|si| !is_fresh(&summaries[si])))
             .collect();
-        stale_wis.sort_by_key(|&wi| summaries[claim[wi].unwrap()].last_activity);
+        stale_wis.sort_by_key(|&wi| std::cmp::Reverse(summaries[claim[wi].unwrap()].last_activity));
         for wi in stale_wis {
             if fresh_unclaimed <= free_n {
                 break;
@@ -2671,9 +2766,15 @@ fn pair_transcripts_to_windows(
     }
     // Pass 2 — first contact. Never-bound windows are offered before stale/released-bound
     // ones; among the windows actually used, oldest (lowest window id) pairs with the oldest
-    // chosen transcript, like the legacy positional zip.
+    // chosen transcript, like the legacy positional zip. This ordering is only the DISPLAY
+    // hint — the durable stamp is decided by pane evidence (`confirmed_stamps`), for which
+    // every pass-1-unclaimed window is a legal target.
     let mut free: Vec<usize> = (0..windows.len()).filter(|&i| !taken[i]).collect();
     free.sort_by_key(|&i| (windows[i].session.is_some(), windows[i].wid));
+    let probe: Vec<(u64, String)> = free
+        .iter()
+        .map(|&i| (windows[i].wid, windows[i].name.clone()))
+        .collect();
     // `summaries` is newest-first, so the first `free.len()` unassigned ones are the newest.
     let chosen: Vec<usize> = (0..summaries.len())
         .filter(|&i| assignment[i].is_none())
@@ -2685,15 +2786,17 @@ fn pair_transcripts_to_windows(
     for (&si, &wi) in chosen.iter().rev().zip(&used) {
         assignment[si] = Some(windows[wi].name.clone());
         taken[wi] = true;
-        // Persist only pairs we're confident in: an actively-writing transcript IS the agent
-        // in this window. A quiet one is a stand-in guess (e.g. a fresh spawn whose .jsonl
-        // hasn't appeared yet, with an old transcript filling the display) — show it, but
-        // leave the window unbound so first contact re-runs once the real transcript starts
-        // writing, instead of wedging the guess for hours.
+        // Nominate only transcripts we could ever be confident in: an actively-writing one
+        // IS some window's agent. A quiet one is a stand-in guess (e.g. a fresh spawn whose
+        // .jsonl hasn't appeared yet, with an old transcript filling the display) — show
+        // it, but never nominate it for a binding.
         if is_fresh(&summaries[si]) {
             if let Some(sid) = &summaries[si].session_id {
                 if windows[wi].session.as_deref() != Some(sid.as_str()) {
-                    new_bindings.push((windows[wi].wid, windows[wi].name.clone(), sid.clone()));
+                    new_bindings.push(BindingCandidate {
+                        sid: sid.clone(),
+                        needle: message_fingerprint(summaries[si].last_message.as_deref()),
+                    });
                 }
             }
         }
@@ -2708,6 +2811,7 @@ fn pair_transcripts_to_windows(
     Pairing {
         assignment,
         new_bindings,
+        probe,
         unpaired: unpaired.into_iter().map(|w| w.name.clone()).collect(),
     }
 }
@@ -4097,6 +4201,10 @@ mod tests {
         }
     }
 
+    fn candidate_sids(p: &Pairing) -> Vec<&str> {
+        p.new_bindings.iter().map(|b| b.sid.as_str()).collect()
+    }
+
     fn wm(name: &str, wid: u64, sid: Option<&str>) -> agent::WindowMeta {
         agent::WindowMeta {
             name: name.into(),
@@ -4122,15 +4230,14 @@ mod tests {
             p.assignment,
             vec![Some("lane-5-2".into()), Some("lane-5".into()), None]
         );
-        // Both paired transcripts are actively fresh → both pairs become sticky bindings.
-        let mut nb = p.new_bindings.clone();
-        nb.sort();
+        // Both paired transcripts are actively fresh → both are nominated for bindings,
+        // with every unclaimed window as a legal stamp target for the evidence pass.
+        let mut sids = candidate_sids(&p);
+        sids.sort();
+        assert_eq!(sids, vec!["b", "c"]);
         assert_eq!(
-            nb,
-            vec![
-                (1, "lane-5".to_string(), "b".to_string()),
-                (2, "lane-5-2".to_string(), "c".to_string())
-            ]
+            p.probe,
+            vec![(1, "lane-5".to_string()), (2, "lane-5-2".to_string())]
         );
         assert!(p.unpaired.is_empty());
     }
@@ -4187,10 +4294,8 @@ mod tests {
             p.assignment,
             vec![Some("lane-7".into()), Some("lane-7-2".into())]
         );
-        assert_eq!(
-            p.new_bindings,
-            vec![(7, "lane-7".to_string(), "c".to_string())]
-        );
+        assert_eq!(candidate_sids(&p), vec!["c"]);
+        assert_eq!(p.probe, vec![(7, "lane-7".to_string())]);
     }
 
     #[test]
@@ -4211,10 +4316,8 @@ mod tests {
         let windows = vec![wm("lane-7", 1, Some("x"))];
         let p = pair_transcripts_to_windows(&[tsum("y", t(5))], &windows, t(5));
         assert_eq!(p.assignment, vec![Some("lane-7".into())]);
-        assert_eq!(
-            p.new_bindings,
-            vec![(1, "lane-7".to_string(), "y".to_string())]
-        );
+        assert_eq!(candidate_sids(&p), vec!["y"]);
+        assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
         assert!(p.unpaired.is_empty());
     }
 
@@ -4253,10 +4356,7 @@ mod tests {
         // the stale one falls back to external.
         let p = pair_transcripts_to_windows(&[tsum("x", t(100)), stale], &windows, t(100));
         assert_eq!(p.assignment, vec![Some("lane-7".into()), None]);
-        assert_eq!(
-            p.new_bindings,
-            vec![(5, "lane-7".to_string(), "x".to_string())]
-        );
+        assert_eq!(candidate_sids(&p), vec!["x"]);
     }
 
     #[test]
@@ -4273,10 +4373,29 @@ mod tests {
             vec![Some("lane-7".into()), None],
             "the live transcript takes the window; the dead one goes external"
         );
-        assert_eq!(
-            p.new_bindings,
-            vec![(1, "lane-7".to_string(), "x".to_string())]
+        assert_eq!(candidate_sids(&p), vec!["x"]);
+        assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
+    }
+
+    #[test]
+    fn clear_rotation_releases_the_rotated_window_not_the_coldest() {
+        // Two bound agents, both currently quiet: a rotated its session id a moment ago
+        // (`/clear` → continuation c), b has been idle for much longer. The window released
+        // for c must be a's — the transcript that went quiet MOST recently is the one that
+        // just rotated; sacrificing the long-idle b would route c's keys into b's pane.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(
+            &[tsum("c", t(100)), tsum("a", t(50)), tsum("b", t(0))],
+            &windows,
+            t(100),
         );
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), None, Some("lane-7-2".into())],
+            "c inherits a's window; b keeps its own; dead a goes external"
+        );
+        assert_eq!(candidate_sids(&p), vec!["c"]);
+        assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
     }
 
     #[test]
@@ -4291,10 +4410,8 @@ mod tests {
             p.assignment,
             vec![Some("lane-7-2".into()), Some("lane-7".into())]
         );
-        assert_eq!(
-            p.new_bindings,
-            vec![(9, "lane-7-2".to_string(), "x".to_string())]
-        );
+        assert_eq!(candidate_sids(&p), vec!["x"]);
+        assert_eq!(p.probe, vec![(9, "lane-7-2".to_string())]);
     }
 
     #[test]
@@ -4336,6 +4453,111 @@ mod tests {
         let kept =
             select_kept_summaries(vec![tsum("b", t(3)), tsum("a", t(1))], &bound, 1, t(1000));
         assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn message_fingerprint_normalizes_and_gates() {
+        // Markdown styling and line wrapping vanish under normalization.
+        let m = "**Done!** The deploy isn't blocked on the invite anymore.";
+        let f = message_fingerprint(Some(m)).unwrap();
+        assert!(pane_text_contains(
+            "✻ Done! The deploy isn't\nblocked on the invite anymore.\n❯",
+            &f
+        ));
+        // A different conversation's pane does not match.
+        assert!(!pane_text_contains(
+            "recap: building Store Listen landing page",
+            &f
+        ));
+        // Long messages fingerprint their TAIL (what stays visible above the input box).
+        let long = format!(
+            "{} tail marker alpha beta gamma delta epsilon",
+            "x".repeat(500)
+        );
+        let f = message_fingerprint(Some(&long)).unwrap();
+        assert!(f.len() <= FINGERPRINT_LEN);
+        let pane = format!(
+            "{} tail marker alpha beta gamma delta epsilon",
+            "x".repeat(60)
+        );
+        assert!(pane_text_contains(&pane, &f));
+        // Absent or indistinct messages give no fingerprint: no evidence, no stamp.
+        assert_eq!(message_fingerprint(Some("ok")), None);
+        assert_eq!(message_fingerprint(None), None);
+    }
+
+    /// Test-side helper mirroring the stamp task's pane check.
+    fn pane_text_contains(pane: &str, needle: &str) -> bool {
+        normalize_fingerprint(pane).contains(needle)
+    }
+
+    #[test]
+    fn stamps_follow_pane_evidence_not_the_hint() {
+        let cand = |sid: &str, msg: &str| BindingCandidate {
+            sid: sid.into(),
+            needle: message_fingerprint(Some(msg)),
+        };
+        let a = cand("a", "fingerprint marker for agent alpha pane evidence");
+        let b = cand("b", "fingerprint marker for agent bravo pane evidence");
+        // Panes are CROSSED relative to candidate order: evidence must decide, so a lands
+        // on @2 and b on @1 regardless of any heuristic hint.
+        let panes = vec![
+            (
+                1,
+                "lane-7".to_string(),
+                normalize_fingerprint("✻ fingerprint marker for agent bravo pane evidence\n❯"),
+            ),
+            (
+                2,
+                "lane-7-2".to_string(),
+                normalize_fingerprint("✻ fingerprint marker for agent alpha pane evidence\n❯"),
+            ),
+        ];
+        let mut got = confirmed_stamps(&[a, b], &panes);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (1, "lane-7".to_string(), "b".to_string()),
+                (2, "lane-7-2".to_string(), "a".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_absent_pane_evidence_stamps_nothing() {
+        let cand = |sid: &str, msg: Option<&str>| BindingCandidate {
+            sid: sid.into(),
+            needle: message_fingerprint(msg),
+        };
+        let marker = "identical rotation continuation marker text";
+        // Two panes showing the same text: ambiguous for a matching candidate.
+        let twin_panes = vec![
+            (1, "lane-7".to_string(), normalize_fingerprint(marker)),
+            (2, "lane-7-2".to_string(), normalize_fingerprint(marker)),
+        ];
+        assert!(confirmed_stamps(&[cand("a", Some(marker))], &twin_panes).is_empty());
+        // Two candidates whose needles both match one pane: mutual ambiguity, skip both.
+        let one_pane = vec![(1, "lane-7".to_string(), normalize_fingerprint(marker))];
+        assert!(
+            confirmed_stamps(
+                &[cand("a", Some(marker)), cand("b", Some(marker))],
+                &one_pane
+            )
+            .is_empty()
+        );
+        // No fingerprint (agent mid-first-turn) or no matching pane: nothing stamped.
+        assert!(confirmed_stamps(&[cand("a", None)], &one_pane).is_empty());
+        assert!(
+            confirmed_stamps(
+                &[cand(
+                    "a",
+                    Some("completely unrelated conversation text here")
+                )],
+                &one_pane
+            )
+            .is_empty()
+        );
     }
 
     #[test]
