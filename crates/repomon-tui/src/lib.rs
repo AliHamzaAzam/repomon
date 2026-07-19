@@ -131,6 +131,15 @@ fn spawn_daemon(socket: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    // Windows twin: detach from the console and its Ctrl-C group so closing the terminal
+    // (or Ctrl-C in it) doesn't take the daemon down with it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     cmd.spawn()
         .with_context(|| format!("starting daemon `{}`", program.display()))?;
     Ok(())
@@ -186,7 +195,10 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
     let db = config::db_path();
     let store = Store::open(&db).with_context(|| format!("opening store at {}", db.display()))?;
     let ctx = Ctx::new(store, config.clone(), Some(db));
+    #[cfg(unix)]
     let socket = std::env::temp_dir().join(format!("repomon-embedded-{}.sock", std::process::id()));
+    #[cfg(windows)]
+    let socket = PathBuf::from(format!(r"\\.\pipe\repomon-embedded-{}", std::process::id()));
 
     let mut watcher = Watcher::new().ok();
     if let Some(w) = watcher.as_mut() {
@@ -236,8 +248,17 @@ async fn start_embedded(config: &Config) -> Result<(PathBuf, EmbeddedGuard)> {
     ))
 }
 
-/// Write the chosen path to `$REPOMON_CD_FD` (or stdout) for the shell wrapper to cd into.
+/// Write the chosen path for the shell wrapper to cd into: `$REPOMON_CD_FILE` (a temp
+/// file, used by the PowerShell wrapper), else `$REPOMON_CD_FD` (an inherited fd, used
+/// by the POSIX/fish wrappers), else stdout.
 fn emit_cd(path: &Path) {
+    if let Ok(file_path) = std::env::var("REPOMON_CD_FILE")
+        && !file_path.is_empty()
+        && std::fs::write(&file_path, format!("{}\n", path.display())).is_ok()
+    {
+        return;
+    }
+    #[cfg(unix)]
     if let Ok(fd_str) = std::env::var("REPOMON_CD_FD") {
         if let Ok(fd) = fd_str.parse::<i32>() {
             use std::io::Write;
@@ -250,4 +271,23 @@ fn emit_cd(path: &Path) {
         }
     }
     println!("{}", path.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn emit_cd_writes_repomon_cd_file() {
+        let dir = std::env::temp_dir().join(format!("repomon-emit-cd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cd_file = dir.join("cd-target");
+        // Safety: tests in this module are the only readers/writers of this var.
+        unsafe { std::env::set_var("REPOMON_CD_FILE", &cd_file) };
+        super::emit_cd(Path::new("/some/lane/worktree"));
+        unsafe { std::env::remove_var("REPOMON_CD_FILE") };
+        let written = std::fs::read_to_string(&cd_file).unwrap();
+        assert_eq!(written.trim_end(), "/some/lane/worktree");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -735,14 +735,12 @@ fn remote_device_by_name(c: &Connection, name: &str) -> rusqlite::Result<Option<
     }
 }
 
-/// A fresh 32-byte hex bearer token from the OS entropy pool. Mirrors the CLI's `remote enable`
-/// generator (`repomon-tui::cli::generate_token`), kept dependency-free by reading `/dev/urandom`.
+/// A fresh 32-byte hex bearer token from the OS entropy pool (`getrandom`, portable across
+/// unix and Windows). Mirrors the CLI's `remote enable` generator
+/// (`repomon-tui::cli::generate_token`).
 fn generate_remote_token() -> String {
-    use std::io::Read;
     let mut buf = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("read /dev/urandom");
+    getrandom::fill(&mut buf).expect("OS entropy source");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

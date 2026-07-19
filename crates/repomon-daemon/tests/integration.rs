@@ -5,10 +5,22 @@ use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::{Ctx, serve};
 use serde_json::json;
-use tokio::net::UnixStream;
+
+/// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
+/// check doesn't port: Windows named pipes have no filesystem presence.)
+async fn connect_retry(sock: &std::path::Path) -> IpcStream {
+    for _ in 0..100 {
+        if let Ok(s) = transport::connect(&Endpoint::from_path(sock)).await {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon endpoint {} never came up", sock.display());
+}
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -46,7 +58,7 @@ fn git_dated(dir: &Path, args: &[&str], date: &str) {
 }
 
 async fn call(
-    stream: &mut UnixStream,
+    stream: &mut IpcStream,
     id: u64,
     method: &str,
     params: Option<serde_json::Value>,
@@ -75,14 +87,7 @@ async fn daemon_serves_repo_and_lane_methods() {
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
 
-    // Wait for the socket to come up.
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // Empty fleet to start.
     let r = call(&mut stream, 1, "repo.list", None).await;
@@ -149,13 +154,7 @@ async fn daemon_spawns_and_drives_an_agent() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // Register a repo and grab its lane.
     let repo_dir = tempfile::tempdir().unwrap();
@@ -298,13 +297,7 @@ async fn streams_agent_output_for_visible_lanes() {
     // The output streamer is what we're testing.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // Do all request/response setup BEFORE subscribing, so responses aren't interleaved
     // with pushed event notifications.
@@ -423,13 +416,7 @@ async fn dashboard_timeline_sessions_search() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     let from = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
     let to = chrono::Utc::now().to_rfc3339();
@@ -501,13 +488,7 @@ async fn fs_browse_marks_repos_and_added() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // root/{myrepo(.git), plain, .hidden}
     let root = tempfile::tempdir().unwrap();
@@ -583,13 +564,7 @@ async fn agent_detect_lists_builtins_and_customs() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     let r = call(&mut stream, 1, "agent.detect", None).await;
     let choices = r.result.unwrap();
@@ -637,13 +612,7 @@ async fn agent_spawn_uses_custom_command() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
@@ -703,13 +672,7 @@ async fn agent_manager_add_set_default_and_remove() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // Add a custom agent → it appears in detect, marked custom, and is persisted to disk.
     let r = call(
@@ -833,13 +796,7 @@ async fn commit_recent_returns_latest_even_when_none_today() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // A repo whose only commits are from last year — nothing "today".
     let repo_dir = tempfile::tempdir().unwrap();
@@ -909,13 +866,7 @@ async fn orchestrator_input_errors_loudly_when_not_running() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // Typing to a dead orchestrator must fail loudly instead of silently no-op'ing at the tmux
     // layer.
@@ -961,13 +912,7 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // A repo with one commit on main.
     let repo_dir = tempfile::tempdir().unwrap();

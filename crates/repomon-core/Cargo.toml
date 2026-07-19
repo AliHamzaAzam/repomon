@@ -21,9 +21,22 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+getrandom = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 globset = { workspace = true }
+
+# The Windows session backend talks to per-agent host processes; the host crate carries the
+# frozen wire types (protocol/codec/registry) and the per-user pipe DACL the daemon's own
+# IPC pipe reuses. windows-sys is for CancelSynchronousIo (byte-stream reader shutdown).
+[target.'cfg(windows)'.dependencies]
+repomon-host = { path = "../repomon-host" }
+base64 = { workspace = true }
+tauri-winrt-notification = "0.8"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use repomon_core::agent::backend::{CaptureOpts, SessionBackend};
 use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
 use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
@@ -133,7 +134,7 @@ pub struct Ctx {
     pub config: RwLock<Config>,
     /// Where [`Config::save`] writes — `config::config_path()` in prod, a tempdir in tests.
     pub config_path: PathBuf,
-    pub tmux: TmuxRuntime,
+    pub backend: Arc<dyn SessionBackend>,
     pub started: Instant,
     pub db_path: Option<PathBuf>,
     pub events: pubsub::EventTx,
@@ -268,11 +269,30 @@ impl Ctx {
     ) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
-        let tmux = TmuxRuntime::new(config.tmux_session.clone());
+        #[cfg(unix)]
+        let backend: Arc<dyn SessionBackend> =
+            Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
+        #[cfg(windows)]
+        let backend: Arc<dyn SessionBackend> = {
+            // Owner identity mirrors `reap::owner_token`: the db path — stable across
+            // restarts (so this daemon re-adopts its own hosts) and distinct per instance
+            // (so a stray test daemon's hosts are never adopted, reaped, or killed).
+            let me = db_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("pid:{}", std::process::id()));
+            Arc::new(repomon_core::WindowsBackend::new(
+                config.tmux_session.clone(),
+                me,
+                config::data_dir(),
+            ))
+        };
         // Make any already-running session attach-native (mouse, clipboard, deep scrollback);
-        // spawns reapply it, but an existing tmux server outlives a daemon restart.
-        if tmux.session_exists() {
-            tmux.configure();
+        // spawns reapply it, but an existing backend server (a tmux server, or detached
+        // Windows host processes) outlives a daemon restart — on Windows this scan is the
+        // re-adoption pass.
+        if backend.session_exists() {
+            backend.configure();
         }
         let (events, _rx) = broadcast::channel(512);
         Arc::new(Ctx {
@@ -281,7 +301,7 @@ impl Ctx {
             lanes,
             config: RwLock::new(config),
             config_path,
-            tmux,
+            backend,
             started: Instant::now(),
             db_path,
             events,
@@ -342,7 +362,7 @@ impl Ctx {
         // the shared byte-stream registry (stopping the pipes no other connection still watches).
         // Keyed by connection id, so it cleans up whatever the session was watching without relying
         // on `watched_bytes` being in sync.
-        crate::bytes_stream::unwatch_all(&self.tmux, &self.bytes_watches, id).await;
+        crate::bytes_stream::unwatch_all(&self.backend, &self.bytes_watches, id).await;
     }
 
     /// Union of every live session's stream targets, plus the set of windows any fresh-beat session
@@ -534,22 +554,26 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 break;
             }
             budget -= 1;
-            let tmux = ctx.tmux.clone();
+            let tmux = ctx.backend.clone();
             let w = window.clone();
-            let content =
-                match tokio::task::spawn_blocking(move || tmux.capture_named(&w, None)).await {
-                    Ok(Ok(c)) => c,
-                    _ => continue,
-                };
+            let content = match tokio::task::spawn_blocking(move || {
+                tmux.capture_named(&w, CaptureOpts::visible())
+            })
+            .await
+            {
+                Ok(Ok(c)) => c,
+                _ => continue,
+            };
             // Only the focused pane carries a cursor (the TUI renders it where you're typing) — one
             // extra tmux fork on a single pane, never on background/Grid tiles.
             let cursor = if is_focused {
-                let tmux = ctx.tmux.clone();
+                let tmux = ctx.backend.clone();
                 let cw = window.clone();
                 tokio::task::spawn_blocking(move || tmux.cursor_named(&cw))
                     .await
                     .ok()
                     .flatten()
+                    .map(|c| (c.col, c.row))
             } else {
                 None
             };
@@ -662,9 +686,9 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
             continue;
         }
         last_cap = now;
-        let tmux = ctx.tmux.clone();
+        let tmux = ctx.backend.clone();
         let content = match tokio::task::spawn_blocking(move || {
-            tmux.capture_named(ORCHESTRATOR_WINDOW, None)
+            tmux.capture_named(ORCHESTRATOR_WINDOW, CaptureOpts::visible())
         })
         .await
         {
@@ -673,11 +697,12 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         };
         // Carry repomind's real cursor so the mediated pane draws it where you're typing (mirrors
         // the focused-lane path in `stream_output`). One extra tmux fork on the single pane.
-        let tmux = ctx.tmux.clone();
+        let tmux = ctx.backend.clone();
         let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named(ORCHESTRATOR_WINDOW))
             .await
             .ok()
-            .flatten();
+            .flatten()
+            .map(|c| (c.col, c.row));
         // Re-push on a cursor-only move (arrowing within repomind's input box) so the rendered cursor
         // tracks even when the text is unchanged. Reset to the floor on any change; otherwise double
         // the (clamped) interval toward the cap so a settled pane stops being re-captured.

@@ -29,10 +29,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::protocol::{Notification, Request, Response, read_frame, write_frame};
+use crate::transport::{self, Endpoint, IpcStream};
 
 /// Keepalive cadence. Must stay comfortably under the daemon's 120s idle-connection reaper so an
 /// otherwise-silent client (e.g. the MCP bridge, which mostly just receives events) is never reaped.
@@ -84,7 +84,7 @@ impl DaemonClient {
     }
 
     async fn connect_inner(path: &Path, keepalive: Option<Duration>) -> Result<Self> {
-        let stream = UnixStream::connect(path)
+        let stream = transport::connect(&Endpoint::from_path(path))
             .await
             .with_context(|| format!("connecting to daemon at {}", path.display()))?;
 
@@ -193,8 +193,8 @@ impl DaemonClient {
 impl Inner {
     /// Spawn the reader + writer tasks for `stream`, install its outbound channel, and mark the
     /// connection live. Reused for the initial connect and every reconnect.
-    fn spawn_io(self: &Arc<Self>, stream: UnixStream) {
-        let (mut rd, mut wr) = stream.into_split();
+    fn spawn_io(self: &Arc<Self>, stream: IpcStream) {
+        let (mut rd, mut wr) = tokio::io::split(stream);
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(128);
         *self.out_tx.lock().unwrap() = out_tx;
         self.connected.store(true, Ordering::SeqCst);
@@ -246,7 +246,7 @@ impl Inner {
         if self.connected.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let stream = UnixStream::connect(&self.path)
+        let stream = transport::connect(&Endpoint::from_path(&self.path))
             .await
             .with_context(|| format!("reconnecting to daemon at {}", self.path.display()))?;
         self.spawn_io(stream);
@@ -304,20 +304,21 @@ mod tests {
     use super::*;
     use crate::protocol::write_message;
     use std::sync::atomic::AtomicUsize;
-    use tokio::net::UnixListener;
 
     /// A keepalive client must ping an idle connection on its own, so the daemon never reaps it.
     #[tokio::test]
     async fn keepalive_pings_idle_connection() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
 
         let pings = Arc::new(AtomicUsize::new(0));
         let pings_srv = pings.clone();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (mut rd, mut wr) = stream.into_split();
+            let stream = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
             while let Ok(Some(frame)) = read_frame(&mut rd).await {
                 if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                     if req.method == "ping" {
@@ -348,7 +349,9 @@ mod tests {
     async fn reconnect_replays_subscribe_and_active_watch() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
 
         // Methods seen on the LATEST server-side connection (reset on each accept).
         let latest: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -358,12 +361,12 @@ mod tests {
             let accepts = accepts.clone();
             tokio::spawn(async move {
                 loop {
-                    let (stream, _) = listener.accept().await.unwrap();
+                    let stream = listener.accept().await.unwrap();
                     accepts.fetch_add(1, Ordering::SeqCst);
                     latest.lock().unwrap().clear();
                     let latest = latest.clone();
                     tokio::spawn(async move {
-                        let (mut rd, mut wr) = stream.into_split();
+                        let (mut rd, mut wr) = tokio::io::split(stream);
                         while let Ok(Some(frame)) = read_frame(&mut rd).await {
                             if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                                 latest.lock().unwrap().push(req.method.clone());
@@ -424,18 +427,20 @@ mod tests {
     async fn reconnect_does_not_replay_a_stopped_watch() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
 
         let latest: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let latest = latest.clone();
             tokio::spawn(async move {
                 loop {
-                    let (stream, _) = listener.accept().await.unwrap();
+                    let stream = listener.accept().await.unwrap();
                     latest.lock().unwrap().clear();
                     let latest = latest.clone();
                     tokio::spawn(async move {
-                        let (mut rd, mut wr) = stream.into_split();
+                        let (mut rd, mut wr) = tokio::io::split(stream);
                         while let Ok(Some(frame)) = read_frame(&mut rd).await {
                             if let Ok(req) = serde_json::from_slice::<Request>(&frame) {
                                 latest.lock().unwrap().push(req.method.clone());
@@ -483,8 +488,8 @@ mod tests {
     /// already live.
     #[tokio::test]
     async fn stale_reader_does_not_clobber_new_connection() {
-        let (a_client, a_server) = UnixStream::pair().unwrap();
-        let (b_client, _b_server) = UnixStream::pair().unwrap();
+        let (a_client, a_server) = IpcStream::pair();
+        let (b_client, _b_server) = IpcStream::pair();
 
         let (events_tx, _rx) = broadcast::channel(8);
         let (placeholder, _) = mpsc::channel(1);

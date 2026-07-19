@@ -13,6 +13,11 @@ use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
+// Lives in `src/attach_client.rs` (declared here to keep `lib.rs` untouched — it is a
+// cross-track conflict hotspot during the native-Windows waves).
+#[path = "attach_client.rs"]
+pub mod attach_client;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Register a repository.
@@ -63,6 +68,8 @@ pub enum Command {
         /// An initial goal to start repomind with (optional).
         prompt: Option<String>,
     },
+    /// (Windows) Attach this console to an agent host window — raw proxy; F12 detaches.
+    AttachHost { window: String },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
         /// Shell to generate completions for.
@@ -70,7 +77,7 @@ pub enum Command {
     },
     /// Print shell integration (cd-on-exit) for `eval "$(repomon shell-init zsh)"`.
     ShellInit {
-        /// Shell: zsh, bash, or fish.
+        /// Shell: zsh, bash, fish, or powershell.
         shell: clap_complete::Shell,
     },
     /// Write a roff man page to stdout (used by the Homebrew formula).
@@ -206,6 +213,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             model,
             prompt,
         } => handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt).await?,
+        Command::AttachHost { window } => attach_client::run(&config.tmux_session, &window).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
@@ -475,17 +483,41 @@ async fn handle_orchestrate(
         ));
     }
 
-    attach_tmux_target(&target)
+    attach_tmux_target(&target, resp.get("attach"))
 }
 
-/// Attach this process to a `session:window` target on repomon's dedicated tmux socket (the socket
-/// label is the session name). `$TMUX` is dropped so this works even from inside tmux. On unix we
-/// `exec` tmux so it owns the terminal directly (like a raw attach); detaching ends the command.
-fn attach_tmux_target(target: &str) -> Result<()> {
-    let socket_label = target.split(':').next().unwrap_or("repomon");
-    let mut cmd = std::process::Command::new("tmux");
-    cmd.args(["-L", socket_label, "attach", "-t", target])
-        .env_remove("TMUX");
+/// Attach this process to a `session:window` target. Prefers the daemon-provided attach command
+/// (the optional `attach` response field: `{ program, args }`); falls back to the classic tmux
+/// invocation on repomon's dedicated socket (the socket label is the session name — the target's
+/// prefix) for daemons without the field. `$TMUX` is dropped so this works even from inside tmux.
+/// On unix we `exec` the attach program so it owns the terminal directly (like a raw attach);
+/// detaching ends the command.
+fn attach_tmux_target(target: &str, attach: Option<&Value>) -> Result<()> {
+    let parsed = attach.and_then(|a| {
+        let program = a.get("program")?.as_str()?.to_string();
+        let args = a
+            .get("args")?
+            .as_array()?
+            .iter()
+            .map(|s| Some(s.as_str()?.to_string()))
+            .collect::<Option<Vec<_>>>()?;
+        Some((program, args))
+    });
+    let (program, args) = parsed.unwrap_or_else(|| {
+        let socket_label = target.split(':').next().unwrap_or("repomon");
+        (
+            "tmux".to_string(),
+            vec![
+                "-L".to_string(),
+                socket_label.to_string(),
+                "attach".to_string(),
+                "-t".to_string(),
+                target.to_string(),
+            ],
+        )
+    });
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).env_remove("TMUX");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -504,22 +536,28 @@ fn attach_tmux_target(target: &str) -> Result<()> {
     }
 }
 
-/// A fresh 32-byte hex bearer token from the OS entropy pool (no extra deps).
+/// A fresh 32-byte hex bearer token from the OS entropy pool (`getrandom`, portable across
+/// unix and Windows).
 fn generate_token() -> String {
     let mut buf = [0u8; 32];
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("read /dev/urandom");
+    getrandom::fill(&mut buf).expect("OS entropy source");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The machine's Tailscale IPv4, via the `tailscale` CLI (PATH, then the Mac app bundle).
+/// Candidate `tailscale` binaries: PATH first, then the platform's default install
+/// location (the Mac app bundle, or the Windows Program Files directory).
+fn tailscale_candidates() -> [&'static str; 2] {
+    let fallback = if cfg!(windows) {
+        r"C:\Program Files\Tailscale\tailscale.exe"
+    } else {
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    };
+    ["tailscale", fallback]
+}
+
+/// The machine's Tailscale IPv4, via the `tailscale` CLI.
 fn tailscale_ip() -> Option<String> {
-    for bin in [
-        "tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ] {
+    for bin in tailscale_candidates() {
         if let Ok(out) = std::process::Command::new(bin).args(["ip", "-4"]).output() {
             if out.status.success() {
                 let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -708,6 +746,24 @@ repomon() {
 }
 "#;
 
+const POWERSHELL_CD_WRAPPER: &str = r#"# repomon shell integration: cd into a lane's worktree on exit.
+# Add to $PROFILE: repomon shell-init powershell | Out-String | Invoke-Expression
+function repomon {
+    $bin = (Get-Command -Name repomon -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1).Source
+    if (-not $bin) { Write-Error 'repomon: binary not found on PATH'; return }
+    $tmp = [System.IO.Path]::GetTempFileName()
+    $env:REPOMON_CD_FILE = $tmp
+    try { & $bin @args }
+    finally { Remove-Item Env:\REPOMON_CD_FILE -ErrorAction SilentlyContinue }
+    $dir = Get-Content -LiteralPath $tmp -TotalCount 1 -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+    if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) {
+        Set-Location -LiteralPath $dir
+    }
+}
+"#;
+
 const FISH_CD_WRAPPER: &str = r#"# repomon shell integration: cd into a lane's worktree on exit.
 function repomon
     set -l tmp (mktemp)
@@ -722,9 +778,10 @@ pub fn shell_init(shell: clap_complete::Shell) -> Result<String> {
     let snippet = match shell {
         clap_complete::Shell::Zsh | clap_complete::Shell::Bash => POSIX_CD_WRAPPER,
         clap_complete::Shell::Fish => FISH_CD_WRAPPER,
+        clap_complete::Shell::PowerShell => POWERSHELL_CD_WRAPPER,
         other => {
             return Err(anyhow!(
-                "shell-init: unsupported shell '{other}'; use zsh, bash, or fish"
+                "shell-init: unsupported shell '{other}'; use zsh, bash, fish, or powershell"
             ));
         }
     };
@@ -761,8 +818,32 @@ mod tests {
     }
 
     #[test]
+    fn shell_init_powershell_defines_wrapper() {
+        let out = super::shell_init(clap_complete::Shell::PowerShell).unwrap();
+        assert!(out.contains("function repomon"));
+        assert!(out.contains("$env:REPOMON_CD_FILE"));
+        assert!(out.contains("Set-Location"));
+        // The wrapper must invoke the real binary, not recurse into the function.
+        assert!(out.contains("-CommandType Application"));
+    }
+
+    #[test]
     fn shell_init_rejects_unsupported_shell() {
-        assert!(super::shell_init(clap_complete::Shell::PowerShell).is_err());
+        assert!(super::shell_init(clap_complete::Shell::Elvish).is_err());
+    }
+
+    #[test]
+    fn tailscale_candidates_path_then_platform_fallback() {
+        let [first, fallback] = super::tailscale_candidates();
+        assert_eq!(first, "tailscale");
+        if cfg!(windows) {
+            assert_eq!(fallback, r"C:\Program Files\Tailscale\tailscale.exe");
+        } else {
+            assert_eq!(
+                fallback,
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            );
+        }
     }
 
     #[test]

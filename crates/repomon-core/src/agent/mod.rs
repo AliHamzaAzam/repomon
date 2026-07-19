@@ -7,6 +7,7 @@
 //! daemon also falls back to "is the tmux window alive?".
 
 pub mod attention;
+pub mod backend;
 pub mod claude;
 pub mod gate;
 pub mod limit;
@@ -14,6 +15,7 @@ pub mod prompt;
 pub mod text;
 pub mod tmux;
 pub mod usage;
+pub mod windows;
 
 use std::path::Path;
 use std::time::Duration;
@@ -22,10 +24,16 @@ use chrono::{DateTime, Utc};
 
 use crate::model::{AgentKind, AgentStatus};
 
+pub use backend::{
+    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, SessionBackend, SpawnSpec,
+    WindowActivity,
+};
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
 pub use tmux::{TmuxRuntime, shell_quote};
 pub use usage::{AccountUsage, UsageReport, UsageWindow, parse_codex_status, parse_usage};
+#[cfg(windows)]
+pub use windows::WindowsBackend;
 
 /// How recently a file must have changed for its agent to count as "running".
 const ACTIVE_WINDOW: Duration = Duration::from_secs(120);
