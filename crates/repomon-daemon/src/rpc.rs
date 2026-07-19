@@ -2096,7 +2096,7 @@ const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(750);
 pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
     {
         let cache = ctx.overlay_cache.lock().await;
-        if let Some((t, lanes)) = &*cache {
+        if let Some((t, lanes)) = cache.entry() {
             if t.elapsed() < OVERLAY_TTL {
                 return Ok(lanes.clone());
             }
@@ -2109,9 +2109,13 @@ pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> 
 /// stale snapshot — notably `notify_watch`, whose edge detection would miss a transition if two
 /// ticks reused the same cached list.
 pub(crate) async fn lanes_with_agents_fresh(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
+    let generation = ctx.overlay_cache.lock().await.generation();
     let mut lanes = ctx.lanes.list().await.map_err(internal)?;
     overlay_agents(ctx, &mut lanes).await;
-    *ctx.overlay_cache.lock().await = Some((std::time::Instant::now(), lanes.clone()));
+    ctx.overlay_cache
+        .lock()
+        .await
+        .publish(generation, lanes.clone());
     Ok(lanes)
 }
 
@@ -2801,8 +2805,7 @@ fn pair_transcripts_to_windows(
         if let Some(sid) = &summaries[si].session_id {
             if windows[wi].session.as_deref() != Some(sid.as_str()) {
                 let needle = message_fingerprint(summaries[si].last_message.as_deref());
-                if is_fresh(&summaries[si]) || (windows[wi].session.is_none() && needle.is_some())
-                {
+                if is_fresh(&summaries[si]) || (windows[wi].session.is_none() && needle.is_some()) {
                     new_bindings.push(BindingCandidate {
                         sid: sid.clone(),
                         needle,
