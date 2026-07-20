@@ -1454,6 +1454,20 @@ mod tests {
 
     /// The persona must teach the repo-notes loop (read at Orient, fold into tasks, write
     /// lessons back) and must no longer present mnemind as the primary team memory.
+    /// The persona must teach the journal loop: the first fleet_status recaps, and
+    /// fleet_history answers "what happened with X".
+    #[test]
+    fn persona_documents_fleet_history() {
+        assert!(
+            crate::PERSONA.contains("fleet_history"),
+            "persona never mentions fleet_history"
+        );
+        assert!(
+            crate::PERSONA.contains("since_you_last_looked"),
+            "persona never mentions the recap block"
+        );
+    }
+
     #[test]
     fn persona_documents_repo_notes() {
         assert!(
