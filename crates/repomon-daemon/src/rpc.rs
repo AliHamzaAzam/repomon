@@ -155,6 +155,15 @@ struct RepoRemove {
     repo_id: RepoId,
 }
 #[derive(Deserialize)]
+struct RepoNotesGet {
+    repo_id: RepoId,
+}
+#[derive(Deserialize)]
+struct RepoNotesSet {
+    repo_id: RepoId,
+    content: String,
+}
+#[derive(Deserialize)]
 struct Discover {
     root: String,
     #[serde(default = "default_depth")]
@@ -601,6 +610,75 @@ pub async fn dispatch(
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
             to_value(paths)
+        }
+        "repo.notes.get" => {
+            let p: RepoNotesGet = parse(params)?;
+            let repo = ctx
+                .store
+                .get_repo(p.repo_id)
+                .await
+                .map_err(|_| RpcError::invalid_params(format!("no repo {}", p.repo_id)))?;
+            let all = ctx.registry.list().await.map_err(internal)?;
+            let dir = ctx.notes_dir.clone();
+            let repo_name = repo.name.clone();
+            let (content, path) = tokio::task::spawn_blocking(move || {
+                let path = repomon_core::notes::notes_path(&dir, &repo, &all);
+                repomon_core::notes::read(&dir, &repo, &all).map(|c| (c, path))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            to_value(json!({
+                "repo_id": p.repo_id,
+                "name": repo_name,
+                "exists": content.is_some(),
+                "content": content.unwrap_or_default(),
+                "path": path.to_string_lossy(),
+            }))
+        }
+        "repo.notes.set" => {
+            let p: RepoNotesSet = parse(params)?;
+            // Cap before any lookup: the error should name the limit, not depend on repo state.
+            if p.content.len() > repomon_core::notes::MAX_NOTES_BYTES {
+                return Err(RpcError::invalid_params(format!(
+                    "notes are {} bytes; the cap is {} bytes",
+                    p.content.len(),
+                    repomon_core::notes::MAX_NOTES_BYTES
+                )));
+            }
+            let repo = ctx
+                .store
+                .get_repo(p.repo_id)
+                .await
+                .map_err(|_| RpcError::invalid_params(format!("no repo {}", p.repo_id)))?;
+            let all = ctx.registry.list().await.map_err(internal)?;
+            let dir = ctx.notes_dir.clone();
+            let repo_name = repo.name.clone();
+            let content = p.content.clone();
+            let (old_bytes, path) = tokio::task::spawn_blocking(move || {
+                let old = repomon_core::notes::read(&dir, &repo, &all)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.len());
+                repomon_core::notes::write(&dir, &repo, &all, &content).map(|p| (old, p))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            tracing::info!(
+                repo = %repo_name,
+                repo_id = p.repo_id,
+                old_bytes = old_bytes.unwrap_or(0),
+                new_bytes = p.content.len(),
+                path = %path.display(),
+                conn = ?sess.kind,
+                "repo notes replaced"
+            );
+            to_value(json!({
+                "repo_id": p.repo_id,
+                "bytes": p.content.len(),
+                "path": path.to_string_lossy(),
+            }))
         }
 
         // ---- lanes ----

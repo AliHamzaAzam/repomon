@@ -133,6 +133,9 @@ pub struct Ctx {
     pub config: RwLock<Config>,
     /// Where [`Config::save`] writes — `config::config_path()` in prod, a tempdir in tests.
     pub config_path: PathBuf,
+    /// Where per-repo notes files live — `data_dir()/repo-notes` in prod, a tempdir in tests
+    /// (injected, not env-based: in-process daemon tests can't share process-global env safely).
+    pub notes_dir: PathBuf,
     pub tmux: TmuxRuntime,
     pub started: Instant,
     pub db_path: Option<PathBuf>,
@@ -266,6 +269,24 @@ impl Ctx {
         db_path: Option<PathBuf>,
         config_path: PathBuf,
     ) -> Arc<Self> {
+        Self::new_with_paths(
+            store,
+            config,
+            db_path,
+            config_path,
+            config::data_dir().join("repo-notes"),
+        )
+    }
+
+    /// Like [`new_with_config_path`](Self::new_with_config_path) but also with an explicit
+    /// repo-notes directory (tests inject a tempdir so notes never touch the real data dir).
+    pub fn new_with_paths(
+        store: Store,
+        config: Config,
+        db_path: Option<PathBuf>,
+        config_path: PathBuf,
+        notes_dir: PathBuf,
+    ) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
         let tmux = TmuxRuntime::new(config.tmux_session.clone());
@@ -281,6 +302,7 @@ impl Ctx {
             lanes,
             config: RwLock::new(config),
             config_path,
+            notes_dir,
             tmux,
             started: Instant::now(),
             db_path,

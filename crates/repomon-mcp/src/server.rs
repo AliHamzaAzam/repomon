@@ -55,6 +55,8 @@ impl ToolHandler for Server {
             "lane_diff" => self.lane_diff(args).await,
             "list_repos" => self.list_repos(args).await,
             "wait_for_change" => self.wait_for_change(args).await,
+            "repo_notes" => self.repo_notes(args).await,
+            "repo_notes_write" => self.repo_notes_write(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
         match out {
@@ -186,7 +188,7 @@ impl Server {
             Some(name) => name,
             None => self.default_agent().await,
         };
-        let res: Value = self
+        let mut res: Value = self
             .client
             .call(
                 "agent.spawn",
@@ -194,6 +196,20 @@ impl Server {
             )
             .await
             .map_err(rpc_err)?;
+        // Piggyback the repo's notes so the orchestrator can fold them into follow-up
+        // instructions without another tool call. Every step is best-effort: the spawn already
+        // happened, so a notes failure must not turn this result into an error.
+        if let Ok(lane) = self
+            .client
+            .call_typed::<Lane>("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+        {
+            if let Some(notes) = self.fetch_repo_notes(lane.repo.id).await {
+                if let Some(obj) = res.as_object_mut() {
+                    obj.insert("repo_notes".into(), json!(notes));
+                }
+            }
+        }
         Ok(res)
     }
 
@@ -339,15 +355,7 @@ impl Server {
                     .into(),
             );
         }
-        let repos: Vec<Repo> = self
-            .client
-            .call_typed("repo.list", None)
-            .await
-            .map_err(rpc_err)?;
-        let repo = repos
-            .iter()
-            .find(|r| r.name == a.repo || r.id.to_string() == a.repo)
-            .ok_or_else(|| format!("no registered repo matching '{}'. Try list_repos.", a.repo))?;
+        let repo = self.resolve_repo(&a.repo).await?;
         let lane: Lane = self
             .client
             .call_typed(
@@ -361,12 +369,18 @@ impl Server {
             )
             .await
             .map_err(rpc_err)?;
-        Ok(json!({
+        let mut out = json!({
             "lane_id": lane.id,
             "path": lane.worktree.path,
             "branch": a.branch,
             "repo": repo.name,
-        }))
+        });
+        // Piggyback the repo's notes (best-effort) so the orchestrator writes the worker's task
+        // with them already in hand.
+        if let Some(notes) = self.fetch_repo_notes(repo.id).await {
+            out["repo_notes"] = json!(notes);
+        }
+        Ok(out)
     }
 
     /// Two-phase destructive delete: no `confirm` mints an impact summary + token (a normal,
@@ -564,6 +578,82 @@ impl Server {
         }
     }
 
+    /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
+    /// or when the notes are empty, so callers can unconditionally `if let Some` — a notes
+    /// hiccup must never fail the spawn/create it piggybacks on.
+    async fn fetch_repo_notes(&self, repo_id: i64) -> Option<String> {
+        let res: Value = match self
+            .client
+            .call("repo.notes.get", Some(json!({ "repo_id": repo_id })))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("repo.notes.get failed for repo {repo_id}: {e}");
+                return None;
+            }
+        };
+        res["content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Resolve a repo by the orchestrator's handle: registered name, or id as a string.
+    async fn resolve_repo(&self, name_or_id: &str) -> Result<Repo, String> {
+        let repos: Vec<Repo> = self
+            .client
+            .call_typed("repo.list", None)
+            .await
+            .map_err(rpc_err)?;
+        repos
+            .into_iter()
+            .find(|r| r.name == name_or_id || r.id.to_string() == name_or_id)
+            .ok_or_else(|| format!("no registered repo matching '{name_or_id}'. Try list_repos."))
+    }
+
+    async fn repo_notes(&self, args: Value) -> Result<Value, String> {
+        let a: RepoNotesArgs = parse(args)?;
+        let repo = self.resolve_repo(&a.repo).await?;
+        let res: Value = self
+            .client
+            .call("repo.notes.get", Some(json!({ "repo_id": repo.id })))
+            .await
+            .map_err(rpc_err)?;
+        let mut out = json!({
+            "repo": repo.name,
+            "content": res["content"],
+            "path": res["path"],
+        });
+        if res["content"].as_str().unwrap_or_default().is_empty() {
+            out["hint"] = json!(
+                "no notes yet. When you learn something durable about this repo (build/test \
+                 commands, conventions, gotchas), record it with repo_notes_write."
+            );
+        }
+        Ok(out)
+    }
+
+    async fn repo_notes_write(&self, args: Value) -> Result<Value, String> {
+        let a: RepoNotesWriteArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        let repo = self.resolve_repo(&a.repo).await?;
+        let res: Value = self
+            .client
+            .call(
+                "repo.notes.set",
+                Some(json!({ "repo_id": repo.id, "content": a.content })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        Ok(json!({
+            "ok": true,
+            "repo": repo.name,
+            "bytes": res["bytes"],
+            "path": res["path"],
+        }))
+    }
+
     async fn default_agent(&self) -> String {
         match self
             .client
@@ -677,6 +767,15 @@ struct LaneDiffArgs {
 }
 fn default_max_patch_chars() -> usize {
     8000
+}
+#[derive(Deserialize)]
+struct RepoNotesArgs {
+    repo: String,
+}
+#[derive(Deserialize)]
+struct RepoNotesWriteArgs {
+    repo: String,
+    content: String,
 }
 #[derive(Deserialize)]
 struct WaitForChangeArgs {
@@ -974,9 +1073,11 @@ fn tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "spawn_agent",
-            description: "Start a coding agent working on a lane with a concrete task. Counts \
-                against the concurrent-agent cap. Omit 'agent' to use the configured default \
-                (usually claude-code).",
+            description: "Start a coding agent working on a lane with a concrete task. Fold the \
+                repo's notes (from create_lane/repo_notes) into the task text. Counts against \
+                the concurrent-agent cap. Omit 'agent' to use the configured default (usually \
+                claude-code). The result embeds repo_notes (the repo's durable notes) when any \
+                exist — use them in follow-up instructions too.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane (worktree) to work in." },
@@ -1044,7 +1145,9 @@ fn tool_catalog() -> Vec<ToolDef> {
         ToolDef {
             name: "create_lane",
             description: "Create a new branch + worktree (a lane) in a repo, ready to spawn an \
-                agent into. In supervised mode this asks for human confirmation first.",
+                agent into. In supervised mode this asks for human confirmation first. The \
+                result embeds repo_notes (the repo's durable notes) when any exist — fold them \
+                into the task you give the worker you spawn here.",
             input_schema: obj(
                 json!({
                     "repo": { "type": "string", "description": "Repo name or id (see list_repos)." },
@@ -1108,6 +1211,35 @@ fn tool_catalog() -> Vec<ToolDef> {
             input_schema: obj(json!({}), &[]),
         },
         ToolDef {
+            name: "repo_notes",
+            description: "Read a repo's durable notes (the fleet's per-repo memory): build/test \
+                commands, conventions, gotchas, standing instructions — recorded across sessions \
+                and hand-editable by the human. Check them before planning work in a repo, and \
+                fold them into every worker task. Also embedded automatically in \
+                create_lane/spawn_agent results as repo_notes.",
+            input_schema: obj(
+                json!({
+                    "repo": { "type": "string", "description": "Repo name or id (see list_repos)." }
+                }),
+                &["repo"],
+            ),
+        },
+        ToolDef {
+            name: "repo_notes_write",
+            description: "Replace a repo's durable notes wholesale (full replace, max 8192 \
+                bytes). Read repo_notes first, integrate the new lesson, and rewrite concisely — \
+                edit, don't append forever. Record durable lessons here after a merge, a \
+                corrected mistake, or a human-stated preference; don't store live fleet state \
+                (that comes from fleet_status).",
+            input_schema: obj(
+                json!({
+                    "repo": { "type": "string", "description": "Repo name or id (see list_repos)." },
+                    "content": { "type": "string", "description": "The complete new notes (markdown). Replaces the previous notes entirely." }
+                }),
+                &["repo", "content"],
+            ),
+        },
+        ToolDef {
             name: "wait_for_change",
             description: "Block until the fleet meaningfully changes (a status/attention edge) or \
                 the timeout elapses, then return the deltas. This is how you watch agents without \
@@ -1129,6 +1261,24 @@ fn tool_catalog() -> Vec<ToolDef> {
 mod tests {
     use super::*;
     use crate::fleet::AgentDigest;
+
+    /// The persona must teach the repo-notes loop (read at Orient, fold into tasks, write
+    /// lessons back) and must no longer present mnemind as the primary team memory.
+    #[test]
+    fn persona_documents_repo_notes() {
+        assert!(
+            crate::PERSONA.contains("repo_notes"),
+            "persona never mentions repo_notes"
+        );
+        assert!(
+            crate::PERSONA.contains("repo_notes_write"),
+            "persona never mentions repo_notes_write"
+        );
+        assert!(
+            !crate::PERSONA.contains("treat them as the team's long-term memory"),
+            "mnemind must be secondary to repo notes now"
+        );
+    }
 
     fn lane(id: i64, repo: &str, status: &str, attention: Attention) -> LaneDigest {
         LaneDigest {

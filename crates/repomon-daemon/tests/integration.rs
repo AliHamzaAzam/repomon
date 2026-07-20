@@ -1059,3 +1059,123 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn repo_notes_get_set_round_trip() {
+    let store = Store::open_in_memory().unwrap();
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let notes_dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new_with_paths(
+        store,
+        Config::default(),
+        None,
+        cfg_dir.path().join("config.toml"),
+        notes_dir.path().to_path_buf(),
+    );
+    let sock = std::env::temp_dir().join(format!("repomon-notes-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "init"]);
+    let r = call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let repo = r.result.unwrap();
+    let repo_id = repo["id"].as_i64().unwrap();
+    let repo_name = repo["name"].as_str().unwrap().to_string();
+
+    // Fresh repo: no notes yet.
+    let r = call(
+        &mut stream,
+        2,
+        "repo.notes.get",
+        Some(json!({ "repo_id": repo_id })),
+    )
+    .await;
+    assert!(r.error.is_none(), "get errored: {:?}", r.error);
+    let got = r.result.unwrap();
+    assert_eq!(got["exists"], json!(false));
+    assert_eq!(got["content"], json!(""));
+    assert_eq!(got["repo_id"], json!(repo_id));
+    assert_eq!(got["name"], json!(repo_name));
+
+    // Set → get round-trips and reports the path inside the injected notes dir.
+    let r = call(
+        &mut stream,
+        3,
+        "repo.notes.set",
+        Some(json!({ "repo_id": repo_id, "content": "use `pnpm test`, never `npm test`" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "set errored: {:?}", r.error);
+    let r = call(
+        &mut stream,
+        4,
+        "repo.notes.get",
+        Some(json!({ "repo_id": repo_id })),
+    )
+    .await;
+    let got = r.result.unwrap();
+    assert_eq!(got["exists"], json!(true));
+    assert_eq!(got["content"], json!("use `pnpm test`, never `npm test`"));
+    let path = std::path::PathBuf::from(got["path"].as_str().unwrap());
+    assert!(path.starts_with(notes_dir.path()), "path was {path:?}");
+
+    // Over the cap: rejected with an error that names the limit.
+    let r = call(
+        &mut stream,
+        5,
+        "repo.notes.set",
+        Some(json!({ "repo_id": repo_id, "content": "x".repeat(8193) })),
+    )
+    .await;
+    let err = r.error.expect("oversized set must error");
+    assert!(
+        err.message.contains("8192"),
+        "unhelpful error: {}",
+        err.message
+    );
+
+    // Unknown repo: not found.
+    let r = call(
+        &mut stream,
+        6,
+        "repo.notes.get",
+        Some(json!({ "repo_id": 999_999 })),
+    )
+    .await;
+    assert!(r.error.is_some(), "bogus repo_id must error");
+
+    // Hand-edited file (the human contract): get picks it up directly.
+    std::fs::write(&path, "hand-edited\n").unwrap();
+    let r = call(
+        &mut stream,
+        7,
+        "repo.notes.get",
+        Some(json!({ "repo_id": repo_id })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["content"], json!("hand-edited\n"));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
