@@ -55,9 +55,18 @@ async fn daemon_call(
 
 /// Boot an in-process daemon on a short temp socket path (macOS caps UDS paths at ~104 chars),
 /// exactly like tests/integration.rs, and return a connected control stream for seeding state.
-async fn boot_daemon(tag: &str) -> (PathBuf, UnixStream) {
+/// Config and repo-notes paths live in the returned tempdir (kept alive by the caller) so the
+/// daemon under test never touches the real `~/.config` / data dir.
+async fn boot_daemon(tag: &str) -> (PathBuf, UnixStream, tempfile::TempDir) {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let state_dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new_with_paths(
+        store,
+        Config::default(),
+        None,
+        state_dir.path().join("config.toml"),
+        state_dir.path().join("repo-notes"),
+    );
 
     let sock =
         std::env::temp_dir().join(format!("repomon-mcpit-{tag}-{}.sock", std::process::id()));
@@ -73,7 +82,7 @@ async fn boot_daemon(tag: &str) -> (PathBuf, UnixStream) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let stream = UnixStream::connect(&sock).await.expect("connect to daemon");
-    (sock, stream)
+    (sock, stream, state_dir)
 }
 
 /// Register a repo with one commit and return its (tempdir, main lane id).
@@ -175,7 +184,7 @@ async fn shutdown_mcp_child(mut child: Child, stdin: ChildStdin) {
 
 #[tokio::test]
 async fn mcp_stdio_end_to_end() {
-    let (sock, mut control) = boot_daemon("e2e").await;
+    let (sock, mut control, _state_dir) = boot_daemon("e2e").await;
     let (repo_dir, lane_id) = seed_repo_lane(&mut control).await;
 
     let mut child = spawn_mcp_child(&sock, &[]);
@@ -200,11 +209,11 @@ async fn mcp_stdio_end_to_end() {
 
     mcp_notify(&mut stdin, "notifications/initialized").await;
 
-    // 2. tools/list -> exactly the 13 v1 tools.
+    // 2. tools/list -> exactly the 15 tools (13 v1 + the repo-notes pair).
     mcp_request(&mut stdin, 2, "tools/list", json!({})).await;
     let resp = mcp_read(&mut lines).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13, "tools/list returned: {tools:?}");
+    assert_eq!(tools.len(), 15, "tools/list returned: {tools:?}");
     let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: BTreeSet<&str> = [
         "fleet_status",
@@ -220,6 +229,8 @@ async fn mcp_stdio_end_to_end() {
         "lane_diff",
         "list_repos",
         "wait_for_change",
+        "repo_notes",
+        "repo_notes_write",
     ]
     .into_iter()
     .collect();
@@ -316,7 +327,7 @@ async fn mcp_stdio_end_to_end() {
 
 #[tokio::test]
 async fn mcp_stdio_read_only_denies_spawn_agent() {
-    let (sock, mut control) = boot_daemon("readonly").await;
+    let (sock, mut control, _state_dir) = boot_daemon("readonly").await;
     let (_repo_dir, lane_id) = seed_repo_lane(&mut control).await;
 
     let mut child = spawn_mcp_child(&sock, &[("REPOMON_MCP_AUTONOMY", "read-only")]);
@@ -353,6 +364,158 @@ async fn mcp_stdio_read_only_denies_spawn_agent() {
         text.contains("read-only") && text.contains("this tool only observes"),
         "unexpected error text: {text}"
     );
+
+    // repo_notes_write is a mutation: refused. The repo_notes read stays available.
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({
+            "name": "repo_notes_write",
+            "arguments": { "repo": "whatever", "content": "x" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("read-only"),
+        "repo_notes_write should be refused under read-only autonomy, got: {text}"
+    );
+
+    let repo_name = _repo_dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "repo_notes", "arguments": { "repo": repo_name } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        !is_error,
+        "repo_notes (read) must work under read-only autonomy, got: {text}"
+    );
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_repo_notes_round_trip() {
+    let (sock, mut control, state_dir) = boot_daemon("notes").await;
+    let (repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+    let repo_name = repo_dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let mut child = spawn_mcp_child(&sock, &[]);
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
+
+    mcp_request(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "repomon-it", "version": "0.0.0" } }),
+    )
+    .await;
+    let _ = mcp_read(&mut lines).await;
+
+    // Empty notes: not an error, and a hint tells the orchestrator how to seed them.
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "repo_notes", "arguments": { "repo": repo_name } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "repo_notes on empty errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["content"], json!(""));
+    assert!(parsed["hint"].is_string(), "expected a hint, got: {parsed}");
+
+    // Write by repo *name* (the orchestrator's handle), then read back.
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({
+            "name": "repo_notes_write",
+            "arguments": { "repo": repo_name, "content": "use `pnpm test`, never `npm test`" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "repo_notes_write errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["ok"], json!(true));
+    let path = PathBuf::from(parsed["path"].as_str().unwrap());
+    assert!(
+        path.starts_with(state_dir.path().join("repo-notes")),
+        "notes path {path:?} escaped the injected dir"
+    );
+
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "repo_notes", "arguments": { "repo": repo_name } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "repo_notes errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        parsed["content"],
+        json!("use `pnpm test`, never `npm test`")
+    );
+    assert!(
+        parsed["hint"].is_null(),
+        "no hint once notes exist: {parsed}"
+    );
+
+    // Unknown repo: error that points at list_repos.
+    mcp_request(
+        &mut stdin,
+        5,
+        "tools/call",
+        json!({ "name": "repo_notes", "arguments": { "repo": "no-such-repo" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(is_error, "unknown repo should error, got: {text}");
+    assert!(text.contains("list_repos"), "unhelpful error: {text}");
+
+    // Over the cap: rejected with an error naming the limit.
+    mcp_request(
+        &mut stdin,
+        6,
+        "tools/call",
+        json!({
+            "name": "repo_notes_write",
+            "arguments": { "repo": repo_name, "content": "x".repeat(8193) },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(is_error, "oversized write should error, got: {text}");
+    assert!(text.contains("8192"), "unhelpful error: {text}");
 
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);

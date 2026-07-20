@@ -55,6 +55,8 @@ impl ToolHandler for Server {
             "lane_diff" => self.lane_diff(args).await,
             "list_repos" => self.list_repos(args).await,
             "wait_for_change" => self.wait_for_change(args).await,
+            "repo_notes" => self.repo_notes(args).await,
+            "repo_notes_write" => self.repo_notes_write(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
         match out {
@@ -339,15 +341,7 @@ impl Server {
                     .into(),
             );
         }
-        let repos: Vec<Repo> = self
-            .client
-            .call_typed("repo.list", None)
-            .await
-            .map_err(rpc_err)?;
-        let repo = repos
-            .iter()
-            .find(|r| r.name == a.repo || r.id.to_string() == a.repo)
-            .ok_or_else(|| format!("no registered repo matching '{}'. Try list_repos.", a.repo))?;
+        let repo = self.resolve_repo(&a.repo).await?;
         let lane: Lane = self
             .client
             .call_typed(
@@ -564,6 +558,61 @@ impl Server {
         }
     }
 
+    /// Resolve a repo by the orchestrator's handle: registered name, or id as a string.
+    async fn resolve_repo(&self, name_or_id: &str) -> Result<Repo, String> {
+        let repos: Vec<Repo> = self
+            .client
+            .call_typed("repo.list", None)
+            .await
+            .map_err(rpc_err)?;
+        repos
+            .into_iter()
+            .find(|r| r.name == name_or_id || r.id.to_string() == name_or_id)
+            .ok_or_else(|| format!("no registered repo matching '{name_or_id}'. Try list_repos."))
+    }
+
+    async fn repo_notes(&self, args: Value) -> Result<Value, String> {
+        let a: RepoNotesArgs = parse(args)?;
+        let repo = self.resolve_repo(&a.repo).await?;
+        let res: Value = self
+            .client
+            .call("repo.notes.get", Some(json!({ "repo_id": repo.id })))
+            .await
+            .map_err(rpc_err)?;
+        let mut out = json!({
+            "repo": repo.name,
+            "content": res["content"],
+            "path": res["path"],
+        });
+        if res["content"].as_str().unwrap_or_default().is_empty() {
+            out["hint"] = json!(
+                "no notes yet. When you learn something durable about this repo (build/test \
+                 commands, conventions, gotchas), record it with repo_notes_write."
+            );
+        }
+        Ok(out)
+    }
+
+    async fn repo_notes_write(&self, args: Value) -> Result<Value, String> {
+        let a: RepoNotesWriteArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        let repo = self.resolve_repo(&a.repo).await?;
+        let res: Value = self
+            .client
+            .call(
+                "repo.notes.set",
+                Some(json!({ "repo_id": repo.id, "content": a.content })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        Ok(json!({
+            "ok": true,
+            "repo": repo.name,
+            "bytes": res["bytes"],
+            "path": res["path"],
+        }))
+    }
+
     async fn default_agent(&self) -> String {
         match self
             .client
@@ -677,6 +726,15 @@ struct LaneDiffArgs {
 }
 fn default_max_patch_chars() -> usize {
     8000
+}
+#[derive(Deserialize)]
+struct RepoNotesArgs {
+    repo: String,
+}
+#[derive(Deserialize)]
+struct RepoNotesWriteArgs {
+    repo: String,
+    content: String,
 }
 #[derive(Deserialize)]
 struct WaitForChangeArgs {
@@ -1106,6 +1164,35 @@ fn tool_catalog() -> Vec<ToolDef> {
             name: "list_repos",
             description: "List the repositories registered with repomon (id, name, path).",
             input_schema: obj(json!({}), &[]),
+        },
+        ToolDef {
+            name: "repo_notes",
+            description: "Read a repo's durable notes (the fleet's per-repo memory): build/test \
+                commands, conventions, gotchas, standing instructions — recorded across sessions \
+                and hand-editable by the human. Check them before planning work in a repo, and \
+                fold them into every worker task. Also embedded automatically in \
+                create_lane/spawn_agent results as repo_notes.",
+            input_schema: obj(
+                json!({
+                    "repo": { "type": "string", "description": "Repo name or id (see list_repos)." }
+                }),
+                &["repo"],
+            ),
+        },
+        ToolDef {
+            name: "repo_notes_write",
+            description: "Replace a repo's durable notes wholesale (full replace, max 8192 \
+                bytes). Read repo_notes first, integrate the new lesson, and rewrite concisely — \
+                edit, don't append forever. Record durable lessons here after a merge, a \
+                corrected mistake, or a human-stated preference; don't store live fleet state \
+                (that comes from fleet_status).",
+            input_schema: obj(
+                json!({
+                    "repo": { "type": "string", "description": "Repo name or id (see list_repos)." },
+                    "content": { "type": "string", "description": "The complete new notes (markdown). Replaces the previous notes entirely." }
+                }),
+                &["repo", "content"],
+            ),
         },
         ToolDef {
             name: "wait_for_change",
