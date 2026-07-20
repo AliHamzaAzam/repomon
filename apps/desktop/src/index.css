@@ -1,0 +1,185 @@
+@import "tailwindcss";
+
+:root {
+  --background: hsl(210 20% 96%);
+  --foreground: hsl(216 20% 8%);
+  --surface: hsl(210 25% 99%);
+  --raised: hsl(210 18% 94%);
+  --line: hsl(215 14% 82%);
+  --muted: hsl(216 10% 42%);
+  --signal: hsl(169 55% 38%);
+  --attention: hsl(35 86% 52%);
+  --fault: hsl(5 68% 52%);
+  --shadow: hsl(216 20% 8% / 0.12);
+}
+
+.dark {
+  --background: hsl(216 20% 8%);
+  --foreground: hsl(210 20% 96%);
+  --surface: hsl(216 21% 12%);
+  --raised: hsl(215 19% 15%);
+  --line: hsl(214 14% 25%);
+  --muted: hsl(215 10% 66%);
+  --signal: hsl(169 61% 59%);
+  --attention: hsl(35 86% 67%);
+  --fault: hsl(5 81% 67%);
+  --shadow: hsl(220 30% 3% / 0.42);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
+  --color-muted: var(--muted);
+  --color-signal: var(--signal);
+  --color-attention: var(--attention);
+  --color-fault: var(--fault);
+  --font-sans: "Aptos", "Segoe UI Variable", "Noto Sans", system-ui, sans-serif;
+  --font-mono: "Berkeley Mono", "SFMono-Regular", "Cascadia Code", "Roboto Mono", monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    cursor: pointer;
+  }
+}
+
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.brand-mark {
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  width: 1.15rem;
+  height: 1rem;
+}
+
+.brand-mark span {
+  width: 3px;
+  border-radius: 1px;
+  background: var(--signal);
+}
+
+.brand-mark span:nth-child(1) {
+  height: 45%;
+  opacity: 0.7;
+}
+
+.brand-mark span:nth-child(2) {
+  height: 100%;
+}
+
+.brand-mark span:nth-child(3) {
+  height: 68%;
+  opacity: 0.82;
+}
+
+.terminal-bay::before {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at center, black 0%, transparent 72%);
+  opacity: 0.2;
+}
+
+.terminal-glyph {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--signal);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.terminal-glyph i {
+  display: block;
+  width: 0.48rem;
+  height: 1px;
+  background: currentColor;
+}
+
+.connection-rail {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--signal) 30%, transparent);
+}
+
+.status-light {
+  display: block;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--signal);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 16%, transparent);
+}
+
+.status-light.is-connecting {
+  animation: connection-breathe 1.4s ease-in-out infinite;
+}
+
+.status-light.is-starting {
+  animation: connection-breathe 1.4s ease-in-out infinite;
+}
+
+.status-light.is-retrying {
+  background: var(--fault);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fault) 16%, transparent);
+  animation: connection-breathe 1s ease-in-out infinite;
+}
+
+@keyframes connection-breathe {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

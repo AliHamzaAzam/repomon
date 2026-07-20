@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/desktop/src-tauri",
     "crates/repomon-core",
     "crates/repomon-daemon",
     "crates/repomon-mcp",

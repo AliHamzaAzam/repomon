@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101318" />
+    <title>Repomon</title>
+    <script>
+      (() => {
+        const saved = localStorage.getItem("repomon-theme") || "system";
+        const dark =
+          saved === "dark" ||
+          (saved === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.add(dark ? "dark" : "light");
+      })();
+    </script>
+  </head>
+
+  <body>
+    <noscript>Repomon Desktop requires JavaScript.</noscript>
+    <div id="root"></div>
+
+    <script src="/src/index.tsx" type="module"></script>
+  </body>
+</html>

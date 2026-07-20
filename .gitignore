@@ -1,6 +1,9 @@
 # Rust
 /target
 **/*.rs.bk
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/gen/
 
 # Visual-companion brainstorm scratch (not part of the project)
 .superpowers/

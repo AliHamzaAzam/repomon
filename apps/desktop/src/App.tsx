@@ -1,0 +1,210 @@
+import { createSignal, onCleanup, onMount } from "solid-js";
+
+import {
+  initialConnection,
+  tauriConnectionSource,
+  type ConnectionPhase,
+  type ConnectionSource,
+} from "./ipc/connection";
+import { applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
+
+interface AppProps {
+  connectionSource?: ConnectionSource;
+}
+
+function phaseLabel(phase: ConnectionPhase): string {
+  switch (phase) {
+    case "starting":
+      return "Starting";
+    case "connecting":
+      return "Connecting";
+    case "connected":
+      return "Connected";
+    case "retrying":
+      return "Retrying";
+  }
+}
+
+function formatUptime(totalSeconds?: number): string {
+  if (totalSeconds === undefined) return "--";
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes.toString().padStart(2, "0")}m` : `${minutes}m`;
+}
+
+function App(props: AppProps) {
+  const [theme, setTheme] = createSignal(readTheme());
+  const [connection, setConnection] = createSignal(initialConnection);
+  const source = props.connectionSource ?? tauriConnectionSource;
+  let stopListening: (() => void) | undefined;
+  let active = true;
+
+  onMount(() => {
+    void source
+      .subscribe(setConnection)
+      .then((stop) => {
+        if (active) stopListening = stop;
+        else stop();
+      })
+      .catch(() => undefined);
+
+    void source
+      .current()
+      .then((snapshot) => {
+        if (active) setConnection(snapshot);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setConnection({
+          phase: "retrying",
+          endpoint: initialConnection.endpoint,
+          message: error instanceof Error ? error.message : String(error),
+          daemon: null,
+        });
+      });
+  });
+
+  onCleanup(() => {
+    active = false;
+    stopListening?.();
+  });
+
+  const cycleTheme = () => {
+    const value = nextTheme(theme());
+    setTheme(value);
+    applyTheme(value);
+  };
+
+  return (
+    <div class="grid h-screen min-h-[38rem] grid-rows-[3.5rem_minmax(0,1fr)_2.75rem] overflow-hidden bg-background text-foreground">
+      <header class="flex items-center justify-between border-b border-line bg-surface px-4">
+        <div class="flex items-center gap-3">
+          <div class="brand-mark" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div class="flex items-baseline gap-3">
+            <h1 class="text-[0.95rem] font-semibold tracking-[-0.02em]">Repomon</h1>
+            <span class="font-mono text-[0.64rem] uppercase tracking-[0.18em] text-muted">
+              Mission control
+            </span>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <span class="rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.14em] text-muted">
+            Local
+          </span>
+          <button
+            type="button"
+            class="focus-ring rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.64rem] uppercase tracking-[0.12em] text-muted transition-colors hover:text-foreground"
+            onClick={cycleTheme}
+            aria-label={`Theme: ${themeLabel(theme())}`}
+          >
+            {themeLabel(theme())}
+          </button>
+        </div>
+      </header>
+
+      <div class="grid min-h-0 grid-cols-[14.5rem_minmax(0,1fr)_15.5rem] max-[980px]:grid-cols-[13rem_minmax(0,1fr)]">
+        <nav
+          aria-label="Fleet"
+          class="flex min-h-0 flex-col border-r border-line bg-surface"
+        >
+          <div class="flex items-center justify-between border-b border-line px-4 py-3">
+            <span class="section-label">Fleet</span>
+              <span class="font-mono text-[0.62rem] text-muted">
+                {connection().daemon?.repos ?? 0} / {connection().daemon?.lanes ?? 0}
+              </span>
+          </div>
+          <div class="flex flex-1 flex-col justify-between p-3">
+            <div class="rounded-lg border border-dashed border-line bg-raised/40 p-3">
+              <p class="text-sm font-medium">Finding your fleet</p>
+              <p class="mt-1.5 text-xs leading-relaxed text-muted">
+                Repositories and lanes appear here after the daemon connects.
+              </p>
+            </div>
+            <div class="space-y-2 border-t border-line pt-3 font-mono text-[0.62rem] uppercase tracking-[0.1em] text-muted">
+              <div class="flex items-center justify-between">
+                <span>Needs you</span>
+                <span>0</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span>Running</span>
+                <span>0</span>
+              </div>
+            </div>
+          </div>
+        </nav>
+
+        <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
+          <div class="absolute inset-x-0 top-0 flex h-10 items-center border-b border-line bg-surface/70 px-3 backdrop-blur">
+            <div class="flex h-full items-center border-x border-line bg-background px-3 font-mono text-[0.65rem] text-muted">
+              No terminal selected
+            </div>
+          </div>
+          <div class="relative flex h-full items-center justify-center px-8 pt-10">
+            <section class="max-w-md text-center" aria-labelledby="terminal-empty-title">
+              <div class="mx-auto mb-5 grid size-14 place-items-center rounded-xl border border-line bg-surface shadow-[0_14px_40px_var(--shadow)]">
+                <div class="terminal-glyph" aria-hidden="true">
+                  <span>&gt;</span>
+                  <i />
+                </div>
+              </div>
+              <p class="section-label mb-2">Terminal bay</p>
+              <h2 id="terminal-empty-title" class="text-xl font-semibold tracking-[-0.025em]">
+                Ready for the first lane
+              </h2>
+              <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
+                Interactive agent and shell terminals will open here once fleet sync begins.
+              </p>
+            </section>
+          </div>
+        </main>
+
+        <aside
+          aria-label="Repomind"
+          class="flex min-h-0 flex-col border-l border-line bg-surface max-[980px]:hidden"
+        >
+          <div class="flex items-center justify-between border-b border-line px-4 py-3">
+            <span class="section-label">Repomind</span>
+            <span class="size-1.5 rounded-full bg-muted/50" aria-hidden="true" />
+          </div>
+          <div class="flex flex-1 items-end p-4">
+            <div class="border-l border-line pl-3">
+              <p class="text-xs font-medium">Orchestrator offline</p>
+              <p class="mt-1 text-xs leading-relaxed text-muted">
+                This rail becomes interactive in the mission-control milestone.
+              </p>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <footer
+        role="status"
+        aria-label="Daemon connection"
+        class="connection-rail grid grid-cols-[auto_minmax(11rem,1fr)_auto_auto_auto] items-center gap-5 border-t border-line bg-surface px-4 font-mono text-[0.64rem] text-muted"
+      >
+        <div class="flex items-center gap-2 text-foreground">
+          <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
+          <span class="uppercase tracking-[0.12em]">{phaseLabel(connection().phase)}</span>
+        </div>
+        <span class="flex min-w-0 items-center gap-2 truncate">
+          <span class="truncate">{connection().endpoint}</span>
+          {connection().message ? (
+            <span class="truncate text-fault">{connection().message}</span>
+          ) : null}
+        </span>
+        <span>Version {connection().daemon?.version ?? "--"}</span>
+        <span>
+          {connection().daemon?.repos ?? 0} repos / {connection().daemon?.lanes ?? 0} lanes
+        </span>
+        <span>Uptime {formatUptime(connection().daemon?.uptime_secs)}</span>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
