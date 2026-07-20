@@ -7,8 +7,6 @@
 //! pending question to act on (the app attaches an Approve action), `AGENT_ALERT` otherwise.
 //! Tokens APNs reports dead (`Unregistered`/`BadDeviceToken`) are evicted from the store.
 
-use std::sync::Arc;
-
 use a2::{
     Client, ClientConfig, CollapseId, DefaultNotificationBuilder, Endpoint, ErrorReason,
     NotificationBuilder, NotificationOptions, Priority,
@@ -126,7 +124,7 @@ impl Push {
 /// Push `title`/`body` to every registered device, evicting tokens APNs reports dead.
 /// Builds the sender fresh per call — alerts are rare and the key parse is cheap, and this
 /// way `[push]` config changes apply immediately.
-pub async fn send_all(ctx: &Arc<Ctx>, title: &str, body: &str, category: &str, data: &Value) {
+pub async fn send_all(ctx: &Ctx, title: &str, body: &str, category: &str, data: &Value) {
     let devices = ctx.store.list_devices().await.unwrap_or_default();
     if devices.is_empty() {
         return;
