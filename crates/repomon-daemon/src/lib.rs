@@ -14,6 +14,7 @@ pub mod reap;
 pub mod remote;
 pub mod rpc;
 pub mod socket;
+pub mod standing;
 pub mod usage_watch;
 
 use std::collections::{HashMap, HashSet};

@@ -194,6 +194,10 @@ async fn main() {
     // live (config.set) starts/stops it without a restart.
     tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));
 
+    // Standing orchestrations: fire due schedules as bounded headless repomind runs. Costs
+    // nothing until a schedule exists.
+    tokio::spawn(repomon_daemon::standing::standing_watch(ctx.clone()));
+
     // Probe Claude's `/usage` for the TUI's account-usage corner. Self-gates per tick on
     // `[usage_probe]` and a TUI being attached, so it costs nothing until enabled and watched.
     tokio::spawn(repomon_daemon::usage_watch::usage_watcher(ctx.clone()));
