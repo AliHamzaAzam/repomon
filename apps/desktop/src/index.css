@@ -81,6 +81,75 @@
   outline-offset: 2px;
 }
 
+.fleet-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 0.45rem;
+  padding: 0.48rem 0.45rem;
+  color: var(--muted);
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.fleet-row:hover {
+  background: color-mix(in srgb, var(--raised) 72%, transparent);
+}
+
+.fleet-row.is-selected {
+  border-color: color-mix(in srgb, var(--signal) 32%, var(--line));
+  background: color-mix(in srgb, var(--signal) 9%, var(--raised));
+}
+
+.lane-pulse {
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.lane-pulse.is-signal {
+  background: var(--signal);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 12%, transparent);
+}
+
+.lane-pulse.is-attention {
+  background: var(--attention);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--attention) 12%, transparent);
+}
+
+.lane-pulse.is-fault {
+  background: var(--fault);
+}
+
+.lane-badge {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.lane-badge.is-signal {
+  border-color: color-mix(in srgb, var(--signal) 34%, var(--line));
+  color: var(--signal);
+}
+
+.lane-badge.is-attention {
+  border-color: color-mix(in srgb, var(--attention) 38%, var(--line));
+  color: var(--attention);
+}
+
+.lane-badge.is-fault {
+  border-color: color-mix(in srgb, var(--fault) 38%, var(--line));
+  color: var(--fault);
+}
+
 .brand-mark {
   display: flex;
   align-items: end;

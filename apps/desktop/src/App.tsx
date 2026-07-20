@@ -1,5 +1,6 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
+import FleetSidebar from "./components/FleetSidebar";
 import {
   initialConnection,
   tauriConnectionSource,
@@ -7,9 +8,11 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
+import { createFleetStore, type FleetSource } from "./stores/fleet";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
+  fleetSource?: FleetSource;
 }
 
 function phaseLabel(phase: ConnectionPhase): string {
@@ -36,8 +39,21 @@ function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
   const source = props.connectionSource ?? tauriConnectionSource;
+  const fleet = createFleetStore(props.fleetSource);
   let stopListening: (() => void) | undefined;
+  let fleetStarted = false;
+  let searchInput: HTMLInputElement | undefined;
   let active = true;
+
+  createEffect(() => {
+    if (connection().phase === "connected" && !fleetStarted) {
+      fleetStarted = true;
+      fleet.start();
+    } else if (connection().phase !== "connected" && fleetStarted) {
+      fleetStarted = false;
+      fleet.stop();
+    }
+  });
 
   onMount(() => {
     void source
@@ -67,12 +83,33 @@ function App(props: AppProps) {
   onCleanup(() => {
     active = false;
     stopListening?.();
+    fleet.stop();
   });
 
   const cycleTheme = () => {
     const value = nextTheme(theme());
     setTheme(value);
     applyTheme(value);
+  };
+
+  const navigateFleet = (event: KeyboardEvent) => {
+    if (event.target instanceof HTMLInputElement) {
+      if (event.key === "Escape") event.currentTarget instanceof HTMLElement && event.currentTarget.focus();
+      return;
+    }
+    if (event.key === "/") {
+      event.preventDefault();
+      searchInput?.focus();
+    } else if (event.key === "j" || event.key === "ArrowDown") {
+      event.preventDefault();
+      fleet.moveSelection(1);
+    } else if (event.key === "k" || event.key === "ArrowUp") {
+      event.preventDefault();
+      fleet.moveSelection(-1);
+    } else if (event.key === "n") {
+      event.preventDefault();
+      fleet.moveSelection(1, true);
+    }
   };
 
   return (
@@ -110,38 +147,23 @@ function App(props: AppProps) {
       <div class="grid min-h-0 grid-cols-[14.5rem_minmax(0,1fr)_15.5rem] max-[980px]:grid-cols-[13rem_minmax(0,1fr)]">
         <nav
           aria-label="Fleet"
-          class="flex min-h-0 flex-col border-r border-line bg-surface"
+          class="flex min-h-0 flex-col border-r border-line bg-surface outline-none"
+          tabIndex={0}
+          onKeyDown={navigateFleet}
         >
           <div class="flex items-center justify-between border-b border-line px-4 py-3">
             <span class="section-label">Fleet</span>
               <span class="font-mono text-[0.62rem] text-muted">
-                {connection().daemon?.repos ?? 0} / {connection().daemon?.lanes ?? 0}
+                {fleet.repos().length} / {fleet.lanes().length}
               </span>
           </div>
-          <div class="flex flex-1 flex-col justify-between p-3">
-            <div class="rounded-lg border border-dashed border-line bg-raised/40 p-3">
-              <p class="text-sm font-medium">Finding your fleet</p>
-              <p class="mt-1.5 text-xs leading-relaxed text-muted">
-                Repositories and lanes appear here after the daemon connects.
-              </p>
-            </div>
-            <div class="space-y-2 border-t border-line pt-3 font-mono text-[0.62rem] uppercase tracking-[0.1em] text-muted">
-              <div class="flex items-center justify-between">
-                <span>Needs you</span>
-                <span>0</span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span>Running</span>
-                <span>0</span>
-              </div>
-            </div>
-          </div>
+          <FleetSidebar fleet={fleet} searchRef={(element) => { searchInput = element; }} />
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
           <div class="absolute inset-x-0 top-0 flex h-10 items-center border-b border-line bg-surface/70 px-3 backdrop-blur">
             <div class="flex h-full items-center border-x border-line bg-background px-3 font-mono text-[0.65rem] text-muted">
-              No terminal selected
+              {fleet.selectedLane()?.repo.name ?? "No lane"} / {fleet.selectedLane()?.worktree.name ?? "No terminal selected"}
             </div>
           </div>
           <div class="relative flex h-full items-center justify-center px-8 pt-10">
@@ -154,10 +176,12 @@ function App(props: AppProps) {
               </div>
               <p class="section-label mb-2">Terminal bay</p>
               <h2 id="terminal-empty-title" class="text-xl font-semibold tracking-[-0.025em]">
-                Ready for the first lane
+                {fleet.selectedLane() ? fleet.selectedLane()?.worktree.branch ?? "Detached worktree" : "Ready for the first lane"}
               </h2>
               <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
-                Interactive agent and shell terminals will open here once fleet sync begins.
+                <Show when={fleet.selectedLane()} fallback="Add a repository to begin monitoring work.">
+                  Select an agent terminal or open a shell to work in this lane.
+                </Show>
               </p>
             </section>
           </div>
