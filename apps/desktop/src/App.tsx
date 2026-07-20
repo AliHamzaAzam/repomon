@@ -1,4 +1,4 @@
-import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createSignal, lazy, onCleanup, onMount } from "solid-js";
 
 import FleetSidebar from "./components/FleetSidebar";
 import {
@@ -9,6 +9,8 @@ import {
 } from "./ipc/connection";
 import { applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
+
+const TerminalPane = lazy(() => import("./components/TerminalPane"));
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -166,24 +168,40 @@ function App(props: AppProps) {
               {fleet.selectedLane()?.repo.name ?? "No lane"} / {fleet.selectedLane()?.worktree.name ?? "No terminal selected"}
             </div>
           </div>
-          <div class="relative flex h-full items-center justify-center px-8 pt-10">
-            <section class="max-w-md text-center" aria-labelledby="terminal-empty-title">
-              <div class="mx-auto mb-5 grid size-14 place-items-center rounded-xl border border-line bg-surface shadow-[0_14px_40px_var(--shadow)]">
-                <div class="terminal-glyph" aria-hidden="true">
-                  <span>&gt;</span>
-                  <i />
+          <div class="absolute inset-x-0 bottom-0 top-10">
+            <Show
+              when={fleet.selectedLane()?.agent_sessions.find((agent) => agent.tmux_window)}
+              fallback={
+                <div class="relative flex h-full items-center justify-center px-8">
+                  <section class="max-w-md text-center" aria-labelledby="terminal-empty-title">
+                    <div class="mx-auto mb-5 grid size-14 place-items-center rounded-xl border border-line bg-surface shadow-[0_14px_40px_var(--shadow)]">
+                      <div class="terminal-glyph" aria-hidden="true">
+                        <span>&gt;</span>
+                        <i />
+                      </div>
+                    </div>
+                    <p class="section-label mb-2">Terminal bay</p>
+                    <h2 id="terminal-empty-title" class="text-xl font-semibold tracking-[-0.025em]">
+                      {fleet.selectedLane() ? fleet.selectedLane()?.worktree.branch ?? "Detached worktree" : "Ready for the first lane"}
+                    </h2>
+                    <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
+                      <Show when={fleet.selectedLane()} fallback="Add a repository to begin monitoring work.">
+                        Spawn an agent or open a shell to work in this lane.
+                      </Show>
+                    </p>
+                  </section>
                 </div>
-              </div>
-              <p class="section-label mb-2">Terminal bay</p>
-              <h2 id="terminal-empty-title" class="text-xl font-semibold tracking-[-0.025em]">
-                {fleet.selectedLane() ? fleet.selectedLane()?.worktree.branch ?? "Detached worktree" : "Ready for the first lane"}
-              </h2>
-              <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
-                <Show when={fleet.selectedLane()} fallback="Add a repository to begin monitoring work.">
-                  Select an agent terminal or open a shell to work in this lane.
-                </Show>
-              </p>
-            </section>
+              }
+            >
+              {(agent) => (
+                <TerminalPane
+                  laneId={fleet.selectedLane()!.id}
+                  window={agent().tmux_window!}
+                  label={agent().custom_label ?? agent().title ?? `${agent().agent} terminal`}
+                  focused
+                />
+              )}
+            </Show>
           </div>
         </main>
 

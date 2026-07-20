@@ -1,6 +1,7 @@
 mod connection;
 mod ipc;
 mod state;
+mod terminal;
 
 use std::path::PathBuf;
 
@@ -37,7 +38,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             connection_status,
             ipc::daemon_call,
-            ipc::daemon_subscribe
+            ipc::daemon_subscribe,
+            terminal::term_watch,
+            terminal::term_unwatch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

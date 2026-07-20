@@ -15,6 +15,7 @@ pub mod error;
 pub mod exec;
 pub mod git;
 pub mod indexer;
+pub mod input;
 pub mod lane;
 pub mod launch;
 pub mod model;

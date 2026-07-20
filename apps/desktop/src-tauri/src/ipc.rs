@@ -17,7 +17,7 @@ pub struct RpcFailure {
 }
 
 impl RpcFailure {
-    fn not_connected() -> Self {
+    pub(crate) fn not_connected() -> Self {
         Self {
             code: NOT_CONNECTED,
             message: "daemon connection is still starting".into(),
@@ -36,7 +36,7 @@ impl From<&RpcError> for RpcFailure {
     }
 }
 
-fn map_call_error(error: Error) -> RpcFailure {
+pub(crate) fn map_call_error(error: Error) -> RpcFailure {
     error
         .downcast_ref::<RpcError>()
         .map(RpcFailure::from)

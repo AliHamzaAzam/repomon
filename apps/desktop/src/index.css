@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
 
 :root {
   --background: hsl(210 20% 96%);
@@ -210,6 +211,17 @@
 
 .connection-rail {
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--signal) 30%, transparent);
+}
+
+.terminal-host .xterm,
+.terminal-host .xterm-viewport,
+.terminal-host .xterm-screen {
+  height: 100%;
+}
+
+.terminal-host .xterm-viewport {
+  scrollbar-color: var(--line) transparent;
+  scrollbar-width: thin;
 }
 
 .status-light {

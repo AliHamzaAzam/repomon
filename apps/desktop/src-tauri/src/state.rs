@@ -1,14 +1,17 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 use repomon_core::client::DaemonClient;
 use tokio::sync::OnceCell;
+use tokio::sync::oneshot;
 
 use crate::connection::ConnectionSnapshot;
 
 pub struct AppState {
     pub client: OnceCell<DaemonClient>,
     pub connection: RwLock<ConnectionSnapshot>,
+    pub terminal_watches: Arc<Mutex<HashMap<String, oneshot::Sender<oneshot::Sender<()>>>>>,
     endpoint: String,
 }
 
@@ -18,6 +21,7 @@ impl AppState {
         Self {
             client: OnceCell::new(),
             connection: RwLock::new(ConnectionSnapshot::starting(&endpoint)),
+            terminal_watches: Arc::new(Mutex::new(HashMap::new())),
             endpoint,
         }
     }

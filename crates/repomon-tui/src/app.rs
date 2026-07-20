@@ -5528,45 +5528,33 @@ fn leaves_insert(key: &KeyEvent) -> bool {
 }
 
 fn translate_key(key: &KeyEvent) -> Option<(String, bool)> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    if let KeyCode::Char(c) = key.code {
-        if ctrl {
-            return Some((format!("C-{}", c.to_ascii_lowercase()), false));
-        }
-        // Alt+<char> (e.g. the terminal sending Option as Meta): forward as a tmux M- key.
-        if alt {
-            return Some((format!("M-{c}"), false));
-        }
-        return Some((c.to_string(), true)); // literal printable
-    }
-    let base = match key.code {
-        KeyCode::Esc => "Escape", // the agent needs Esc (interrupt / clear); ^O leaves insert
-        KeyCode::Enter => "Enter",
-        KeyCode::Backspace => "BSpace",
-        KeyCode::Tab => "Tab",
-        KeyCode::BackTab => "BTab", // Shift+Tab — cycles agent modes
-        KeyCode::Up => "Up",
-        KeyCode::Down => "Down",
-        KeyCode::Left => "Left",
-        KeyCode::Right => "Right",
-        KeyCode::Delete => "DC",
-        KeyCode::Home => "Home",
-        KeyCode::End => "End",
-        KeyCode::PageUp => "PageUp",
-        KeyCode::PageDown => "PageDown",
+    use repomon_core::input::{Key, Modifiers};
+
+    let shared = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Esc => Key::Escape,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
         _ => return None,
     };
-    // Carry Alt/Ctrl so Option+Arrow (word jump), Ctrl+Arrow, Alt+Backspace (word delete), …
-    // reach the agent as tmux M-/C- keys.
-    let prefix = if ctrl {
-        "C-"
-    } else if alt {
-        "M-"
-    } else {
-        ""
-    };
-    Some((format!("{prefix}{base}"), false))
+    Some(repomon_core::input::translate_key(
+        shared,
+        Modifiers {
+            control: key.modifiers.contains(KeyModifiers::CONTROL),
+            alt: key.modifiers.contains(KeyModifiers::ALT),
+        },
+    ))
 }
 
 /// Await the next forwardable event, collapsing lag. `None` means the stream closed.
