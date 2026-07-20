@@ -236,6 +236,66 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 continue;
             };
             let sess = session_by_key(lane, &key, subagents);
+            // Approval-policy auto-approve: a routine Bash permission matching a confirmed
+            // per-repo rule is answered by the daemon itself (the default-approve key, same
+            // assumption as approve_agent's choice=None) and the alert is suppressed — the
+            // acceptance is precisely "the fourth cargo test never reaches your phone". The
+            // hardcoded always-escalate sniffer wins over any learned rule.
+            if kind == NotifKind::NeedsYou {
+                use repomon_core::agent::approval;
+                let auto = match sess {
+                    Some(s) => match (s.pending_dialog.as_ref(), s.tmux_window.clone()) {
+                        (Some(dialog), Some(window)) => approval::dialog_command(dialog)
+                            .map(|cmd| (approval::command_pattern(&cmd), cmd, window)),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if let Some((pattern, cmd, window)) = auto {
+                    let allowed = !approval::is_always_escalate(&cmd)
+                        && ctx
+                            .store
+                            .has_approval_rule(lane.repo.name.clone(), pattern.clone())
+                            .await
+                            .unwrap_or(false);
+                    if allowed {
+                        tracing::info!(
+                            lane = lane_id,
+                            pattern = %pattern,
+                            "auto-approving allowlisted permission"
+                        );
+                        let tmux = ctx.tmux.clone();
+                        let win = window.clone();
+                        let sent =
+                            tokio::task::spawn_blocking(move || tmux.send_key_named(&win, "Enter"))
+                                .await;
+                        if matches!(sent, Ok(Ok(_))) {
+                            rpc::mark_input(&ctx, lane_id, &window).await;
+                            let _ = ctx
+                                .store
+                                .append_journal(repomon_core::model::JournalEntry {
+                                    id: 0,
+                                    at: chrono::Utc::now(),
+                                    session: format!("auto-approve-{lane_id}"),
+                                    action: "auto_approve".into(),
+                                    lane_id: Some(lane_id),
+                                    repo: Some(lane.repo.name.clone()),
+                                    params: Some(
+                                        json!({ "pattern": pattern, "command": cmd }).to_string(),
+                                    ),
+                                    outcome: "ok".into(),
+                                    detail: None,
+                                })
+                                .await;
+                            continue;
+                        }
+                        tracing::warn!(
+                            lane = lane_id,
+                            "auto-approve key send failed; escalating normally"
+                        );
+                    }
+                }
+            }
             let (title, body) = compose(
                 kind,
                 lane,

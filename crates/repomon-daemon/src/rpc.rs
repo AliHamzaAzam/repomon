@@ -102,7 +102,7 @@ const DIALOG_CHANGED: i64 = -32010;
 /// Record that input reached a lane window: stamp `input_seen` (quiets the notification
 /// engine) and drop the window's sniff-cache entry, so an answered dialog can't be
 /// re-advertised by `lane.list` for the rest of its TTL.
-async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
+pub(crate) async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
     ctx.input_seen
         .lock()
         .await
