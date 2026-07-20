@@ -188,6 +188,17 @@ struct JournalQuery {
     limit: Option<usize>,
 }
 #[derive(Deserialize)]
+struct ApprovalRecord {
+    repo: String,
+    command: String,
+    verdict: String,
+}
+#[derive(Deserialize)]
+struct ApprovalRuleRef {
+    repo: String,
+    pattern: String,
+}
+#[derive(Deserialize)]
 struct ScheduleAdd {
     spec: String,
     prompt: String,
@@ -763,6 +774,73 @@ pub async fn dispatch(
             }
             .map_err(internal)?;
             to_value(json!({ "entries": entries }))
+        }
+
+        // ---- approval policy ----
+        "approval.record" => {
+            use repomon_core::agent::approval;
+            let p: ApprovalRecord = parse(params)?;
+            if !matches!(p.verdict.as_str(), "approve" | "deny") {
+                return Err(RpcError::invalid_params(
+                    "verdict must be \"approve\" or \"deny\"",
+                ));
+            }
+            let pattern = approval::command_pattern(&p.command);
+            if pattern.is_empty() {
+                return to_value(json!({
+                    "pattern": Value::Null,
+                    "approvals": 0,
+                    "rule_exists": false,
+                    "propose": false,
+                }));
+            }
+            let approvals = ctx
+                .store
+                .record_approval_event(p.repo.clone(), pattern.clone(), p.verdict.clone())
+                .await
+                .map_err(internal)?;
+            let rule_exists = ctx
+                .store
+                .has_approval_rule(p.repo.clone(), pattern.clone())
+                .await
+                .map_err(internal)?;
+            let propose =
+                approvals >= 3 && !rule_exists && !approval::is_always_escalate(&p.command);
+            tracing::info!(
+                repo = %p.repo,
+                pattern = %pattern,
+                verdict = %p.verdict,
+                approvals,
+                "approval verdict recorded"
+            );
+            to_value(json!({
+                "pattern": pattern,
+                "approvals": approvals,
+                "rule_exists": rule_exists,
+                "propose": propose,
+            }))
+        }
+        "approval.allow" => {
+            let p: ApprovalRuleRef = parse(params)?;
+            ctx.store
+                .add_approval_rule(p.repo.clone(), p.pattern.clone())
+                .await
+                .map_err(internal)?;
+            tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule confirmed");
+            Ok(Value::Null)
+        }
+        "approval.remove" => {
+            let p: ApprovalRuleRef = parse(params)?;
+            ctx.store
+                .remove_approval_rule(p.repo.clone(), p.pattern.clone())
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule removed");
+            Ok(Value::Null)
+        }
+        "approval.list" => {
+            let rules = ctx.store.list_approval_rules().await.map_err(internal)?;
+            to_value(json!({ "rules": rules }))
         }
 
         // ---- standing-orchestration schedules ----
