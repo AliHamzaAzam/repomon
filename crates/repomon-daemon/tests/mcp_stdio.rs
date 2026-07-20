@@ -58,11 +58,22 @@ async fn daemon_call(
 /// Config and repo-notes paths live in the returned tempdir (kept alive by the caller) so the
 /// daemon under test never touches the real `~/.config` / data dir.
 async fn boot_daemon(tag: &str) -> (PathBuf, UnixStream, tempfile::TempDir) {
+    boot_daemon_cfg(tag, Config::default()).await
+}
+
+/// [`boot_daemon`] with a caller-shaped config (custom tmux session, agents, ...). The worktree
+/// template is always redirected into the state tempdir so an MCP `create_lane` (which takes no
+/// path) can never land a worktree in the real `~/code`.
+async fn boot_daemon_cfg(
+    tag: &str,
+    mut config: Config,
+) -> (PathBuf, UnixStream, tempfile::TempDir) {
     let store = Store::open_in_memory().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
+    config.worktree_template = format!("{}/wt/{{repo}}/{{branch}}", state_dir.path().display());
     let ctx = Ctx::new_with_paths(
         store,
-        Config::default(),
+        config,
         None,
         state_dir.path().join("config.toml"),
         state_dir.path().join("repo-notes"),
@@ -517,6 +528,108 @@ async fn mcp_stdio_repo_notes_round_trip() {
     assert!(is_error, "oversized write should error, got: {text}");
     assert!(text.contains("8192"), "unhelpful error: {text}");
 
+    // create_lane embeds the repo's notes in its own result — the orchestrator gets them with
+    // no extra tool call, ready to fold into the worker's task.
+    mcp_request(
+        &mut stdin,
+        7,
+        "tools/call",
+        json!({
+            "name": "create_lane",
+            "arguments": { "repo": repo_name, "branch": "feat/notes-embed" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "create_lane errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        parsed["repo_notes"],
+        json!("use `pnpm test`, never `npm test`"),
+        "create_lane result must embed the notes: {parsed}"
+    );
+
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
+    if !repomon_core::TmuxRuntime::available() {
+        eprintln!("tmux not available; skipping spawn_agent notes-embed test");
+        return;
+    }
+    // A unique tmux session (name doubles as the `-L` socket) so parallel CI runs never collide
+    // and we never touch the user's real `repomon` session.
+    let session = format!("repomon-notes-embed-it-{}", std::process::id());
+    let mut config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
+    // A harmless custom "agent" instead of real `claude`: `true` ignores its arguments and
+    // exits 0, exercising the real spawn path without launching an autonomous session.
+    config.agents.insert("noop".to_string(), "true".to_string());
+
+    let (sock, mut control, _state_dir) = boot_daemon_cfg("spawn-embed", config).await;
+    let (repo_dir, lane_id) = seed_repo_lane(&mut control).await;
+    let repo_name = repo_dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let mut child = spawn_mcp_child(&sock, &[]);
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
+
+    mcp_request(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "repomon-it", "version": "0.0.0" } }),
+    )
+    .await;
+    let _ = mcp_read(&mut lines).await;
+
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({
+            "name": "repo_notes_write",
+            "arguments": { "repo": repo_name, "content": "use `pnpm test`, never `npm test`" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "repo_notes_write errored: {text}");
+
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({
+            "name": "spawn_agent",
+            "arguments": { "lane_id": lane_id, "agent": "noop", "task": "run the tests" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "spawn_agent errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        parsed["repo_notes"],
+        json!("use `pnpm test`, never `npm test`"),
+        "spawn_agent result must embed the notes: {parsed}"
+    );
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+    let _ = StdCommand::new("tmux")
+        .args(["-L", &session, "kill-server"])
+        .output();
 }
