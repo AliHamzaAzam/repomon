@@ -82,6 +82,76 @@
   outline-offset: 2px;
 }
 
+.mission-grid {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 14.5rem minmax(0, 1fr) 0;
+}
+
+.mission-grid.is-repomind-open {
+  grid-template-columns: 14.5rem minmax(0, 1fr) 17rem;
+}
+
+.repomind-panel {
+  display: none;
+  overflow: hidden;
+}
+
+.mission-grid.is-repomind-open .repomind-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-layout {
+  display: grid;
+  min-height: 0;
+  height: 100%;
+  gap: 1px;
+  background: var(--line);
+}
+
+.terminal-layout.is-focused {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.terminal-layout.is-split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.terminal-layout.is-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.terminal-layout.is-grid.count-1,
+.terminal-layout.is-grid.count-2 {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.repomind-message {
+  border-left: 2px solid var(--line);
+  padding-left: 0.65rem;
+}
+
+.repomind-message.is-assistant {
+  border-color: var(--signal);
+}
+
+.repomind-message.is-user {
+  border-color: var(--attention);
+}
+
+@media (max-width: 980px) {
+  .mission-grid,
+  .mission-grid.is-repomind-open {
+    grid-template-columns: 13rem minmax(0, 1fr);
+  }
+
+  .repomind-panel {
+    display: none !important;
+  }
+}
+
 .fleet-row {
   display: flex;
   width: 100%;

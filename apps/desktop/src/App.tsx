@@ -1,6 +1,8 @@
-import { Show, createEffect, createSignal, lazy, onCleanup, onMount } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import FleetSidebar from "./components/FleetSidebar";
+import RepomindPanel from "./components/RepomindPanel";
+import TerminalWorkspace from "./components/TerminalWorkspace";
 import {
   initialConnection,
   tauriConnectionSource,
@@ -9,8 +11,6 @@ import {
 } from "./ipc/connection";
 import { applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
-
-const TerminalPane = lazy(() => import("./components/TerminalPane"));
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -40,6 +40,7 @@ function formatUptime(totalSeconds?: number): string {
 function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
+  const [repomindOpen, setRepomindOpen] = createSignal(true);
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   let stopListening: (() => void) | undefined;
@@ -137,6 +138,12 @@ function App(props: AppProps) {
           </span>
           <button
             type="button"
+            class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${repomindOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
+            onClick={() => setRepomindOpen(!repomindOpen())}
+            aria-pressed={repomindOpen()}
+          >Repomind</button>
+          <button
+            type="button"
             class="focus-ring rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.64rem] uppercase tracking-[0.12em] text-muted transition-colors hover:text-foreground"
             onClick={cycleTheme}
             aria-label={`Theme: ${themeLabel(theme())}`}
@@ -146,7 +153,7 @@ function App(props: AppProps) {
         </div>
       </header>
 
-      <div class="grid min-h-0 grid-cols-[14.5rem_minmax(0,1fr)_15.5rem] max-[980px]:grid-cols-[13rem_minmax(0,1fr)]">
+      <div class={`mission-grid ${repomindOpen() ? "is-repomind-open" : ""}`}>
         <nav
           aria-label="Fleet"
           class="flex min-h-0 flex-col border-r border-line bg-surface outline-none"
@@ -163,64 +170,18 @@ function App(props: AppProps) {
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
-          <div class="absolute inset-x-0 top-0 flex h-10 items-center border-b border-line bg-surface/70 px-3 backdrop-blur">
-            <div class="flex h-full items-center border-x border-line bg-background px-3 font-mono text-[0.65rem] text-muted">
-              {fleet.selectedLane()?.repo.name ?? "No lane"} / {fleet.selectedLane()?.worktree.name ?? "No terminal selected"}
-            </div>
-          </div>
-          <div class="absolute inset-x-0 bottom-0 top-10">
-            <Show
-              when={fleet.selectedLane()?.agent_sessions.find((agent) => agent.tmux_window)}
-              fallback={
-                <div class="relative flex h-full items-center justify-center px-8">
-                  <section class="max-w-md text-center" aria-labelledby="terminal-empty-title">
-                    <div class="mx-auto mb-5 grid size-14 place-items-center rounded-xl border border-line bg-surface shadow-[0_14px_40px_var(--shadow)]">
-                      <div class="terminal-glyph" aria-hidden="true">
-                        <span>&gt;</span>
-                        <i />
-                      </div>
-                    </div>
-                    <p class="section-label mb-2">Terminal bay</p>
-                    <h2 id="terminal-empty-title" class="text-xl font-semibold tracking-[-0.025em]">
-                      {fleet.selectedLane() ? fleet.selectedLane()?.worktree.branch ?? "Detached worktree" : "Ready for the first lane"}
-                    </h2>
-                    <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
-                      <Show when={fleet.selectedLane()} fallback="Add a repository to begin monitoring work.">
-                        Spawn an agent or open a shell to work in this lane.
-                      </Show>
-                    </p>
-                  </section>
-                </div>
-              }
-            >
-              {(agent) => (
-                <TerminalPane
-                  laneId={fleet.selectedLane()!.id}
-                  window={agent().tmux_window!}
-                  label={agent().custom_label ?? agent().title ?? `${agent().agent} terminal`}
-                  focused
-                />
-              )}
-            </Show>
-          </div>
+          <TerminalWorkspace fleet={fleet} />
         </main>
 
         <aside
           aria-label="Repomind"
-          class="flex min-h-0 flex-col border-l border-line bg-surface max-[980px]:hidden"
+          class="repomind-panel min-h-0 border-l border-line bg-surface"
         >
           <div class="flex items-center justify-between border-b border-line px-4 py-3">
             <span class="section-label">Repomind</span>
             <span class="size-1.5 rounded-full bg-muted/50" aria-hidden="true" />
           </div>
-          <div class="flex flex-1 items-end p-4">
-            <div class="border-l border-line pl-3">
-              <p class="text-xs font-medium">Orchestrator offline</p>
-              <p class="mt-1 text-xs leading-relaxed text-muted">
-                This rail becomes interactive in the mission-control milestone.
-              </p>
-            </div>
-          </div>
+          <RepomindPanel />
         </aside>
       </div>
 

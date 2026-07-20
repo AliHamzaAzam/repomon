@@ -50,7 +50,7 @@ interface ConfigView {
   [key: string]: unknown;
 }
 
-interface OrchestratorStatus {
+export interface OrchestratorStatus {
   running: boolean;
   agent?: string | null;
   model?: string | null;

@@ -7,6 +7,7 @@ export interface FleetSnapshot {
   repos: Repo[];
   lanes: Lane[];
   usage: AccountUsage[];
+  terminals: Array<{ lane_id: number; id: string }>;
 }
 
 export interface FleetSource {
@@ -16,12 +17,13 @@ export interface FleetSource {
 
 export const daemonFleetSource: FleetSource = {
   async load() {
-    const [repos, lanes, usage] = await Promise.all([
+    const [repos, lanes, usage, terminals] = await Promise.all([
       daemonCall("repo.list"),
       daemonCall("lane.list"),
       daemonCall("usage.get").catch(() => []),
+      daemonCall("terminal.list_all").catch(() => []),
     ]);
-    return { repos, lanes, usage };
+    return { repos, lanes, usage, terminals };
   },
   subscribe: subscribeDaemon,
 };
@@ -94,6 +96,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [repos, setRepos] = createSignal<Repo[]>([]);
   const [lanes, setLanes] = createSignal<Lane[]>([]);
   const [usage, setUsage] = createSignal<AccountUsage[]>([]);
+  const [terminals, setTerminals] = createSignal<Array<{ lane_id: number; id: string }>>([]);
   const [selectedLaneId, setSelectedLaneId] = createSignal<number | null>(null);
   const [query, setQuery] = createSignal("");
   const [urgentOnly, setUrgentOnly] = createSignal(false);
@@ -130,6 +133,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setRepos(snapshot.repos);
       setLanes(snapshot.lanes);
       setUsage(snapshot.usage);
+      setTerminals(snapshot.terminals);
       setError(null);
       const current = selectedLaneId();
       if (current === null || !snapshot.lanes.some((lane) => lane.id === current)) {
@@ -185,6 +189,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     repos,
     lanes,
     usage,
+    terminals,
     selectedLane,
     selectedLaneId,
     setSelectedLaneId,
