@@ -1746,6 +1746,19 @@ mod tests {
         assert!(crate::UNATTENDED_ADDENDUM.contains("briefing"));
     }
 
+    /// The persona must teach the approval-policy loop and its hard limits.
+    #[test]
+    fn persona_documents_approval_policy() {
+        assert!(
+            crate::PERSONA.contains("approval_allow"),
+            "persona never mentions approval_allow"
+        );
+        assert!(
+            crate::PERSONA.contains("always escalate"),
+            "persona must state the always-escalate guarantee"
+        );
+    }
+
     #[test]
     fn persona_documents_repo_notes() {
         assert!(
