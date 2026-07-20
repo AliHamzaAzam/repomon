@@ -220,11 +220,11 @@ async fn mcp_stdio_end_to_end() {
 
     mcp_notify(&mut stdin, "notifications/initialized").await;
 
-    // 2. tools/list -> exactly the 16 tools (13 v1 + repo-notes pair + fleet_history).
+    // 2. tools/list -> exactly the 18 tools (13 v1 + repo-notes pair + fleet_history + playbook pair).
     mcp_request(&mut stdin, 2, "tools/list", json!({})).await;
     let resp = mcp_read(&mut lines).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 16, "tools/list returned: {tools:?}");
+    assert_eq!(tools.len(), 18, "tools/list returned: {tools:?}");
     let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: BTreeSet<&str> = [
         "fleet_status",
@@ -243,6 +243,8 @@ async fn mcp_stdio_end_to_end() {
         "repo_notes",
         "repo_notes_write",
         "fleet_history",
+        "playbook_save",
+        "playbook_search",
     ]
     .into_iter()
     .collect();
@@ -791,6 +793,126 @@ async fn mcp_stdio_read_only_allows_fleet_history() {
     assert!(
         !is_error,
         "fleet_history (read) must work under read-only autonomy, got: {text}"
+    );
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_playbook_draft_approval_flow() {
+    let (sock, mut control, _state_dir) = boot_daemon("playbook").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
+
+    // Draft a playbook; the result must say it is a draft awaiting human approval.
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({
+            "name": "playbook_save",
+            "arguments": { "name": "release-all", "content": "1. lane per repo\n2. verify\n3. merge" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "playbook_save errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["status"], json!("draft"));
+    assert!(
+        parsed["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("approve"),
+        "save result must explain the approval step: {parsed}"
+    );
+
+    // Unapproved: search returns nothing, with a hint.
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "playbook_search", "arguments": { "query": "release" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "playbook_search errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["playbooks"], json!([]));
+    assert!(
+        parsed["hint"].is_string(),
+        "empty search should hint: {parsed}"
+    );
+
+    // Human approves out-of-band (the CLI path drives this same RPC).
+    let r = daemon_call(
+        &mut control,
+        50,
+        "playbook.approve",
+        Some(json!({ "name": "release-all" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "approve errored: {:?}", r.error);
+
+    // Now the playbook is followable.
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "playbook_search", "arguments": { "query": "release" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, _) = tool_result(&resp);
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let books = parsed["playbooks"].as_array().unwrap();
+    assert_eq!(books.len(), 1);
+    assert!(
+        books[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("lane per repo")
+    );
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_read_only_playbooks() {
+    let (sock, mut control, _state_dir) = boot_daemon("playbook-ro").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) =
+        init_mcp_child(&sock, &[("REPOMON_MCP_AUTONOMY", "read-only")]).await;
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "playbook_save", "arguments": { "name": "x", "content": "y" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("read-only"),
+        "playbook_save should be refused under read-only autonomy, got: {text}"
+    );
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "playbook_search", "arguments": { "query": "x" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        !is_error,
+        "playbook_search (read) must work under read-only autonomy, got: {text}"
     );
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);
