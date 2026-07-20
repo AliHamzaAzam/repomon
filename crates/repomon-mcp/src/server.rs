@@ -1566,6 +1566,20 @@ mod tests {
         );
     }
 
+    /// The persona must teach the playbook cycle: search before multi-lane goals, draft after
+    /// completed ones, human approval gates everything.
+    #[test]
+    fn persona_documents_playbooks() {
+        assert!(
+            crate::PERSONA.contains("playbook_search"),
+            "persona never mentions playbook_search"
+        );
+        assert!(
+            crate::PERSONA.contains("playbook_save"),
+            "persona never mentions playbook_save"
+        );
+    }
+
     #[test]
     fn persona_documents_repo_notes() {
         assert!(
