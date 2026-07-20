@@ -9,6 +9,7 @@ import {
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import { applyAccent } from "../theme";
+import { installAvailableUpdate, type UpdateProgress } from "../ipc/updater";
 
 type ControlTab = "actions" | "triage" | "history" | "settings" | "feed";
 
@@ -40,6 +41,8 @@ export default function ControlCenter(props: ControlCenterProps) {
   const [search, setSearch] = createSignal("");
   const [config, setConfig] = createSignal<ConfigView | null>(null);
   const [browser, setBrowser] = createSignal<BrowseResult | null>(null);
+  const [updateProgress, setUpdateProgress] = createSignal<UpdateProgress | null>(null);
+  const [updateMessage, setUpdateMessage] = createSignal<string | null>(null);
 
   const selectedLane = () => props.fleet.selectedLane();
   const selectedAgent = createMemo(() => selectedLane()?.agent_sessions[0] ?? null);
@@ -159,6 +162,24 @@ export default function ControlCenter(props: ControlCenterProps) {
 
   async function loadSettings() {
     setConfig(await daemonCall("config.get"));
+  }
+
+  async function updateDesktop() {
+    setBusy("update");
+    setError(null);
+    setUpdateMessage("Checking for updates…");
+    try {
+      const outcome = await installAvailableUpdate((progress) => {
+        setUpdateProgress(progress);
+        setUpdateMessage(`Downloading Repomon ${progress.version}`);
+      });
+      if (outcome === "current") setUpdateMessage("Repomon is up to date.");
+    } catch (cause) {
+      setUpdateMessage(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function chooseTab(next: ControlTab) {
@@ -344,6 +365,13 @@ export default function ControlCenter(props: ControlCenterProps) {
                       </For>
                     </div>
                     <button type="submit" class="focus-ring rounded bg-signal px-4 py-2 font-mono text-[0.6rem] font-semibold uppercase text-background">Save settings</button>
+                    <div class="flex items-center gap-3 border-t border-line pt-4">
+                      <button type="button" class="focus-ring rounded border border-line px-3 py-2 font-mono text-[0.58rem] uppercase text-muted" onClick={() => void updateDesktop()} disabled={busy() === "update"}>Check for updates</button>
+                      <span class="text-xs text-muted">{updateMessage()}</span>
+                    </div>
+                    <Show when={updateProgress()?.total}>
+                      <progress class="h-1.5 w-full accent-signal" max={updateProgress()!.total} value={updateProgress()!.downloaded} />
+                    </Show>
                   </form>
                 )}
               </Show>

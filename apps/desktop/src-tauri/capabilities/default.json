@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "process:allow-restart",
+    "updater:default"
+  ]
 }

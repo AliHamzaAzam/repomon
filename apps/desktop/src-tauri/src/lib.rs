@@ -26,6 +26,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new(endpoint))
         .setup(move |app| {
             let handle = app.handle().clone();

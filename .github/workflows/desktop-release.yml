@@ -1,0 +1,91 @@
+name: desktop release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - platform: macos-14
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+          # This row becomes required when release/windows-preview merges. It remains an allowed
+          # preview failure until repomon-core supplies the named-pipe transport on the tag branch.
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            windows_preview: true
+    continue-on-error: ${{ matrix.windows_preview || false }}
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev
+          libgtk-3-dev
+          librsvg2-dev
+          libayatana-appindicator3-dev
+          patchelf
+          rpm
+          tmux
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Prepare updater configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        run: >-
+          jq --arg key "$TAURI_SIGNING_PUBLIC_KEY"
+          '.plugins.updater.pubkey = $key'
+          apps/desktop/src-tauri/tauri.release.conf.json
+          > apps/desktop/src-tauri/tauri.signed.conf.json
+      - name: Build daemon sidecar
+        shell: bash
+        run: |
+          cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
+          mkdir -p apps/desktop/src-tauri/binaries
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/${{ matrix.target }}/release/repomond.exe" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe"
+          else
+            cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
+          fi
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: Repomon ${{ github.ref_name }}
+          releaseBody: Desktop bundles and signed updater metadata for Repomon ${{ github.ref_name }}.
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.signed.conf.json

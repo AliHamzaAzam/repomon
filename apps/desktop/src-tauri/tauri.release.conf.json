@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/repomond"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/AliHamzaAzam/repomon/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
+    }
+  }
+}

@@ -26,12 +26,39 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Mission control for local coding-agent fleets",
+    "longDescription": "Repomon is a desktop mission-control client for repositories, worktree lanes, coding agents, terminals, and the repomind orchestrator.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["tmux"]
+      },
+      "rpm": {
+        "depends": ["tmux"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/AliHamzaAzam/repomon/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
+    }
   }
 }
