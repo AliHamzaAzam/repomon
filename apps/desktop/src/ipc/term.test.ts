@@ -1,10 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import { translateKeyboardKey } from "./term";
+import { DaemonRpcError } from "./rpc";
+import { asTransportError, translateKeyboardKey } from "./term";
 
 function key(value: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return new KeyboardEvent("keydown", { key: value, ...modifiers });
 }
+
+describe("asTransportError", () => {
+  it("surfaces the daemon message from a structured RpcFailure", () => {
+    const error = asTransportError({ code: -32009, message: "terminal 'lane-7' is already watched", data: null });
+    expect(error).toBeInstanceOf(DaemonRpcError);
+    expect(error.message).toBe("terminal 'lane-7' is already watched");
+  });
+
+  it("passes through a plain string rejection", () => {
+    expect(asTransportError("boom").message).toBe("boom");
+  });
+
+  it("keeps an existing Error untouched", () => {
+    const original = new Error("already an error");
+    expect(asTransportError(original)).toBe(original);
+  });
+});
 
 describe("terminal key translation", () => {
   it("lets xterm collect printable runs", () => {

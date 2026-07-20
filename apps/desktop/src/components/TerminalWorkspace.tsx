@@ -3,17 +3,11 @@ import { For, Show, createEffect, createMemo, createSignal, lazy } from "solid-j
 import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
 import type { FleetStore } from "../stores/fleet";
+import { dedupe, stabilizeTargets, type PaneTarget } from "./terminalTargets";
 
 const TerminalPane = lazy(() => import("./TerminalPane"));
 
 export type WorkspaceLayout = "focused" | "split" | "grid";
-
-interface PaneTarget {
-  laneId: number;
-  window: string;
-  label: string;
-  shell: boolean;
-}
 
 interface TerminalWorkspaceProps {
   fleet: FleetStore;
@@ -29,22 +23,18 @@ function readRenderer(): TerminalRenderer {
   return value === "webgl" || value === "dom" ? value : "auto";
 }
 
-function dedupe(targets: PaneTarget[]): PaneTarget[] {
-  const seen = new Set<string>();
-  return targets.filter((target) => {
-    if (seen.has(target.window)) return false;
-    seen.add(target.window);
-    return true;
-  });
-}
-
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [layout, setLayout] = createSignal<WorkspaceLayout>(readLayout());
   const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
   const [activeWindow, setActiveWindow] = createSignal<string | null>(null);
   const [openingShell, setOpeningShell] = createSignal(false);
 
-  const targets = createMemo(() => dedupe(props.fleet.lanes().flatMap((lane) => [
+  // Fleet polls every second and hands us a brand-new lanes array each time. Reconcile the
+  // rebuilt targets against this cache so each window keeps a stable object reference, and the
+  // reference-keyed <For> below keeps its TerminalPane (and its byte watch) mounted instead of
+  // tearing it down every poll.
+  const targetCache = new Map<string, PaneTarget>();
+  const targets = createMemo(() => stabilizeTargets(targetCache, dedupe(props.fleet.lanes().flatMap((lane) => [
     ...lane.agent_sessions.flatMap((agent, index): PaneTarget[] => agent.tmux_window ? [{
       laneId: lane.id,
       window: agent.tmux_window,
@@ -59,7 +49,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         label: `shell ${terminal.id.split("-").slice(-1)[0]}`,
         shell: true,
       })),
-  ])));
+  ]))));
 
   const laneTargets = createMemo(() => targets().filter((target) => target.laneId === props.fleet.selectedLaneId()));
 

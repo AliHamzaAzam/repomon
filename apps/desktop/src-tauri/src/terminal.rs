@@ -23,14 +23,6 @@ pub struct TermWatchAck {
     pub rows: Option<u16>,
 }
 
-fn watch_error(message: impl Into<String>) -> RpcFailure {
-    RpcFailure {
-        code: -32009,
-        message: message.into(),
-        data: None,
-    }
-}
-
 fn dimensions(value: &Value) -> TermWatchAck {
     TermWatchAck {
         cols: value.get("cols").and_then(Value::as_u64).map(|n| n as u16),
@@ -95,12 +87,15 @@ pub async fn term_watch(
     window: String,
     on_bytes: Channel<InvokeResponseBody>,
 ) -> Result<TermWatchAck, RpcFailure> {
-    {
-        let watches = state.terminal_watches.lock().unwrap();
-        if watches.contains_key(&window) {
-            return Err(watch_error(format!(
-                "terminal '{window}' is already watched"
-            )));
+    // A rapid unmount/remount (tab switch, or a re-render that reuses a window id) can arrive
+    // before the previous pane's fire-and-forget `term_unwatch` has finished. Rather than reject
+    // the new pane, tear the stale watch down first and let this one take over. Done before the
+    // daemon `on:true` join below so the old task's `on:false` can't deregister the new watch.
+    let stale = state.terminal_watches.lock().unwrap().remove(&window);
+    if let Some(cancel) = stale {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if cancel.send(ack_tx).is_ok() {
+            let _ = ack_rx.await;
         }
     }
 

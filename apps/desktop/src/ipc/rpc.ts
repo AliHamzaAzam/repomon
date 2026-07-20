@@ -119,7 +119,7 @@ export type RpcMethod = keyof RpcMap;
 export type RpcParams<M extends RpcMethod> = RpcMap[M]["params"];
 export type RpcResult<M extends RpcMethod> = RpcMap[M]["result"];
 
-function isRpcFailure(value: unknown): value is RpcFailure {
+export function isRpcFailure(value: unknown): value is RpcFailure {
   return typeof value === "object" && value !== null && "code" in value && "message" in value;
 }
 

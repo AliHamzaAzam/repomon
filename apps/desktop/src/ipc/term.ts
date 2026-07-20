@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import { daemonCall } from "./rpc";
+import { DaemonRpcError, daemonCall, isRpcFailure } from "./rpc";
 
 export type TerminalRenderer = "auto" | "webgl" | "dom";
 
@@ -49,6 +49,14 @@ export function translateKeyboardKey(event: KeyboardEvent): TranslatedKey | null
   return { key: `${control ? "C-" : alt ? "M-" : ""}${base}`, literal: false };
 }
 
+/// Normalize whatever `invoke` rejected with into a real `Error`, so callers surface the
+/// daemon's message instead of stringifying a `{code, message}` object into `[object Object]`.
+export function asTransportError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  if (isRpcFailure(error)) return new DaemonRpcError(error);
+  return new Error(typeof error === "string" ? error : "terminal transport unavailable");
+}
+
 export async function watchTerminal(
   target: TerminalTarget,
   onBytes: (bytes: Uint8Array) => void,
@@ -58,11 +66,16 @@ export async function watchTerminal(
   channel.onmessage = (buffer) => {
     if (active) onBytes(new Uint8Array(buffer));
   };
-  const ack = await invoke<TermWatchAck>("term_watch", {
-    laneId: target.laneId,
-    window: target.window,
-    onBytes: channel,
-  });
+  let ack: TermWatchAck;
+  try {
+    ack = await invoke<TermWatchAck>("term_watch", {
+      laneId: target.laneId,
+      window: target.window,
+      onBytes: channel,
+    });
+  } catch (error) {
+    throw asTransportError(error);
+  }
   return {
     ack,
     async stop() {
