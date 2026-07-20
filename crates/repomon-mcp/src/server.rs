@@ -188,7 +188,7 @@ impl Server {
             Some(name) => name,
             None => self.default_agent().await,
         };
-        let res: Value = self
+        let mut res: Value = self
             .client
             .call(
                 "agent.spawn",
@@ -196,6 +196,20 @@ impl Server {
             )
             .await
             .map_err(rpc_err)?;
+        // Piggyback the repo's notes so the orchestrator can fold them into follow-up
+        // instructions without another tool call. Every step is best-effort: the spawn already
+        // happened, so a notes failure must not turn this result into an error.
+        if let Ok(lane) = self
+            .client
+            .call_typed::<Lane>("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+        {
+            if let Some(notes) = self.fetch_repo_notes(lane.repo.id).await {
+                if let Some(obj) = res.as_object_mut() {
+                    obj.insert("repo_notes".into(), json!(notes));
+                }
+            }
+        }
         Ok(res)
     }
 
@@ -355,12 +369,18 @@ impl Server {
             )
             .await
             .map_err(rpc_err)?;
-        Ok(json!({
+        let mut out = json!({
             "lane_id": lane.id,
             "path": lane.worktree.path,
             "branch": a.branch,
             "repo": repo.name,
-        }))
+        });
+        // Piggyback the repo's notes (best-effort) so the orchestrator writes the worker's task
+        // with them already in hand.
+        if let Some(notes) = self.fetch_repo_notes(repo.id).await {
+            out["repo_notes"] = json!(notes);
+        }
+        Ok(out)
     }
 
     /// Two-phase destructive delete: no `confirm` mints an impact summary + token (a normal,
@@ -556,6 +576,27 @@ impl Server {
                 _ = tokio::time::sleep(remaining) => {}
             }
         }
+    }
+
+    /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
+    /// or when the notes are empty, so callers can unconditionally `if let Some` — a notes
+    /// hiccup must never fail the spawn/create it piggybacks on.
+    async fn fetch_repo_notes(&self, repo_id: i64) -> Option<String> {
+        let res: Value = match self
+            .client
+            .call("repo.notes.get", Some(json!({ "repo_id": repo_id })))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("repo.notes.get failed for repo {repo_id}: {e}");
+                return None;
+            }
+        };
+        res["content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     /// Resolve a repo by the orchestrator's handle: registered name, or id as a string.
@@ -1032,9 +1073,11 @@ fn tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "spawn_agent",
-            description: "Start a coding agent working on a lane with a concrete task. Counts \
-                against the concurrent-agent cap. Omit 'agent' to use the configured default \
-                (usually claude-code).",
+            description: "Start a coding agent working on a lane with a concrete task. Fold the \
+                repo's notes (from create_lane/repo_notes) into the task text. Counts against \
+                the concurrent-agent cap. Omit 'agent' to use the configured default (usually \
+                claude-code). The result embeds repo_notes (the repo's durable notes) when any \
+                exist — use them in follow-up instructions too.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane (worktree) to work in." },
@@ -1102,7 +1145,9 @@ fn tool_catalog() -> Vec<ToolDef> {
         ToolDef {
             name: "create_lane",
             description: "Create a new branch + worktree (a lane) in a repo, ready to spawn an \
-                agent into. In supervised mode this asks for human confirmation first.",
+                agent into. In supervised mode this asks for human confirmation first. The \
+                result embeds repo_notes (the repo's durable notes) when any exist — fold them \
+                into the task you give the worker you spawn here.",
             input_schema: obj(
                 json!({
                     "repo": { "type": "string", "description": "Repo name or id (see list_repos)." },
