@@ -1,6 +1,7 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import FleetSidebar from "./components/FleetSidebar";
+import ControlCenter from "./components/ControlCenter";
 import RepomindPanel from "./components/RepomindPanel";
 import TerminalWorkspace from "./components/TerminalWorkspace";
 import {
@@ -9,8 +10,10 @@ import {
   type ConnectionPhase,
   type ConnectionSource,
 } from "./ipc/connection";
-import { applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
+import { daemonCall } from "./ipc/rpc";
+import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
+import { createNotificationStore } from "./stores/notifications";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -43,8 +46,10 @@ function App(props: AppProps) {
   const [repomindOpen, setRepomindOpen] = createSignal(true);
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
+  const notifications = createNotificationStore();
   let stopListening: (() => void) | undefined;
   let fleetStarted = false;
+  let notificationsStarted = false;
   let searchInput: HTMLInputElement | undefined;
   let active = true;
 
@@ -52,9 +57,20 @@ function App(props: AppProps) {
     if (connection().phase === "connected" && !fleetStarted) {
       fleetStarted = true;
       fleet.start();
+      void daemonCall("config.get").then((config) => applyAccent(config.accent)).catch(() => undefined);
     } else if (connection().phase !== "connected" && fleetStarted) {
       fleetStarted = false;
       fleet.stop();
+    }
+  });
+
+  createEffect(() => {
+    if (connection().phase === "connected" && !notificationsStarted) {
+      notificationsStarted = true;
+      void notifications.start();
+    } else if (connection().phase !== "connected" && notificationsStarted) {
+      notificationsStarted = false;
+      notifications.stop();
     }
   });
 
@@ -87,6 +103,7 @@ function App(props: AppProps) {
     active = false;
     stopListening?.();
     fleet.stop();
+    notifications.stop();
   });
 
   const cycleTheme = () => {
@@ -136,6 +153,7 @@ function App(props: AppProps) {
           <span class="rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.14em] text-muted">
             Local
           </span>
+          <ControlCenter fleet={fleet} notifications={notifications} />
           <button
             type="button"
             class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${repomindOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}

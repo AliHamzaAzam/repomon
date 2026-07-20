@@ -1,12 +1,8 @@
-//! Daemon-side notification engine, for clients that aren't on this machine.
+//! Daemon-side notification engine for every subscribed client.
 //!
-//! The TUI does its own edge detection for local popups; remote clients (the iOS companion)
-//! can't — they may not even be connected when an agent starts waiting. So the daemon runs the
-//! same shared detection (`repomon_core::notify`) over the lane list and, on each meaningful
-//! transition, broadcasts an `event.notification` to subscribed clients (and, with push
-//! configured, sends APNs — see `push`). Self-gating: each tick re-reads the config and does
-//! nothing unless the remote bridge is enabled, so the watcher costs nothing for TUI-only use
-//! and reacts live when `[remote]` is switched on.
+//! The TUI does its own edge detection for local popups, while desktop and remote clients consume
+//! `event.notification`. The daemon runs the shared detection (`repomon_core::notify`) over the
+//! lane list and broadcasts every meaningful transition. APNs remains optional and remote-gated.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -219,10 +215,10 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 "attention": attention,
                 "dialog": sess.and_then(|s| s.pending_dialog.clone()),
             });
-            // Remote clients (the iOS companion): event.notification + APNs — only when the bridge
-            // is enabled.
+            // Every subscribed local or remote client receives the feed event. APNs remains gated
+            // behind the remote bridge because it carries remote credentials and device state.
+            ctx.broadcast("event.notification", payload.clone());
             if cfg.remote.enabled {
-                ctx.broadcast("event.notification", payload.clone());
                 // Lock-screen push: a NeedsYou with a pending question gets the actionable
                 // category (Approve / Open); everything else is a plain alert. Approve-from-lock
                 // only when an actual dialog is up — a plain "finished its turn" Enter would be a

@@ -189,7 +189,7 @@ async fn main() {
         ctx.clone(),
     ));
 
-    // Daemon-side notification engine for remote clients (event.notification + push). Spawned
+    // Daemon-side notification engine for subscribed clients (event.notification + optional push). Spawned
     // unconditionally — it self-gates per tick on `[remote] enabled`, so flipping the config
     // live (config.set) starts/stops it without a restart.
     tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));

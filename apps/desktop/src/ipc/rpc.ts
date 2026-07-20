@@ -37,7 +37,7 @@ export interface DaemonEvent<T = unknown> {
   params: T;
 }
 
-interface ConfigView {
+export interface ConfigView {
   accent?: string | null;
   auto_continue: boolean;
   default_agent?: string | null;
@@ -63,6 +63,7 @@ interface RpcMap {
   "repo.list": { params: undefined; result: Repo[] };
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
+  "repo.discover": { params: { root: string; max_depth?: number }; result: string[] };
   "lane.list": { params: undefined; result: Lane[] };
   "lane.create": {
     params: {
@@ -103,7 +104,7 @@ interface RpcMap {
   timeline: { params: { from_iso: string; to_iso: string; bucket_secs: number }; result: TimelineData };
   sessions: { params: { from_iso: string; to_iso: string }; result: WorkSession[] };
   "config.get": { params: undefined; result: ConfigView };
-  "config.set": { params: Partial<ConfigView>; result: null };
+  "config.set": { params: Partial<ConfigView>; result: ConfigView };
   "usage.get": { params: undefined; result: AccountUsage[] };
   "orchestrator.status": { params: undefined; result: OrchestratorStatus };
   "orchestrator.transcript": { params: { limit?: number }; result: TranscriptItem[] };

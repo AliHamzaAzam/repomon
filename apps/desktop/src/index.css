@@ -141,6 +141,54 @@
   border-color: var(--attention);
 }
 
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.action-grid button {
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: var(--raised);
+  padding: 0.65rem;
+  color: var(--foreground);
+  font-size: 0.75rem;
+  text-align: left;
+}
+
+.action-grid button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--signal) 45%, var(--line));
+}
+
+.action-grid button.is-danger {
+  color: var(--fault);
+}
+
+.action-grid button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.settings-input {
+  display: block;
+  width: 100%;
+  height: 2.25rem;
+  margin-top: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: var(--background);
+  padding: 0 0.6rem;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  outline: none;
+}
+
+.settings-input:focus {
+  border-color: var(--signal);
+}
+
 @media (max-width: 980px) {
   .mission-grid,
   .mission-grid.is-repomind-open {
