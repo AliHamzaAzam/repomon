@@ -620,6 +620,11 @@ mod tests {
             "repo.discover",
             "config.get",
             "config.set",
+            // per-repo notes stay local-only for now: the write side injects text into every
+            // future worker prompt for that repo, too much leverage for the bridge until a
+            // deliberate Phase 6 decision allowlists it.
+            "repo.notes.get",
+            "repo.notes.set",
             "terminal.open",
             "terminal.close",
             "terminal.target",
