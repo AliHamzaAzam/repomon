@@ -57,6 +57,10 @@ pub struct ConnSession {
     /// When this connection last drove an agent (send_input/signal/key/scroll/answer, and a fit
     /// that actually applied). `agent.fit`'s remote-vs-remote arbitration is last-interaction-wins.
     pub last_interaction: Mutex<Option<Instant>>,
+    /// Whether THIS connection is watching the orchestrator pane stream. Per-connection (like
+    /// the viewport) so one client leaving its command-center view can never stop another's
+    /// stream; `Ctx::orchestrator_watched` is the union across live sessions.
+    pub watches_orchestrator: std::sync::atomic::AtomicBool,
 }
 
 impl ConnSession {
@@ -71,6 +75,7 @@ impl ConnSession {
             watched_bytes: std::sync::Mutex::new(HashSet::new()),
             output_filter: std::sync::Mutex::new((HashSet::new(), HashSet::new())),
             last_interaction: Mutex::new(None),
+            watches_orchestrator: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

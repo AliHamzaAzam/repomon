@@ -2388,7 +2388,8 @@ pub async fn dispatch(
         // client is actually watching.
         "orchestrator.watch" => {
             let p: OrchestratorWatch = parse(params)?;
-            *ctx.orchestrator_watched.lock().await = p.on;
+            sess.watches_orchestrator
+                .store(p.on, std::sync::atomic::Ordering::Relaxed);
             Ok(Value::Null)
         }
         // Size the orchestrator window to the viewer's pane so the streamed capture fills it exactly

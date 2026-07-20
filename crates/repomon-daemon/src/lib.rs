@@ -225,10 +225,6 @@ pub struct Ctx {
     /// The single daemon-owned repomind orchestrator session, if one is running. `None` until
     /// `orchestrator.start` spawns it; cleared by `orchestrator.stop`.
     pub orchestrator: Mutex<Option<OrchestratorSession>>,
-    /// Whether a client (the TUI's command-center view) currently wants the orchestrator pane
-    /// streamed. Gates `stream_orchestrator` so capturing the pane costs nothing when nobody's
-    /// watching.
-    pub orchestrator_watched: Mutex<bool>,
     /// When the orchestrator pane was last typed into (any `orchestrator.send_input`/`key`), so
     /// `stream_orchestrator` captures it at frame-rate while you type to repomind, the same
     /// keystroke-echo speedup `input_seen` gives a focused lane. Goes quiet on its own.
@@ -329,12 +325,20 @@ impl Ctx {
             last_good_sessions: Mutex::new(HashMap::new()),
             last_overlay_sessions: Mutex::new(HashMap::new()),
             orchestrator: Mutex::new(None),
-            orchestrator_watched: Mutex::new(false),
             orchestrator_input_seen: Mutex::new(None),
             orchestrator_attention: Mutex::new(("none".to_string(), None)),
             remote_tokens: std::sync::RwLock::new(Vec::new()),
             remote_mutate_lock: Mutex::new(()),
             shutdown: Notify::new(),
+        })
+    }
+
+    /// Whether ANY live connection is watching the orchestrator pane stream (the union of the
+    /// per-connection flags — see `ConnSession::watches_orchestrator`).
+    pub async fn orchestrator_watched(&self) -> bool {
+        self.sessions.lock().await.values().any(|s| {
+            s.watches_orchestrator
+                .load(std::sync::atomic::Ordering::Relaxed)
         })
     }
 
@@ -658,7 +662,7 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
-        let watched = *ctx.orchestrator_watched.lock().await;
+        let watched = ctx.orchestrator_watched().await;
         let running = ctx.orchestrator.lock().await.is_some();
         if !watched || !running {
             last = None;
