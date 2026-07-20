@@ -3,8 +3,21 @@
 _Snapshot: 2026-07-06 · branch `main` · 248 commits · github.com/AliHamzaAzam/repomon (public)_
 
 repomon is a Rust TUI for running a fleet of AI coding agents across many repos,
-branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned milestones
-(M0–M13) are complete and the quality/perf gates pass — ready for hands-on testing.**
+branches, and worktrees, backed by a session-owning daemon (tmux on macOS/Linux, per-agent
+host processes on Windows). **Verdict: all planned milestones (M0–M13) are complete and the
+quality/perf gates pass — ready for hands-on testing.**
+
+**Native Windows support has landed** (branch `release/windows-preview`, size-M port across
+Tracks A–I). It is **code-complete and CI-green** on `x86_64-pc-windows-msvc`: the workspace
+builds, `cargo fmt`/clippy are clean, and the test suite passes on the `windows-latest` CI leg
+(tmux-only tests self-skip; the new host and backend integration tests run). The design keeps
+the JSON-RPC wire protocol frozen (iOS-safe) and full durability parity: a `SessionBackend`
+trait with a tmux backend on Unix and a host-process backend on Windows, named-pipe IPC, and
+`repomon-agent-host.exe` (ConPTY + server-side vt100) whose detached hosts survive daemon
+restarts and are re-adopted on start. **Two gates remain before a Windows release is tagged:**
+a physical Windows 11 end-to-end pass ([docs/windows-validation.md](docs/windows-validation.md))
+and binary signing (unsigned binaries trip SmartScreen). There is a preview build on
+`release/windows-preview` and **no published Windows GitHub release yet**.
 
 ## Plan completion (M0–M13) ✅
 
@@ -64,9 +77,53 @@ branches, and worktrees, backed by a tmux-owning daemon. **Verdict: all planned 
   wl-paste/xclip, and a /proc-based liveness probe. CI runs the suite on macOS + Ubuntu;
   releases ship x86_64 and aarch64 Linux binaries.
 
+## Native Windows port (branch `release/windows-preview`)
+
+Code-complete, CI-green, awaiting a physical E2E pass and signing. What landed:
+
+- **Track A, IPC transport + portability.** A `transport` abstraction (Unix socket ⇄ named
+  pipe); pipe-name socket default, `USERNAME`/`getrandom`/`$HOME` and PATHEXT-aware lookup,
+  detached daemon spawn, and a `windows-latest` CI leg.
+- **Track B, `SessionBackend` extraction.** The ~25-method trait lifted from `TmuxRuntime`
+  (the single tmux choke point); `Ctx.backend: Arc<dyn SessionBackend>`; `SpawnSpec` replaces
+  shell strings; the FIFO byte stream folded into `open_byte_stream`. Zero behavior change on
+  Unix.
+- **Track C, `repomon-host` crate.** `repomon-agent-host.exe`: ConPTY + server-side `vt100`
+  with 50k scrollback + a named-pipe control server, against a frozen
+  [PROTOCOL.md](crates/repomon-host/PROTOCOL.md).
+- **Track I, `WindowsBackend`.** Host spawning, registry scan + `hello` verification + stale
+  GC, **re-adoption on daemon start** (durability parity), and a Windows liveness arm that asks
+  the hosts instead of `ps`/`lsof`.
+- **Tracks D1–D4, platform services.** `Set-Clipboard`/`Get-Clipboard` + image paste, WinRT
+  toasts, a Task Scheduler service arm, and PowerShell `shell-init` with a `REPOMON_CD_FILE`
+  temp-file cd-on-exit.
+- **Track E + follow-up, packaging.** `install.ps1` and a `windows-latest` release job; the
+  `x86_64-pc-windows-msvc` leg is now **required**, aarch64 stays best-effort.
+- **Track F, attach.** `repomon attach-host` raw byte proxy + the embedded focus view, popped
+  out into a Windows Terminal tab.
+
+## Cutting a Windows release
+
+The Windows binaries are built and packaged by `.github/workflows/release.yml`:
+
+- **Trigger.** A `v*` tag runs the whole release (macOS, Linux, Windows). A
+  `workflow_dispatch` on any branch runs **only** `build-windows`, so the Windows packaging can
+  be validated before a real tag (it stamps a `0.0.0-<sha>` dev version).
+- **Artifacts.** `build-windows` produces `repomon-<version>-<target>.zip` (containing
+  `repomon.exe` + `repomond.exe` + `repomon-agent-host.exe`) and a matching `.zip.sha256`,
+  uploaded per target.
+- **Targets.** `x86_64-pc-windows-msvc` is **required** (the port has landed); the
+  `aarch64-pc-windows-msvc` leg is **best-effort** (`experimental: true`, `continue-on-error`),
+  and the release step uses `nullglob` so a release without the ARM64 zip still succeeds.
+- **Publish.** The tag-gated `release` job attaches every `*.zip`/`*.zip.sha256` (alongside the
+  macOS/Linux tarballs) plus `install.sh` and `install.ps1` to the GitHub release.
+- **TODO before shipping.** Binary **code-signing** is not wired yet; unsigned binaries trip
+  SmartScreen on first run. Sign the three exes before or as part of the first Windows release.
+  (Do not edit `release.yml` for docs work; this note only describes the existing flow.)
+
 ## Deferred (explicitly out of scope in the plan)
 
-SwiftUI menu-bar app · native repomon-owned PTY mode · web dashboard · Windows. None blocking.
+SwiftUI menu-bar app · native repomon-owned PTY mode · web dashboard. None blocking.
 
 ## Known limitations to keep in mind while testing
 
@@ -76,8 +133,8 @@ SwiftUI menu-bar app · native repomon-owned PTY mode · web dashboard · Window
 - **cd-on-exit (`c`)** only acts when the `repomon` shell function is installed (it sets
   `$REPOMON_CD_FD`); otherwise it shows a hint instead of quitting.
 - In agent views (Focus/Split/Grid) the daemon refreshes ~1 s and runs a cached liveness
-  probe (`ps`+`lsof` on macOS, `/proc` on Linux) — light, but slightly more active than the
-  0% Fleet idle.
+  probe (`ps`+`lsof` on macOS, `/proc` on Linux; on Windows the hosts report child liveness
+  directly, no scan); light, but slightly more active than the 0% Fleet idle.
 
 ## Suggested next steps
 

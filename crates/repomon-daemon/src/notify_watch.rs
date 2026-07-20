@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use repomon_core::Config;
 use repomon_core::agent;
+use repomon_core::agent::backend::CaptureOpts;
 use repomon_core::model::{AgentStatus, LaneId};
 use repomon_core::notify::{
     NotifKind, SessKey, SessState, activity_allows_refire, compose, diff_session_transitions,
@@ -313,9 +314,9 @@ async fn check_orchestrator_attention(
             // leak an end_of_turn into this one.
             *transcript_cache = None;
         }
-        let tmux = ctx.tmux.clone();
+        let tmux = ctx.backend.clone();
         let pane = tokio::task::spawn_blocking(move || {
-            tmux.capture_named(ORCHESTRATOR_WINDOW, Some(ORCH_CAPTURE_LINES))
+            tmux.capture_named(ORCHESTRATOR_WINDOW, CaptureOpts::last(ORCH_CAPTURE_LINES))
         })
         .await
         .ok()

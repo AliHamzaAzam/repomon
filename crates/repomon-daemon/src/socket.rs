@@ -1,4 +1,5 @@
-//! The Unix-domain-socket JSON-RPC server.
+//! The local-IPC JSON-RPC server (a Unix domain socket on unix, a named pipe on Windows —
+//! see `repomon_core::transport`).
 //!
 //! Each connection runs a dedicated reader task (so `read_frame`, which isn't
 //! cancel-safe, always runs to completion) that feeds incoming frames over an mpsc. The
@@ -10,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response, RpcError};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use serde_json::Value;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
@@ -23,23 +24,19 @@ use crate::{Ctx, rpc};
 /// never dropped; the connection task simply re-accepts on the next request.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Bind the socket and serve until shutdown is requested.
+/// Bind the local IPC endpoint and serve until shutdown is requested. `socket_path` is the
+/// socket file on unix and is interpreted as a named-pipe name on Windows (stale-file cleanup
+/// and parent-dir creation happen inside `transport::listen`; pipes need neither).
 pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Clear a stale socket from a previous run.
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
-    }
-    let listener = UnixListener::bind(socket_path)?;
+    let endpoint = Endpoint::from_path(socket_path);
+    let mut listener = transport::listen(&endpoint).await?;
     tracing::info!("listening on {}", socket_path.display());
 
     loop {
         tokio::select! {
             _ = ctx.shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _addr)) => {
+                Ok(stream) => {
                     let ctx = ctx.clone();
                     tokio::spawn(async move { handle_conn(ctx, stream).await });
                 }
@@ -48,12 +45,14 @@ pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
         }
     }
 
+    // Remove the socket file so the next daemon start binds cleanly (pipes vanish on close).
+    #[cfg(unix)]
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
 
-async fn handle_conn(ctx: Arc<Ctx>, stream: UnixStream) {
-    let (mut read_half, mut write_half) = stream.into_split();
+async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
 
     // Reader task: read_frame to completion, hand frames to the connection task.
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(128);

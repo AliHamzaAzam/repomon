@@ -3,6 +3,9 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Manual dispatch on a branch ref runs only build-windows (the other jobs are
+  # tag-gated) so the Windows packaging can be validated before a real release.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +14,7 @@ jobs:
   build:
     # Both macOS arches build on the arm64 runner via cross-compilation (macOS clang is a
     # universal toolchain). Avoids depending on the scarce/slow macos-13 Intel runners.
+    if: github.ref_type == 'tag'
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
@@ -38,6 +42,7 @@ jobs:
 
   build-linux:
     # Each Linux arch builds natively on its own runner (no cross C toolchain needed).
+    if: github.ref_type == 'tag'
     strategy:
       matrix:
         include:
@@ -67,9 +72,58 @@ jobs:
             repomon-*.tar.gz
             repomon-*.tar.gz.sha256
 
+  build-windows:
+    # Runs on tag pushes AND on workflow_dispatch from any branch, so the Windows
+    # packaging can be exercised before the release flow is finalized.
+    #
+    # The native Windows port has landed and the workspace builds and tests green on
+    # x86_64-pc-windows-msvc, so that leg is required. aarch64-pc-windows-msvc stays
+    # best-effort (stretch target, allowed to fail).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            experimental: false
+          - target: aarch64-pc-windows-msvc
+            experimental: true # stretch target, allowed to fail
+    continue-on-error: ${{ matrix.experimental }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            "0.0.0-$($env:GITHUB_SHA.Substring(0, 7))" # branch dispatch: dev version
+          }
+          $dist = "repomon-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/repomon.exe", `
+            "target/${{ matrix.target }}/release/repomond.exe" -Destination $dist
+          # repomon-agent-host (crates/repomon-host, Track C) may not have landed
+          # yet; include it in the zip whenever the workspace produced it.
+          $agentHost = "target/${{ matrix.target }}/release/repomon-agent-host.exe"
+          if (Test-Path $agentHost) { Copy-Item $agentHost -Destination $dist }
+          Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"
+          (Get-FileHash "$dist.zip" -Algorithm SHA256).Hash.ToLower() |
+            Set-Content "$dist.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            repomon-*.zip
+            repomon-*.zip.sha256
+
   universal:
     # Merge the two thin binaries into one fat (arm64+x86_64) archive for a
     # one-download-fits-all manual install. lipo is macOS-only, so this runs on macOS.
+    if: github.ref_type == 'tag'
     needs: build
     runs-on: macos-14
     steps:
@@ -96,12 +150,13 @@ jobs:
             repomon-*-universal-apple-darwin.tar.gz.sha256
 
   release:
-    needs: [build, universal, build-linux]
+    if: github.ref_type == 'tag'
+    needs: [build, universal, build-linux, build-windows]
     runs-on: ubuntu-latest
     env:
       HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4        # for install.sh
+      - uses: actions/checkout@v4        # for install.sh / install.ps1
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -110,7 +165,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz install.sh \
+          # nullglob: the Windows zips are best-effort while build-windows is
+          # continue-on-error; a release without them must still succeed.
+          shopt -s nullglob
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip dist/*.zip.sha256 \
+            install.sh install.ps1 \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
       - name: Bump tap formula
         if: env.HAS_TAP_TOKEN == 'true'

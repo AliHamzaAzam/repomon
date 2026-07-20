@@ -9,14 +9,27 @@
 use std::process::Command;
 use std::time::Duration;
 
+use repomon_core::agent::backend::SpawnSpec;
 use repomon_core::protocol::{self, Request, Response};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::{Ctx, serve};
 use serde_json::json;
-use tokio::net::UnixStream;
+
+/// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
+/// check doesn't port: Windows named pipes have no filesystem presence.)
+async fn connect_retry(sock: &std::path::Path) -> IpcStream {
+    for _ in 0..100 {
+        if let Ok(s) = transport::connect(&Endpoint::from_path(sock)).await {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon endpoint {} never came up", sock.display());
+}
 
 async fn call(
-    stream: &mut UnixStream,
+    stream: &mut IpcStream,
     id: u64,
     method: &str,
     params: Option<serde_json::Value>,
@@ -57,13 +70,7 @@ async fn orchestrator_adopts_a_surviving_window() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // A genuine `orchestrator.start` below writes its `--mcp-config` file under
     // `config::config_dir()`; redirect that to a tempdir so the test doesn't touch the
@@ -135,8 +142,8 @@ async fn orchestrator_adopts_a_surviving_window() {
     // 3. Spawn a fake orchestrator window directly via the same TmuxRuntime the daemon uses —
     // as if a window from a previous daemon lifetime survived a restart.
     let home = std::env::temp_dir();
-    ctx.tmux
-        .spawn_named("orchestrator", &home, "sleep 30")
+    ctx.backend
+        .spawn_named("orchestrator", &SpawnSpec::new("sleep 30", &home))
         .expect("spawn fake orchestrator window");
 
     // 4. orchestrator.start adopts the surviving window: running:true, and does not spawn a
@@ -166,7 +173,7 @@ async fn orchestrator_adopts_a_surviving_window() {
         "adopted session's session_id should be unknown (this process never captured the prior \
          process's --session-id): {status}"
     );
-    let windows = ctx.tmux.list_windows().unwrap();
+    let windows = ctx.backend.list_windows().unwrap();
     let orchestrator_windows = windows.iter().filter(|w| *w == "orchestrator").count();
     assert_eq!(
         orchestrator_windows, 1,
@@ -184,7 +191,7 @@ async fn orchestrator_adopts_a_surviving_window() {
     assert!(r.error.is_none(), "send_input errored: {:?}", r.error);
 
     // 6. Kill the window out from under the daemon.
-    ctx.tmux
+    ctx.backend
         .kill_named("orchestrator")
         .expect("kill fake orchestrator window");
 

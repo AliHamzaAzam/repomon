@@ -8,12 +8,24 @@ use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
+use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
 use repomon_daemon::{Ctx, serve};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+/// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
+/// check doesn't port: Windows named pipes have no filesystem presence.)
+async fn connect_retry(sock: &std::path::Path) -> IpcStream {
+    for _ in 0..100 {
+        if let Ok(s) = transport::connect(&Endpoint::from_path(sock)).await {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon endpoint {} never came up", sock.display());
+}
 
 /// Every read (daemon socket or MCP child) is guarded by this — a hang must fail the test, not
 /// wedge CI.
@@ -38,7 +50,7 @@ fn git(dir: &Path, args: &[&str]) {
 /// Call the daemon directly over its length-prefixed JSON-RPC socket — same helper as
 /// tests/integration.rs's `call()`. Used to seed a repo before the MCP child ever connects.
 async fn daemon_call(
-    stream: &mut UnixStream,
+    stream: &mut IpcStream,
     id: u64,
     method: &str,
     params: Option<Value>,
@@ -55,7 +67,7 @@ async fn daemon_call(
 
 /// Boot an in-process daemon on a short temp socket path (macOS caps UDS paths at ~104 chars),
 /// exactly like tests/integration.rs, and return a connected control stream for seeding state.
-async fn boot_daemon(tag: &str) -> (PathBuf, UnixStream) {
+async fn boot_daemon(tag: &str) -> (PathBuf, IpcStream) {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);
 
@@ -66,18 +78,12 @@ async fn boot_daemon(tag: &str) -> (PathBuf, UnixStream) {
     let server_sock = sock.clone();
     tokio::spawn(async move { serve(ctx, &server_sock).await });
 
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let stream = UnixStream::connect(&sock).await.expect("connect to daemon");
+    let stream = connect_retry(&sock).await;
     (sock, stream)
 }
 
 /// Register a repo with one commit and return its (tempdir, main lane id).
-async fn seed_repo_lane(stream: &mut UnixStream) -> (tempfile::TempDir, i64) {
+async fn seed_repo_lane(stream: &mut IpcStream) -> (tempfile::TempDir, i64) {
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);

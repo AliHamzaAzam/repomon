@@ -296,7 +296,15 @@ impl Lanes {
         let mut cache = self.state_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(e) = cache
             .iter_mut()
-            .filter(|(p, _)| root.starts_with(p))
+            .filter(|(p, _)| {
+                // Canonicalize the key side too: cache keys come from `git worktree list` and
+                // aren't necessarily in canonical form, and a raw prefix test against the
+                // canonicalized `root` breaks on Windows (`\\?\` verbatim prefix, 8.3 short
+                // names in temp paths). On unix keys are already canonical, so this is a no-op
+                // comparison there. Best-effort: an unresolvable key falls back to itself.
+                let key = p.canonicalize().unwrap_or_else(|_| (*p).clone());
+                root.starts_with(key)
+            })
             .max_by_key(|(p, _)| p.as_os_str().len())
             .map(|(_, e)| e)
         {

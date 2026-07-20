@@ -34,6 +34,12 @@ use crate::notify::{self, NotifEvent, NotifKind};
 use crate::theme::Theme;
 use crate::view;
 
+// The Windows attach pop-out (Track F). Declared here — like `cli::attach_client` — so `lib.rs`
+// stays untouched; the pure-logic argv/launcher helpers are reachable (and dead-code-free) on
+// every OS because `app` is a public module.
+#[path = "popout.rs"]
+pub mod popout;
+
 /// How long an in-app notification banner stays up before reverting to the footer hints.
 pub const NOTIF_BANNER_TTL: Duration = Duration::from_secs(6);
 /// Don't re-fire the same session's notification within this window (suppresses status flapping).
@@ -414,8 +420,9 @@ pub struct App {
     /// Last terminal title emitted (OSC 2), to skip redundant writes.
     last_title: String,
     attach_request: Option<LaneId>,
-    /// A tmux target (e.g. a terminal window) the loop should attach to next.
-    attach_target: Option<String>,
+    /// An attach the loop should perform next (e.g. a terminal window): the target plus the
+    /// command to run for it.
+    attach_target: Option<AttachSpec>,
     /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
     input_suspended: Arc<AtomicBool>,
     /// Set by the reader thread once it has actually entered its paused branch — so an attach waits
@@ -3606,7 +3613,7 @@ impl App {
                     .and_then(|a| a.as_bool())
                     .unwrap_or(false);
                 if available && !target.is_empty() {
-                    self.attach_target = Some(target);
+                    self.attach_target = Some(AttachSpec::from_parts(target, v.get("attach")));
                 } else {
                     self.status = "repomind isn't running yet".into();
                 }
@@ -3707,8 +3714,8 @@ impl App {
             .call("terminal.target", Some(json!({ "id": window })))
             .await
         {
-            if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
-                self.attach_target = Some(t.to_string());
+            if let Some(spec) = AttachSpec::from_response(&v) {
+                self.attach_target = Some(spec);
             }
         }
     }
@@ -4120,8 +4127,8 @@ impl App {
             .await
         {
             Ok(v) => {
-                if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
-                    self.attach_target = Some(t.to_string());
+                if let Some(spec) = AttachSpec::from_response(&v) {
+                    self.attach_target = Some(spec);
                 }
                 self.terminals_lane = None; // refetch the list after we return
             }
@@ -4146,8 +4153,8 @@ impl App {
                     .call("terminal.target", Some(json!({ "id": name })))
                     .await;
                 if let Ok(v) = resp {
-                    if let Some(t) = v.get("target").and_then(|t| t.as_str()) {
-                        self.attach_target = Some(t.to_string());
+                    if let Some(spec) = AttachSpec::from_response(&v) {
+                        self.attach_target = Some(spec);
                     }
                 }
             }
@@ -4799,8 +4806,12 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     enable_bracketed_paste();
     // Log panics to a file before the terminal is restored (which would otherwise scroll the
     // message off-screen, leaving a crash undiagnosable). Chains to ratatui's restore hook.
+    // Lives in the portable log dir (`<data_dir>/logs`), not /tmp, which Windows lacks.
     {
         let prev = std::panic::take_hook();
+        let log_dir = repomon_core::service::log_dir();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let panic_log = log_dir.join("repomon-panic.log");
         std::panic::set_hook(Box::new(move |info| {
             let loc = info
                 .location()
@@ -4808,7 +4819,7 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
                 .unwrap_or_default();
             let bt = std::backtrace::Backtrace::force_capture();
             let _ = std::fs::write(
-                "/tmp/repomon-panic.log",
+                &panic_log,
                 format!("repomon panic at {loc}\n{info}\n\nbacktrace:\n{bt}\n"),
             );
             prev(info);
@@ -5125,8 +5136,8 @@ async fn event_loop(
             while in_rx.try_recv().is_ok() {} // drop anything queued before the reader parked
             continue;
         }
-        if let Some(target) = app.attach_target.take() {
-            do_attach_target(terminal, app, &target).await;
+        if let Some(spec) = app.attach_target.take() {
+            do_attach_target(terminal, app, &spec).await;
             while in_rx.try_recv().is_ok() {}
             continue;
         }
@@ -5214,7 +5225,10 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // skips the event-loop's post-burst flush.
     app.flush_pending_input().await;
     // Stop the embedded byte stream while attached: the real terminal shows the pane, and the
-    // sync block re-establishes the emulator on return.
+    // sync block re-establishes the emulator on return. On Windows the attach pops out into a
+    // separate window (below) instead of taking over this terminal, so the embedded render stays
+    // up and the stream keeps running.
+    #[cfg(not(windows))]
     app.stop_emu().await;
     let window = app.selected_window();
     let resp = app
@@ -5224,23 +5238,34 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
             Some(json!({ "lane_id": lane, "window": window })),
         )
         .await;
-    let (target, available) = match resp {
-        Ok(v) => (
-            v.get("target")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string(),
-            v.get("available")
-                .and_then(|a| a.as_bool())
-                .unwrap_or(false),
-        ),
+    let v = match resp {
+        Ok(v) => v,
         Err(e) => {
             app.status = format!("attach failed: {e}");
             return;
         }
     };
+    let target = v
+        .get("target")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let available = v
+        .get("available")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false);
     if !available || target.is_empty() {
         app.status = "no agent running in this lane".into();
+        return;
+    }
+    let spec = AttachSpec::from_parts(target, v.get("attach"));
+    // Windows: pop the agent out into a WT tab / new console and return — the TUI never suspends.
+    // A no-op on Unix, where the tmux-style suspend/attach path below runs unchanged.
+    let title = app
+        .selected_lane()
+        .map(lane_popout_title)
+        .unwrap_or_else(|| popout_title(&spec));
+    if attach_via_popout(app, &spec, &title) {
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
@@ -5252,7 +5277,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     disable_mouse();
     ratatui::restore();
     let keepalive = spawn_attach_keepalive(&app.client);
-    tmux_attach(&target);
+    run_attach(&spec);
     keepalive.abort();
     // Diagnostic: time the terminal re-init + first paint after a detach. None of these touch the
     // daemon, so a stall here (vs a slow RPC) points at ratatui::init / drain / draw rather than the
@@ -5288,9 +5313,14 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     }
 }
 
-/// Suspend the TUI, attach to an arbitrary tmux target (e.g. a plain terminal), then re-enter.
-async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target: &str) {
-    if target.is_empty() {
+/// Suspend the TUI, attach to an arbitrary target (e.g. a plain terminal), then re-enter.
+async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, spec: &AttachSpec) {
+    if spec.target.is_empty() {
+        return;
+    }
+    // Windows: pop out into a separate terminal and return (no-op on Unix — the tmux path runs).
+    let title = popout_title(spec);
+    if attach_via_popout(app, spec, &title) {
         return;
     }
     app.input_suspended.store(true, Ordering::Relaxed);
@@ -5301,7 +5331,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, target:
     disable_mouse();
     ratatui::restore();
     let keepalive = spawn_attach_keepalive(&app.client);
-    tmux_attach(target);
+    run_attach(spec);
     keepalive.abort();
     *terminal = ratatui::init();
     enable_bracketed_paste();
@@ -5338,7 +5368,7 @@ const DETACH_MSG_CLEANUP: &str = "\x1b[1A\x1b[2K\r";
 /// the full ~15s client timeout (confirmed: silent connection closed at exactly 120.0s). A
 /// `watcher.park` ping every 45s keeps the connection live AND re-asserts the parked state, so the
 /// daemon keeps owning desktop popups. The runtime is multi-threaded, so this task runs on another
-/// worker while `tmux_attach` blocks the event loop's worker; the client's reader task (still
+/// worker while `run_attach` blocks the event loop's worker; the client's reader task (still
 /// draining the socket while parked) resolves each ping's response. Abort it on return.
 fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> {
     let client = client.clone();
@@ -5352,15 +5382,120 @@ fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> 
     })
 }
 
-/// Attach to a `session:window` target on repomon's dedicated tmux socket (the socket label is
-/// the session name). `$TMUX` is dropped so this works even when repomon runs inside tmux —
-/// otherwise tmux refuses to attach ("sessions should be nested with care").
-fn tmux_attach(target: &str) {
-    let socket = target.split(':').next().unwrap_or("repomon");
+/// How to go "all the way in" to a window from the real terminal: the daemon-provided attach
+/// command when the response carried one (the optional `attach` field of the `*.target`
+/// responses — the backend knows how to attach to itself), else the classic tmux invocation
+/// derived from the target (older daemons without the field).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttachSpec {
+    /// The `session:window` target, kept for logging.
+    target: String,
+    program: String,
+    args: Vec<String>,
+}
+
+impl AttachSpec {
+    /// From a `*.target`-shaped response: `{ target, attach? }`. `None` without a non-empty
+    /// target (the caller's availability checks still apply).
+    fn from_response(v: &serde_json::Value) -> Option<Self> {
+        let target = v.get("target")?.as_str()?;
+        if target.is_empty() {
+            return None;
+        }
+        Some(Self::from_parts(target.to_string(), v.get("attach")))
+    }
+
+    /// Build from a known target plus the response's optional `attach` field.
+    fn from_parts(target: String, attach: Option<&serde_json::Value>) -> Self {
+        if let Some((program, args)) = attach.and_then(parse_attach_field) {
+            return AttachSpec {
+                target,
+                program,
+                args,
+            };
+        }
+        // Fallback: repomon's dedicated tmux socket is labelled with the session name — the
+        // target's prefix (exactly what this client always ran before the `attach` field).
+        let socket = target.split(':').next().unwrap_or("repomon").to_string();
+        AttachSpec {
+            program: "tmux".into(),
+            args: vec![
+                "-L".into(),
+                socket,
+                "attach".into(),
+                "-t".into(),
+                target.clone(),
+            ],
+            target,
+        }
+    }
+}
+
+/// Parse the `attach` response field (`{ program, args }`) if well-formed.
+fn parse_attach_field(a: &serde_json::Value) -> Option<(String, Vec<String>)> {
+    let program = a.get("program")?.as_str()?.to_string();
+    let args = a
+        .get("args")?
+        .as_array()?
+        .iter()
+        .map(|s| Some(s.as_str()?.to_string()))
+        .collect::<Option<Vec<_>>>()?;
+    Some((program, args))
+}
+
+/// Windows: pop the agent out into a *separate* terminal (a Windows Terminal tab, or a new
+/// console when `wt.exe` isn't on PATH) rather than handing over the TUI's terminal, and return
+/// `true` so the caller skips the whole tmux-style suspend/attach/reinit dance. The FleetView
+/// keeps running — including the embedded focus-view render — beside the popped-out window
+/// (plan decision #2: embedded + external window). `title` labels the new tab.
+///
+/// On macOS/Linux this is a no-op returning `false`, so the existing in-terminal attach path
+/// runs unchanged.
+#[cfg(windows)]
+fn attach_via_popout(app: &mut App, spec: &AttachSpec, title: &str) -> bool {
+    match popout::launch(title, &spec.program, &spec.args) {
+        Ok(()) => {
+            app.status = format!("popped {title} out into a new terminal; it's still running")
+        }
+        Err(e) => app.status = format!("couldn't pop out the attach: {e}"),
+    }
+    true
+}
+
+/// macOS/Linux: never pop out — attach in the current terminal (the tmux path below).
+#[cfg(not(windows))]
+fn attach_via_popout(_app: &mut App, _spec: &AttachSpec, _title: &str) -> bool {
+    false
+}
+
+/// A pop-out tab title for a lane agent: the lane's worktree name (`main` for the primary).
+fn lane_popout_title(lane: &Lane) -> String {
+    if lane.worktree.is_main {
+        "main".to_string()
+    } else {
+        lane.worktree.name.clone()
+    }
+}
+
+/// A concise tab title for a popped-out attach: the window name the client attaches to
+/// (`attach-host <window>` → `<window>`), falling back to the raw target.
+fn popout_title(spec: &AttachSpec) -> String {
+    spec.args
+        .last()
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| spec.target.clone())
+}
+
+/// Run the attach command in the real terminal. `$TMUX` is dropped so a tmux-backed attach
+/// works even when repomon runs inside tmux — otherwise tmux refuses to attach ("sessions
+/// should be nested with care").
+fn run_attach(spec: &AttachSpec) {
+    let target = &spec.target;
     tui_log(&format!("attach -> {target}"));
     let start = std::time::Instant::now();
-    let status = std::process::Command::new("tmux")
-        .args(["-L", socket, "attach", "-t", target])
+    let status = std::process::Command::new(&spec.program)
+        .args(&spec.args)
         .env_remove("TMUX")
         .status();
     // Log when (and how) the attach ended so an *unexpected* detach is traceable after the fact:
@@ -5494,9 +5629,49 @@ fn write_clipboard_png(path: &std::path::Path) -> bool {
     String::from_utf8_lossy(&out.stdout).trim() == "ok"
 }
 
+/// A PowerShell single-quoted string literal: embedded single quotes double, nothing else
+/// is special (unlike double quotes, no `$`/backtick expansion of the path).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ps_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The Windows PowerShell script that saves the clipboard's image to `path` as PNG.
+/// `Get-Clipboard -Format Image` is Windows PowerShell 5.1 syntax (repomon-core's argv
+/// builder always invokes `powershell`, never `pwsh`, which dropped `-Format`). Exits 1
+/// when the clipboard holds no image, matching the wl-paste/xclip contract.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_clipboard_png_script(path: &str) -> String {
+    format!(
+        "Add-Type -AssemblyName System.Drawing;\
+         $img = Get-Clipboard -Format Image;\
+         if ($null -eq $img) {{ exit 1 }};\
+         $img.Save({}, [System.Drawing.Imaging.ImageFormat]::Png)",
+        ps_single_quote(path)
+    )
+}
+
+/// Write the clipboard's image to `path` as PNG via `(Get-Clipboard -Format Image).Save(...)`.
+#[cfg(windows)]
+fn write_clipboard_png(path: &std::path::Path) -> bool {
+    use std::process::{Command, Stdio};
+    let argv = repomon_core::clipboard::windows_powershell_argv(&windows_clipboard_png_script(
+        &path.to_string_lossy(),
+    ));
+    Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && path.exists()
+}
+
 /// Write the clipboard's image to `path` as PNG. Tries `wl-paste`, then `xclip`; both exit
 /// non-zero when the clipboard holds no image target.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn write_clipboard_png(path: &std::path::Path) -> bool {
     use std::process::{Command, Stdio};
     let candidates: [&[&str]; 2] = [
@@ -5571,6 +5746,65 @@ async fn next_note(rx: &mut broadcast::Receiver<Notification>) -> Option<Notific
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_spec_prefers_the_daemon_provided_command() {
+        // A modern daemon's `*.target` response carries the exact attach invocation.
+        let v = serde_json::json!({
+            "target": "repomon:=lane-7",
+            "available": true,
+            "attach": { "program": "tmux", "args": ["-L", "repomon", "attach", "-t", "repomon:=lane-7"] },
+        });
+        let spec = AttachSpec::from_response(&v).expect("target present");
+        assert_eq!(spec.target, "repomon:=lane-7");
+        assert_eq!(spec.program, "tmux");
+        assert_eq!(
+            spec.args,
+            vec!["-L", "repomon", "attach", "-t", "repomon:=lane-7"]
+        );
+    }
+
+    #[test]
+    fn attach_spec_falls_back_to_the_classic_tmux_invocation() {
+        // An older daemon without the `attach` field: derive `tmux -L <session> attach -t <target>`
+        // from the target's session prefix, exactly as this client always did.
+        let v = serde_json::json!({ "target": "mysess:=lane-1", "available": true });
+        let spec = AttachSpec::from_response(&v).expect("target present");
+        assert_eq!(spec.program, "tmux");
+        assert_eq!(
+            spec.args,
+            vec!["-L", "mysess", "attach", "-t", "mysess:=lane-1"]
+        );
+        // A malformed `attach` field (wrong shape) also falls back rather than erroring.
+        let bad = serde_json::json!({ "target": "s:=w", "attach": { "program": 7 } });
+        let spec = AttachSpec::from_response(&bad).expect("target present");
+        assert_eq!(spec.program, "tmux");
+        // No target → no attach.
+        assert!(AttachSpec::from_response(&serde_json::json!({ "target": "" })).is_none());
+        assert!(AttachSpec::from_response(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn ps_single_quote_doubles_embedded_quotes() {
+        assert_eq!(
+            ps_single_quote(r"C:\Users\me\tmp.png"),
+            r"'C:\Users\me\tmp.png'"
+        );
+        assert_eq!(ps_single_quote("o'brien.png"), "'o''brien.png'");
+        assert_eq!(ps_single_quote(""), "''");
+    }
+
+    #[test]
+    fn windows_clipboard_png_script_saves_clipboard_image_to_the_quoted_path() {
+        let script = windows_clipboard_png_script(r"C:\t\a'b.png");
+        // Windows PowerShell 5.1 syntax (pwsh 7 dropped -Format Image).
+        assert!(script.contains("Get-Clipboard -Format Image"));
+        // No image on the clipboard must exit non-zero, like wl-paste/xclip do.
+        assert!(script.contains("exit 1"));
+        // PNG output at the single-quoted (escaped) path.
+        assert!(script.contains(r"'C:\t\a''b.png'"));
+        assert!(script.contains("ImageFormat]::Png"));
+    }
 
     #[test]
     fn detach_cleanup_erases_line_in_place_not_fullscreen() {
@@ -5845,11 +6079,14 @@ mod tests {
     /// `DaemonClient` to build an `App` around (`App::new` has no other constructor). A listener
     /// that accepts once and goes quiet is enough; no daemon RPC is exercised.
     async fn app_with_dummy_client() -> App {
+        use repomon_core::transport::{self, Endpoint};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
-        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let mut listener = transport::listen(&Endpoint::from_path(&sock))
+            .await
+            .unwrap();
         tokio::spawn(async move {
-            let _ = listener.accept().await;
+            let _stream = listener.accept().await;
             // Keep the accepted stream alive for the test's duration instead of dropping it
             // immediately, so the client doesn't see an instant EOF/reconnect churn.
             std::future::pending::<()>().await;
