@@ -63,6 +63,11 @@ pub enum Command {
         /// An initial goal to start repomind with (optional).
         prompt: Option<String>,
     },
+    /// Review and approve orchestrator-drafted playbooks (procedural memory).
+    Playbooks {
+        #[command(subcommand)]
+        cmd: PlaybooksCmd,
+    },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
         /// Shell to generate completions for.
@@ -199,6 +204,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
+        Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
         Command::Orchestrate {
             agent,
             autonomy,
@@ -530,6 +536,86 @@ fn tailscale_ip() -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Subcommand)]
+pub enum PlaybooksCmd {
+    /// List all playbooks (name, status, updated, pending revision marker).
+    List,
+    /// Print a playbook's content (and its pending revision, if any).
+    Show { name: String },
+    /// Approve a draft (or promote an approved playbook's pending revision).
+    Approve { name: String },
+    /// Delete a playbook outright.
+    Delete { name: String },
+}
+
+/// `repomon playbooks ...` — the human approval surface for orchestrator-drafted playbooks.
+/// Drafts are inert until approved here (or via the daemon RPC this drives).
+async fn handle_playbooks(
+    cmd: PlaybooksCmd,
+    config: &Config,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        PlaybooksCmd::List => {
+            let res = client.call("playbook.list", None).await?;
+            let books = res
+                .get("playbooks")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if books.is_empty() {
+                println!("no playbooks yet (repomind drafts them after completed goals)");
+                return Ok(());
+            }
+            for b in books {
+                let name = b["name"].as_str().unwrap_or("?");
+                let status = b["status"].as_str().unwrap_or("?");
+                let updated = b["updated_at"].as_str().unwrap_or("?");
+                let pending = if b["draft_content"].is_string() {
+                    "  (pending revision)"
+                } else {
+                    ""
+                };
+                println!("{name}	{status}	{updated}{pending}");
+            }
+        }
+        PlaybooksCmd::Show { name } => {
+            let res = client.call("playbook.list", None).await?;
+            let books = res
+                .get("playbooks")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let Some(b) = books.iter().find(|b| b["name"].as_str() == Some(&*name)) else {
+                anyhow::bail!("no playbook named {name:?} (see `repomon playbooks list`)");
+            };
+            println!(
+                "# {} [{}]\n\n{}",
+                name,
+                b["status"].as_str().unwrap_or("?"),
+                b["content"].as_str().unwrap_or("")
+            );
+            if let Some(rev) = b["draft_content"].as_str() {
+                println!("\n--- pending revision (approve to promote) ---\n\n{rev}");
+            }
+        }
+        PlaybooksCmd::Approve { name } => {
+            client
+                .call("playbook.approve", Some(json!({ "name": name })))
+                .await?;
+            println!("approved playbook {name} (repomind will follow it from the next search)");
+        }
+        PlaybooksCmd::Delete { name } => {
+            client
+                .call("playbook.delete", Some(json!({ "name": name })))
+                .await?;
+            println!("deleted playbook {name}");
+        }
+    }
+    Ok(())
 }
 
 async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {

@@ -188,6 +188,21 @@ struct JournalQuery {
     limit: Option<usize>,
 }
 #[derive(Deserialize)]
+struct PlaybookSave {
+    name: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct PlaybookSearch {
+    query: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct PlaybookName {
+    name: String,
+}
+#[derive(Deserialize)]
 struct Discover {
     root: String,
     #[serde(default = "default_depth")]
@@ -737,6 +752,67 @@ pub async fn dispatch(
             }
             .map_err(internal)?;
             to_value(json!({ "entries": entries }))
+        }
+
+        // ---- playbooks ----
+        "playbook.save" => {
+            let p: PlaybookSave = parse(params)?;
+            let name = p.name.trim();
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                return Err(RpcError::invalid_params(
+                    "playbook name must be 1-64 chars of [A-Za-z0-9._-] (kebab-case works well)",
+                ));
+            }
+            if p.content.len() > 16384 {
+                return Err(RpcError::invalid_params(format!(
+                    "playbook is {} bytes; the cap is 16384 bytes",
+                    p.content.len()
+                )));
+            }
+            let book = ctx
+                .store
+                .save_playbook(name.to_string(), p.content)
+                .await
+                .map_err(internal)?;
+            tracing::info!(playbook = %book.name, status = %book.status, "playbook saved");
+            to_value(book)
+        }
+        "playbook.search" => {
+            let p: PlaybookSearch = parse(params)?;
+            let books = ctx
+                .store
+                .search_playbooks(p.query, p.limit.unwrap_or(10).min(50))
+                .await
+                .map_err(internal)?;
+            to_value(json!({ "playbooks": books }))
+        }
+        "playbook.list" => {
+            let books = ctx.store.list_playbooks().await.map_err(internal)?;
+            to_value(json!({ "playbooks": books }))
+        }
+        "playbook.approve" => {
+            let p: PlaybookName = parse(params)?;
+            let book = ctx
+                .store
+                .approve_playbook(p.name)
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %book.name, "playbook approved");
+            to_value(book)
+        }
+        "playbook.delete" => {
+            let p: PlaybookName = parse(params)?;
+            ctx.store
+                .delete_playbook(p.name.clone())
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %p.name, "playbook deleted");
+            Ok(Value::Null)
         }
 
         // ---- lanes ----

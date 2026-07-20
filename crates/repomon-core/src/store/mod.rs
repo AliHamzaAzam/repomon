@@ -25,7 +25,12 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0005_lanes_autoincrement.sql"),
     include_str!("../../migrations/0006_remote_devices.sql"),
     include_str!("../../migrations/0007_orchestration_log.sql"),
+    include_str!("../../migrations/0008_playbooks.sql"),
 ];
+
+/// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
+/// an unapproved draft is a proposal, not knowledge, and stale proposals shouldn't pile up.
+const PLAYBOOK_DRAFT_TTL_DAYS: i64 = 30;
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
 /// oldest are evicted, so a misbehaving/abusive client can't grow the table (or per-alert APNs
@@ -652,6 +657,128 @@ impl Store {
         .await
     }
 
+    // ---- playbooks -----------------------------------------------------------
+
+    /// Save a playbook. A new name inserts a draft; an existing draft is replaced; saving over
+    /// an approved playbook stashes the text as a pending revision (`draft_content`) so the
+    /// approved content stays live until a human re-approves. Returns the row as stored.
+    pub async fn save_playbook(&self, name: String, content: String) -> Result<Playbook> {
+        self.call(move |c| {
+            sweep_expired_playbook_drafts(c)?;
+            let now = to_iso(&Utc::now());
+            let status: Option<String> = match c.query_row(
+                "SELECT status FROM playbooks WHERE name = ?1",
+                params![&name],
+                |r| r.get(0),
+            ) {
+                Ok(s) => Some(s),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e.into()),
+            };
+            match status.as_deref() {
+                None => {
+                    c.execute(
+                        "INSERT INTO playbooks(name, content, status, created_at, updated_at)
+                         VALUES(?1, ?2, 'draft', ?3, ?3)",
+                        params![&name, &content, &now],
+                    )?;
+                }
+                Some("approved") => {
+                    c.execute(
+                        "UPDATE playbooks SET draft_content = ?2, updated_at = ?3 WHERE name = ?1",
+                        params![&name, &content, &now],
+                    )?;
+                }
+                _ => {
+                    c.execute(
+                        "UPDATE playbooks SET content = ?2, updated_at = ?3 WHERE name = ?1",
+                        params![&name, &content, &now],
+                    )?;
+                }
+            }
+            get_playbook(c, &name)
+        })
+        .await
+    }
+
+    /// Search APPROVED playbooks only (case-insensitive substring over name + approved
+    /// content), most recently approved first. Drafts and pending revisions never surface here
+    /// — approval is the self-poisoning-prompt gate.
+    pub async fn search_playbooks(&self, query: String, limit: usize) -> Result<Vec<Playbook>> {
+        self.call(move |c| {
+            let pattern = format!("%{query}%");
+            let mut stmt = c.prepare(&format!(
+                "SELECT {PLAYBOOK_COLS} FROM playbooks
+                 WHERE status = 'approved' AND (name LIKE ?1 OR content LIKE ?1)
+                 ORDER BY approved_at DESC LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(params![pattern, limit as i64], playbook_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Every playbook (after sweeping expired drafts), name order — the approval surface's view.
+    pub async fn list_playbooks(&self) -> Result<Vec<Playbook>> {
+        self.call(|c| {
+            sweep_expired_playbook_drafts(c)?;
+            let mut stmt = c.prepare(&format!(
+                "SELECT {PLAYBOOK_COLS} FROM playbooks ORDER BY name"
+            ))?;
+            let rows = stmt.query_map([], playbook_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Approve a draft (or promote an approved playbook's pending revision).
+    pub async fn approve_playbook(&self, name: String) -> Result<Playbook> {
+        self.call(move |c| {
+            let now = to_iso(&Utc::now());
+            let n = c.execute(
+                "UPDATE playbooks SET
+                     content     = COALESCE(draft_content, content),
+                     draft_content = NULL,
+                     status      = 'approved',
+                     approved_at = ?2,
+                     updated_at  = ?2
+                 WHERE name = ?1",
+                params![&name, &now],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("playbook {name}")));
+            }
+            get_playbook(c, &name)
+        })
+        .await
+    }
+
+    /// Delete a playbook outright (draft or approved).
+    pub async fn delete_playbook(&self, name: String) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute("DELETE FROM playbooks WHERE name = ?1", params![&name])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("playbook {name}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Test-only: age a playbook's `updated_at` back `days` days to exercise draft expiry.
+    #[cfg(test)]
+    pub async fn backdate_playbook(&self, name: String, days: i64) -> Result<()> {
+        self.call(move |c| {
+            let then = to_iso(&(Utc::now() - chrono::Duration::days(days)));
+            c.execute(
+                "UPDATE playbooks SET updated_at = ?2 WHERE name = ?1",
+                params![&name, &then],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     // ---- agent sessions ------------------------------------------------------
 
     /// Insert or update a session keyed by its manifest path. Returns its id.
@@ -783,6 +910,45 @@ fn opt_dt_col(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> 
                 )
             }),
     }
+}
+
+/// Column list shared by every playbook SELECT so `playbook_from_row` indexes stay in sync.
+const PLAYBOOK_COLS: &str =
+    "name, content, status, draft_content, created_at, updated_at, approved_at";
+
+fn playbook_from_row(row: &Row) -> rusqlite::Result<Playbook> {
+    Ok(Playbook {
+        name: row.get(0)?,
+        content: row.get(1)?,
+        status: row.get(2)?,
+        draft_content: row.get(3)?,
+        created_at: dt_col(row, 4)?,
+        updated_at: dt_col(row, 5)?,
+        approved_at: opt_dt_col(row, 6)?,
+    })
+}
+
+fn get_playbook(c: &Connection, name: &str) -> Result<Playbook> {
+    c.query_row(
+        &format!("SELECT {PLAYBOOK_COLS} FROM playbooks WHERE name = ?1"),
+        params![name],
+        playbook_from_row,
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("playbook {name}")),
+        other => other.into(),
+    })
+}
+
+/// Drop unreviewed drafts older than [`PLAYBOOK_DRAFT_TTL_DAYS`]. Approved playbooks (including
+/// ones carrying a pending revision) never expire.
+fn sweep_expired_playbook_drafts(c: &Connection) -> Result<()> {
+    let cutoff = to_iso(&(Utc::now() - chrono::Duration::days(PLAYBOOK_DRAFT_TTL_DAYS)));
+    c.execute(
+        "DELETE FROM playbooks WHERE status = 'draft' AND updated_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(())
 }
 
 /// Column list shared by every journal SELECT so `journal_from_row` indexes stay in sync.
@@ -1151,6 +1317,104 @@ mod tests {
             .await
             .unwrap();
         assert!(s.journal_since_prev_session(50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn playbook_save_creates_a_draft_hidden_from_search() {
+        let s = store().await;
+        let p = s
+            .save_playbook("release-all".into(), "step 1: ...".into())
+            .await
+            .unwrap();
+        assert_eq!(p.status, "draft");
+        assert!(p.approved_at.is_none());
+        // Drafts never surface in search: approval is the poisoning gate.
+        assert!(
+            s.search_playbooks("release".into(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // But they are listable for the approval surface.
+        assert_eq!(s.list_playbooks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn playbook_approve_makes_it_searchable() {
+        let s = store().await;
+        s.save_playbook("release-all".into(), "step 1: ...".into())
+            .await
+            .unwrap();
+        let p = s.approve_playbook("release-all".into()).await.unwrap();
+        assert_eq!(p.status, "approved");
+        assert!(p.approved_at.is_some());
+        let hits = s.search_playbooks("step 1".into(), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "release-all");
+    }
+
+    #[tokio::test]
+    async fn playbook_save_over_approved_stashes_a_revision() {
+        let s = store().await;
+        s.save_playbook("release-all".into(), "v1".into())
+            .await
+            .unwrap();
+        s.approve_playbook("release-all".into()).await.unwrap();
+        let p = s
+            .save_playbook("release-all".into(), "v2".into())
+            .await
+            .unwrap();
+        // Still approved with the OLD content live; the new text waits as a revision.
+        assert_eq!(p.status, "approved");
+        assert_eq!(p.content, "v1");
+        assert_eq!(p.draft_content.as_deref(), Some("v2"));
+        let hits = s.search_playbooks("release".into(), 10).await.unwrap();
+        assert_eq!(hits[0].content, "v1");
+        // Approving promotes the revision.
+        let p = s.approve_playbook("release-all".into()).await.unwrap();
+        assert_eq!(p.content, "v2");
+        assert!(p.draft_content.is_none());
+        let hits = s.search_playbooks("release".into(), 10).await.unwrap();
+        assert_eq!(hits[0].content, "v2");
+    }
+
+    #[tokio::test]
+    async fn playbook_expired_drafts_are_swept() {
+        let s = store().await;
+        s.save_playbook("stale".into(), "old draft".into())
+            .await
+            .unwrap();
+        s.save_playbook("fresh".into(), "new draft".into())
+            .await
+            .unwrap();
+        s.backdate_playbook("stale".into(), 31).await.unwrap();
+        let names: Vec<String> = s
+            .list_playbooks()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["fresh"], "31-day-old draft must be swept");
+    }
+
+    #[tokio::test]
+    async fn playbook_approved_never_expires() {
+        let s = store().await;
+        s.save_playbook("keeper".into(), "v1".into()).await.unwrap();
+        s.approve_playbook("keeper".into()).await.unwrap();
+        s.backdate_playbook("keeper".into(), 90).await.unwrap();
+        assert_eq!(s.list_playbooks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn playbook_delete_removes_it() {
+        let s = store().await;
+        s.save_playbook("gone".into(), "x".into()).await.unwrap();
+        s.delete_playbook("gone".into()).await.unwrap();
+        assert!(s.list_playbooks().await.unwrap().is_empty());
+        assert!(s.delete_playbook("gone".into()).await.is_err());
+        assert!(s.approve_playbook("gone".into()).await.is_err());
     }
 
     #[tokio::test]
