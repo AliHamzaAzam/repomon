@@ -1179,3 +1179,85 @@ async fn repo_notes_get_set_round_trip() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn journal_append_and_query() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-jrnl-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Two sessions: "a" (the previous one) and "b" (the current one).
+    for (i, (session, action, params)) in [
+        ("a", "session_start", None),
+        (
+            "a",
+            "spawn_agent",
+            Some("{\"task\":\"fix the auth refactor\"}"),
+        ),
+        ("a", "merge_lane", None),
+        ("b", "session_start", None),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let r = call(
+            &mut stream,
+            i as u64 + 1,
+            "journal.append",
+            Some(json!({ "session": session, "action": action, "params": params })),
+        )
+        .await;
+        assert!(r.error.is_none(), "append errored: {:?}", r.error);
+        assert!(r.result.unwrap()["id"].as_i64().unwrap() > 0);
+    }
+
+    // Plain query: newest first.
+    let r = call(&mut stream, 10, "journal.query", Some(json!({}))).await;
+    let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0]["action"], json!("session_start"));
+    assert_eq!(entries[0]["session"], json!("b"));
+
+    // Search filters (case-insensitive substring over params).
+    let r = call(
+        &mut stream,
+        11,
+        "journal.query",
+        Some(json!({ "query": "AUTH" })),
+    )
+    .await;
+    let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
+    assert_eq!(entries.len(), 1, "entries: {entries:?}");
+    assert_eq!(entries[0]["action"], json!("spawn_agent"));
+
+    // Recap: everything after session a's start, ascending.
+    let r = call(
+        &mut stream,
+        12,
+        "journal.query",
+        Some(json!({ "since_last_session": true })),
+    )
+    .await;
+    let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
+    let actions: Vec<&str> = entries
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(actions, ["spawn_agent", "merge_lane", "session_start"]);
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

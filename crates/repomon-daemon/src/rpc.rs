@@ -164,6 +164,30 @@ struct RepoNotesSet {
     content: String,
 }
 #[derive(Deserialize)]
+struct JournalAppend {
+    session: String,
+    action: String,
+    #[serde(default)]
+    lane_id: Option<i64>,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    params: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+}
+#[derive(Deserialize)]
+struct JournalQuery {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    since_last_session: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
 struct Discover {
     root: String,
     #[serde(default = "default_depth")]
@@ -679,6 +703,40 @@ pub async fn dispatch(
                 "bytes": p.content.len(),
                 "path": path.to_string_lossy(),
             }))
+        }
+
+        // ---- orchestration journal ----
+        "journal.append" => {
+            let p: JournalAppend = parse(params)?;
+            let id = ctx
+                .store
+                .append_journal(repomon_core::model::JournalEntry {
+                    id: 0,
+                    at: chrono::Utc::now(),
+                    session: p.session,
+                    action: p.action,
+                    lane_id: p.lane_id,
+                    repo: p.repo,
+                    params: p.params,
+                    outcome: p.outcome.unwrap_or_else(|| "ok".to_string()),
+                    detail: p.detail,
+                })
+                .await
+                .map_err(internal)?;
+            to_value(json!({ "id": id }))
+        }
+        "journal.query" => {
+            let p: JournalQuery = parse(params)?;
+            let limit = p.limit.unwrap_or(50).min(200);
+            let entries = if let Some(q) = p.query {
+                ctx.store.search_journal(q, limit).await
+            } else if p.since_last_session {
+                ctx.store.journal_since_prev_session(limit).await
+            } else {
+                ctx.store.recent_journal(limit).await
+            }
+            .map_err(internal)?;
+            to_value(json!({ "entries": entries }))
         }
 
         // ---- lanes ----
