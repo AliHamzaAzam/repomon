@@ -181,6 +181,15 @@ pub struct Schedule {
     pub last_run_at: Option<DateTime<Utc>>,
 }
 
+/// A human-confirmed approval rule: routine Bash permission dialogs matching `pattern` in
+/// `repo` are auto-approved by the daemon (the always-escalate sniffer still wins).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRule {
+    pub repo: String,
+    pub pattern: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// The kind of coding agent backing a session. An open enum from day one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {
