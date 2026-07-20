@@ -57,11 +57,24 @@ pub enum Command {
         /// Cap on how many agents repomind may run at once (default 4).
         #[arg(long)]
         max_agents: Option<usize>,
+        /// Instead of launching a session, register a standing schedule for this prompt (e.g.
+        /// "weekdays 09:00", "daily 21:00", "every 2h"). The daemon then runs it headless,
+        /// bounded, and delivers the result as a notification.
+        #[arg(long)]
+        schedule: Option<String>,
+        /// Action cap for the scheduled standing run (default 10, max 50).
+        #[arg(long)]
+        max_actions: Option<u32>,
         /// Override the model for the orchestrator session (e.g. opus, sonnet).
         #[arg(long)]
         model: Option<String>,
         /// An initial goal to start repomind with (optional).
         prompt: Option<String>,
+    },
+    /// List or remove standing-orchestration schedules (see `orchestrate --schedule`).
+    Schedules {
+        #[command(subcommand)]
+        cmd: SchedulesCmd,
     },
     /// Review and approve orchestrator-drafted playbooks (procedural memory).
     Playbooks {
@@ -205,13 +218,23 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
         Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
+        Command::Schedules { cmd } => handle_schedules(cmd, config, socket).await?,
         Command::Orchestrate {
             agent,
             autonomy,
             max_agents,
+            schedule,
+            max_actions,
             model,
             prompt,
-        } => handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt).await?,
+        } => {
+            if let Some(spec) = schedule {
+                handle_schedule_add(config, socket, spec, max_actions, prompt).await?
+            } else {
+                handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt)
+                    .await?
+            }
+        }
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = crate::Cli::command();
@@ -536,6 +559,84 @@ fn tailscale_ip() -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Subcommand)]
+pub enum SchedulesCmd {
+    /// List schedules (id, spec, next run, prompt).
+    List,
+    /// Remove a schedule by id.
+    Remove { id: i64 },
+}
+
+/// `repomon orchestrate --schedule <spec> "<prompt>"` — register a standing run.
+async fn handle_schedule_add(
+    config: &Config,
+    socket: Option<PathBuf>,
+    spec: String,
+    max_actions: Option<u32>,
+    prompt: Option<String>,
+) -> Result<()> {
+    let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
+        anyhow::bail!(
+            "--schedule needs a prompt, e.g. repomon orchestrate --schedule \"weekdays 09:00\" \"morning fleet briefing\""
+        );
+    };
+    let client = connect(socket, config).await?;
+    let res = client
+        .call(
+            "schedule.add",
+            Some(json!({ "spec": spec, "prompt": prompt, "max_actions": max_actions })),
+        )
+        .await?;
+    println!(
+        "scheduled #{} — {} (next run {})",
+        res["id"],
+        res["spec"].as_str().unwrap_or("?"),
+        res["next_run"].as_str().unwrap_or("?")
+    );
+    println!("the daemon runs it headless and bounded; results arrive as notifications");
+    Ok(())
+}
+
+async fn handle_schedules(
+    cmd: SchedulesCmd,
+    config: &Config,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        SchedulesCmd::List => {
+            let res = client.call("schedule.list", None).await?;
+            let scheds = res
+                .get("schedules")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if scheds.is_empty() {
+                println!(
+                    "no schedules (add one with: repomon orchestrate --schedule \"weekdays 09:00\" \"morning fleet briefing\")"
+                );
+                return Ok(());
+            }
+            for sc in scheds {
+                println!(
+                    "#{}\t{}\tnext {}\t{}",
+                    sc["id"],
+                    sc["spec"].as_str().unwrap_or("?"),
+                    sc["next_run"].as_str().unwrap_or("?"),
+                    sc["prompt"].as_str().unwrap_or("")
+                );
+            }
+        }
+        SchedulesCmd::Remove { id } => {
+            client
+                .call("schedule.remove", Some(json!({ "id": id })))
+                .await?;
+            println!("removed schedule #{id}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
