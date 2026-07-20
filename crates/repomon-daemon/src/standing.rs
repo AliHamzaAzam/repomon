@@ -255,3 +255,48 @@ fn tail(s: &str, max: usize) -> String {
     }
     trimmed.chars().skip(count - max).collect()
 }
+
+/// Whether a pending needs-you triage should fire: the agent has sat unattended long enough
+/// and still no UI (local TUI or remote companion) is attached. Pure so the policy is testable
+/// without a fleet.
+pub fn triage_due(elapsed: Duration, after_mins: u64, ui_attached: bool) -> bool {
+    !ui_attached && elapsed >= Duration::from_secs(after_mins * 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn triage_fires_only_after_the_window_with_no_ui() {
+        let m10 = Duration::from_secs(10 * 60);
+        assert!(triage_due(m10, 10, false));
+        assert!(triage_due(m10 + Duration::from_secs(1), 10, false));
+        assert!(!triage_due(m10 - Duration::from_secs(1), 10, false));
+        // Any attached UI suppresses triage: the human is already looking.
+        assert!(!triage_due(m10, 10, true));
+    }
+
+    #[test]
+    fn headless_command_composes_claude_print_mode() {
+        let cmd = build_headless_command(
+            "claude",
+            std::path::Path::new("/tmp/x.json"),
+            &Some("opus".into()),
+            "morning briefing",
+        );
+        assert!(cmd.starts_with("claude -p "));
+        assert!(cmd.contains("--mcp-config"));
+        assert!(cmd.contains("--append-system-prompt"));
+        assert!(cmd.contains("--allowedTools mcp__repomon"));
+        assert!(cmd.contains("--model"));
+        assert!(
+            cmd.contains("Unattended run"),
+            "system prompt must carry the unattended addendum"
+        );
+        assert!(
+            !cmd.contains("--session-id"),
+            "headless runs don't pin sessions"
+        );
+    }
+}
