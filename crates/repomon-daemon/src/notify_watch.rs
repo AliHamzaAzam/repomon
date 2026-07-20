@@ -469,20 +469,56 @@ async fn check_orchestrator_attention(
     drop(orch);
     ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status);
 
-    if edge_to_attention && !tui_active && cfg.notify_enabled && cfg.notify_needs_you {
+    if edge_to_attention && cfg.notify_enabled && cfg.notify_needs_you {
         let due = popup_fired
             .map(|t| t.elapsed() >= ORCH_POPUP_DEBOUNCE)
             .unwrap_or(true);
         if due {
             *popup_fired = Some(Instant::now());
-            repomon_core::notify::send_native(
-                "repomind needs you",
-                headline.as_deref().unwrap_or(""),
-                cfg.notify_sound,
-                cfg.notify_click_focus,
-            );
+            // Phone loop: repomind's own escalations reach remote clients like a managed
+            // agent's would — event.notification for the in-app feed plus APNs — regardless of
+            // whether a TUI is open locally (mirrors the lane path's remote gating).
+            if cfg.remote.enabled {
+                let (title, body, payload) =
+                    orchestrator_attention_payload(word, headline.as_deref());
+                ctx.broadcast("event.notification", payload.clone());
+                push::send_all(ctx, &title, &body, push::CATEGORY_ALERT, &payload).await;
+            }
+            // Local desktop popup only when the TUI isn't already covering it.
+            if !tui_active {
+                repomon_core::notify::send_native(
+                    "repomind needs you",
+                    headline.as_deref().unwrap_or(""),
+                    cfg.notify_sound,
+                    cfg.notify_click_focus,
+                );
+            }
         }
     }
+}
+
+/// Build the remote notification for a repomind needs-you edge: title, push body, and the
+/// event payload. Pure so the shape is testable; `attention` is the derived word
+/// (permission / decision / end_of_turn) and `headline` the dialog summary or last message.
+fn orchestrator_attention_payload(
+    attention: &str,
+    headline: Option<&str>,
+) -> (String, String, serde_json::Value) {
+    let title = "repomind needs you".to_string();
+    let body = match headline {
+        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => format!("repomind is waiting on you ({attention})"),
+    };
+    let payload = json!({
+        // One live orchestrator pane exists, so attention-kind granularity is enough for
+        // client-side dedup (a re-fire only happens after the attention word changed).
+        "id": format!("orchestrator:{attention}"),
+        "kind": "orchestrator_needs_you",
+        "attention": attention,
+        "title": title,
+        "body": body,
+    });
+    (title, body, payload)
 }
 
 /// Map the orchestrator's pane dialog (if any — already detected/classified by
@@ -520,6 +556,32 @@ fn tail(s: &str, max: usize) -> String {
     let start = count - max;
     let clipped: String = s.chars().skip(start).collect();
     format!("…{}", clipped.trim_start())
+}
+
+#[cfg(test)]
+mod orch_payload_tests {
+    use super::*;
+
+    #[test]
+    fn orchestrator_payload_carries_attention_and_headline() {
+        let (title, body, payload) =
+            orchestrator_attention_payload("decision", Some("Which auth method should we use?"));
+        assert_eq!(title, "repomind needs you");
+        assert!(body.contains("auth method"));
+        assert_eq!(payload["kind"], serde_json::json!("orchestrator_needs_you"));
+        assert_eq!(payload["attention"], serde_json::json!("decision"));
+        assert!(payload["id"].as_str().unwrap().contains("orchestrator"));
+    }
+
+    #[test]
+    fn orchestrator_payload_survives_a_missing_headline() {
+        let (_, body, payload) = orchestrator_attention_payload("end_of_turn", None);
+        assert!(
+            !body.is_empty(),
+            "an empty push body reads as a bug on the phone"
+        );
+        assert_eq!(payload["attention"], serde_json::json!("end_of_turn"));
+    }
 }
 
 #[cfg(test)]

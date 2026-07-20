@@ -1572,3 +1572,74 @@ async fn approval_record_and_rules_lifecycle() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn orchestrator_watch_is_per_connection() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ow-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut a = UnixStream::connect(&sock).await.expect("connect A");
+    let mut b = UnixStream::connect(&sock).await.expect("connect B");
+
+    assert!(!ctx.orchestrator_watched().await);
+
+    // A watches; B saying "off" must not clobber A's watch (per-connection state, like
+    // viewports — a phone leaving its view must not stop the TUI's stream).
+    let r = call(&mut a, 1, "orchestrator.watch", Some(json!({ "on": true }))).await;
+    assert!(r.error.is_none(), "watch errored: {:?}", r.error);
+    assert!(ctx.orchestrator_watched().await);
+    let r = call(
+        &mut b,
+        1,
+        "orchestrator.watch",
+        Some(json!({ "on": false })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    assert!(
+        ctx.orchestrator_watched().await,
+        "another connection's off must not clobber A's watch"
+    );
+
+    // A turning itself off unwatches.
+    let r = call(
+        &mut a,
+        2,
+        "orchestrator.watch",
+        Some(json!({ "on": false })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    assert!(!ctx.orchestrator_watched().await);
+
+    // A watching then DISCONNECTING unwatches via session cleanup.
+    let r = call(&mut a, 3, "orchestrator.watch", Some(json!({ "on": true }))).await;
+    assert!(r.error.is_none());
+    assert!(ctx.orchestrator_watched().await);
+    drop(a);
+    for _ in 0..100 {
+        if !ctx.orchestrator_watched().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !ctx.orchestrator_watched().await,
+        "disconnect must release the watch"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
