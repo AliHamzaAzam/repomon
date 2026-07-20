@@ -140,7 +140,7 @@ impl DaemonClient {
             match tokio::time::timeout(CALL_TIMEOUT, rx).await {
                 Ok(Ok(resp)) => {
                     if let Some(err) = resp.error {
-                        return Err(anyhow!("{} (code {})", err.message, err.code));
+                        return Err(err.into());
                     }
                     if method == "subscribe" {
                         *self.inner.subscribe_params.lock().unwrap() = Some(params.clone());

@@ -34,6 +34,7 @@ globset = "0.4"
 directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ts-rs = { version = "12", features = ["chrono-impl", "serde-compat", "serde-json-impl"] }
 # --- daemon: async, ipc, cli ---
 tokio = { version = "1", features = [
     "rt-multi-thread",

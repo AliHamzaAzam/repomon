@@ -23,6 +23,8 @@ const TAIL_BYTES: u64 = 8 * 1024;
 
 /// The latest stop-gate verdict for a worktree, as read from the dxkit loop ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct GateVerdict {
     /// Whether the gate let the agent stop (`false` = bounced on net-new findings).
     pub allowed: bool,

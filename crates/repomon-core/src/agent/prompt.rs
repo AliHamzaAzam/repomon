@@ -38,6 +38,8 @@ const BODY_MAX_LINES: usize = 8;
 /// [`detect_dialog`] extracts it from pane text; [`detect_pending_prompt`] remains the
 /// compact one-line view for callers that only need the "why".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct PendingDialog {
     /// The dialog's box header naming the tool ("Bash command", "Edit file"); `None` for
     /// boxless dialogs.
@@ -59,6 +61,8 @@ pub struct PendingDialog {
 
 /// One selectable dialog row: its printed number (if any) and its text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct DialogOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number: Option<u32>,

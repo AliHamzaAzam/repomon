@@ -32,7 +32,10 @@ pub mod oid_hex {
 
 /// A registered repository. `path` points at the main worktree, canonical and absolute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct Repo {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: RepoId,
     pub path: PathBuf,
     pub name: String,
@@ -45,6 +48,8 @@ pub struct Repo {
 /// never crosses the remote bridge or `remote.devices` output. `role` is `"full"` today (the
 /// bridge's default-deny allowlist is the real authority); the column exists for future scoping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct RemoteDevice {
     pub name: String,
     pub token: String,
@@ -55,13 +60,18 @@ pub struct RemoteDevice {
 
 /// A single worktree of a repo (the main checkout is also a worktree).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct Worktree {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: WorktreeId,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
     pub path: PathBuf,
     /// `None` when HEAD is detached.
     pub branch: Option<String>,
     #[serde(with = "oid_hex")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub head: gix::ObjectId,
     pub is_main: bool,
     /// Last path component — what the UI shows.
@@ -70,6 +80,8 @@ pub struct Worktree {
 
 /// Counts of staged / unstaged / untracked changes in a worktree.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct DirtyState {
     pub staged: u32,
     pub unstaged: u32,
@@ -87,9 +99,13 @@ impl DirtyState {
 
 /// The live git state of a worktree — the part that changes as work happens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct WorktreeState {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub worktree_id: WorktreeId,
     #[serde(with = "oid_hex")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub head: gix::ObjectId,
     pub branch: Option<String>,
     pub upstream: Option<String>,
@@ -111,9 +127,13 @@ pub struct WorktreeState {
 
 /// A single commit, summarized for timelines and the Today view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct Commit {
     #[serde(with = "oid_hex")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub oid: gix::ObjectId,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
     pub author_name: String,
     pub author_email: String,
@@ -200,6 +220,8 @@ impl<'de> Deserialize<'de> for AgentKind {
 
 /// Whether an agent is actively working, waiting on the user, idle, or finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentStatus {
     Running,
@@ -231,10 +253,16 @@ impl AgentStatus {
 
 /// A live (or historical) agent session tied to a `(repo, worktree)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct AgentSession {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: SessionId,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub agent: AgentKind,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub worktree_id: Option<WorktreeId>,
     pub started_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -294,6 +322,7 @@ pub struct AgentSession {
     /// finished its turn — independent of the Idle time-decay that hides this in `status`.
     /// Daemon-internal (feeds the stall detector); never serialized.
     #[serde(skip)]
+    #[cfg_attr(feature = "ts", ts(skip))]
     pub ended_turn: bool,
     /// The latest dxkit stop-gate verdict from the worktree's `.dxkit/loop/ledger.jsonl`,
     /// when the lane uses dxkit. Overlaid at list time; not persisted. A fresh `allowed`
@@ -315,7 +344,10 @@ pub struct AgentSession {
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct Lane {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: LaneId,
     pub repo: Repo,
     pub worktree: Worktree,
@@ -329,8 +361,12 @@ pub struct Lane {
 
 /// Persisted per-lane metadata not derivable from git (pin state, tmux window, agent kind).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct LaneMeta {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: LaneId,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
     pub worktree_path: PathBuf,
     pub pinned: bool,
@@ -341,7 +377,10 @@ pub struct LaneMeta {
 
 /// Parameters for creating a new lane (and its worktree).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct CreateLaneParams {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
     pub branch: String,
     #[serde(default)]
@@ -354,6 +393,8 @@ pub struct CreateLaneParams {
 
 /// A half-open UTC time range `[from, to)`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct TimeRange {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
@@ -361,7 +402,10 @@ pub struct TimeRange {
 
 /// The result of indexing a repo's commits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct SyncReport {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
     pub commits_added: u32,
     pub commits_skipped: u32,
@@ -370,6 +414,8 @@ pub struct SyncReport {
 
 /// Whether a work session was focused on one repo or spanned several in parallel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionKind {
     Focused,
@@ -378,10 +424,13 @@ pub enum SessionKind {
 
 /// A detected window of activity (Phase 3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct WorkSession {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
     pub kind: SessionKind,
+    #[cfg_attr(feature = "ts", ts(type = "Array<number>"))]
     pub repo_ids: Vec<RepoId>,
     pub repo_names: Vec<String>,
     pub commit_count: u32,
@@ -395,7 +444,10 @@ impl WorkSession {
 
 /// One repo's density row in the timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct TimelineRow {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub repo_id: RepoId,
     pub repo_name: String,
     /// Density level (0–5) per time bucket.
@@ -404,6 +456,8 @@ pub struct TimelineRow {
 
 /// A correlation between two repos' active-bucket sets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct Correlation {
     pub a: String,
     pub b: String,
@@ -413,9 +467,12 @@ pub struct Correlation {
 
 /// The full timeline payload: density rows + correlations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct TimelineData {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bucket_secs: i64,
     pub rows: Vec<TimelineRow>,
     pub correlations: Vec<Correlation>,
@@ -425,6 +482,8 @@ pub struct TimelineData {
 /// themselves (the mobile chat view): a user or assistant message with the full *unwrapped*
 /// text, or an aggregated run of tool calls between messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct TranscriptItem {
     /// "user" | "assistant" | "tools".
     pub role: String,
@@ -436,6 +495,8 @@ pub struct TranscriptItem {
 
 /// A spawnable agent choice: a built-in kind (detected on PATH) or a configured custom one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct AgentChoice {
     /// The name to pass to `agent.spawn` (a kind like "claude-code", or a custom name).
     pub name: String,
@@ -452,6 +513,8 @@ pub struct AgentChoice {
 
 /// One entry in the interactive repo browser (directories only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct BrowseEntry {
     pub name: String,
     pub path: PathBuf,
@@ -461,6 +524,8 @@ pub struct BrowseEntry {
 
 /// A directory listing for the repo browser.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct BrowseResult {
     pub path: PathBuf,
     pub parent: Option<PathBuf>,

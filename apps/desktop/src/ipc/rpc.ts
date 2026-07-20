@@ -1,0 +1,152 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+
+import type {
+  AccountUsage,
+  AgentChoice,
+  BrowseResult,
+  Commit,
+  Lane,
+  PendingDialog,
+  Repo,
+  TimelineData,
+  TranscriptItem,
+  WorkSession,
+} from "../bindings";
+
+export interface RpcFailure {
+  code: number;
+  message: string;
+  data: unknown | null;
+}
+
+export class DaemonRpcError extends Error implements RpcFailure {
+  readonly code: number;
+  readonly data: unknown | null;
+
+  constructor(error: RpcFailure) {
+    super(error.message);
+    this.name = "DaemonRpcError";
+    this.code = error.code;
+    this.data = error.data;
+  }
+}
+
+export interface DaemonEvent<T = unknown> {
+  jsonrpc: "2.0";
+  method: `event.${string}`;
+  params: T;
+}
+
+interface ConfigView {
+  accent?: string | null;
+  auto_continue: boolean;
+  default_agent?: string | null;
+  embedded_pty: boolean;
+  expand_agents: boolean;
+  notify_enabled: boolean;
+  spawn_prompt: boolean;
+  usage_probe: boolean;
+  worktree_template: string;
+  [key: string]: unknown;
+}
+
+interface OrchestratorStatus {
+  running: boolean;
+  agent?: string | null;
+  model?: string | null;
+  window?: string | null;
+  attention?: string | null;
+  headline?: string | null;
+}
+
+interface RpcMap {
+  "repo.list": { params: undefined; result: Repo[] };
+  "repo.add": { params: { path: string }; result: Repo };
+  "repo.remove": { params: { repo_id: number }; result: null };
+  "lane.list": { params: undefined; result: Lane[] };
+  "lane.create": {
+    params: {
+      repo_id: number;
+      branch: string;
+      source_branch?: string;
+      path?: string;
+      copy_files?: string[];
+    };
+    result: Lane;
+  };
+  "lane.delete": { params: { lane_id: number; also_delete_branch?: boolean }; result: null };
+  "lane.focus": { params: { lane_id: number }; result: { path: string } };
+  "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
+  "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: unknown };
+  "agent.detect": { params: undefined; result: AgentChoice[] };
+  "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string } };
+  "agent.adopt": { params: { lane_id: number; session_id?: string }; result: { lane_id: number; window: string } };
+  "agent.stop": { params: { lane_id: number; window?: string }; result: null };
+  "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };
+  "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };
+  "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: null };
+  "agent.pin": { params: { lane_id: number; pinned: boolean }; result: null };
+  "agent.auto_continue": { params: { lane_id: number; enabled: boolean }; result: null };
+  "agent.send_input": { params: { lane_id: number; window?: string; text: string; enter?: boolean }; result: null };
+  "agent.key": { params: { lane_id: number; window?: string; key: string; literal?: boolean }; result: null };
+  "agent.resize": { params: { lane_id: number; window?: string; cols: number; rows: number }; result: null };
+  "agent.fit": { params: { lane_id: number; window?: string; cols: number; rows: number }; result: null };
+  "session.rename": { params: { session_id: string; label?: string }; result: null };
+  "terminal.open": { params: { lane_id: number }; result: { id: string; target: string } };
+  "terminal.list": { params: { lane_id: number }; result: string[] };
+  "terminal.list_all": { params: undefined; result: Array<{ lane_id: number; id: string }> };
+  "terminal.close": { params: { id: string }; result: null };
+  "fs.browse": { params: { path?: string }; result: BrowseResult };
+  "viewport.set": { params: { lane_ids: number[]; focus_lane?: number; focus_window?: string; windows?: string[] }; result: null };
+  "commit.recent": { params: { lane_id?: number; repo_id?: number; limit?: number }; result: Commit[] };
+  "commit.search": { params: { query: string; limit?: number }; result: Commit[] };
+  timeline: { params: { from_iso: string; to_iso: string; bucket_secs: number }; result: TimelineData };
+  sessions: { params: { from_iso: string; to_iso: string }; result: WorkSession[] };
+  "config.get": { params: undefined; result: ConfigView };
+  "config.set": { params: Partial<ConfigView>; result: null };
+  "usage.get": { params: undefined; result: AccountUsage[] };
+  "orchestrator.status": { params: undefined; result: OrchestratorStatus };
+  "orchestrator.transcript": { params: { limit?: number }; result: TranscriptItem[] };
+  "orchestrator.start": { params: { agent?: string; model?: string }; result: OrchestratorStatus };
+  "orchestrator.stop": { params: undefined; result: null };
+  "orchestrator.send_input": { params: { text: string; enter?: boolean }; result: null };
+  "orchestrator.key": { params: { key: string; literal?: boolean }; result: null };
+  "orchestrator.resize": { params: { cols: number; rows: number }; result: null };
+}
+
+export type RpcMethod = keyof RpcMap;
+export type RpcParams<M extends RpcMethod> = RpcMap[M]["params"];
+export type RpcResult<M extends RpcMethod> = RpcMap[M]["result"];
+
+function isRpcFailure(value: unknown): value is RpcFailure {
+  return typeof value === "object" && value !== null && "code" in value && "message" in value;
+}
+
+export async function daemonCall<M extends RpcMethod>(
+  method: M,
+  ...args: RpcParams<M> extends undefined ? [] | [undefined] : [RpcParams<M>]
+): Promise<RpcResult<M>> {
+  try {
+    return await invoke<RpcResult<M>>("daemon_call", {
+      method,
+      params: args[0] ?? null,
+    });
+  } catch (error) {
+    if (isRpcFailure(error)) throw new DaemonRpcError(error);
+    throw error;
+  }
+}
+
+export async function subscribeDaemon(
+  onEvent: (event: DaemonEvent) => void,
+): Promise<() => void> {
+  const channel = new Channel<DaemonEvent>();
+  let active = true;
+  channel.onmessage = (event) => {
+    if (active) onEvent(event);
+  };
+  await invoke("daemon_subscribe", { onEvent: channel });
+  return () => {
+    active = false;
+  };
+}

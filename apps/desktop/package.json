@@ -12,6 +12,8 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bindings:generate": "TS_RS_EXPORT_DIR=../../apps/desktop/src/bindings cargo test -p repomon-core --features ts export_bindings -- --nocapture",
+    "bindings:check": "bun run bindings:generate && git diff --exit-code -- src/bindings",
     "serve": "vite preview",
     "tauri": "tauri"
   },

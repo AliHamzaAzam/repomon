@@ -18,6 +18,8 @@ use super::text::{parse_pct, parse_reset_datetime, strip_ansi};
 /// One usage limit window, normalized across agents. `pct_used` is how much of the window is
 /// consumed (0–100); `label` is a short tag for display (`5h`, `wk`, `mo`, or a model name).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct UsageWindow {
     pub label: String,
     pub pct_used: u8,
@@ -27,6 +29,8 @@ pub struct UsageWindow {
 /// An account's usage: an ordered list of limit windows (shortest first). Empty/absent windows
 /// mean nothing was readable — clients show nothing rather than zeros.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct UsageReport {
     pub windows: Vec<UsageWindow>,
 }
@@ -40,11 +44,14 @@ impl UsageReport {
 /// One account's usage, as carried over RPC to clients. `key` matches
 /// [`super::claude::account_key`] (or `"codex"`) so a client can pick the focused agent's account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct AccountUsage {
     pub key: String,
     pub label: String,
     pub report: UsageReport,
     /// How long ago the probe captured this, in seconds.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub age_secs: u64,
 }
 

@@ -92,6 +92,14 @@ impl RpcError {
     }
 }
 
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (code {})", self.message, self.code)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
 /// A server-pushed notification (no `id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {

@@ -28,6 +28,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Check generated desktop bindings
+        run: >-
+          TS_RS_EXPORT_DIR=../../apps/desktop/src/bindings
+          cargo test -p repomon-core --features ts export_bindings --locked
+      - run: git diff --exit-code -- apps/desktop/src/bindings
 
   frontend:
     runs-on: ubuntu-latest
