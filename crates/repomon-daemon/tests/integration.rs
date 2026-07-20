@@ -1615,13 +1615,7 @@ async fn approval_record_and_rules_lifecycle() {
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
     };
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+    let mut stream = connect_retry(&sock).await;
 
     // Three consistent approvals: third one proposes an allowlist entry.
     for (i, expect_propose) in [(1u64, false), (2, false), (3, true)] {
