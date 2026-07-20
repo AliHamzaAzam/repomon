@@ -22,16 +22,49 @@ pub struct Server {
     client: DaemonClient,
     fleet: Fleet,
     policy: Policy,
+    /// Opaque per-process marker on every journal entry; `session_start` rows carrying it
+    /// delimit sessions for the cold-start recap.
+    session: String,
+    /// Appends the `session_start` journal row exactly once, lazily (first journaled action or
+    /// first `fleet_status`, whichever comes first).
+    session_started: tokio::sync::OnceCell<()>,
+    /// The `since_you_last_looked` recap rides only the FIRST `fleet_status` of the process.
+    recap_shown: std::sync::atomic::AtomicBool,
 }
 
 impl Server {
     pub fn new(client: DaemonClient, fleet: Fleet, policy: Policy) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         Server {
             client,
             fleet,
             policy,
+            session: format!("{}-{nanos}", std::process::id()),
+            session_started: tokio::sync::OnceCell::new(),
+            recap_shown: std::sync::atomic::AtomicBool::new(false),
         }
     }
+}
+
+/// Mutating tools whose calls (and failures) land in the orchestration journal. Reads are
+/// deliberately not journaled — the journal answers "what did repomind DO", not "what did it
+/// look at".
+fn journaled_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_agent"
+            | "send_to_agent"
+            | "approve_agent"
+            | "interrupt_agent"
+            | "stop_agent"
+            | "create_lane"
+            | "delete_lane"
+            | "merge_lane"
+            | "repo_notes_write"
+    )
 }
 
 #[async_trait::async_trait]
@@ -41,6 +74,9 @@ impl ToolHandler for Server {
     }
 
     async fn call(&self, name: &str, args: Value) -> ToolResult {
+        // Journal mutating tools centrally so coverage can't drift as handlers evolve. The args
+        // clone happens only for journaled tools.
+        let journal_args = journaled_tool(name).then(|| args.clone());
         let out = match name {
             "fleet_status" => self.fleet_status(args).await,
             "read_agent" => self.read_agent(args).await,
@@ -57,8 +93,12 @@ impl ToolHandler for Server {
             "wait_for_change" => self.wait_for_change(args).await,
             "repo_notes" => self.repo_notes(args).await,
             "repo_notes_write" => self.repo_notes_write(args).await,
+            "fleet_history" => self.fleet_history(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
+        if let Some(jargs) = journal_args {
+            self.journal(name, &jargs, &out).await;
+        }
         match out {
             Ok(v) => ToolResult::ok(v.to_string()),
             Err(e) => ToolResult::error(e),
@@ -77,7 +117,41 @@ impl Server {
         if a.only_attention.unwrap_or(false) {
             lanes.retain(|l| l.attention().needs_you());
         }
-        Ok(json!({ "generation": generation, "counts": counts, "lanes": lanes }))
+        let mut out = json!({ "generation": generation, "counts": counts, "lanes": lanes });
+        // Cold-start recap, once per process: what happened since the previous session's start,
+        // so the first orient both orients and recaps. Best-effort — a journal hiccup must not
+        // fail the status call.
+        if !self
+            .recap_shown
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.ensure_session_started().await;
+            if let Ok(res) = self
+                .client
+                .call(
+                    "journal.query",
+                    Some(json!({ "since_last_session": true, "limit": 200 })),
+                )
+                .await
+            {
+                let entries = res["entries"].as_array().cloned().unwrap_or_default();
+                // Exclude session_start markers (incl. this session's own) — they're anchors,
+                // not activity.
+                let acted: Vec<&Value> = entries
+                    .iter()
+                    .filter(|e| e["action"] != json!("session_start"))
+                    .collect();
+                let recent: Vec<Value> = acted
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .rev()
+                    .map(|e| compact_journal_entry(e))
+                    .collect();
+                out["since_you_last_looked"] = json!({ "entries": acted.len(), "recent": recent });
+            }
+        }
+        Ok(out)
     }
 
     async fn read_agent(&self, args: Value) -> Result<Value, String> {
@@ -578,6 +652,85 @@ impl Server {
         }
     }
 
+    /// Append the `session_start` journal row exactly once per process, best-effort. Anchors
+    /// the NEXT session's cold-start recap, so it must run for read-heavy sessions too (hence
+    /// the `fleet_status` call site as well as `journal`'s).
+    async fn ensure_session_started(&self) {
+        self.session_started
+            .get_or_init(|| async {
+                let params = json!({
+                    "autonomy": self.policy.autonomy.as_str(),
+                    "max_agents": self.policy.max_concurrent_agents,
+                })
+                .to_string();
+                let res = self
+                    .client
+                    .call(
+                        "journal.append",
+                        Some(json!({
+                            "session": self.session,
+                            "action": "session_start",
+                            "params": params,
+                        })),
+                    )
+                    .await;
+                if let Err(e) = res {
+                    tracing::debug!("journal session_start failed: {e}");
+                }
+            })
+            .await;
+    }
+
+    /// Record one mutating tool call in the orchestration journal, best-effort: a journal
+    /// hiccup must never fail the action it records.
+    async fn journal(&self, tool: &str, args: &Value, out: &Result<Value, String>) {
+        self.ensure_session_started().await;
+        let (outcome, detail) = match out {
+            Ok(v) => ("ok", truncate(&v.to_string(), 200)),
+            Err(e) => ("error", truncate(e, 300)),
+        };
+        let res = self
+            .client
+            .call(
+                "journal.append",
+                Some(json!({
+                    "session": self.session,
+                    "action": tool,
+                    "lane_id": args.get("lane_id").and_then(Value::as_i64),
+                    "repo": args.get("repo").and_then(Value::as_str),
+                    "params": truncate(&args.to_string(), 300),
+                    "outcome": outcome,
+                    "detail": detail,
+                })),
+            )
+            .await;
+        if let Err(e) = res {
+            tracing::debug!("journal.append for {tool} failed: {e}");
+        }
+    }
+
+    async fn fleet_history(&self, args: Value) -> Result<Value, String> {
+        let a: FleetHistoryArgs = parse(args)?;
+        let limit = a.limit.unwrap_or(50).min(200);
+        let res: Value = self
+            .client
+            .call(
+                "journal.query",
+                Some(json!({
+                    "query": a.query,
+                    "since_last_session": a.since_last_session.unwrap_or(false),
+                    "limit": limit,
+                })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        let entries: Vec<Value> = res["entries"]
+            .as_array()
+            .map(|v| v.iter().map(compact_journal_entry).collect())
+            .unwrap_or_default();
+        Ok(json!({ "entries": entries }))
+    }
+
     /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
     /// or when the notes are empty, so callers can unconditionally `if let Some` — a notes
     /// hiccup must never fail the spawn/create it piggybacks on.
@@ -767,6 +920,15 @@ struct LaneDiffArgs {
 }
 fn default_max_patch_chars() -> usize {
     8000
+}
+#[derive(Deserialize)]
+struct FleetHistoryArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    since_last_session: Option<bool>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 #[derive(Deserialize)]
 struct RepoNotesArgs {
@@ -963,6 +1125,18 @@ fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
 
 fn rpc_err(e: anyhow::Error) -> String {
     format!("daemon error: {e}")
+}
+
+/// Project a journal row to the compact shape `fleet_history` and the recap share.
+fn compact_journal_entry(e: &Value) -> Value {
+    json!({
+        "at": e["at"],
+        "action": e["action"],
+        "repo": e["repo"],
+        "lane_id": e["lane_id"],
+        "outcome": e["outcome"],
+        "params": e["params"],
+    })
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1240,6 +1414,22 @@ fn tool_catalog() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "fleet_history",
+            description: "Search the orchestration journal: every past mutating action (spawns, \
+                sends, merges, notes writes) with parameters and outcome, across all sessions. \
+                Use it to answer 'what happened with X' or to explain fleet state you can't \
+                account for. since_last_session=true returns the cold-start recap window (also \
+                embedded in your first fleet_status as since_you_last_looked).",
+            input_schema: obj(
+                json!({
+                    "query": { "type": "string", "description": "Substring to search (action names, repos, parameters, outcomes)." },
+                    "since_last_session": { "type": "boolean", "description": "Return everything since the previous session began instead of searching." },
+                    "limit": { "type": "integer", "description": "Max entries, up to 200 (default 50)." }
+                }),
+                &[],
+            ),
+        },
+        ToolDef {
             name: "wait_for_change",
             description: "Block until the fleet meaningfully changes (a status/attention edge) or \
                 the timeout elapses, then return the deltas. This is how you watch agents without \
@@ -1264,6 +1454,20 @@ mod tests {
 
     /// The persona must teach the repo-notes loop (read at Orient, fold into tasks, write
     /// lessons back) and must no longer present mnemind as the primary team memory.
+    /// The persona must teach the journal loop: the first fleet_status recaps, and
+    /// fleet_history answers "what happened with X".
+    #[test]
+    fn persona_documents_fleet_history() {
+        assert!(
+            crate::PERSONA.contains("fleet_history"),
+            "persona never mentions fleet_history"
+        );
+        assert!(
+            crate::PERSONA.contains("since_you_last_looked"),
+            "persona never mentions the recap block"
+        );
+    }
+
     #[test]
     fn persona_documents_repo_notes() {
         assert!(

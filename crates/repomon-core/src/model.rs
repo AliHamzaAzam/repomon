@@ -123,6 +123,33 @@ pub struct Commit {
     pub parent_count: u32,
 }
 
+/// One orchestration-journal row: an orchestrator-initiated action (or a `session_start`
+/// marker), what it targeted, and how it went. Params/detail are pre-truncated digests, never
+/// full payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalEntry {
+    /// Rowid; 0 on insert (assigned by the store).
+    #[serde(default)]
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    /// Opaque per-orchestrator-process marker; `session_start` rows carrying it delimit recaps.
+    pub session: String,
+    /// Tool/action name, e.g. `spawn_agent`, `merge_lane`, `session_start`.
+    pub action: String,
+    #[serde(default)]
+    pub lane_id: Option<i64>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Compact JSON digest of the arguments (truncated at write time).
+    #[serde(default)]
+    pub params: Option<String>,
+    /// `"ok"` or `"error"`.
+    pub outcome: String,
+    /// Error text or a short result digest (truncated at write time).
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// The kind of coding agent backing a session. An open enum from day one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {

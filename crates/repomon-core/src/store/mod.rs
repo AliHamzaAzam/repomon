@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0004_session_labels.sql"),
     include_str!("../../migrations/0005_lanes_autoincrement.sql"),
     include_str!("../../migrations/0006_remote_devices.sql"),
+    include_str!("../../migrations/0007_orchestration_log.sql"),
 ];
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
@@ -568,6 +569,89 @@ impl Store {
         .await
     }
 
+    // ---- orchestration journal ----------------------------------------------
+
+    /// Append one journal entry (its `id` field is ignored). Returns the assigned rowid.
+    pub async fn append_journal(&self, e: JournalEntry) -> Result<i64> {
+        self.call(move |c| {
+            c.execute(
+                "INSERT INTO orchestration_log(at, session, action, lane_id, repo, params, outcome, detail)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    to_iso(&e.at),
+                    e.session,
+                    e.action,
+                    e.lane_id,
+                    e.repo,
+                    e.params,
+                    e.outcome,
+                    e.detail,
+                ],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .await
+    }
+
+    /// The newest journal entries, newest first.
+    pub async fn recent_journal(&self, limit: usize) -> Result<Vec<JournalEntry>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {JOURNAL_COLS} FROM orchestration_log ORDER BY id DESC LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(params![limit as i64], journal_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Search the journal (case-insensitive substring over action/repo/params/detail, the
+    /// [`search_commits`](Self::search_commits) pattern), newest first.
+    pub async fn search_journal(&self, query: String, limit: usize) -> Result<Vec<JournalEntry>> {
+        self.call(move |c| {
+            let pattern = format!("%{query}%");
+            let mut stmt = c.prepare(&format!(
+                "SELECT {JOURNAL_COLS} FROM orchestration_log
+                 WHERE action LIKE ?1 OR repo LIKE ?1 OR params LIKE ?1 OR detail LIKE ?1
+                 ORDER BY id DESC LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(params![pattern, limit as i64], journal_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// The cold-start recap: every entry after the previous session's `session_start` (i.e. the
+    /// second-newest one), ascending — the previous session's actions plus anything since,
+    /// including the current session's own `session_start` marker. Empty until two sessions
+    /// exist.
+    pub async fn journal_since_prev_session(&self, limit: usize) -> Result<Vec<JournalEntry>> {
+        self.call(move |c| {
+            let anchor: Option<i64> = c
+                .query_row(
+                    "SELECT id FROM orchestration_log WHERE action = 'session_start'
+                     ORDER BY id DESC LIMIT 1 OFFSET 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+            let Some(anchor) = anchor else {
+                return Ok(Vec::new());
+            };
+            let mut stmt = c.prepare(&format!(
+                "SELECT {JOURNAL_COLS} FROM orchestration_log WHERE id > ?1
+                 ORDER BY id ASC LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(params![anchor, limit as i64], journal_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
     // ---- agent sessions ------------------------------------------------------
 
     /// Insert or update a session keyed by its manifest path. Returns its id.
@@ -699,6 +783,23 @@ fn opt_dt_col(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> 
                 )
             }),
     }
+}
+
+/// Column list shared by every journal SELECT so `journal_from_row` indexes stay in sync.
+const JOURNAL_COLS: &str = "id, at, session, action, lane_id, repo, params, outcome, detail";
+
+fn journal_from_row(row: &Row) -> rusqlite::Result<JournalEntry> {
+    Ok(JournalEntry {
+        id: row.get(0)?,
+        at: dt_col(row, 1)?,
+        session: row.get(2)?,
+        action: row.get(3)?,
+        lane_id: row.get(4)?,
+        repo: row.get(5)?,
+        params: row.get(6)?,
+        outcome: row.get(7)?,
+        detail: row.get(8)?,
+    })
 }
 
 fn oid_col(row: &Row, idx: usize) -> rusqlite::Result<gix::ObjectId> {
@@ -944,6 +1045,112 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, ["first", "second", "third"]);
+    }
+
+    fn journal(session: &str, action: &str, params: Option<&str>) -> JournalEntry {
+        JournalEntry {
+            id: 0,
+            at: Utc::now(),
+            session: session.to_string(),
+            action: action.to_string(),
+            lane_id: None,
+            repo: None,
+            params: params.map(str::to_string),
+            outcome: "ok".to_string(),
+            detail: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_append_and_recent_round_trip() {
+        let s = store().await;
+        s.append_journal(journal("a", "session_start", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("a", "spawn_agent", Some("{\"lane_id\":1}")))
+            .await
+            .unwrap();
+        let recent = s.recent_journal(10).await.unwrap();
+        // Newest first, fields intact.
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].action, "spawn_agent");
+        assert_eq!(recent[0].outcome, "ok");
+        assert_eq!(recent[0].params.as_deref(), Some("{\"lane_id\":1}"));
+        assert_eq!(recent[1].action, "session_start");
+        assert!(recent[0].id > recent[1].id);
+    }
+
+    #[tokio::test]
+    async fn journal_search_is_case_insensitive_substring() {
+        let s = store().await;
+        s.append_journal(journal(
+            "a",
+            "merge_lane",
+            Some("{\"lane_id\":7,\"into\":\"main\"}"),
+        ))
+        .await
+        .unwrap();
+        s.append_journal(journal(
+            "a",
+            "spawn_agent",
+            Some("{\"task\":\"fix AUTH refactor\"}"),
+        ))
+        .await
+        .unwrap();
+        let hits = s.search_journal("auth".into(), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].action, "spawn_agent");
+        // action column is searched too
+        let hits = s.search_journal("merge".into(), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].action, "merge_lane");
+    }
+
+    #[tokio::test]
+    async fn journal_since_prev_session_spans_the_previous_session() {
+        let s = store().await;
+        // A session that should NOT appear (before the previous session_start).
+        s.append_journal(journal("old", "session_start", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("old", "spawn_agent", None))
+            .await
+            .unwrap();
+        // The previous session: its start and actions ARE the recap.
+        s.append_journal(journal("prev", "session_start", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("prev", "create_lane", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("prev", "merge_lane", None))
+            .await
+            .unwrap();
+        // The current session's own start.
+        s.append_journal(journal("cur", "session_start", None))
+            .await
+            .unwrap();
+        let recap = s.journal_since_prev_session(50).await.unwrap();
+        let actions: Vec<&str> = recap.iter().map(|e| e.action.as_str()).collect();
+        // Ascending, starting after the previous session_start; nothing from "old".
+        assert_eq!(
+            actions,
+            ["create_lane", "merge_lane", "session_start"],
+            "recap was: {recap:?}"
+        );
+        assert!(recap.iter().all(|e| e.session != "old"));
+    }
+
+    #[tokio::test]
+    async fn journal_since_prev_session_empty_on_first_session() {
+        let s = store().await;
+        s.append_journal(journal("first", "session_start", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("first", "spawn_agent", None))
+            .await
+            .unwrap();
+        assert!(s.journal_since_prev_session(50).await.unwrap().is_empty());
     }
 
     #[tokio::test]

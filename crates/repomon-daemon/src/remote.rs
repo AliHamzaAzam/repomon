@@ -625,6 +625,11 @@ mod tests {
             // deliberate Phase 6 decision allowlists it.
             "repo.notes.get",
             "repo.notes.set",
+            // the orchestration journal is local-only like the notes it complements: append is
+            // an unauthenticated write channel into every future recap, and query exposes the
+            // full action history — neither belongs on the bridge without a deliberate decision.
+            "journal.append",
+            "journal.query",
             "terminal.open",
             "terminal.close",
             "terminal.target",
