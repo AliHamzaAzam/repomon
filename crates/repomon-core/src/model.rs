@@ -150,6 +150,23 @@ pub struct JournalEntry {
     pub detail: Option<String>,
 }
 
+/// A playbook: procedural memory drafted by the orchestrator, inert until a human approves it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Playbook {
+    pub name: String,
+    /// The live text: draft text before approval, approved text after.
+    pub content: String,
+    /// `"draft"` or `"approved"`.
+    pub status: String,
+    /// A pending revision saved over an approved playbook, awaiting re-approval.
+    #[serde(default)]
+    pub draft_content: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub approved_at: Option<DateTime<Utc>>,
+}
+
 /// The kind of coding agent backing a session. An open enum from day one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {
