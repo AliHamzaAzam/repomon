@@ -63,6 +63,10 @@ struct PendingConfirm {
 /// The runtime guardrails: a fixed configuration plus mutable counters.
 pub struct Policy {
     pub autonomy: Autonomy,
+    /// Set for headless standing/triage runs (`REPOMON_MCP_UNATTENDED=1`): merge_lane and
+    /// delete_lane are refused outright regardless of autonomy — an unattended orchestrator
+    /// reports and recommends, never lands or destroys work.
+    pub unattended: bool,
     pub max_concurrent_agents: usize,
     pub max_actions: u64,
     actions: Mutex<u64>,
@@ -79,8 +83,12 @@ impl Policy {
             .unwrap_or(Autonomy::Autonomous);
         let max_concurrent_agents = env_usize("REPOMON_MCP_MAX_AGENTS", 4);
         let max_actions = env_usize("REPOMON_MCP_MAX_ACTIONS", 100) as u64;
+        let unattended = std::env::var("REPOMON_MCP_UNATTENDED")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
         Policy {
             autonomy,
+            unattended,
             max_concurrent_agents,
             max_actions,
             actions: Mutex::new(0),
@@ -228,6 +236,7 @@ mod tests {
     fn policy(autonomy: Autonomy, max_actions: u64) -> Policy {
         Policy {
             autonomy,
+            unattended: false,
             max_concurrent_agents: 4,
             max_actions,
             actions: Mutex::new(0),
@@ -246,6 +255,11 @@ mod tests {
         assert!(Autonomy::Autonomous.allows_structural());
         assert!(!Autonomy::Supervised.allows_structural());
         assert!(!Autonomy::ReadOnly.allows_mutation());
+    }
+
+    #[test]
+    fn unattended_flag_defaults_off_in_test_policies() {
+        assert!(!policy(Autonomy::Autonomous, 100).unattended);
     }
 
     #[test]
@@ -285,6 +299,7 @@ mod tests {
     fn policy_with_ttl(ttl: Duration) -> Policy {
         Policy {
             autonomy: Autonomy::Autonomous,
+            unattended: false,
             max_concurrent_agents: 4,
             max_actions: 100,
             actions: Mutex::new(0),
