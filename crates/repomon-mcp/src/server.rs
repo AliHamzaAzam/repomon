@@ -465,6 +465,15 @@ impl Server {
     /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
     async fn delete_lane(&self, args: Value) -> Result<Value, String> {
         let a: DeleteLaneArgs = parse(args)?;
+        // Unattended runs never destroy work, regardless of autonomy (locked design decision:
+        // an unattended orchestrator must be MORE conservative than an attended one).
+        if self.policy.unattended {
+            return Err(
+                "this is an unattended standing run: deleting a lane is never allowed here. \
+                 Report the lane's state and recommend the delete to the human instead."
+                    .into(),
+            );
+        }
         // Defense-in-depth on top of the two-phase confirm below: gate on the same
         // structural-autonomy check create_lane/merge_lane use, checked before either phase so
         // supervised/read-only mode refuses early — before a token is ever minted.
@@ -535,6 +544,15 @@ impl Server {
 
     async fn merge_lane(&self, args: Value) -> Result<Value, String> {
         let a: MergeLaneArgs = parse(args)?;
+        // Unattended runs never land work, regardless of autonomy (locked design decision).
+        if self.policy.unattended {
+            return Err(
+                "this is an unattended standing run: merging is never allowed here. Verify \
+                 with lane_diff, then report the lane as merge-ready and recommend the merge \
+                 to the human instead."
+                    .into(),
+            );
+        }
         self.policy.record_mutation()?;
         if !self.policy.autonomy.allows_structural() {
             return Err(
@@ -1578,6 +1596,15 @@ mod tests {
             crate::PERSONA.contains("playbook_save"),
             "persona never mentions playbook_save"
         );
+    }
+
+    /// The unattended addendum must set the report-and-recommend posture and name the
+    /// refused tools, since the server hard-refuses them.
+    #[test]
+    fn unattended_addendum_documents_the_bounds() {
+        assert!(crate::UNATTENDED_ADDENDUM.contains("merge_lane"));
+        assert!(crate::UNATTENDED_ADDENDUM.contains("RECOMMEND"));
+        assert!(crate::UNATTENDED_ADDENDUM.contains("briefing"));
     }
 
     #[test]

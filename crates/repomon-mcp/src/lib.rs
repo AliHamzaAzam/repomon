@@ -24,6 +24,20 @@ use repomon_core::client::DaemonClient;
 /// `--append-system-prompt` by the launcher.
 pub const PERSONA: &str = include_str!("../assets/repomind.md");
 
+/// Appended to [`PERSONA`] for headless standing/triage runs. The server enforces the hard
+/// rules (merge_lane/delete_lane refuse in unattended mode); this addendum sets expectations
+/// so the model plans within them instead of bumping into refusals.
+pub const UNATTENDED_ADDENDUM: &str = "\n\n## Unattended run\n\nThis is a bounded, unattended \
+standing run: no human is watching, and your final message is delivered as a notification \
+(phone lock screen sized). Rules:\n\n\
+- You cannot merge_lane or delete_lane here (the server refuses them). Verify merge-ready \
+work with lane_diff and RECOMMEND the action instead.\n\
+- Prefer observing and reporting over acting; act only when the goal explicitly asks for it \
+and stay well inside the action cap.\n\
+- Never wait on wait_for_change for long stretches; do the task, then stop.\n\
+- End with a compact briefing (2-6 short lines): what you saw, what you did, what needs the \
+human and your recommendation.";
+
 /// How to run the server.
 pub struct Options {
     /// The daemon socket to connect to.

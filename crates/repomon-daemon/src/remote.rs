@@ -633,6 +633,11 @@ mod tests {
             // playbooks stay local-only: save is a write channel into future orchestrator
             // prompts (post-approval), and approve is the human gate itself — neither belongs
             // on the bridge.
+            // standing-run schedules mint unattended orchestrator processes — strictly
+            // local-only.
+            "schedule.add",
+            "schedule.list",
+            "schedule.remove",
             "playbook.save",
             "playbook.search",
             "playbook.list",

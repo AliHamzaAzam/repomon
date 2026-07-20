@@ -167,6 +167,20 @@ pub struct Playbook {
     pub approved_at: Option<DateTime<Utc>>,
 }
 
+/// A standing-orchestration schedule: a bounded headless repomind run the daemon fires on a
+/// spec ("daily 09:00", "every 30m", ...).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: i64,
+    pub spec: String,
+    pub prompt: String,
+    /// The run's action cap — deliberately lower than an attended session's.
+    pub max_actions: u32,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Utc>>,
+}
+
 /// The kind of coding agent backing a session. An open enum from day one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {

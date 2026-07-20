@@ -21,6 +21,7 @@ pub mod notes;
 pub mod notify;
 pub mod protocol;
 pub mod registry;
+pub mod schedule;
 pub mod service;
 pub mod session;
 pub mod store;

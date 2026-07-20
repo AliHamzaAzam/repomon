@@ -1382,3 +1382,81 @@ async fn playbook_lifecycle_over_rpc() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn schedule_add_list_remove() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-sch-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Valid add returns the row plus its computed next firing.
+    let r = call(
+        &mut stream,
+        1,
+        "schedule.add",
+        Some(json!({ "spec": "daily 09:00", "prompt": "morning fleet briefing" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "add errored: {:?}", r.error);
+    let sched = r.result.unwrap();
+    let id = sched["id"].as_i64().unwrap();
+    assert_eq!(sched["max_actions"], json!(10), "default cap should be 10");
+    assert!(sched["next_run"].is_string(), "missing next_run: {sched}");
+
+    // Bad spec teaches the grammar.
+    let r = call(
+        &mut stream,
+        2,
+        "schedule.add",
+        Some(json!({ "spec": "tuesdays 09:00", "prompt": "x" })),
+    )
+    .await;
+    let err = r.error.expect("bad spec must error");
+    assert!(err.message.contains("daily"), "unhelpful: {}", err.message);
+
+    // Empty prompt rejected; oversized max_actions clamped to 50.
+    let r = call(
+        &mut stream,
+        3,
+        "schedule.add",
+        Some(json!({ "spec": "every 30m", "prompt": "" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "empty prompt must error");
+    let r = call(
+        &mut stream,
+        4,
+        "schedule.add",
+        Some(json!({ "spec": "every 30m", "prompt": "sweep", "max_actions": 500 })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["max_actions"], json!(50));
+
+    // List shows both with next_run.
+    let r = call(&mut stream, 5, "schedule.list", None).await;
+    let scheds = r.result.unwrap()["schedules"].as_array().unwrap().clone();
+    assert_eq!(scheds.len(), 2);
+    assert!(scheds.iter().all(|s| s["next_run"].is_string()));
+
+    // Remove; second remove errors.
+    let r = call(&mut stream, 6, "schedule.remove", Some(json!({ "id": id }))).await;
+    assert!(r.error.is_none(), "remove errored: {:?}", r.error);
+    let r = call(&mut stream, 7, "schedule.remove", Some(json!({ "id": id }))).await;
+    assert!(r.error.is_some(), "double remove must error");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

@@ -917,3 +917,62 @@ async fn mcp_stdio_read_only_playbooks() {
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn mcp_stdio_unattended_refuses_merge_and_delete() {
+    let (sock, mut control, _state_dir) = boot_daemon("unattended").await;
+    let (_repo_dir, lane_id) = seed_repo_lane(&mut control).await;
+
+    // Unattended + fully autonomous: structural autonomy is NOT the gate here.
+    let (child, mut stdin, mut lines) = init_mcp_child(
+        &sock,
+        &[
+            ("REPOMON_MCP_UNATTENDED", "1"),
+            ("REPOMON_MCP_AUTONOMY", "autonomous"),
+        ],
+    )
+    .await;
+
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "merge_lane", "arguments": { "lane_id": lane_id } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("unattended"),
+        "merge_lane must be refused in unattended mode, got: {text}"
+    );
+
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "delete_lane", "arguments": { "lane_id": lane_id } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("unattended"),
+        "delete_lane must be refused in unattended mode, got: {text}"
+    );
+
+    // Reads and non-structural mutations stay available (only caps bound them).
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "fleet_status", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "fleet_status must work unattended: {text}");
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
