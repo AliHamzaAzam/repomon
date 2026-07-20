@@ -7,6 +7,7 @@
 //! are enforced here in [`crate::policy`], not merely asked for in the persona.
 
 use chrono::Utc;
+use repomon_core::agent::approval;
 use repomon_core::agent::text::strip_ansi;
 use repomon_core::client::DaemonClient;
 use repomon_core::model::{AgentChoice, AgentSession, Lane, Repo, TranscriptItem};
@@ -65,6 +66,7 @@ fn journaled_tool(name: &str) -> bool {
             | "merge_lane"
             | "repo_notes_write"
             | "playbook_save"
+            | "approval_allow"
     )
 }
 
@@ -97,6 +99,8 @@ impl ToolHandler for Server {
             "fleet_history" => self.fleet_history(args).await,
             "playbook_save" => self.playbook_save(args).await,
             "playbook_search" => self.playbook_search(args).await,
+            "approval_allow" => self.approval_allow(args).await,
+            "approval_rules" => self.approval_rules(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
         if let Some(jargs) = journal_args {
@@ -368,17 +372,77 @@ impl Server {
             )
             .await
             .map_err(rpc_err)?;
-        Ok(json!({
+        let mut out = json!({
             "ok": true,
             "sent": key,
             "answered": answered,
             "prompt": primary.and_then(|s| s.pending_prompt.clone()),
-        }))
+        });
+        // Approval-policy learning, best-effort: record this verdict for Bash permission
+        // dialogs and surface the daemon's allowlist proposal when the streak reaches it.
+        if let Some(cmd) = primary
+            .and_then(|s| s.pending_dialog.as_ref())
+            .and_then(approval::dialog_command)
+        {
+            let verdict = if key == "Escape" { "deny" } else { "approve" };
+            if let Ok(res) = self
+                .client
+                .call(
+                    "approval.record",
+                    Some(json!({ "repo": lane.repo.name, "command": cmd, "verdict": verdict })),
+                )
+                .await
+            {
+                if res["propose"] == json!(true) {
+                    let pattern = res["pattern"].as_str().unwrap_or_default().to_string();
+                    out["proposal"] = json!(format!(
+                        "'{pattern}' has now been approved {} times in a row in {}. Ask the \
+                         human whether to allowlist it (the daemon would auto-approve matching \
+                         permissions from now on); ONLY after they explicitly agree, call \
+                         approval_allow {{repo: \"{}\", pattern: \"{pattern}\"}} and then \
+                         confirm with the returned token.",
+                        res["approvals"], lane.repo.name, lane.repo.name
+                    ));
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn interrupt_agent(&self, args: Value) -> Result<Value, String> {
         let a: InterruptAgentArgs = parse(args)?;
         self.policy.record_mutation()?;
+        // Approval-policy learning, best-effort: interrupting a pending Bash permission dialog
+        // is a deny verdict (denies reset streaks and never generalize). Read the dialog
+        // BEFORE the interrupt clears it.
+        if let Ok(lane) = self
+            .client
+            .call_typed::<Lane>("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+        {
+            let primary = fleet::primary_agent(&lane);
+            let attention = primary
+                .map(fleet::agent_attention)
+                .unwrap_or(Attention::None);
+            if attention == Attention::Permission {
+                if let Some(cmd) = primary
+                    .and_then(|s| s.pending_dialog.as_ref())
+                    .and_then(approval::dialog_command)
+                {
+                    let _ = self
+                        .client
+                        .call(
+                            "approval.record",
+                            Some(json!({
+                                "repo": lane.repo.name,
+                                "command": cmd,
+                                "verdict": "deny",
+                            })),
+                        )
+                        .await;
+                }
+            }
+        }
         if a.hard.unwrap_or(false) {
             self.client
                 .call(
@@ -810,6 +874,51 @@ impl Server {
         Ok(out)
     }
 
+    async fn approval_allow(&self, args: Value) -> Result<Value, String> {
+        let a: ApprovalAllowArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        // Same two-phase confirm as delete_lane: allowlisting is a standing permission bypass,
+        // so repomind can never self-confirm — phase 1 mints a token to relay with the impact,
+        // phase 2 redeems it only for the exact (repo, pattern) it was minted for.
+        let flags = format!("approval:{}:{}", a.repo, a.pattern);
+        match a.confirm {
+            None => {
+                let token = self.policy.mint_confirm(0, &flags);
+                Ok(json!({
+                    "impact": format!(
+                        "Allowlisting '{}' in {} means the daemon will auto-approve matching \
+                         Bash permission dialogs from now on, attended or not, without asking \
+                         anyone (force-push / rm -rf / reset --hard still always escalate). \
+                         Relay this to the human; only after they explicitly agree, re-call \
+                         approval_allow with confirm=<token>.",
+                        a.pattern, a.repo
+                    ),
+                    "confirm_token": token,
+                }))
+            }
+            Some(token) => {
+                self.policy.take_confirm(&token, 0, &flags)?;
+                self.client
+                    .call(
+                        "approval.allow",
+                        Some(json!({ "repo": a.repo, "pattern": a.pattern })),
+                    )
+                    .await
+                    .map_err(rpc_err)?;
+                Ok(json!({ "ok": true, "repo": a.repo, "pattern": a.pattern }))
+            }
+        }
+    }
+
+    async fn approval_rules(&self, _args: Value) -> Result<Value, String> {
+        let res: Value = self
+            .client
+            .call("approval.list", None)
+            .await
+            .map_err(rpc_err)?;
+        Ok(json!({ "rules": res["rules"] }))
+    }
+
     /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
     /// or when the notes are empty, so callers can unconditionally `if let Some` — a notes
     /// hiccup must never fail the spawn/create it piggybacks on.
@@ -1008,6 +1117,13 @@ struct FleetHistoryArgs {
     since_last_session: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct ApprovalAllowArgs {
+    repo: String,
+    pattern: String,
+    #[serde(default)]
+    confirm: Option<String>,
 }
 #[derive(Deserialize)]
 struct PlaybookSaveArgs {
@@ -1544,6 +1660,29 @@ fn tool_catalog() -> Vec<ToolDef> {
                 }),
                 &["query"],
             ),
+        },
+        ToolDef {
+            name: "approval_allow",
+            description: "Allowlist a routine Bash command pattern for a repo, after explicit \
+                human agreement: the daemon will then auto-approve matching permission dialogs \
+                (they stop reaching anyone). Two-phase: call without confirm to get an impact \
+                summary + token to relay to the human; re-call with confirm=<token> only after \
+                they say yes. Force-push / rm -rf / reset --hard always escalate regardless.",
+            input_schema: obj(
+                json!({
+                    "repo": { "type": "string", "description": "Repo name the rule applies to." },
+                    "pattern": { "type": "string", "description": "The command pattern from approve_agent's proposal (first two tokens, e.g. 'cargo test')." },
+                    "confirm": { "type": "string", "description": "The token from a prior call without confirm. Omit to get the impact summary + token first." }
+                }),
+                &["repo", "pattern"],
+            ),
+        },
+        ToolDef {
+            name: "approval_rules",
+            description: "List the confirmed per-repo approval rules (patterns the daemon \
+                auto-approves). Use to answer 'what gets auto-approved?' or before proposing a \
+                new rule.",
+            input_schema: obj(json!({}), &[]),
         },
         ToolDef {
             name: "wait_for_change",
