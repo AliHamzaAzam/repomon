@@ -1,7 +1,7 @@
 # Repomon Desktop M1: Skeleton and Connect
 
-**Status:** ready for implementation  
-**Branch:** `codex/desktop-m1`  
+**Status:** completed 2026-07-20
+**Branch:** `codex/desktop-m1`
 **Source:** `docs/superpowers/specs/2026-07-20-desktop-gui-design.md`
 
 ## Outcome
@@ -85,7 +85,7 @@ Repomon Desktop is an operator watchfloor, not a generic admin dashboard.
 1. Scaffold with `create-tauri-app` using Solid, TypeScript, and bun.
 2. Pin the approved major versions and add Vitest with a jsdom environment.
 3. Add a smoke test asserting the shell title, honest empty states, and connection rail exist.
-4. Run `bun test` and confirm it fails before the application shell is implemented.
+4. Run `bun run test` and confirm it fails before the application shell is implemented.
 5. Configure Tailwind through `@tailwindcss/vite` with semantic CSS variables at root,
    `@theme inline`, one `@layer base`, and no `tailwind.config.*`.
 6. Implement the watchfloor shell and light/dark/system theme persistence.
@@ -162,7 +162,7 @@ status. Connected snapshots include `uptime_secs`, `repos`, `lanes`, `db_size_by
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passes.
 - `cargo test --workspace --locked` passes.
-- `bun install --frozen-lockfile`, `bun run check`, `bun test`, and `bun run build` pass in
+- `bun install --frozen-lockfile`, `bun run check`, `bun run test`, and `bun run build` pass in
   `apps/desktop/`.
 
 ## Task 5: Live milestone verification and commits
@@ -184,3 +184,14 @@ Pause after M1 with:
 - the live retry observation;
 - any deferred issues that belong to M2;
 - a clean list of committed files and untouched pre-existing untracked files.
+
+## Verification record
+
+- Frontend: frozen install, TypeScript check, 4 Vitest tests, and Vite 7 production build pass.
+- Rust: workspace fmt, clippy with warnings denied, and the full locked workspace test suite pass.
+- Host: the focused framed-socket test maps `daemon.status` into a connected snapshot.
+- Live: the desktop started an isolated daemon on its private socket. Stopping PID 12515 moved
+  through the recovery path and launched PID 30137 on the same socket. The replacement reported
+  version 0.5.0 with fresh uptime through `daemon status`.
+- Isolation: the verification app, daemon, socket, database, logs, and temporary directory were
+  removed after the smoke test. The live fleet was not touched.
