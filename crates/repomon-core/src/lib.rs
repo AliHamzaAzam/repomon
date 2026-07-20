@@ -16,6 +16,7 @@ pub mod exec;
 pub mod git;
 pub mod indexer;
 pub mod lane;
+pub mod launch;
 pub mod model;
 pub mod notify;
 pub mod protocol;

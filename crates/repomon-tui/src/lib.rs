@@ -13,12 +13,13 @@ pub mod theme;
 pub mod view;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::Parser;
 use client::DaemonClient;
 use repomon_core::{Config, config};
+
+pub use repomon_core::launch::{connect_with_retry, ensure_daemon, spawn_daemon};
 
 #[derive(Parser)]
 #[command(
@@ -81,79 +82,6 @@ pub async fn run_cli() -> Result<()> {
         emit_cd(&path);
     }
     Ok(())
-}
-
-/// Connect to a running daemon, or start a detached `repomond` and connect to that.
-///
-/// Returns `Err` if no daemon is running and `repomond` can't be launched (e.g. the binary
-/// isn't built/on PATH) — callers may then fall back to an in-process daemon.
-pub async fn ensure_daemon(
-    config: &Config,
-    socket_override: Option<PathBuf>,
-) -> Result<DaemonClient> {
-    let socket = socket_override.unwrap_or_else(|| config::socket_path(config));
-    if let Ok(client) = DaemonClient::connect(&socket).await {
-        return Ok(client);
-    }
-    spawn_daemon(&socket)?;
-    // Generous window: a first-ever start runs SQLite migrations before binding the socket.
-    connect_with_retry(&socket, 150).await
-}
-
-/// Launch `repomond` as a detached background process (logs to the daemon log file).
-fn spawn_daemon(socket: &Path) -> Result<()> {
-    use std::process::{Command, Stdio};
-    let program = repomon_core::service::repomond_path();
-    let _ = std::fs::create_dir_all(repomon_core::service::log_dir());
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(repomon_core::service::log_file())
-        .ok();
-
-    let mut cmd = Command::new(&program);
-    cmd.arg("--socket").arg(socket).stdin(Stdio::null());
-    match log {
-        Some(out) => {
-            let err = out.try_clone().ok();
-            cmd.stdout(Stdio::from(out));
-            if let Some(err) = err {
-                cmd.stderr(Stdio::from(err));
-            }
-        }
-        None => {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-    }
-    // Detach from the TUI's process group so it survives the terminal/UI closing.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    cmd.spawn()
-        .with_context(|| format!("starting daemon `{}`", program.display()))?;
-    Ok(())
-}
-
-/// Connect to the daemon, retrying briefly (a freshly-started daemon needs a moment to bind).
-pub async fn connect_with_retry(socket: &Path, tries: usize) -> Result<DaemonClient> {
-    let mut last = None;
-    for _ in 0..tries {
-        match DaemonClient::connect(socket).await {
-            Ok(c) => return Ok(c),
-            Err(e) => {
-                last = Some(e);
-                tokio::time::sleep(Duration::from_millis(40)).await;
-            }
-        }
-    }
-    Err(last.unwrap_or_else(|| anyhow!("could not connect"))).with_context(|| {
-        format!(
-            "no daemon at {} — start it with `repomond` or run with --embedded",
-            socket.display()
-        )
-    })
 }
 
 /// Render a single Fleet frame to stdout via the test backend (no TTY needed).
