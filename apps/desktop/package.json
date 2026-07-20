@@ -12,6 +12,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "bash e2e/isolated.sh",
     "bindings:generate": "TS_RS_EXPORT_DIR=../../apps/desktop/src/bindings cargo test -p repomon-core --features ts export_bindings -- --nocapture",
     "bindings:check": "bun run bindings:generate && git diff --exit-code -- src/bindings",
     "serve": "vite preview",
@@ -46,6 +47,7 @@
     "typescript": "~5.9.2",
     "vite": "^7.0.0",
     "vite-plugin-solid": "^2.11.0",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "webdriverio": "^9.20.0"
   }
 }
