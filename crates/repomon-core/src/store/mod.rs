@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0007_orchestration_log.sql"),
     include_str!("../../migrations/0008_playbooks.sql"),
     include_str!("../../migrations/0009_schedules.sql"),
+    include_str!("../../migrations/0010_approvals.sql"),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -843,6 +844,105 @@ impl Store {
         .await
     }
 
+    // ---- approval policy -----------------------------------------------------
+
+    /// Record one permission verdict and return how many CONSECUTIVE trailing approvals the
+    /// (repo, pattern) now has — a deny resets the streak (denies never generalize).
+    pub async fn record_approval_event(
+        &self,
+        repo: String,
+        pattern: String,
+        verdict: String,
+    ) -> Result<u32> {
+        self.call(move |c| {
+            c.execute(
+                "INSERT INTO approval_events(repo, pattern, verdict, at) VALUES(?1, ?2, ?3, ?4)",
+                params![&repo, &pattern, &verdict, to_iso(&Utc::now())],
+            )?;
+            let mut stmt = c.prepare(
+                "SELECT verdict FROM approval_events WHERE repo = ?1 AND pattern = ?2
+                 ORDER BY id DESC",
+            )?;
+            let rows = stmt.query_map(params![&repo, &pattern], |r| r.get::<_, String>(0))?;
+            let mut streak = 0u32;
+            for v in rows {
+                if v?.as_str() == "approve" {
+                    streak += 1;
+                } else {
+                    break;
+                }
+            }
+            Ok(streak)
+        })
+        .await
+    }
+
+    pub async fn add_approval_rule(&self, repo: String, pattern: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "INSERT OR IGNORE INTO approval_rules(repo, pattern, created_at)
+                 VALUES(?1, ?2, ?3)",
+                params![&repo, &pattern, to_iso(&Utc::now())],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn remove_approval_rule(&self, repo: String, pattern: String) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute(
+                "DELETE FROM approval_rules WHERE repo = ?1 AND pattern = ?2",
+                params![&repo, &pattern],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("approval rule {repo}:{pattern}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn list_approval_rules(&self) -> Result<Vec<ApprovalRule>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT repo, pattern, created_at FROM approval_rules ORDER BY repo, pattern",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (repo, pattern, created) = r?;
+                out.push(ApprovalRule {
+                    repo,
+                    pattern,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created)
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    pub async fn has_approval_rule(&self, repo: String, pattern: String) -> Result<bool> {
+        self.call(move |c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM approval_rules WHERE repo = ?1 AND pattern = ?2",
+                params![&repo, &pattern],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     // ---- agent sessions ------------------------------------------------------
 
     /// Insert or update a session keyed by its manifest path. Returns its id.
@@ -1515,6 +1615,70 @@ mod tests {
         s.remove_schedule(sched.id).await.unwrap();
         assert!(s.list_schedules().await.unwrap().is_empty());
         assert!(s.remove_schedule(sched.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn approval_streak_counts_consecutive_approves_and_denies_reset() {
+        let s = store().await;
+        for expected in [1, 2, 3] {
+            let n = s
+                .record_approval_event("api".into(), "cargo test".into(), "approve".into())
+                .await
+                .unwrap();
+            assert_eq!(n, expected);
+        }
+        // A deny resets the streak; the next approve starts over at 1.
+        assert_eq!(
+            s.record_approval_event("api".into(), "cargo test".into(), "deny".into())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.record_approval_event("api".into(), "cargo test".into(), "approve".into())
+                .await
+                .unwrap(),
+            1
+        );
+        // Streaks are per repo+pattern.
+        assert_eq!(
+            s.record_approval_event("web".into(), "cargo test".into(), "approve".into())
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_rules_crud() {
+        let s = store().await;
+        assert!(
+            !s.has_approval_rule("api".into(), "cargo test".into())
+                .await
+                .unwrap()
+        );
+        s.add_approval_rule("api".into(), "cargo test".into())
+            .await
+            .unwrap();
+        s.add_approval_rule("api".into(), "cargo test".into())
+            .await
+            .unwrap(); // idempotent
+        assert!(
+            s.has_approval_rule("api".into(), "cargo test".into())
+                .await
+                .unwrap()
+        );
+        let rules = s.list_approval_rules().await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].repo, "api");
+        s.remove_approval_rule("api".into(), "cargo test".into())
+            .await
+            .unwrap();
+        assert!(
+            s.remove_approval_rule("api".into(), "cargo test".into())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

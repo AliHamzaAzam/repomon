@@ -76,6 +76,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: SchedulesCmd,
     },
+    /// Manage the per-repo approval allowlist (patterns the daemon auto-approves).
+    Approvals {
+        #[command(subcommand)]
+        cmd: ApprovalsCmd,
+    },
     /// Review and approve orchestrator-drafted playbooks (procedural memory).
     Playbooks {
         #[command(subcommand)]
@@ -219,6 +224,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
         Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
         Command::Schedules { cmd } => handle_schedules(cmd, config, socket).await?,
+        Command::Approvals { cmd } => handle_approvals(cmd, config, socket).await?,
         Command::Orchestrate {
             agent,
             autonomy,
@@ -634,6 +640,70 @@ async fn handle_schedules(
                 .call("schedule.remove", Some(json!({ "id": id })))
                 .await?;
             println!("removed schedule #{id}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
+pub enum ApprovalsCmd {
+    /// List confirmed approval rules (repo, pattern, since).
+    List,
+    /// Allowlist a command pattern for a repo (the daemon then auto-approves matches).
+    Allow { repo: String, pattern: String },
+    /// Remove an approval rule.
+    Remove { repo: String, pattern: String },
+}
+
+/// `repomon approvals ...` — the CLI surface over the approval allowlist. The same rules feed
+/// the daemon's auto-approve; force-push/rm -rf/reset --hard always escalate regardless.
+async fn handle_approvals(
+    cmd: ApprovalsCmd,
+    config: &Config,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        ApprovalsCmd::List => {
+            let res = client.call("approval.list", None).await?;
+            let rules = res
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rules.is_empty() {
+                println!("no approval rules (repomind proposes them after 3 consistent approvals)");
+                return Ok(());
+            }
+            for r in rules {
+                println!(
+                    "{}\t{}\tsince {}",
+                    r["repo"].as_str().unwrap_or("?"),
+                    r["pattern"].as_str().unwrap_or("?"),
+                    r["created_at"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        ApprovalsCmd::Allow { repo, pattern } => {
+            client
+                .call(
+                    "approval.allow",
+                    Some(json!({ "repo": repo, "pattern": pattern })),
+                )
+                .await?;
+            println!(
+                "allowlisted '{pattern}' in {repo} — the daemon now auto-approves matching \
+                 Bash permissions (destructive commands still always escalate)"
+            );
+        }
+        ApprovalsCmd::Remove { repo, pattern } => {
+            client
+                .call(
+                    "approval.remove",
+                    Some(json!({ "repo": repo, "pattern": pattern })),
+                )
+                .await?;
+            println!("removed approval rule '{pattern}' in {repo}");
         }
     }
     Ok(())

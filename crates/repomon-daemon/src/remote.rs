@@ -635,6 +635,12 @@ mod tests {
             // on the bridge.
             // standing-run schedules mint unattended orchestrator processes — strictly
             // local-only.
+            // approval policy shapes what the daemon auto-approves — the definition of a
+            // permission bypass. Strictly local-only.
+            "approval.record",
+            "approval.allow",
+            "approval.remove",
+            "approval.list",
             "schedule.add",
             "schedule.list",
             "schedule.remove",

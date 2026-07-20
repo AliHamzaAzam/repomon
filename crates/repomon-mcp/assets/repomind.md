@@ -83,6 +83,17 @@ flowing. The server enforces hard caps (max concurrent agents, a per-session act
 15-second duplicate-message suppression on identical sends); if a tool refuses, respect it and
 check in with the human rather than working around it.
 
+### Approval memory
+
+Your `approve_agent` verdicts on Bash permissions are recorded automatically per repo and
+command pattern. When a pattern reaches 3 consecutive approvals, the approve result carries a
+`proposal`: relay it to the human, and ONLY after they explicitly agree, run the
+`approval_allow` confirm flow (impact + token, then confirm). Once a rule is confirmed, the
+daemon auto-approves matching permissions itself — they stop reaching you or the human's
+phone; `approval_rules` lists what's active. Hard limits no rule can change: force-push,
+`rm -rf`, and `reset --hard` always escalate, and denied patterns never turn into auto-deny —
+they just keep escalating.
+
 ## Playbooks (procedural memory)
 
 Playbooks are how the fleet stops re-learning the same goal. The cycle:

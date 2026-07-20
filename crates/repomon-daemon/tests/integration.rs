@@ -1460,3 +1460,115 @@ async fn schedule_add_list_remove() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn approval_record_and_rules_lifecycle() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ap-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut stream = UnixStream::connect(&sock).await.expect("connect");
+
+    // Three consistent approvals: third one proposes an allowlist entry.
+    for (i, expect_propose) in [(1u64, false), (2, false), (3, true)] {
+        let r = call(
+            &mut stream,
+            i,
+            "approval.record",
+            Some(json!({ "repo": "api", "command": "cargo test -p foo", "verdict": "approve" })),
+        )
+        .await;
+        assert!(r.error.is_none(), "record errored: {:?}", r.error);
+        let v = r.result.unwrap();
+        assert_eq!(v["pattern"], json!("cargo test"));
+        assert_eq!(v["approvals"], json!(i));
+        assert_eq!(v["propose"], json!(expect_propose), "at approval {i}: {v}");
+    }
+
+    // Confirmed rule: listed, and further records say rule_exists instead of proposing.
+    let r = call(
+        &mut stream,
+        4,
+        "approval.allow",
+        Some(json!({ "repo": "api", "pattern": "cargo test" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "allow errored: {:?}", r.error);
+    let r = call(&mut stream, 5, "approval.list", None).await;
+    let rules = r.result.unwrap()["rules"].as_array().unwrap().clone();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["pattern"], json!("cargo test"));
+    let r = call(
+        &mut stream,
+        6,
+        "approval.record",
+        Some(json!({ "repo": "api", "command": "cargo test --lib", "verdict": "approve" })),
+    )
+    .await;
+    let v = r.result.unwrap();
+    assert_eq!(v["rule_exists"], json!(true));
+    assert_eq!(v["propose"], json!(false));
+
+    // Always-escalate commands never propose, no matter the streak.
+    for i in 10..14u64 {
+        let r = call(
+            &mut stream,
+            i,
+            "approval.record",
+            Some(json!({ "repo": "api", "command": "git push --force", "verdict": "approve" })),
+        )
+        .await;
+        let v = r.result.unwrap();
+        assert_eq!(v["propose"], json!(false), "always-escalate proposed: {v}");
+    }
+
+    // A deny resets the streak.
+    let r = call(
+        &mut stream,
+        20,
+        "approval.record",
+        Some(json!({ "repo": "api", "command": "npm run build", "verdict": "approve" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["approvals"], json!(1));
+    let r = call(
+        &mut stream,
+        21,
+        "approval.record",
+        Some(json!({ "repo": "api", "command": "npm run build", "verdict": "deny" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["approvals"], json!(0));
+
+    // Remove; second remove errors.
+    let r = call(
+        &mut stream,
+        22,
+        "approval.remove",
+        Some(json!({ "repo": "api", "pattern": "cargo test" })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    let r = call(
+        &mut stream,
+        23,
+        "approval.remove",
+        Some(json!({ "repo": "api", "pattern": "cargo test" })),
+    )
+    .await;
+    assert!(r.error.is_some());
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
