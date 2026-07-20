@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/repomond", "binaries/repomon-agent-host"]
+  }
+}

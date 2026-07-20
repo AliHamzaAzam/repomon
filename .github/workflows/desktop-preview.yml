@@ -2,7 +2,7 @@ name: desktop preview
 
 # Unsigned, installable preview bundles for testers. Decoupled from the production `v*` release
 # (which also runs the CLI + Homebrew pipeline and requires signing secrets): this lane fires on
-# its own `desktop-v*` tag, needs no secrets, and publishes a prerelease with dmg + Linux bundles.
+# its own `desktop-v*` tag, needs no secrets, and publishes a prerelease with dmg + Linux + NSIS.
 on:
   push:
     tags: ["desktop-v*"]
@@ -19,19 +19,21 @@ jobs:
           - platform: macos-14
             target: aarch64-apple-darwin
             bundles: dmg
+            config: src-tauri/tauri.preview.conf.json
           - platform: macos-14
             target: x86_64-apple-darwin
             bundles: dmg
+            config: src-tauri/tauri.preview.conf.json
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: appimage,deb,rpm
-          # Windows needs repomon-core's named-pipe transport (branch release/windows-preview).
-          # Kept here as an allowed failure so it lights up automatically once that merges.
+            config: src-tauri/tauri.preview.conf.json
+          # Windows bundles both sidecars: the daemon plus the per-agent ConPTY host it spawns.
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: nsis
-            windows_preview: true
-    continue-on-error: ${{ matrix.windows_preview || false }}
+            config: src-tauri/tauri.preview.win.conf.json
+            host_sidecar: true
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +66,12 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
           fi
+      - name: Build agent-host sidecar (Windows)
+        if: ${{ matrix.host_sidecar }}
+        shell: bash
+        run: |
+          cargo build --release --locked -p repomon-host --target "${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/repomon-agent-host.exe" "apps/desktop/src-tauri/binaries/repomon-agent-host-${{ matrix.target }}.exe"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -74,12 +82,12 @@ jobs:
           releaseBody: |
             Unsigned preview build of the Repomon desktop app, for testing only.
 
-            Requires a working `repomon`/`repomond` setup and `tmux` on the machine.
+            Requires a working `repomon`/`repomond` setup on the machine (tmux on macOS/Linux).
 
             - macOS: unsigned. After copying to Applications, right-click the app and choose Open
               to get past Gatekeeper (or run `xattr -dr com.apple.quarantine /Applications/Repomon.app`).
             - Linux: AppImage, deb, or rpm. Requires `tmux`.
-            - Windows: pending the native named-pipe transport (branch release/windows-preview).
+            - Windows: NSIS installer. Bundles the daemon and per-agent ConPTY host (no tmux needed).
           releaseDraft: false
           prerelease: true
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.preview.conf.json
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config ${{ matrix.config }}
