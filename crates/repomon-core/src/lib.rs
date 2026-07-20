@@ -17,6 +17,7 @@ pub mod git;
 pub mod indexer;
 pub mod lane;
 pub mod model;
+pub mod notes;
 pub mod notify;
 pub mod protocol;
 pub mod registry;
