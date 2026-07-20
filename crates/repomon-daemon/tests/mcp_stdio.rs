@@ -220,11 +220,11 @@ async fn mcp_stdio_end_to_end() {
 
     mcp_notify(&mut stdin, "notifications/initialized").await;
 
-    // 2. tools/list -> exactly the 15 tools (13 v1 + the repo-notes pair).
+    // 2. tools/list -> exactly the 16 tools (13 v1 + repo-notes pair + fleet_history).
     mcp_request(&mut stdin, 2, "tools/list", json!({})).await;
     let resp = mcp_read(&mut lines).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 15, "tools/list returned: {tools:?}");
+    assert_eq!(tools.len(), 16, "tools/list returned: {tools:?}");
     let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: BTreeSet<&str> = [
         "fleet_status",
@@ -242,6 +242,7 @@ async fn mcp_stdio_end_to_end() {
         "wait_for_change",
         "repo_notes",
         "repo_notes_write",
+        "fleet_history",
     ]
     .into_iter()
     .collect();
@@ -632,4 +633,165 @@ async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
     let _ = StdCommand::new("tmux")
         .args(["-L", &session, "kill-server"])
         .output();
+}
+
+/// Spawn an MCP child, initialize it, and return (child, stdin, stdout-lines).
+async fn init_mcp_child(
+    sock: &Path,
+    extra_env: &[(&str, &str)],
+) -> (Child, ChildStdin, tokio::io::Lines<BufReader<ChildStdout>>) {
+    let mut child = spawn_mcp_child(sock, extra_env);
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
+    mcp_request(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "repomon-it", "version": "0.0.0" } }),
+    )
+    .await;
+    let _ = mcp_read(&mut lines).await;
+    (child, stdin, lines)
+}
+
+#[tokio::test]
+async fn mcp_stdio_journal_and_cold_start_recap() {
+    let (sock, mut control, _state_dir) = boot_daemon("journal").await;
+    let (repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+    let repo_name = repo_dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // Session 1: one journaled mutation, then a clean exit.
+    let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({
+            "name": "repo_notes_write",
+            "arguments": { "repo": repo_name, "content": "use `pnpm test`" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "repo_notes_write errored: {text}");
+    shutdown_mcp_child(child, stdin).await;
+
+    // Session 2 (the cold start): the FIRST fleet_status carries the recap...
+    let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "fleet_status", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "fleet_status errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let recap = &parsed["since_you_last_looked"];
+    assert!(
+        recap.is_object(),
+        "first fleet_status must carry since_you_last_looked: {parsed}"
+    );
+    assert!(
+        recap.to_string().contains("repo_notes_write"),
+        "recap should mention the previous session's action: {recap}"
+    );
+
+    // ...and the second omits it (it's a cold-start block, not a per-call one).
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "fleet_status", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, _) = tool_result(&resp);
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        parsed.get("since_you_last_looked").is_none(),
+        "recap must appear only on the first call: {parsed}"
+    );
+
+    // fleet_history searches the journal.
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "fleet_history", "arguments": { "query": "repo_notes_write" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "fleet_history errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "fleet_history found nothing: {parsed}");
+    assert_eq!(entries[0]["action"], json!("repo_notes_write"));
+    assert_eq!(entries[0]["outcome"], json!("ok"));
+
+    // Failed mutations are journaled too, with outcome error.
+    mcp_request(
+        &mut stdin,
+        5,
+        "tools/call",
+        json!({
+            "name": "repo_notes_write",
+            "arguments": { "repo": "no-such-repo", "content": "x" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (_, is_error) = tool_result(&resp);
+    assert!(is_error);
+    mcp_request(
+        &mut stdin,
+        6,
+        "tools/call",
+        json!({ "name": "fleet_history", "arguments": { "query": "no-such-repo" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, _) = tool_result(&resp);
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert!(
+        entries.iter().any(|e| e["outcome"] == json!("error")),
+        "failed mutation should be journaled with outcome=error: {parsed}"
+    );
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_read_only_allows_fleet_history() {
+    let (sock, mut control, _state_dir) = boot_daemon("journal-ro").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) =
+        init_mcp_child(&sock, &[("REPOMON_MCP_AUTONOMY", "read-only")]).await;
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "fleet_history", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        !is_error,
+        "fleet_history (read) must work under read-only autonomy, got: {text}"
+    );
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
 }
