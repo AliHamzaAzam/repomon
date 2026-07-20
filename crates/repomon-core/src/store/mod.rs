@@ -26,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0006_remote_devices.sql"),
     include_str!("../../migrations/0007_orchestration_log.sql"),
     include_str!("../../migrations/0008_playbooks.sql"),
+    include_str!("../../migrations/0009_schedules.sql"),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -779,6 +780,69 @@ impl Store {
         .await
     }
 
+    // ---- standing-orchestration schedules ------------------------------------
+
+    /// Add a schedule. The spec is validated by the caller (`schedule::parse_spec`).
+    pub async fn add_schedule(
+        &self,
+        spec: String,
+        prompt: String,
+        max_actions: u32,
+    ) -> Result<Schedule> {
+        self.call(move |c| {
+            let now = Utc::now();
+            c.execute(
+                "INSERT INTO schedules(spec, prompt, max_actions, created_at)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![&spec, &prompt, max_actions, to_iso(&now)],
+            )?;
+            Ok(Schedule {
+                id: c.last_insert_rowid(),
+                spec,
+                prompt,
+                max_actions,
+                created_at: now,
+                last_run_at: None,
+            })
+        })
+        .await
+    }
+
+    pub async fn list_schedules(&self) -> Result<Vec<Schedule>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, spec, prompt, max_actions, created_at, last_run_at
+                 FROM schedules ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], schedule_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    pub async fn remove_schedule(&self, id: i64) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("schedule {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Stamp a schedule's last firing time. Called BEFORE the run so a slow run can't double-fire.
+    pub async fn mark_schedule_run(&self, id: i64, at: DateTime<Utc>) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE schedules SET last_run_at = ?2 WHERE id = ?1",
+                params![id, to_iso(&at)],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     // ---- agent sessions ------------------------------------------------------
 
     /// Insert or update a session keyed by its manifest path. Returns its id.
@@ -910,6 +974,17 @@ fn opt_dt_col(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> 
                 )
             }),
     }
+}
+
+fn schedule_from_row(row: &Row) -> rusqlite::Result<Schedule> {
+    Ok(Schedule {
+        id: row.get(0)?,
+        spec: row.get(1)?,
+        prompt: row.get(2)?,
+        max_actions: row.get(3)?,
+        created_at: dt_col(row, 4)?,
+        last_run_at: opt_dt_col(row, 5)?,
+    })
 }
 
 /// Column list shared by every playbook SELECT so `playbook_from_row` indexes stay in sync.
@@ -1415,6 +1490,31 @@ mod tests {
         assert!(s.list_playbooks().await.unwrap().is_empty());
         assert!(s.delete_playbook("gone".into()).await.is_err());
         assert!(s.approve_playbook("gone".into()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn schedule_add_list_remove_round_trip() {
+        let s = store().await;
+        let sched = s
+            .add_schedule("daily 09:00".into(), "morning briefing".into(), 10)
+            .await
+            .unwrap();
+        assert!(sched.id > 0);
+        assert!(sched.last_run_at.is_none());
+        let all = s.list_schedules().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].spec, "daily 09:00");
+        assert_eq!(all[0].max_actions, 10);
+        let at = Utc::now();
+        s.mark_schedule_run(sched.id, at).await.unwrap();
+        let all = s.list_schedules().await.unwrap();
+        assert_eq!(
+            all[0].last_run_at.map(|d| d.timestamp()),
+            Some(at.timestamp())
+        );
+        s.remove_schedule(sched.id).await.unwrap();
+        assert!(s.list_schedules().await.unwrap().is_empty());
+        assert!(s.remove_schedule(sched.id).await.is_err());
     }
 
     #[tokio::test]
