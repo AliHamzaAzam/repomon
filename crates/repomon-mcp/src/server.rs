@@ -1262,6 +1262,24 @@ mod tests {
     use super::*;
     use crate::fleet::AgentDigest;
 
+    /// The persona must teach the repo-notes loop (read at Orient, fold into tasks, write
+    /// lessons back) and must no longer present mnemind as the primary team memory.
+    #[test]
+    fn persona_documents_repo_notes() {
+        assert!(
+            crate::PERSONA.contains("repo_notes"),
+            "persona never mentions repo_notes"
+        );
+        assert!(
+            crate::PERSONA.contains("repo_notes_write"),
+            "persona never mentions repo_notes_write"
+        );
+        assert!(
+            !crate::PERSONA.contains("treat them as the team's long-term memory"),
+            "mnemind must be secondary to repo notes now"
+        );
+    }
+
     fn lane(id: i64, repo: &str, status: &str, attention: Attention) -> LaneDigest {
         LaneDigest {
             lane_id: id,
