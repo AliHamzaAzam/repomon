@@ -1,8 +1,9 @@
 name: desktop preview
 
-# Unsigned, installable preview bundles for testers. Decoupled from the production `v*` release
-# (which also runs the CLI + Homebrew pipeline and requires signing secrets): this lane fires on
-# its own `desktop-v*` tag, needs no secrets, and publishes a prerelease with dmg + Linux + NSIS.
+# Signed, installable preview bundles for testers, plus the in-app updater feed. Decoupled from
+# the production `v*` release (which also runs the CLI + Homebrew pipeline): this lane fires on
+# its own `desktop-v*` tag and publishes to a fixed moving `desktop-preview` release so the
+# updater has a stable endpoint (releases/download/desktop-preview/latest.json).
 on:
   push:
     tags: ["desktop-v*"]
@@ -16,14 +17,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # One universal macOS build: a single dmg + one .app.tar.gz updater artifact that
+          # serves both Apple Silicon and Intel (avoids the per-arch updater-name collision).
           - platform: macos-14
-            target: aarch64-apple-darwin
-            bundles: dmg
+            target: universal-apple-darwin
+            bundles: app,dmg
             config: src-tauri/tauri.preview.conf.json
-          - platform: macos-14
-            target: x86_64-apple-darwin
-            bundles: dmg
-            config: src-tauri/tauri.preview.conf.json
+            apple_universal: true
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: appimage,deb,rpm
@@ -38,7 +38,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: rustup target add ${{ matrix.target }}
+      - name: Add Rust targets
+        shell: bash
+        run: |
+          if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          else
+            rustup target add "${{ matrix.target }}"
+          fi
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -59,11 +66,18 @@ jobs:
       - name: Build daemon sidecar
         shell: bash
         run: |
-          cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
           mkdir -p apps/desktop/src-tauri/binaries
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
+          if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
+            # Both arch daemons; Tauri lipos them into the universal app.
+            for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --release --locked -p repomon-daemon --target "$arch"
+              cp "target/$arch/release/repomond" "apps/desktop/src-tauri/binaries/repomond-$arch"
+            done
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond.exe" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe"
           else
+            cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
           fi
       - name: Build agent-host sidecar (Windows)
@@ -90,9 +104,9 @@ jobs:
 
             Requires a working `repomon`/`repomond` setup (tmux on macOS/Linux).
 
-            - macOS: right-click the app and choose Open on first launch
+            - macOS: universal dmg. Right-click the app and choose Open on first launch
               (or `xattr -dr com.apple.quarantine /Applications/Repomon.app`).
-            - Linux: AppImage, deb, or rpm. Requires `tmux`.
+            - Linux: AppImage (auto-updates), deb, or rpm. Requires `tmux`.
             - Windows: NSIS installer. Bundles the daemon and per-agent ConPTY host (no tmux needed).
           releaseDraft: false
           prerelease: true
