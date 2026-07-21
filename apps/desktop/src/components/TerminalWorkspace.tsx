@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, lazy } from "solid-j
 
 import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
+import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import { dedupe, stabilizeTargets, type PaneTarget } from "./terminalTargets";
 
@@ -11,6 +12,7 @@ export type WorkspaceLayout = "focused" | "split" | "grid";
 
 interface TerminalWorkspaceProps {
   fleet: FleetStore;
+  actions: ActionsStore;
 }
 
 function readLayout(): WorkspaceLayout {
@@ -145,6 +147,18 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </For>
           <button
             type="button"
+            class="focus-ring h-7 shrink-0 rounded border border-dashed border-signal/40 px-2 font-mono text-[0.58rem] text-signal hover:bg-signal/10 disabled:opacity-40"
+            onClick={() => {
+              const lane = props.fleet.selectedLane();
+              if (lane) props.actions.spawn(lane);
+            }}
+            disabled={!props.fleet.selectedLane()}
+            title="Spawn an agent in this lane"
+          >
+            + agent
+          </button>
+          <button
+            type="button"
             class="focus-ring h-7 shrink-0 rounded border border-dashed border-line px-2 font-mono text-[0.58rem] text-muted hover:text-foreground"
             onClick={() => void openShell()}
             disabled={props.fleet.selectedLaneId() === null || openingShell()}
@@ -191,6 +205,22 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
                 {props.fleet.selectedLane() ? "Spawn an agent or open a shell to work in this lane." : "Add a repository to begin monitoring work."}
               </p>
+              <Show when={props.fleet.selectedLane()}>
+                {(lane) => (
+                  <div class="mt-4 flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-signal"
+                      onClick={() => props.actions.spawn(lane())}
+                    >Spawn agent</button>
+                    <button
+                      type="button"
+                      class="focus-ring rounded-md border border-line px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
+                      onClick={() => void openShell()}
+                    >Open shell</button>
+                  </div>
+                )}
+              </Show>
             </section>
           </div>
         }

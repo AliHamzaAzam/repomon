@@ -218,7 +218,7 @@ function App(props: AppProps) {
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
-          <TerminalWorkspace fleet={fleet} />
+          <TerminalWorkspace fleet={fleet} actions={actions} />
         </main>
 
         <aside
