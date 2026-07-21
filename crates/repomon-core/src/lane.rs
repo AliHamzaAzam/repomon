@@ -38,6 +38,13 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// repo root). A worktree the watcher flags as changed re-walks on the next list regardless, so
 /// this can be generous; the refresh is also capped per list so it never re-walks all at once.
 const STATE_TTL: Duration = Duration::from_secs(180);
+/// Minimum spacing between forced re-walks of a worktree the watcher keeps flagging dirty. An
+/// active agent writing files fires a burst of fsevents, each of which invalidates the state cache;
+/// without this, every `lane.list` would run a fresh (uncapped) gix status walk of that worktree.
+/// Within the debounce a dirty worktree reuses its last state and refreshes via the capped stale
+/// path instead, coalescing the burst into at most one walk per window. Kept short so a real change
+/// still surfaces within a poll or two.
+const DIRTY_DEBOUNCE: Duration = Duration::from_millis(1500);
 /// How long a repo's cached `git worktree list` stays valid. Worktrees change only on lane
 /// create/delete (which clear the cache) or external `git worktree` ops; this TTL bounds the
 /// latter while sparing a git subprocess per repo on every overlay.
@@ -188,7 +195,16 @@ impl Lanes {
             for (i, (_, entry, _, _, _)) in pending.iter().enumerate() {
                 match cache.get(&entry.path) {
                     None => must_walk.push(i),
-                    Some(e) if e.dirty => must_walk.push(i),
+                    // Dirty and not walked within the debounce → walk now.
+                    Some(e) if e.dirty && e.walked_at.elapsed() >= DIRTY_DEBOUNCE => {
+                        must_walk.push(i)
+                    }
+                    // Dirty but walked very recently → reuse and refresh via the capped stale path,
+                    // so an fsevents firehose can't force a fresh walk on every single event.
+                    Some(e) if e.dirty => {
+                        states[i] = Some(Ok(e.state.clone()));
+                        stale.push((i, e.walked_at));
+                    }
                     Some(e) if e.walked_at.elapsed() < STATE_TTL => {
                         states[i] = Some(Ok(e.state.clone()));
                     }

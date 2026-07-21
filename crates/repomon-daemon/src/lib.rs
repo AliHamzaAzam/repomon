@@ -158,6 +158,10 @@ pub struct Ctx {
     /// many clients polling every ~1s don't each re-run the tmux/lsof/transcript scan. Invalidated
     /// on structural changes (spawn/adopt/stop/lane create/delete) so user actions show at once.
     pub overlay_cache: Mutex<Option<(Instant, Vec<Lane>)>>,
+    /// Single-flight guard for the overlay recompute. Serializes fresh rebuilds so that when several
+    /// callers miss the TTL cache at once (two clients polling `lane.list` plus the notify watcher),
+    /// exactly one runs the expensive scan and the rest reuse its result instead of stampeding.
+    pub overlay_flight: Mutex<()>,
     /// Cache of the pending-prompt pane sniff per tmux window — a `capture-pane` per Running/Waiting
     /// session is the bulk of the overlay's subprocess cost. Short TTL: a dialog appearing is seen
     /// within it; until then the session reads as it last did. Keyed by window name. Any input sent
@@ -310,6 +314,7 @@ impl Ctx {
             live_cwds: Mutex::new(None),
             cwds_sticky: Mutex::new(HashMap::new()),
             overlay_cache: Mutex::new(None),
+            overlay_flight: Mutex::new(()),
             prompt_cache: Mutex::new(HashMap::new()),
             pane_seen: Mutex::new(HashMap::new()),
             gate_cache: Mutex::new(HashMap::new()),

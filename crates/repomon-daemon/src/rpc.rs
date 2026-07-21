@@ -2114,6 +2114,20 @@ pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> 
 /// stale snapshot — notably `notify_watch`, whose edge detection would miss a transition if two
 /// ticks reused the same cached list.
 pub(crate) async fn lanes_with_agents_fresh(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
+    // Single-flight: only one overlay scan runs at a time. Callers that arrived together (two
+    // clients polling `lane.list`, or the notify watcher landing on the same instant) queue on this
+    // lock; whoever waited then finds the leader's just-written cache below and reuses it instead of
+    // running its own tmux/transcript/gix scan. The `_fresh` contract still holds — the value is at
+    // most one in-flight scan old (well under the notify watcher's 2s tick and 30s debounce).
+    let _flight = ctx.overlay_flight.lock().await;
+    {
+        let cache = ctx.overlay_cache.lock().await;
+        if let Some((t, lanes)) = &*cache {
+            if t.elapsed() < OVERLAY_TTL {
+                return Ok(lanes.clone());
+            }
+        }
+    }
     let mut lanes = ctx.lanes.list().await.map_err(internal)?;
     overlay_agents(ctx, &mut lanes).await;
     *ctx.overlay_cache.lock().await = Some((std::time::Instant::now(), lanes.clone()));
