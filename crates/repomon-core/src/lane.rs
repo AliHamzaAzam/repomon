@@ -67,6 +67,9 @@ type WorktreeCache = Arc<Mutex<HashMap<PathBuf, (Instant, Vec<worktree::Worktree
 /// every client, was the dominant source of the daemon's disk-write churn.
 type WtSig = (RepoId, Option<String>, gix::ObjectId, bool, String);
 
+/// Cached `list` bookkeeping per worktree path: change signature, the persisted row, and lane id.
+type WtCache = Arc<Mutex<HashMap<PathBuf, (WtSig, Worktree, LaneId)>>>;
+
 /// Manages lanes across all registered repos.
 #[derive(Clone)]
 pub struct Lanes {
@@ -81,9 +84,15 @@ pub struct Lanes {
     /// re-enumerated with a git subprocess on every overlay. Cleared by create/delete; otherwise
     /// bounded by [`WORKTREES_TTL`]. Shared across clones via `Arc`.
     worktrees_cache: WorktreeCache,
-    /// Last-persisted worktree row signature per path, so `list` only writes `upsert_worktree` when
-    /// a worktree actually changed (new head/branch) instead of on every poll. See [`WtSig`].
-    wt_cache: Arc<Mutex<HashMap<PathBuf, (WtSig, Worktree)>>>,
+    /// Per worktree path: its last-persisted row signature, the row itself, and its lane id. Lets
+    /// `list` skip BOTH the `upsert_worktree` and the `get_or_create_lane` writes when a worktree is
+    /// unchanged — each ran unconditionally per worktree per poll, and even a no-op
+    /// `INSERT ... ON CONFLICT DO NOTHING` commits a WAL frame, so together they were the daemon's
+    /// disk-write churn. See [`WtSig`].
+    wt_cache: WtCache,
+    /// Last-pruned worktree keep-set per repo, so `prune_worktrees` (a DELETE that commits even when
+    /// it removes nothing) only runs when the repo's worktree set actually changed.
+    prune_cache: Arc<Mutex<HashMap<RepoId, Vec<String>>>>,
 }
 
 impl Lanes {
@@ -94,6 +103,7 @@ impl Lanes {
             state_cache: Arc::new(Mutex::new(HashMap::new())),
             worktrees_cache: Arc::new(Mutex::new(HashMap::new())),
             wt_cache: Arc::new(Mutex::new(HashMap::new())),
+            prune_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -165,17 +175,18 @@ impl Lanes {
                     .unwrap_or_else(|| "?".to_string());
                 let head = entry.head.unwrap_or_else(null_oid);
 
-                // Skip the DB write when this worktree's row is unchanged since the last list.
+                // Skip the DB writes (worktree upsert + lane get-or-create) when this worktree is
+                // unchanged since the last list — both commit a WAL frame even when nothing changes.
                 let sig: WtSig = (repo.id, entry.branch.clone(), head, is_main, name.clone());
                 let cached = {
                     let cache = self.wt_cache.lock().unwrap_or_else(|e| e.into_inner());
                     cache
                         .get(&entry.path)
-                        .filter(|(s, _)| *s == sig)
-                        .map(|(_, w)| w.clone())
+                        .filter(|(s, _, _)| *s == sig)
+                        .map(|(_, w, lid)| (w.clone(), *lid))
                 };
-                let wt = match cached {
-                    Some(w) => w,
+                let (wt, lane_id) = match cached {
+                    Some(pair) => pair,
                     None => {
                         let w = self
                             .store
@@ -188,22 +199,35 @@ impl Lanes {
                                 name,
                             )
                             .await?;
+                        let lid = self
+                            .store
+                            .get_or_create_lane(repo.id, entry.path.to_string_lossy().into_owned())
+                            .await?;
                         self.wt_cache
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .insert(entry.path.clone(), (sig, w.clone()));
-                        w
+                            .insert(entry.path.clone(), (sig, w.clone(), lid));
+                        (w, lid)
                     }
                 };
-                let lane_id = self
-                    .store
-                    .get_or_create_lane(repo.id, entry.path.to_string_lossy().into_owned())
-                    .await?;
 
                 pending.push((repo.clone(), entry, wt, lane_id, head));
             }
 
-            self.store.prune_worktrees(repo.id, keep).await?;
+            // Only prune when this repo's worktree set changed; an unchanged DELETE still commits.
+            let prune_needed = {
+                let mut cache = self.prune_cache.lock().unwrap_or_else(|e| e.into_inner());
+                match cache.get(&repo.id) {
+                    Some(prev) if *prev == keep => false,
+                    _ => {
+                        cache.insert(repo.id, keep.clone());
+                        true
+                    }
+                }
+            };
+            if prune_needed {
+                self.store.prune_worktrees(repo.id, keep).await?;
+            }
         }
 
         // Phase 2 — each worktree's live git state. `read_state` (gix status) is a full directory
@@ -414,6 +438,10 @@ impl Lanes {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.prune_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         // Re-list and return the freshly created lane.
         self.list()
@@ -474,6 +502,10 @@ impl Lanes {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&wt_path);
+        self.prune_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         Ok(())
     }
 
