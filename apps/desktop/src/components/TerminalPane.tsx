@@ -95,6 +95,22 @@ export default function TerminalPane(props: TerminalPaneProps) {
       }
     }
 
+    // The WebGL renderer bakes a glyph atlas from whatever font is loaded when it initializes.
+    // Our custom "Berkeley Mono" can still be loading at that point, so some glyphs rasterize as
+    // blanks — the scattered missing characters. Rebuild the atlas once fonts are ready so text
+    // renders completely.
+    function rebuildAtlas() {
+      try {
+        webgl?.clearTextureAtlas();
+        terminal.refresh(0, terminal.rows - 1);
+      } catch {
+        // best-effort; the DOM renderer needs no atlas
+      }
+    }
+    if (webgl && typeof document !== "undefined" && document.fonts?.ready) {
+      void document.fonts.ready.then(rebuildAtlas);
+    }
+
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f") {
