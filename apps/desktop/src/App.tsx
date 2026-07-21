@@ -1,9 +1,13 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
+import ActionModals from "./components/ActionModals";
 import FleetSidebar from "./components/FleetSidebar";
 import ControlCenter from "./components/ControlCenter";
 import RepomindPanel from "./components/RepomindPanel";
 import TerminalWorkspace from "./components/TerminalWorkspace";
+import UpdateBanner from "./components/UpdateBanner";
+import { checkForUpdate, type AvailableUpdate } from "./ipc/updater";
+import { createActionsStore } from "./stores/actions";
 import {
   initialConnection,
   tauriConnectionSource,
@@ -44,8 +48,10 @@ function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(true);
+  const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
+  const actions = createActionsStore(fleet);
   const notifications = createNotificationStore();
   let stopListening: (() => void) | undefined;
   let fleetStarted = false;
@@ -74,7 +80,23 @@ function App(props: AppProps) {
     }
   });
 
+  const onSettingsShortcut = (event: KeyboardEvent) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+      event.preventDefault();
+      actions.openSettings();
+    }
+  };
+
   onMount(() => {
+    window.addEventListener("keydown", onSettingsShortcut);
+
+    // Check for a newer build once on launch; silent if current or if not a Tauri build.
+    void checkForUpdate()
+      .then((available) => {
+        if (active && available) setUpdate(available);
+      })
+      .catch(() => undefined);
+
     void source
       .subscribe(setConnection)
       .then((stop) => {
@@ -101,6 +123,7 @@ function App(props: AppProps) {
 
   onCleanup(() => {
     active = false;
+    window.removeEventListener("keydown", onSettingsShortcut);
     stopListening?.();
     fleet.stop();
     notifications.stop();
@@ -153,7 +176,14 @@ function App(props: AppProps) {
           <span class="rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.14em] text-muted">
             Local
           </span>
-          <ControlCenter fleet={fleet} notifications={notifications} />
+          <ControlCenter fleet={fleet} notifications={notifications} actions={actions} />
+          <button
+            type="button"
+            class="focus-ring rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
+            onClick={() => actions.openSettings()}
+            aria-label="Settings"
+            title="Settings (⌘,)"
+          >Settings</button>
           <button
             type="button"
             class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${repomindOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
@@ -184,7 +214,7 @@ function App(props: AppProps) {
                 {fleet.repos().length} / {fleet.lanes().length}
               </span>
           </div>
-          <FleetSidebar fleet={fleet} searchRef={(element) => { searchInput = element; }} />
+          <FleetSidebar fleet={fleet} actions={actions} searchRef={(element) => { searchInput = element; }} />
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
@@ -224,6 +254,11 @@ function App(props: AppProps) {
         </span>
         <span>Uptime {formatUptime(connection().daemon?.uptime_secs)}</span>
       </footer>
+
+      <ActionModals actions={actions} />
+      <Show when={update()}>
+        {(available) => <UpdateBanner update={available()} onDismiss={() => setUpdate(null)} />}
+      </Show>
     </div>
   );
 }

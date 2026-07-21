@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 tauri = { version = "~2.9.0", features = [] }
+tauri-plugin-dialog = "~2.4.0"
 tauri-plugin-notification = "~2.3.0"
 tauri-plugin-process = "~2.3.0"
 tauri-plugin-updater = "~2.9.0"

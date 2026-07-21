@@ -39,14 +39,26 @@ export interface DaemonEvent<T = unknown> {
 
 export interface ConfigView {
   accent?: string | null;
-  auto_continue: boolean;
-  default_agent?: string | null;
-  embedded_pty: boolean;
-  expand_agents: boolean;
-  notify_enabled: boolean;
-  spawn_prompt: boolean;
-  usage_probe: boolean;
   worktree_template: string;
+  default_agent?: string | null;
+  auto_continue: boolean;
+  auto_continue_message: string;
+  spawn_prompt: boolean;
+  notify_enabled: boolean;
+  notify_needs_you: boolean;
+  notify_rate_limited: boolean;
+  notify_resumed: boolean;
+  notify_idle: boolean;
+  notify_sound: boolean;
+  notify_show_why: boolean;
+  notify_coalesce: boolean;
+  notify_click_focus: boolean;
+  notify_subagents: boolean;
+  usage_probe: boolean;
+  expand_agents: boolean;
+  embedded_pty: boolean;
+  orchestrator_agent?: string | null;
+  orchestrator_model?: string | null;
   [key: string]: unknown;
 }
 

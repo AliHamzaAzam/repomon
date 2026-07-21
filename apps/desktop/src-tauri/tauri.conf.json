@@ -56,9 +56,9 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/AliHamzaAzam/repomon/releases/latest/download/latest.json"
+        "https://github.com/AliHamzaAzam/repomon/releases/download/desktop-preview/latest.json"
       ],
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDQkRERjE2RTcyQTZCRDEKUldUUmF5cm5GdCs5M0dMNERGc2UwZEhFUzlDbW41dHJaY1VZbXg5aHJCWlY1UFQ1anY5WTgyeUEK"
     }
   }
 }

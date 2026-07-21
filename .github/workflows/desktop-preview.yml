@@ -75,19 +75,26 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: Repomon Desktop ${{ github.ref_name }} (unsigned preview)
+          # Fixed moving release so the in-app updater has a stable endpoint
+          # (releases/download/desktop-preview/latest.json). Each desktop-v* tag refreshes it.
+          tagName: desktop-preview
+          releaseName: Repomon Desktop (preview)
           releaseBody: |
-            Unsigned preview build of the Repomon desktop app, for testing only.
+            Rolling preview build of the Repomon desktop app, for testing. The installed app
+            auto-updates from this release (updates are cryptographically signed; the OS-level
+            code signature is not set yet, so first install shows a Gatekeeper/SmartScreen prompt).
 
-            Requires a working `repomon`/`repomond` setup on the machine (tmux on macOS/Linux).
+            Requires a working `repomon`/`repomond` setup (tmux on macOS/Linux).
 
-            - macOS: unsigned. After copying to Applications, right-click the app and choose Open
-              to get past Gatekeeper (or run `xattr -dr com.apple.quarantine /Applications/Repomon.app`).
+            - macOS: right-click the app and choose Open on first launch
+              (or `xattr -dr com.apple.quarantine /Applications/Repomon.app`).
             - Linux: AppImage, deb, or rpm. Requires `tmux`.
             - Windows: NSIS installer. Bundles the daemon and per-agent ConPTY host (no tmux needed).
           releaseDraft: false
           prerelease: true
+          includeUpdaterJson: true
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config ${{ matrix.config }}

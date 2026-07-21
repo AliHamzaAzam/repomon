@@ -1,21 +1,17 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
-import {
-  DaemonRpcError,
-  daemonCall,
-  type ConfigView,
-} from "../ipc/rpc";
+import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
-import { applyAccent } from "../theme";
-import { installAvailableUpdate, type UpdateProgress } from "../ipc/updater";
+import type { ActionsStore } from "../stores/actions";
 
-type ControlTab = "actions" | "triage" | "history" | "settings" | "feed";
+type ControlTab = "actions" | "triage" | "history" | "feed";
 
 interface ControlCenterProps {
   fleet: FleetStore;
   notifications: NotificationStore;
+  actions: ActionsStore;
 }
 
 function replacementDialog(error: unknown): PendingDialog | null | undefined {
@@ -39,10 +35,7 @@ export default function ControlCenter(props: ControlCenterProps) {
   const [sessions, setSessions] = createSignal<WorkSession[]>([]);
   const [timeline, setTimeline] = createSignal<TimelineData | null>(null);
   const [search, setSearch] = createSignal("");
-  const [config, setConfig] = createSignal<ConfigView | null>(null);
   const [browser, setBrowser] = createSignal<BrowseResult | null>(null);
-  const [updateProgress, setUpdateProgress] = createSignal<UpdateProgress | null>(null);
-  const [updateMessage, setUpdateMessage] = createSignal<string | null>(null);
 
   const selectedLane = () => props.fleet.selectedLane();
   const selectedAgent = createMemo(() => selectedLane()?.agent_sessions[0] ?? null);
@@ -76,21 +69,16 @@ export default function ControlCenter(props: ControlCenterProps) {
     }
   }
 
-  async function spawnAgent() {
+  function spawnAgent() {
     const lane = selectedLane();
     if (!lane) return;
-    const choices = await daemonCall("agent.detect");
-    const fallback = choices.find((choice) => choice.default && choice.detected)
-      ?? choices.find((choice) => choice.detected);
-    const agent = window.prompt("Agent name", fallback?.name ?? "claude-code")?.trim();
-    if (!agent) return;
-    const task = window.prompt("Initial task (optional)")?.trim();
-    await run("spawn", () => daemonCall("agent.spawn", { lane_id: lane.id, agent, task: task || undefined }));
+    props.actions.spawn(lane);
+    setOpen(false);
   }
 
-  async function addRepo() {
-    const path = window.prompt("Absolute repository path")?.trim();
-    if (path) await run("repo.add", () => daemonCall("repo.add", { path }));
+  function addRepo() {
+    void props.actions.addRepo();
+    setOpen(false);
   }
 
   async function browse(path?: string) {
@@ -98,11 +86,21 @@ export default function ControlCenter(props: ControlCenterProps) {
     if (result) setBrowser(result as BrowseResult);
   }
 
-  async function createLane() {
-    const repo = selectedLane()?.repo ?? props.fleet.repos()[0];
-    if (!repo) return;
-    const branch = window.prompt(`New branch in ${repo.name}`)?.trim();
-    if (branch) await run("lane.create", () => daemonCall("lane.create", { repo_id: repo.id, branch }));
+  function createLane() {
+    props.actions.newLane(selectedLane()?.repo.id ?? props.fleet.repos()[0]?.id);
+    setOpen(false);
+  }
+
+  function renameSession() {
+    const agent = selectedAgent();
+    if (!agent?.session_id) return;
+    props.actions.rename({ sessionId: agent.session_id, current: agent.custom_label ?? "" });
+    setOpen(false);
+  }
+
+  function confirmAction(options: Parameters<ActionsStore["confirm"]>[0]) {
+    props.actions.confirm(options);
+    setOpen(false);
   }
 
   async function answer(choice: number) {
@@ -160,32 +158,9 @@ export default function ControlCenter(props: ControlCenterProps) {
     }
   }
 
-  async function loadSettings() {
-    setConfig(await daemonCall("config.get"));
-  }
-
-  async function updateDesktop() {
-    setBusy("update");
-    setError(null);
-    setUpdateMessage("Checking for updates…");
-    try {
-      const outcome = await installAvailableUpdate((progress) => {
-        setUpdateProgress(progress);
-        setUpdateMessage(`Downloading Repomon ${progress.version}`);
-      });
-      if (outcome === "current") setUpdateMessage("Repomon is up to date.");
-    } catch (cause) {
-      setUpdateMessage(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function chooseTab(next: ControlTab) {
     setTab(next);
     if (next === "history") await loadHistory();
-    if (next === "settings") await loadSettings();
     if (next === "feed") props.notifications.markAllRead();
   }
 
@@ -214,7 +189,7 @@ export default function ControlCenter(props: ControlCenterProps) {
           <section role="dialog" aria-modal="true" aria-label="Control center" class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
             <nav aria-label="Control sections" class="border-r border-line bg-raised/50 p-2">
               <p class="section-label px-2 pb-3 pt-2">Control center</p>
-              <For each={["actions", "triage", "history", "settings", "feed"] as ControlTab[]}>
+              <For each={["actions", "triage", "history", "feed"] as ControlTab[]}>
                 {(item) => (
                   <button type="button" class={`focus-ring mb-1 flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs capitalize ${tab() === item ? "bg-signal/10 text-signal" : "text-muted hover:bg-raised hover:text-foreground"}`} onClick={() => void chooseTab(item)}>
                     <span>{item}</span>
@@ -265,18 +240,16 @@ export default function ControlCenter(props: ControlCenterProps) {
                   <section>
                     <p class="section-label mb-2">Agent</p>
                     <div class="action-grid">
-                      <button onClick={() => void spawnAgent()}>Spawn agent</button>
+                      <button onClick={() => spawnAgent()} disabled={!selectedLane()}>Spawn agent</button>
                       <button onClick={() => void run("adopt", () => daemonCall("agent.adopt", { lane_id: selectedLane()!.id, session_id: selectedAgent()?.session_id ?? undefined }))} disabled={!selectedLane() || !selectedAgent()?.external}>Adopt external</button>
-                      <button onClick={() => {
-                        const agent = selectedAgent();
-                        const label = agent?.session_id ? window.prompt("Session label", agent.custom_label ?? "") : null;
-                        if (agent?.session_id && label !== null) void run("rename", () => daemonCall("session.rename", { session_id: agent.session_id!, label }));
-                      }} disabled={!selectedAgent()?.session_id}>Rename session</button>
+                      <button onClick={() => renameSession()} disabled={!selectedAgent()?.session_id}>Rename session</button>
                       <button onClick={() => void run("pin", () => daemonCall("agent.pin", { lane_id: selectedLane()!.id, pinned: !selectedLane()!.pinned }))} disabled={!selectedLane()}>{selectedLane()?.pinned ? "Unpin lane" : "Pin lane"}</button>
                       <button onClick={() => void run("continue", () => daemonCall("agent.auto_continue", { lane_id: selectedLane()!.id, enabled: true }))} disabled={!selectedLane()}>Arm auto-continue</button>
                       <button class="is-danger" onClick={() => {
+                        const lane = selectedLane();
                         const agent = selectedAgent();
-                        if (selectedLane() && window.confirm("Stop this managed agent?")) void run("stop", () => daemonCall("agent.stop", { lane_id: selectedLane()!.id, window: agent?.tmux_window ?? undefined }));
+                        if (!lane) return;
+                        confirmAction({ title: "Stop agent?", message: "Stop this managed agent. Its terminal session ends.", confirmLabel: "Stop", danger: true, onConfirm: async () => { await daemonCall("agent.stop", { lane_id: lane.id, window: agent?.tmux_window ?? undefined }); await props.fleet.refresh(); } });
                       }} disabled={!selectedLane() || !selectedAgent()?.tmux_window}>Stop agent</button>
                     </div>
                   </section>
@@ -284,19 +257,24 @@ export default function ControlCenter(props: ControlCenterProps) {
                   <section>
                     <p class="section-label mb-2">Lane and repository</p>
                     <div class="action-grid">
-                      <button onClick={() => void createLane()}>New lane</button>
+                      <button onClick={() => createLane()}>New lane</button>
                       <button onClick={() => void run("diff", () => daemonCall("lane.diff", { lane_id: selectedLane()!.id, include_patch: true }))} disabled={!selectedLane()}>Review diff</button>
                       <button onClick={() => {
-                        if (selectedLane() && window.confirm("Merge this lane into the repository base branch?")) void run("merge", () => daemonCall("lane.merge", { lane_id: selectedLane()!.id }));
+                        const lane = selectedLane();
+                        if (!lane) return;
+                        confirmAction({ title: "Merge lane?", message: `Merge ${lane.worktree.branch ?? lane.worktree.name} into the repository base branch.`, confirmLabel: "Merge", onConfirm: async () => { await daemonCall("lane.merge", { lane_id: lane.id }); await props.fleet.refresh(); } });
                       }} disabled={!selectedLane() || selectedLane()?.worktree.is_main}>Merge lane</button>
-                      <button onClick={() => void addRepo()}>Add repository</button>
+                      <button onClick={() => addRepo()}>Add repository</button>
                       <button onClick={() => void browse(browser()?.path)}>Browse filesystem</button>
                       <button class="is-danger" onClick={() => {
-                        if (selectedLane() && !selectedLane()!.worktree.is_main && window.confirm("Delete this worktree lane?")) void run("delete", () => daemonCall("lane.delete", { lane_id: selectedLane()!.id, also_delete_branch: false }));
+                        const lane = selectedLane();
+                        if (!lane || lane.worktree.is_main) return;
+                        confirmAction({ title: "Delete lane?", message: `Delete the worktree lane ${lane.worktree.branch ?? lane.worktree.name}. The branch is kept.`, confirmLabel: "Delete", danger: true, onConfirm: async () => { await daemonCall("lane.delete", { lane_id: lane.id, also_delete_branch: false }); await props.fleet.refresh(); } });
                       }} disabled={!selectedLane() || selectedLane()?.worktree.is_main}>Delete lane</button>
                       <button class="is-danger" onClick={() => {
                         const repo = selectedLane()?.repo;
-                        if (repo && window.confirm(`Remove ${repo.name} from repomon?`)) void run("remove", () => daemonCall("repo.remove", { repo_id: repo.id }));
+                        if (repo) props.actions.removeRepo(repo);
+                        setOpen(false);
                       }} disabled={!selectedLane()}>Remove repository</button>
                     </div>
                   </section>
@@ -344,36 +322,6 @@ export default function ControlCenter(props: ControlCenterProps) {
                 <Show when={timeline()?.rows.length}>
                   <section class="mt-5"><p class="section-label mb-2">Activity timeline</p><For each={timeline()!.rows}>{(row) => <div class="mb-2 grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2"><span class="truncate text-xs text-muted">{row.repo_name}</span><div class="flex h-5 items-end gap-px">{row.density.map((level) => <i class="flex-1 bg-signal" style={{ height: `${Math.max(8, level * 18)}%`, opacity: `${0.18 + level * 0.14}` }} />)}</div></div>}</For></section>
                 </Show>
-              </Show>
-
-              <Show when={tab() === "settings" && config()}>
-                {(settings) => (
-                  <form class="space-y-4" onSubmit={(event) => {
-                    event.preventDefault();
-                    void run("settings", async () => {
-                      const saved = await daemonCall("config.set", settings());
-                      setConfig(saved);
-                      applyAccent(saved.accent);
-                      return saved;
-                    });
-                  }}>
-                    <label class="block"><span class="section-label">Accent</span><input class="settings-input" value={String(settings().accent ?? "cyan")} onInput={(event) => setConfig({ ...settings(), accent: event.currentTarget.value })} /></label>
-                    <label class="block"><span class="section-label">Worktree template</span><input class="settings-input" value={settings().worktree_template} onInput={(event) => setConfig({ ...settings(), worktree_template: event.currentTarget.value })} /></label>
-                    <div class="grid gap-2 sm:grid-cols-2">
-                      <For each={[["auto_continue", "Auto-continue"], ["notify_enabled", "Notifications"], ["usage_probe", "Usage probe"], ["expand_agents", "Expand agents"], ["embedded_pty", "Embedded terminal"]] as Array<[keyof ConfigView, string]>}>
-                        {([key, label]) => <label class="flex items-center justify-between rounded border border-line p-3 text-xs"><span>{label}</span><input type="checkbox" checked={Boolean(settings()[key])} onChange={(event) => setConfig({ ...settings(), [key]: event.currentTarget.checked })} /></label>}
-                      </For>
-                    </div>
-                    <button type="submit" class="focus-ring rounded bg-signal px-4 py-2 font-mono text-[0.6rem] font-semibold uppercase text-background">Save settings</button>
-                    <div class="flex items-center gap-3 border-t border-line pt-4">
-                      <button type="button" class="focus-ring rounded border border-line px-3 py-2 font-mono text-[0.58rem] uppercase text-muted" onClick={() => void updateDesktop()} disabled={busy() === "update"}>Check for updates</button>
-                      <span class="text-xs text-muted">{updateMessage()}</span>
-                    </div>
-                    <Show when={updateProgress()?.total}>
-                      <progress class="h-1.5 w-full accent-signal" max={updateProgress()!.total} value={updateProgress()!.downloaded} />
-                    </Show>
-                  </form>
-                )}
               </Show>
 
               <Show when={tab() === "feed"}>

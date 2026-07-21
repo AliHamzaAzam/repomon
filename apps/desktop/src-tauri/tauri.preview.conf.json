@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "createUpdaterArtifacts": true,
     "externalBin": ["binaries/repomond"]
   }
 }

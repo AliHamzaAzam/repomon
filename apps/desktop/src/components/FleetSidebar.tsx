@@ -2,9 +2,11 @@ import { For, Show, createMemo } from "solid-js";
 
 import type { Lane, Repo } from "../bindings";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
+import type { ActionsStore } from "../stores/actions";
 
 interface FleetSidebarProps {
   fleet: FleetStore;
+  actions: ActionsStore;
   searchRef?: (element: HTMLInputElement) => void;
 }
 
@@ -71,27 +73,53 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           />
           <span class="absolute left-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted">⌕</span>
         </label>
-        <button
-          type="button"
-          class={`focus-ring flex h-7 w-full items-center justify-between rounded-md border px-2 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${props.fleet.urgentOnly() ? "border-attention/50 bg-attention/10 text-attention" : "border-line bg-raised text-muted"}`}
-          onClick={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
-          aria-pressed={props.fleet.urgentOnly()}
-        >
-          <span>Urgent only</span>
-          <span>{props.fleet.counts().urgent}</span>
-        </button>
+        <div class="flex gap-2">
+          <button
+            type="button"
+            class={`focus-ring flex h-7 flex-1 items-center justify-between rounded-md border px-2 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${props.fleet.urgentOnly() ? "border-attention/50 bg-attention/10 text-attention" : "border-line bg-raised text-muted"}`}
+            onClick={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
+            aria-pressed={props.fleet.urgentOnly()}
+          >
+            <span>Urgent only</span>
+            <span>{props.fleet.counts().urgent}</span>
+          </button>
+          <button
+            type="button"
+            class="focus-ring flex h-7 items-center gap-1 rounded-md border border-line bg-raised px-2 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
+            onClick={() => void props.actions.addRepo()}
+            title="Add a repository"
+          >
+            <span>+ Repo</span>
+          </button>
+        </div>
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         <Show when={!props.fleet.loading() || props.fleet.lanes().length} fallback={<p class="p-3 text-xs text-muted">Syncing fleet…</p>}>
           <For each={grouped()}>
             {(group) => (
-              <section class="mb-2" aria-label={group.repo.name}>
+              <section class="group/repo mb-2" aria-label={group.repo.name}>
                 <div class="flex items-center justify-between px-2 py-1.5">
                   <span class="truncate font-mono text-[0.61rem] font-semibold uppercase tracking-[0.08em] text-muted">
                     {group.repo.name}
                   </span>
-                  <span class="font-mono text-[0.55rem] text-muted/70">{group.lanes.length}</span>
+                  <span class="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-signal group-hover/repo:opacity-100"
+                      onClick={() => props.actions.newLane(group.repo.id)}
+                      title={`New lane in ${group.repo.name}`}
+                      aria-label={`New lane in ${group.repo.name}`}
+                    >+</button>
+                    <button
+                      type="button"
+                      class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-fault group-hover/repo:opacity-100"
+                      onClick={() => props.actions.removeRepo(group.repo)}
+                      title={`Remove ${group.repo.name}`}
+                      aria-label={`Remove ${group.repo.name}`}
+                    >×</button>
+                    <span class="font-mono text-[0.55rem] text-muted/70">{group.lanes.length}</span>
+                  </span>
                 </div>
                 <div class="space-y-0.5">
                   <For each={group.lanes}>
@@ -109,9 +137,21 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </For>
           <Show when={!props.fleet.visibleLanes().length}>
             <div class="m-2 rounded-lg border border-dashed border-line p-3 text-xs leading-relaxed text-muted">
-              {props.fleet.query() || props.fleet.urgentOnly()
-                ? "No lanes match this view."
-                : "Add a repository to begin monitoring work."}
+              <Show
+                when={props.fleet.query() || props.fleet.urgentOnly()}
+                fallback={
+                  <div class="space-y-2">
+                    <p>No repositories yet.</p>
+                    <button
+                      type="button"
+                      class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-signal"
+                      onClick={() => void props.actions.addRepo()}
+                    >Add a repository</button>
+                  </div>
+                }
+              >
+                No lanes match this view.
+              </Show>
             </div>
           </Show>
         </Show>
