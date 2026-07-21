@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::git::{reader, worktree};
-use crate::model::{CreateLaneParams, Lane, LaneId, Repo, RepoId, WorktreeState};
+use crate::model::{CreateLaneParams, Lane, LaneId, Repo, RepoId, Worktree, WorktreeState};
 use crate::store::Store;
 
 fn join_err(e: tokio::task::JoinError) -> Error {
@@ -61,6 +61,12 @@ struct StateEntry {
 /// Per-repo cache of `git worktree list` results, keyed by repo path.
 type WorktreeCache = Arc<Mutex<HashMap<PathBuf, (Instant, Vec<worktree::WorktreeEntry>)>>>;
 
+/// The inputs that determine a worktree's persisted DB row: `(repo_id, branch, head, is_main,
+/// name)`. Caching this per worktree path lets an unchanged worktree skip its `upsert_worktree`
+/// (a DB write) on every list — that unconditional write, run for all worktrees on every poll from
+/// every client, was the dominant source of the daemon's disk-write churn.
+type WtSig = (RepoId, Option<String>, gix::ObjectId, bool, String);
+
 /// Manages lanes across all registered repos.
 #[derive(Clone)]
 pub struct Lanes {
@@ -75,6 +81,9 @@ pub struct Lanes {
     /// re-enumerated with a git subprocess on every overlay. Cleared by create/delete; otherwise
     /// bounded by [`WORKTREES_TTL`]. Shared across clones via `Arc`.
     worktrees_cache: WorktreeCache,
+    /// Last-persisted worktree row signature per path, so `list` only writes `upsert_worktree` when
+    /// a worktree actually changed (new head/branch) instead of on every poll. See [`WtSig`].
+    wt_cache: Arc<Mutex<HashMap<PathBuf, (WtSig, Worktree)>>>,
 }
 
 impl Lanes {
@@ -84,6 +93,7 @@ impl Lanes {
             config,
             state_cache: Arc::new(Mutex::new(HashMap::new())),
             worktrees_cache: Arc::new(Mutex::new(HashMap::new())),
+            wt_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -155,17 +165,36 @@ impl Lanes {
                     .unwrap_or_else(|| "?".to_string());
                 let head = entry.head.unwrap_or_else(null_oid);
 
-                let wt = self
-                    .store
-                    .upsert_worktree(
-                        repo.id,
-                        entry.path.clone(),
-                        entry.branch.clone(),
-                        head,
-                        is_main,
-                        name,
-                    )
-                    .await?;
+                // Skip the DB write when this worktree's row is unchanged since the last list.
+                let sig: WtSig = (repo.id, entry.branch.clone(), head, is_main, name.clone());
+                let cached = {
+                    let cache = self.wt_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    cache
+                        .get(&entry.path)
+                        .filter(|(s, _)| *s == sig)
+                        .map(|(_, w)| w.clone())
+                };
+                let wt = match cached {
+                    Some(w) => w,
+                    None => {
+                        let w = self
+                            .store
+                            .upsert_worktree(
+                                repo.id,
+                                entry.path.clone(),
+                                entry.branch.clone(),
+                                head,
+                                is_main,
+                                name,
+                            )
+                            .await?;
+                        self.wt_cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(entry.path.clone(), (sig, w.clone()));
+                        w
+                    }
+                };
                 let lane_id = self
                     .store
                     .get_or_create_lane(repo.id, entry.path.to_string_lossy().into_owned())
@@ -381,6 +410,10 @@ impl Lanes {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.wt_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         // Re-list and return the freshly created lane.
         self.list()
@@ -434,6 +467,10 @@ impl Lanes {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.state_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&wt_path);
+        self.wt_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&wt_path);
