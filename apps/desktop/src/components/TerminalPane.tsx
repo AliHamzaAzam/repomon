@@ -109,6 +109,16 @@ export default function TerminalPane(props: TerminalPaneProps) {
     });
     terminal.onData((data) => input.push(data));
 
+    // Pin xterm to the pane's actual grid. agent.fit is arbitrated: when another viewer (e.g. the
+    // TUI focused on this lane) owns the pane size, our fit is refused and the daemon returns the
+    // authoritative grid. The raw byte stream is positioned for THAT grid, so xterm must match it
+    // or absolute cursor moves land at the wrong columns and the pane renders garbled.
+    function applyGrid(cols?: number | null, rows?: number | null) {
+      if (cols && rows && (cols !== terminal.cols || rows !== terminal.rows)) {
+        terminal.resize(cols, rows);
+      }
+    }
+
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resize = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer);
@@ -120,7 +130,9 @@ export default function TerminalPane(props: TerminalPaneProps) {
             window: props.window,
             cols: terminal.cols,
             rows: terminal.rows,
-          });
+          })
+            .then((grid) => applyGrid(grid.cols, grid.rows))
+            .catch(() => undefined);
         } catch {
           // A hidden grid tile can briefly have no measurable geometry.
         }
@@ -133,6 +145,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
       .then((watch) => {
         stopWatch = watch.stop;
         setTransportError(null);
+        // Start aligned with the pane's current size before any bytes arrive.
+        applyGrid(watch.ack.cols, watch.ack.rows);
         terminal.focus();
       })
       .catch((error: unknown) => {

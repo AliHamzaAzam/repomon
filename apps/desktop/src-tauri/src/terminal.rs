@@ -58,6 +58,18 @@ fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
         .is_ok()
 }
 
+/// Assemble a resync repaint: clear the screen + scrollback and home, then the captured screen.
+/// tmux joins captured lines with a bare LF, which only moves the cursor DOWN in a raw stream, so
+/// re-anchor each line to column 0 (`\r\n`) — otherwise the repaint staircases to the right (the
+/// same reason the TUI's `Emu::seed_capture` rewrites newlines).
+fn resync_frame(content: &str) -> Vec<u8> {
+    let body = content.replace('\n', "\r\n");
+    let mut bytes = Vec::with_capacity(body.len() + 8);
+    bytes.extend_from_slice(b"\x1b[H\x1b[2J\x1b[3J");
+    bytes.extend_from_slice(body.as_bytes());
+    bytes
+}
+
 async fn capture_resync(
     client: &DaemonClient,
     channel: &Channel<InvokeResponseBody>,
@@ -74,10 +86,9 @@ async fn capture_resync(
     let Some(content) = value.get("content").and_then(Value::as_str) else {
         return true;
     };
-    let mut bytes = Vec::with_capacity(content.len() + 16);
-    bytes.extend_from_slice(b"\x1bc\x1b[H");
-    bytes.extend_from_slice(content.as_bytes());
-    channel.send(InvokeResponseBody::Raw(bytes)).is_ok()
+    channel
+        .send(InvokeResponseBody::Raw(resync_frame(content)))
+        .is_ok()
 }
 
 #[tauri::command]
@@ -200,7 +211,17 @@ mod tests {
     use repomon_core::protocol::Notification;
     use serde_json::json;
 
-    use super::{MAX_PENDING, append_pending, dimensions, event_bytes};
+    use super::{MAX_PENDING, append_pending, dimensions, event_bytes, resync_frame};
+
+    #[test]
+    fn resync_frame_reanchors_bare_newlines() {
+        let frame = resync_frame("line1\nline2");
+        let text = String::from_utf8(frame).unwrap();
+        // Clears screen + scrollback, homes, then repaints with CR-anchored lines.
+        assert!(text.starts_with("\x1b[H\x1b[2J\x1b[3J"));
+        assert!(text.contains("line1\r\nline2"));
+        assert!(!text.contains("line1\nline2"));
+    }
 
     #[test]
     fn routes_and_decodes_only_the_requested_window() {

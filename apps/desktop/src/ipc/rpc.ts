@@ -103,7 +103,10 @@ interface RpcMap {
   "agent.send_input": { params: { lane_id: number; window?: string; text: string; enter?: boolean }; result: null };
   "agent.key": { params: { lane_id: number; window?: string; key: string; literal?: boolean }; result: null };
   "agent.resize": { params: { lane_id: number; window?: string; cols: number; rows: number }; result: null };
-  "agent.fit": { params: { lane_id: number; window?: string; cols: number; rows: number }; result: null };
+  "agent.fit": {
+    params: { lane_id: number; window?: string; cols: number; rows: number };
+    result: { applied: boolean; cols: number | null; rows: number | null };
+  };
   "session.rename": { params: { session_id: string; label?: string }; result: null };
   "terminal.open": { params: { lane_id: number }; result: { id: string; target: string } };
   "terminal.list": { params: { lane_id: number }; result: string[] };
