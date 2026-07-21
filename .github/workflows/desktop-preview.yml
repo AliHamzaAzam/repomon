@@ -68,9 +68,12 @@ jobs:
         run: |
           mkdir -p apps/desktop/src-tauri/binaries
           if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
-            # Tauri expects one sidecar named for the universal target; lipo the two arches into it.
+            # The universal build compiles each arch slice (needs the per-arch sidecar) and then
+            # copies the universal-named one when bundling, so provide all three.
             cargo build --release --locked -p repomon-daemon --target aarch64-apple-darwin
             cargo build --release --locked -p repomon-daemon --target x86_64-apple-darwin
+            cp target/aarch64-apple-darwin/release/repomond apps/desktop/src-tauri/binaries/repomond-aarch64-apple-darwin
+            cp target/x86_64-apple-darwin/release/repomond apps/desktop/src-tauri/binaries/repomond-x86_64-apple-darwin
             lipo -create -output apps/desktop/src-tauri/binaries/repomond-universal-apple-darwin \
               target/aarch64-apple-darwin/release/repomond \
               target/x86_64-apple-darwin/release/repomond
