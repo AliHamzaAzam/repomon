@@ -68,11 +68,12 @@ jobs:
         run: |
           mkdir -p apps/desktop/src-tauri/binaries
           if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
-            # Both arch daemons; Tauri lipos them into the universal app.
-            for arch in aarch64-apple-darwin x86_64-apple-darwin; do
-              cargo build --release --locked -p repomon-daemon --target "$arch"
-              cp "target/$arch/release/repomond" "apps/desktop/src-tauri/binaries/repomond-$arch"
-            done
+            # Tauri expects one sidecar named for the universal target; lipo the two arches into it.
+            cargo build --release --locked -p repomon-daemon --target aarch64-apple-darwin
+            cargo build --release --locked -p repomon-daemon --target x86_64-apple-darwin
+            lipo -create -output apps/desktop/src-tauri/binaries/repomond-universal-apple-darwin \
+              target/aarch64-apple-darwin/release/repomond \
+              target/x86_64-apple-darwin/release/repomond
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
             cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond.exe" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe"
