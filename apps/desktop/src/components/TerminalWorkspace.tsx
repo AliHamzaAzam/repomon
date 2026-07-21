@@ -208,6 +208,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                   label={target.label}
                   renderer={renderer()}
                   focused={activeWindow() === target.window}
+                  shell={target.shell}
                 />
               </div>
             )}

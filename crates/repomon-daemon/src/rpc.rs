@@ -1510,6 +1510,9 @@ pub async fn dispatch(
                     .map_err(internal)?
             };
             let attach = attach_json(&*ctx.backend, &target);
+            // Nudge other clients (a TUI, another desktop window) to re-list terminals so a shell
+            // opened here shows up for them too.
+            ctx.broadcast("event.repo.changed", json!({ "path": Value::Null }));
             Ok(json!({ "id": name, "target": target, "attach": attach }))
         }
         "terminal.list" => {
@@ -1553,6 +1556,7 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             let id = p.id;
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&id)).await;
+            ctx.broadcast("event.repo.changed", json!({ "path": Value::Null }));
             Ok(Value::Null)
         }
         "terminal.target" => {

@@ -4265,20 +4265,21 @@ impl App {
 
     /// Refresh the selected lane's open terminals when the selection changes.
     async fn sync_terminals(&mut self) {
+        // Refetch every sync (not only when the selected lane changes) so terminals another client
+        // opened in the current lane — e.g. a shell created from the desktop app — show up here too.
         let sel = self.selected_lane().map(|l| l.id);
-        if sel == self.terminals_lane {
-            return;
-        }
         self.terminals_lane = sel;
-        self.terminals.clear();
-        if let Some(id) = sel {
-            if let Ok(t) = self
-                .client
-                .call_typed::<Vec<String>>("terminal.list", Some(json!({ "lane_id": id })))
-                .await
-            {
-                self.terminals = t;
+        match sel {
+            Some(id) => {
+                if let Ok(t) = self
+                    .client
+                    .call_typed::<Vec<String>>("terminal.list", Some(json!({ "lane_id": id })))
+                    .await
+                {
+                    self.terminals = t;
+                }
             }
+            None => self.terminals.clear(),
         }
     }
 

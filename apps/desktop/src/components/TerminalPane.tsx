@@ -19,6 +19,8 @@ interface TerminalPaneProps extends TerminalTarget {
   label: string;
   renderer?: TerminalRenderer;
   focused?: boolean;
+  /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
+  shell?: boolean;
 }
 
 function terminalTheme(element: HTMLElement) {
@@ -109,34 +111,40 @@ export default function TerminalPane(props: TerminalPaneProps) {
     });
     terminal.onData((data) => input.push(data));
 
-    // Pin xterm to the pane's actual grid. agent.fit is arbitrated: when another viewer (e.g. the
-    // TUI focused on this lane) owns the pane size, our fit is refused and the daemon returns the
-    // authoritative grid. The raw byte stream is positioned for THAT grid, so xterm must match it
-    // or absolute cursor moves land at the wrong columns and the pane renders garbled.
     function applyGrid(cols?: number | null, rows?: number | null) {
       if (cols && rows && (cols !== terminal.cols || rows !== terminal.rows)) {
         terminal.resize(cols, rows);
       }
     }
 
+    // Keep xterm and the tmux pane the same size. Fit xterm to the container first (so it never
+    // overflows and clips the bottom), then reconcile the pane:
+    //  - A GUI-owned shell: force the pane to our size with agent.resize, so pane == container.
+    //  - A shared agent pane: request politely with the arbitrated agent.fit; if another viewer
+    //    (e.g. the TUI) owns the size, pin xterm to the authoritative grid it returns so the raw
+    //    byte stream's absolute cursor moves don't land at the wrong columns and garble the pane.
+    async function syncSize() {
+      try {
+        fit.fit();
+      } catch {
+        return; // a hidden grid tile can briefly have no measurable geometry
+      }
+      const cols = terminal.cols;
+      const rows = terminal.rows;
+      if (!cols || !rows) return;
+      const args = { lane_id: props.laneId, window: props.window, cols, rows };
+      if (props.shell) {
+        await daemonCall("agent.resize", args).catch(() => undefined);
+      } else {
+        const grid = await daemonCall("agent.fit", args).catch(() => null);
+        if (grid) applyGrid(grid.cols, grid.rows);
+      }
+    }
+
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resize = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        try {
-          fit.fit();
-          void daemonCall("agent.fit", {
-            lane_id: props.laneId,
-            window: props.window,
-            cols: terminal.cols,
-            rows: terminal.rows,
-          })
-            .then((grid) => applyGrid(grid.cols, grid.rows))
-            .catch(() => undefined);
-        } catch {
-          // A hidden grid tile can briefly have no measurable geometry.
-        }
-      }, 100);
+      resizeTimer = setTimeout(() => void syncSize(), 100);
     });
     resize.observe(container);
     fit.fit();
@@ -145,8 +153,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       .then((watch) => {
         stopWatch = watch.stop;
         setTransportError(null);
-        // Start aligned with the pane's current size before any bytes arrive.
-        applyGrid(watch.ack.cols, watch.ack.rows);
+        void syncSize();
         terminal.focus();
       })
       .catch((error: unknown) => {
