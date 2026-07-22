@@ -1,4 +1,5 @@
 import { createMemo, createSignal } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 
 import type { AccountUsage, Lane, Repo } from "../bindings";
 import { daemonCall, subscribeDaemon, type DaemonEvent } from "../ipc/rpc";
@@ -102,8 +103,14 @@ function byPriority(a: Lane, b: Lane): number {
 }
 
 export function createFleetStore(source: FleetSource = daemonFleetSource) {
-  const [repos, setRepos] = createSignal<Repo[]>([]);
-  const [lanes, setLanes] = createSignal<Lane[]>([]);
+  // repos/lanes are Solid stores updated with keyed `reconcile`, so a poll only touches the fields
+  // that actually changed and leaves every unchanged row's identity intact. That keeps the sidebar
+  // DOM stable across the 2s heartbeat — otherwise every row would be rebuilt each poll, which
+  // resets CSS :hover and makes hover states flicker.
+  const [repoStore, setRepoStore] = createStore<Repo[]>([]);
+  const [laneStore, setLaneStore] = createStore<Lane[]>([]);
+  const repos = () => repoStore;
+  const lanes = () => laneStore;
   const [usage, setUsage] = createSignal<AccountUsage[]>([]);
   const [terminals, setTerminals] = createSignal<Array<{ lane_id: number; id: string }>>([]);
   const [selectedLaneId, setSelectedLaneId] = createSignal<number | null>(null);
@@ -139,8 +146,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     try {
       const snapshot = await source.load();
       if (!active) return;
-      setRepos(snapshot.repos);
-      setLanes(snapshot.lanes);
+      setRepoStore(reconcile(snapshot.repos, { key: "id" }));
+      setLaneStore(reconcile(snapshot.lanes, { key: "id" }));
       setUsage(snapshot.usage);
       setTerminals(snapshot.terminals);
       setError(null);
