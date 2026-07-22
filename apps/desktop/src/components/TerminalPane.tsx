@@ -141,7 +141,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       if ((props.renderer ?? "dom") !== "dom") await preloadTerminalFont();
       if (disposed) return;
 
-      input = createInputCoalescer(target);
+      input = createInputCoalescer(target, (error) => setTransportError(errorMessage(error)));
       terminal = new Terminal({
         allowProposedApi: true,
         cursorBlink: true,

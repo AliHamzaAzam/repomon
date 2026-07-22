@@ -106,9 +106,10 @@ export async function watchTerminal(
   };
 }
 
-export function createInputCoalescer(target: TerminalTarget) {
+export function createInputCoalescer(target: TerminalTarget, onError?: (error: unknown) => void) {
   let pending = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const reportError = onError ?? (() => undefined);
 
   async function flush() {
     if (timer) clearTimeout(timer);
@@ -127,7 +128,7 @@ export function createInputCoalescer(target: TerminalTarget) {
   function push(text: string) {
     pending += text;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => void flush(), 8);
+    timer = setTimeout(() => void flush().catch(reportError), 8);
   }
 
   async function key(translated: TranslatedKey) {
@@ -143,7 +144,7 @@ export function createInputCoalescer(target: TerminalTarget) {
   function dispose() {
     if (timer) clearTimeout(timer);
     timer = undefined;
-    void flush();
+    void flush().catch(reportError);
   }
 
   return { push, flush, key, dispose };

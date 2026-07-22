@@ -3,6 +3,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createSignal } from "solid-js";
 
 import type { PendingDialog } from "../bindings";
@@ -31,7 +32,22 @@ function isFleetNotification(value: unknown): value is Omit<FleetNotification, "
     && "body" in value;
 }
 
-export function createNotificationStore() {
+export function showNativeNotification(notification: FleetNotification, onActivate?: (laneId: number) => void) {
+  try {
+    const popup = new Notification(notification.title, { body: notification.body });
+    popup.onclick = () => {
+      popup.close();
+      onActivate?.(notification.lane_id);
+      window.focus();
+      const appWindow = getCurrentWindow();
+      void appWindow.unminimize().then(() => appWindow.setFocus()).catch(() => undefined);
+    };
+  } catch {
+    sendNotification({ title: notification.title, body: notification.body });
+  }
+}
+
+export function createNotificationStore(onActivate?: (laneId: number) => void) {
   const [items, setItems] = createSignal<FleetNotification[]>([]);
   const [nativeEnabled, setNativeEnabled] = createSignal(false);
   let active = false;
@@ -54,7 +70,7 @@ export function createNotificationStore() {
           return [notification, ...current].slice(0, 200);
         });
         if (nativeEnabled()) {
-          sendNotification({ title: notification.title, body: notification.body });
+          showNativeNotification(notification, onActivate);
         }
       });
     } catch {

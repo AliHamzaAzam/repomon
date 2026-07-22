@@ -36,25 +36,34 @@ export interface LaneIndicator {
   urgent: boolean;
 }
 
+function gateSuffix(lane: Lane): string {
+  const blocked = lane.agent_sessions.find((agent) => !agent.inferred && agent.gate && !agent.gate.allowed)?.gate;
+  return blocked ? ` · gate ${blocked.net_new_findings}` : "";
+}
+
 export function laneIndicator(lane: Lane): LaneIndicator {
   const agents = lane.agent_sessions;
+  const gate = gateSuffix(lane);
   if (agents.some((agent) => agent.pending_dialog)) {
-    return { label: "decision", tone: "attention", urgent: true };
+    return { label: `decision${gate}`, tone: "attention", urgent: true };
   }
   if (agents.some((agent) => agent.stale)) {
     return { label: "stalled", tone: "fault", urgent: true };
   }
-  if (agents.some((agent) => agent.status === "waiting")) {
-    return { label: "needs you", tone: "attention", urgent: true };
-  }
   if (agents.some((agent) => agent.status === "rate-limited")) {
     return { label: "limited", tone: "fault", urgent: true };
+  }
+  if (agents.some((agent) => !agent.inferred && agent.status === "waiting")) {
+    return { label: `needs you${gate}`, tone: "attention", urgent: true };
   }
   if (agents.some((agent) => agent.external)) {
     return { label: "external", tone: "muted", urgent: false };
   }
-  if (agents.some((agent) => agent.status === "running")) {
-    return { label: agents.length > 1 ? `${agents.length} running` : "running", tone: "signal", urgent: false };
+  if (agents.some((agent) => !agent.inferred && agent.status === "running")) {
+    return { label: `${agents.length > 1 ? `${agents.length} running` : "running"}${gate}`, tone: "signal", urgent: false };
+  }
+  if (agents.some((agent) => agent.inferred)) {
+    return { label: "active · inferred", tone: "signal", urgent: false };
   }
   return { label: agents.length ? "idle" : "open", tone: "muted", urgent: false };
 }

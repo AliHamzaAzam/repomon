@@ -52,7 +52,7 @@ function App(props: AppProps) {
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const actions = createActionsStore(fleet);
-  const notifications = createNotificationStore();
+  const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   let stopListening: (() => void) | undefined;
   let fleetStarted = false;
   let notificationsStarted = false;
