@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
+import type { FleetSource } from "./stores/fleet";
 
 function sourceFor(snapshot: ConnectionSnapshot): ConnectionSource {
   return {
@@ -61,5 +62,20 @@ describe("Repomon desktop shell", () => {
       expect(screen.getByText("Retrying")).toBeInTheDocument();
       expect(screen.getByText("daemon connection closed")).toBeInTheDocument();
     });
+  });
+
+  it("surfaces fleet loading errors instead of failing silently", async () => {
+    const fleetSource: FleetSource = {
+      load: async () => { throw new Error("fleet sync failed"); },
+      subscribe: async () => () => undefined,
+    };
+    render(() => <App connectionSource={sourceFor({
+      phase: "connected",
+      endpoint: "/tmp/repomon.sock",
+      message: null,
+      daemon: null,
+    })} fleetSource={fleetSource} />);
+
+    expect(await screen.findByText("fleet sync failed")).toBeInTheDocument();
   });
 });

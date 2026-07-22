@@ -1,6 +1,6 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
+import type { AgentSession, BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
@@ -24,6 +24,10 @@ function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
+function agentKey(agent: AgentSession, index: number): string {
+  return agent.tmux_window ?? agent.session_id ?? `${agent.agent}-${index}`;
+}
+
 export default function ControlCenter(props: ControlCenterProps) {
   const [open, setOpen] = createSignal(false);
   const [tab, setTab] = createSignal<ControlTab>("actions");
@@ -36,17 +40,61 @@ export default function ControlCenter(props: ControlCenterProps) {
   const [timeline, setTimeline] = createSignal<TimelineData | null>(null);
   const [search, setSearch] = createSignal("");
   const [browser, setBrowser] = createSignal<BrowseResult | null>(null);
+  const [selectedAgentKey, setSelectedAgentKey] = createSignal<string | null>(null);
+  let trigger!: HTMLButtonElement;
+  let dialogElement!: HTMLElement;
+  let previouslyFocused: HTMLElement | null = null;
 
   const selectedLane = () => props.fleet.selectedLane();
-  const selectedAgent = createMemo(() => selectedLane()?.agent_sessions[0] ?? null);
+  const selectedAgents = createMemo(() => selectedLane()?.agent_sessions ?? []);
+  const selectedAgent = createMemo(() => selectedAgents().find((agent, index) => agentKey(agent, index) === selectedAgentKey()) ?? selectedAgents()[0] ?? null);
   const pendingAgent = createMemo(() => selectedLane()?.agent_sessions.find((agent) => agent.pending_dialog) ?? null);
+
+  createEffect(() => {
+    const agents = selectedAgents();
+    if (!agents.some((agent, index) => agentKey(agent, index) === selectedAgentKey())) {
+      setSelectedAgentKey(agents[0] ? agentKey(agents[0], 0) : null);
+    }
+  });
+
+  function focusableElements() {
+    return [...dialogElement.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )];
+  }
+
+  function openControl() {
+    previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : trigger;
+    setOpen(true);
+    queueMicrotask(() => (focusableElements()[0] ?? dialogElement).focus());
+  }
+
+  function closeControl(restoreFocus = true) {
+    setOpen(false);
+    if (restoreFocus) queueMicrotask(() => (previouslyFocused?.isConnected ? previouslyFocused : trigger)?.focus());
+  }
 
   const onKey = (event: KeyboardEvent) => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
-      setOpen(!open());
+      if (open()) closeControl();
+      else openControl();
     } else if (event.key === "Escape" && open()) {
-      setOpen(false);
+      closeControl();
+    } else if (event.key === "Tab" && open()) {
+      const focusable = focusableElements();
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        dialogElement.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
   };
 
@@ -73,12 +121,12 @@ export default function ControlCenter(props: ControlCenterProps) {
     const lane = selectedLane();
     if (!lane) return;
     props.actions.spawn(lane);
-    setOpen(false);
+    closeControl(false);
   }
 
   function addRepo() {
     void props.actions.addRepo();
-    setOpen(false);
+    closeControl(false);
   }
 
   async function browse(path?: string) {
@@ -87,20 +135,22 @@ export default function ControlCenter(props: ControlCenterProps) {
   }
 
   function createLane() {
-    props.actions.newLane(selectedLane()?.repo.id ?? props.fleet.repos()[0]?.id);
-    setOpen(false);
+    const repoId = selectedLane()?.repo.id ?? props.fleet.repos()[0]?.id;
+    if (repoId === undefined) return;
+    props.actions.newLane(repoId);
+    closeControl(false);
   }
 
   function renameSession() {
     const agent = selectedAgent();
     if (!agent?.session_id) return;
     props.actions.rename({ sessionId: agent.session_id, current: agent.custom_label ?? "" });
-    setOpen(false);
+    closeControl(false);
   }
 
   function confirmAction(options: Parameters<ActionsStore["confirm"]>[0]) {
     props.actions.confirm(options);
-    setOpen(false);
+    closeControl(false);
   }
 
   async function answer(choice: number) {
@@ -169,9 +219,10 @@ export default function ControlCenter(props: ControlCenterProps) {
   return (
     <>
       <button
+        ref={trigger}
         type="button"
         class="focus-ring relative rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
-        onClick={() => setOpen(true)}
+        onClick={openControl}
         aria-haspopup="dialog"
       >
         Control <span class="ml-1 text-[0.5rem] opacity-60">⌘K</span>
@@ -184,9 +235,9 @@ export default function ControlCenter(props: ControlCenterProps) {
 
       <Show when={open()}>
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-6 backdrop-blur-sm" onPointerDown={(event) => {
-          if (event.target === event.currentTarget) setOpen(false);
+          if (event.target === event.currentTarget) closeControl();
         }}>
-          <section role="dialog" aria-modal="true" aria-label="Control center" class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
+          <section ref={dialogElement} role="dialog" aria-modal="true" aria-label="Control center" tabIndex={-1} class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
             <nav aria-label="Control sections" class="border-r border-line bg-raised/50 p-2">
               <p class="section-label px-2 pb-3 pt-2">Control center</p>
               <For each={["actions", "triage", "history", "feed"] as ControlTab[]}>
@@ -199,7 +250,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                   </button>
                 )}
               </For>
-              <button type="button" class="focus-ring absolute bottom-[8%] ml-2 font-mono text-[0.55rem] uppercase text-muted" onClick={() => setOpen(false)}>Esc close</button>
+              <button type="button" class="focus-ring absolute bottom-[8%] ml-2 font-mono text-[0.55rem] uppercase text-muted" onClick={() => closeControl()}>Esc close</button>
             </nav>
 
             <div class="min-h-0 overflow-y-auto p-5">
@@ -208,7 +259,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                   <p class="section-label">{tab()}</p>
                   <h2 class="mt-1 text-lg font-semibold">{selectedLane()?.repo.name ?? "Fleet"} <span class="font-normal text-muted">/ {selectedLane()?.worktree.branch ?? "no lane"}</span></h2>
                 </div>
-                <button type="button" class="focus-ring rounded border border-line px-2 py-1 text-xs text-muted" onClick={() => setOpen(false)}>Close</button>
+                <button type="button" class="focus-ring rounded border border-line px-2 py-1 text-xs text-muted" onClick={() => closeControl()}>Close</button>
               </div>
 
               <Show when={error()}>
@@ -239,6 +290,22 @@ export default function ControlCenter(props: ControlCenterProps) {
 
                   <section>
                     <p class="section-label mb-2">Agent</p>
+                    <Show when={selectedAgents().length > 1}>
+                      <div class="mb-2 flex flex-wrap gap-1" role="group" aria-label="Agent session">
+                        <For each={selectedAgents()}>
+                          {(agent, index) => (
+                            <button
+                              type="button"
+                              class={`focus-ring rounded border px-2 py-1 text-xs ${selectedAgent() === agent ? "border-signal/40 bg-signal/10 text-signal" : "border-line text-muted"}`}
+                              aria-pressed={selectedAgent() === agent}
+                              onClick={() => setSelectedAgentKey(agentKey(agent, index()))}
+                            >
+                              {agent.custom_label ?? agent.title ?? `${agent.agent} ${index() + 1}`}
+                            </button>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
                     <div class="action-grid">
                       <button onClick={() => spawnAgent()} disabled={!selectedLane()}>Spawn agent</button>
                       <button onClick={() => void run("adopt", () => daemonCall("agent.adopt", { lane_id: selectedLane()!.id, session_id: selectedAgent()?.session_id ?? undefined }))} disabled={!selectedLane() || !selectedAgent()?.external}>Adopt external</button>
@@ -257,7 +324,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                   <section>
                     <p class="section-label mb-2">Lane and repository</p>
                     <div class="action-grid">
-                      <button onClick={() => createLane()}>New lane</button>
+                      <button onClick={() => createLane()} disabled={!props.fleet.repos().length}>New lane</button>
                       <button onClick={() => void run("diff", () => daemonCall("lane.diff", { lane_id: selectedLane()!.id, include_patch: true }))} disabled={!selectedLane()}>Review diff</button>
                       <button onClick={() => {
                         const lane = selectedLane();
@@ -274,7 +341,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                       <button class="is-danger" onClick={() => {
                         const repo = selectedLane()?.repo;
                         if (repo) props.actions.removeRepo(repo);
-                        setOpen(false);
+                        closeControl(false);
                       }} disabled={!selectedLane()}>Remove repository</button>
                     </div>
                   </section>

@@ -2042,7 +2042,7 @@ pub async fn dispatch(
         // client is actually watching.
         "orchestrator.watch" => {
             let p: OrchestratorWatch = parse(params)?;
-            *ctx.orchestrator_watched.lock().await = p.on;
+            *sess.orchestrator_watched.lock().await = p.on;
             Ok(Value::Null)
         }
         // Size the orchestrator window to the viewer's pane so the streamed capture fills it exactly

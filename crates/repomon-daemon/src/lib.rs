@@ -226,10 +226,6 @@ pub struct Ctx {
     /// The single daemon-owned repomind orchestrator session, if one is running. `None` until
     /// `orchestrator.start` spawns it; cleared by `orchestrator.stop`.
     pub orchestrator: Mutex<Option<OrchestratorSession>>,
-    /// Whether a client (the TUI's command-center view) currently wants the orchestrator pane
-    /// streamed. Gates `stream_orchestrator` so capturing the pane costs nothing when nobody's
-    /// watching.
-    pub orchestrator_watched: Mutex<bool>,
     /// When the orchestrator pane was last typed into (any `orchestrator.send_input`/`key`), so
     /// `stream_orchestrator` captures it at frame-rate while you type to repomind, the same
     /// keystroke-echo speedup `input_seen` gives a focused lane. Goes quiet on its own.
@@ -331,7 +327,6 @@ impl Ctx {
             last_good_sessions: Mutex::new(HashMap::new()),
             last_overlay_sessions: Mutex::new(HashMap::new()),
             orchestrator: Mutex::new(None),
-            orchestrator_watched: Mutex::new(false),
             orchestrator_input_seen: Mutex::new(None),
             orchestrator_attention: Mutex::new(("none".to_string(), None)),
             remote_tokens: std::sync::RwLock::new(Vec::new()),
@@ -414,6 +409,19 @@ impl Ctx {
             }
         }
         ViewportSnapshot { targets, focused }
+    }
+
+    /// True while any live connection wants the repomind pane streamed. A watcher is stored on
+    /// its connection session so another client leaving the view cannot disable the stream.
+    pub async fn has_orchestrator_watcher(&self) -> bool {
+        let sessions: Vec<Arc<ConnSession>> =
+            self.sessions.lock().await.values().cloned().collect();
+        for sess in sessions {
+            if *sess.orchestrator_watched.lock().await {
+                return true;
+            }
+        }
+        false
     }
 
     /// Publish an `event.<topic>` notification to all subscribers.
@@ -636,7 +644,7 @@ fn stream_window_for(lane: LaneId, focus: &Option<(LaneId, String)>) -> String {
 }
 
 /// Stream the repomind orchestrator's pane to subscribed clients. While a session is running AND a
-/// client has asked to watch it (`orchestrator_watched`), capture the `orchestrator` window and
+/// client has asked to watch it, capture the `orchestrator` window and
 /// broadcast `event.orchestrator.output` whenever the pane text or cursor changes. Idle (no session
 /// or nobody watching) it does nothing but a cheap flag check.
 ///
@@ -664,7 +672,7 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
-        let watched = *ctx.orchestrator_watched.lock().await;
+        let watched = ctx.has_orchestrator_watcher().await;
         let running = ctx.orchestrator.lock().await.is_some();
         if !watched || !running {
             last = None;
@@ -843,5 +851,23 @@ mod stream_tests {
             snap.focused.is_empty(),
             "a stale beat streams its viewport but claims no fast-cadence focus"
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_watch_is_union_of_live_connections() {
+        let ctx = test_ctx().await;
+        let a = ctx.open_session(ConnKind::Local).await;
+        let b = ctx.open_session(ConnKind::Remote { device: None }).await;
+        assert!(!ctx.has_orchestrator_watcher().await);
+
+        *a.orchestrator_watched.lock().await = true;
+        *b.orchestrator_watched.lock().await = true;
+        assert!(ctx.has_orchestrator_watcher().await);
+
+        *a.orchestrator_watched.lock().await = false;
+        assert!(ctx.has_orchestrator_watcher().await);
+
+        ctx.close_session(b.id).await;
+        assert!(!ctx.has_orchestrator_watcher().await);
     }
 }

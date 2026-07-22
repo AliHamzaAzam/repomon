@@ -136,7 +136,13 @@ function App(props: AppProps) {
   };
 
   const navigateFleet = (event: KeyboardEvent) => {
-    if (event.target instanceof HTMLInputElement) {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement
+      || (target instanceof HTMLElement && target.isContentEditable)
+    ) {
       if (event.key === "Escape") event.currentTarget instanceof HTMLElement && event.currentTarget.focus();
       return;
     }
@@ -229,7 +235,9 @@ function App(props: AppProps) {
             <span class="section-label">Repomind</span>
             <span class="size-1.5 rounded-full bg-muted/50" aria-hidden="true" />
           </div>
-          <RepomindPanel />
+          <Show when={repomindOpen()}>
+            <RepomindPanel />
+          </Show>
         </aside>
       </div>
 
@@ -256,6 +264,17 @@ function App(props: AppProps) {
       </footer>
 
       <ActionModals actions={actions} />
+      <Show when={actions.error() ?? fleet.error()}>
+        {(message) => (
+          <div role="alert" class="fixed right-4 top-16 z-[70] flex max-w-md items-start gap-3 rounded-md border border-fault/40 bg-surface p-3 text-xs text-fault shadow-lg">
+            <span>{message()}</span>
+            <button type="button" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Dismiss error" onClick={() => {
+              actions.dismissError();
+              fleet.dismissError();
+            }}>×</button>
+          </div>
+        )}
+      </Show>
       <Show when={update()}>
         {(available) => <UpdateBanner update={available()} onDismiss={() => setUpdate(null)} />}
       </Show>

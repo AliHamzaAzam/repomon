@@ -66,6 +66,7 @@ export interface OrchestratorStatus {
   running: boolean;
   agent?: string | null;
   model?: string | null;
+  backend?: string | null;
   window?: string | null;
   attention?: string | null;
   headline?: string | null;
@@ -131,6 +132,7 @@ interface RpcMap {
   "orchestrator.stop": { params: undefined; result: null };
   "orchestrator.send_input": { params: { text: string; enter?: boolean }; result: null };
   "orchestrator.key": { params: { key: string; literal?: boolean }; result: null };
+  "orchestrator.watch": { params: { on: boolean }; result: null };
   "orchestrator.resize": { params: { cols: number; rows: number }; result: null };
 }
 

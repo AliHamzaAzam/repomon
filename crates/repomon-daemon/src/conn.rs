@@ -57,6 +57,9 @@ pub struct ConnSession {
     /// When this connection last drove an agent (send_input/signal/key/scroll/answer, and a fit
     /// that actually applied). `agent.fit`'s remote-vs-remote arbitration is last-interaction-wins.
     pub last_interaction: Mutex<Option<Instant>>,
+    /// Whether this connection currently has the repomind live pane visible. Keeping this per
+    /// connection prevents one client from stopping the stream while another still needs it.
+    pub orchestrator_watched: Mutex<bool>,
 }
 
 impl ConnSession {
@@ -71,6 +74,7 @@ impl ConnSession {
             watched_bytes: std::sync::Mutex::new(HashSet::new()),
             output_filter: std::sync::Mutex::new((HashSet::new(), HashSet::new())),
             last_interaction: Mutex::new(None),
+            orchestrator_watched: Mutex::new(false),
         }
     }
 

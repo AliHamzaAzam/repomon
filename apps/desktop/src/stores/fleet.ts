@@ -203,6 +203,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     setUrgentOnly,
     loading,
     error,
+    dismissError: () => setError(null),
     visibleLanes,
     counts,
     refresh,

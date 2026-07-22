@@ -106,14 +106,14 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   <span class="flex items-center gap-1.5">
                     <button
                       type="button"
-                      class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-signal group-hover/repo:opacity-100"
+                      class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-signal focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
                       onClick={() => props.actions.newLane(group.repo.id)}
                       title={`New lane in ${group.repo.name}`}
                       aria-label={`New lane in ${group.repo.name}`}
                     >+</button>
                     <button
                       type="button"
-                      class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-fault group-hover/repo:opacity-100"
+                      class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-fault focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
                       onClick={() => props.actions.removeRepo(group.repo)}
                       title={`Remove ${group.repo.name}`}
                       aria-label={`Remove ${group.repo.name}`}
