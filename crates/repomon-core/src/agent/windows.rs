@@ -23,6 +23,10 @@ use super::backend::AttachCommand;
 /// Environment overrides parsed out of a spawn program string (`KEY=VALUE` prefixes).
 pub type EnvPairs = Vec<(String, String)>;
 
+/// Process flags for background Windows helpers. `CREATE_NO_WINDOW` must not be combined with
+/// `DETACHED_PROCESS`, because Windows ignores it in that combination.
+pub const WINDOWS_BACKGROUND_PROCESS_FLAGS: u32 = 0x0800_0000 | 0x0000_0200;
+
 /// Split a [`SpawnSpec`](super::backend::SpawnSpec) `program` string into environment
 /// assignments and an argv. On Unix the program is a shell fragment run via `sh -c`; there is
 /// no shell on Windows, so the backend parses the common shapes itself: leading `KEY=VALUE`
@@ -237,17 +241,12 @@ mod host_backend {
     };
     use super::super::tmux::TmuxRuntime;
     use super::{
-        ConnectOutcome, ScanAction, attach_command_for, exact_target_of, host_spawn_args,
-        is_claude_program, scan_action, split_spawn_program, target_of, user_shell_from,
-        window_from_target,
+        ConnectOutcome, ScanAction, WINDOWS_BACKGROUND_PROCESS_FLAGS, attach_command_for,
+        exact_target_of, host_spawn_args, is_claude_program, scan_action, split_spawn_program,
+        target_of, user_shell_from, window_from_target,
     };
     use crate::error::{Error, Result};
     use crate::model::LaneId;
-
-    /// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`: the host has no console and outlives the
-    /// daemon (PROTOCOL.md §1) — durability parity with the out-of-process tmux server.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     /// How long a spawn waits for the fresh host's pipe to answer `hello`.
     const SPAWN_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -519,7 +518,7 @@ mod host_backend {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+                .creation_flags(WINDOWS_BACKGROUND_PROCESS_FLAGS)
                 .spawn()
                 .map_err(Error::Io)?;
             let pipe = self.pipe_name(window);
@@ -971,6 +970,19 @@ mod tests {
                 "plan",
             ]
         );
+    }
+
+    #[test]
+    fn background_process_flags_suppress_console_windows() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        assert_ne!(WINDOWS_BACKGROUND_PROCESS_FLAGS & CREATE_NO_WINDOW, 0);
+        assert_ne!(
+            WINDOWS_BACKGROUND_PROCESS_FLAGS & CREATE_NEW_PROCESS_GROUP,
+            0
+        );
+        assert_eq!(WINDOWS_BACKGROUND_PROCESS_FLAGS & DETACHED_PROCESS, 0);
     }
 
     #[test]

@@ -19,6 +19,11 @@ export interface TranslatedKey {
   literal: boolean;
 }
 
+export interface WheelStep {
+  up: boolean;
+  ticks: number;
+}
+
 const namedKeys: Record<string, string> = {
   Escape: "Escape",
   Enter: "Enter",
@@ -47,6 +52,22 @@ export function translateKeyboardKey(event: KeyboardEvent): TranslatedKey | null
   if (!base) return null;
   if (event.key === "Tab" && event.shiftKey) base = "BTab";
   return { key: `${control ? "C-" : alt ? "M-" : ""}${base}`, literal: false };
+}
+
+/// Turn browser wheel units into the small integer steps expected by the daemon. Pixel-mode
+/// trackpads can emit tiny deltas while conventional wheels often emit roughly 100 pixels.
+export function wheelStep(deltaY: number, deltaMode: number, pageRows: number): WheelStep | null {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return null;
+  const magnitude = Math.abs(deltaY);
+  const rawTicks = deltaMode === 1
+    ? magnitude
+    : deltaMode === 2
+      ? magnitude * Math.max(1, pageRows)
+      : magnitude / 40;
+  return {
+    up: deltaY < 0,
+    ticks: Math.max(1, Math.min(40, Math.ceil(rawTicks))),
+  };
 }
 
 /// Normalize whatever `invoke` rejected with into a real `Error`, so callers surface the

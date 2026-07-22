@@ -22,7 +22,7 @@ function readLayout(): WorkspaceLayout {
 
 function readRenderer(): TerminalRenderer {
   const value = localStorage.getItem("repomon.terminal.renderer");
-  return value === "webgl" || value === "dom" ? value : "auto";
+  return value === "webgl" || value === "auto" ? value : "dom";
 }
 
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
@@ -30,6 +30,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
   const [activeWindow, setActiveWindow] = createSignal<string | null>(null);
   const [openingShell, setOpeningShell] = createSignal(false);
+  const [closingShell, setClosingShell] = createSignal<string | null>(null);
+  const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
 
   // Fleet polls every second and hands us a brand-new lanes array each time. Reconcile the
   // rebuilt targets against this cache so each window keeps a stable object reference, and the
@@ -102,47 +104,58 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     const laneId = props.fleet.selectedLaneId();
     if (laneId === null) return;
     setOpeningShell(true);
+    setWorkspaceError(null);
     try {
       const terminal = await daemonCall("terminal.open", { lane_id: laneId });
       await props.fleet.refresh();
       setActiveWindow(terminal.id);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : String(error));
     } finally {
       setOpeningShell(false);
     }
   }
 
   async function closeShell(target: PaneTarget) {
-    await daemonCall("terminal.close", { id: target.window });
-    if (activeWindow() === target.window) setActiveWindow(null);
-    await props.fleet.refresh();
+    setClosingShell(target.window);
+    setWorkspaceError(null);
+    try {
+      await daemonCall("terminal.close", { id: target.window });
+      if (activeWindow() === target.window) setActiveWindow(null);
+      await props.fleet.refresh();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setClosingShell(null);
+    }
   }
 
   return (
-    <div class="grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)]">
+    <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)]">
       <div class="flex min-w-0 items-center justify-between border-b border-line bg-surface/90 px-2 backdrop-blur">
-        <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="group" aria-label="Lane terminals and actions">
           <For each={laneTargets()}>
             {(target) => (
-              <button
-                type="button"
-                class={`focus-ring group flex h-7 shrink-0 items-center gap-1.5 rounded border px-2 font-mono text-[0.58rem] ${activeWindow() === target.window ? "border-signal/40 bg-signal/10 text-foreground" : "border-line bg-raised text-muted"}`}
-                onClick={() => setActiveWindow(target.window)}
-              >
-                <span class={target.shell ? "text-attention" : "text-signal"}>{target.shell ? ">_" : "●"}</span>
-                <span class="max-w-32 truncate">{target.label}</span>
+              <div class={`flex h-7 shrink-0 items-stretch overflow-hidden rounded border font-mono text-[0.58rem] ${activeWindow() === target.window ? "border-signal/40 bg-signal/10 text-foreground" : "border-line bg-raised text-muted"}`}>
+                <button
+                  type="button"
+                  aria-pressed={activeWindow() === target.window}
+                  class="focus-ring flex items-center gap-1.5 px-2"
+                  onClick={() => setActiveWindow(target.window)}
+                >
+                  <span class={target.shell ? "text-attention" : "text-signal"}>{target.shell ? ">_" : "●"}</span>
+                  <span class="max-w-32 truncate">{target.label}</span>
+                </button>
                 <Show when={target.shell}>
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    class="ml-1 text-muted hover:text-fault"
+                  <button
+                    type="button"
+                    class="focus-ring border-l border-line px-1.5 text-muted hover:bg-fault/10 hover:text-fault disabled:opacity-40"
                     aria-label={`Close ${target.label}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void closeShell(target);
-                    }}
-                  >×</span>
+                    disabled={closingShell() === target.window}
+                    onClick={() => void closeShell(target)}
+                  >×</button>
                 </Show>
-              </button>
+              </div>
             )}
           </For>
           <button
@@ -189,6 +202,15 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </select>
         </div>
       </div>
+
+      <Show when={workspaceError()}>
+        {(message) => (
+          <div role="alert" class="absolute right-3 top-12 z-40 flex max-w-md items-start gap-3 rounded-md border border-fault/40 bg-surface p-3 text-xs text-fault shadow-lg">
+            <span>{message()}</span>
+            <button type="button" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Dismiss terminal error" onClick={() => setWorkspaceError(null)}>×</button>
+          </div>
+        )}
+      </Show>
 
       <Show
         when={visibleTargets().length}

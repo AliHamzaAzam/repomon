@@ -102,6 +102,10 @@ interface RpcMap {
   "agent.auto_continue": { params: { lane_id: number; enabled: boolean }; result: null };
   "agent.send_input": { params: { lane_id: number; window?: string; text: string; enter?: boolean }; result: null };
   "agent.key": { params: { lane_id: number; window?: string; key: string; literal?: boolean }; result: null };
+  "agent.scroll": {
+    params: { lane_id: number; window?: string; up: boolean; ticks: number };
+    result: { forwarded: boolean };
+  };
   "agent.resize": { params: { lane_id: number; window?: string; cols: number; rows: number }; result: null };
   "agent.fit": {
     params: { lane_id: number; window?: string; cols: number; rows: number };

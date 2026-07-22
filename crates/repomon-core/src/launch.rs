@@ -57,14 +57,14 @@ pub fn spawn_daemon(socket: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    // Windows twin: detach from the console and its Ctrl-C group so closing the terminal
-    // (or Ctrl-C in it) doesn't take the daemon down with it.
+    // Windows twin: start without a console window and in a new Ctrl-C group so the daemon
+    // survives its UI closing without flashing a console during launch.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
 
     cmd.spawn()
