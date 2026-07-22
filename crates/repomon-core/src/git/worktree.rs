@@ -5,9 +5,9 @@
 //! (so we get exact git semantics rather than a reimplementation).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::error::{Error, Result};
+use crate::process::background_command;
 
 /// One worktree as reported by `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +177,7 @@ pub fn prune(repo_path: &Path) -> Result<()> {
 }
 
 fn run(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = background_command("git")
         .arg("-C")
         .arg(repo_path)
         .args(args)

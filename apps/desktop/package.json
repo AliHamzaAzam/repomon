@@ -18,7 +18,7 @@
     "serve": "vite preview",
     "sidecar:prepare": "bun scripts/prepare-sidecar.ts",
     "tauri": "tauri",
-    "tauri:build": "bun run sidecar:prepare && tauri build --config src-tauri/tauri.release.conf.json"
+    "tauri:build": "bun scripts/build-tauri.ts"
   },
   "license": "Apache-2.0",
   "dependencies": {

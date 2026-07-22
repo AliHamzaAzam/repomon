@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 
+#[cfg(windows)]
+use crate::process::{WINDOWS_CREATE_NEW_PROCESS_GROUP, WINDOWS_CREATE_NO_WINDOW};
 use crate::{Config, client::DaemonClient, config, service};
 
 /// Connect to a running daemon, or start a detached `repomond` and connect to that.
@@ -62,9 +64,7 @@ pub fn spawn_daemon(socket: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP);
     }
 
     cmd.spawn()

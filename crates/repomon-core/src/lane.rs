@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::git::{reader, worktree};
 use crate::model::{CreateLaneParams, Lane, LaneId, Repo, RepoId, Worktree, WorktreeState};
+use crate::process::background_command;
 use crate::store::Store;
 
 fn join_err(e: tokio::task::JoinError) -> Error {
@@ -615,7 +617,7 @@ fn worktree_branch(repo_path: &Path, wt_path: &Path) -> Option<String> {
 fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<String> {
     if let Some(target) = into {
         // Best-effort: ensure the main worktree is on the requested target branch.
-        let out = Command::new("git")
+        let out = background_command("git")
             .arg("-C")
             .arg(repo_path)
             .args(["symbolic-ref", "--short", "HEAD"])
@@ -628,7 +630,7 @@ fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<St
             )));
         }
     }
-    let out = Command::new("git")
+    let out = background_command("git")
         .arg("-C")
         .arg(repo_path)
         .args(["merge", "--no-edit", branch])
@@ -641,7 +643,7 @@ fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<St
         // undoing the in-progress merge attempt itself — so aborting here is safe to do
         // unconditionally. Ignore the abort's own result: if it also fails there's nothing more
         // we can do from here, and the original merge error is what the caller needs to see.
-        let _ = Command::new("git")
+        let _ = background_command("git")
             .arg("-C")
             .arg(repo_path)
             .args(["merge", "--abort"])
@@ -662,7 +664,7 @@ fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<St
 }
 
 fn delete_branch(repo_path: &Path, branch: &str) -> Result<()> {
-    let out = Command::new("git")
+    let out = background_command("git")
         .arg("-C")
         .arg(repo_path)
         .args(["branch", "-D", branch])

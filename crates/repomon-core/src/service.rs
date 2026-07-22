@@ -373,7 +373,7 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use std::process::Command;
+    use crate::process::background_command;
 
     /// The task's path in the Task Scheduler library — no file on disk, but callers print it
     /// after install the way the Unix arms print the plist/unit path.
@@ -382,7 +382,7 @@ mod platform {
     }
 
     fn schtasks(args: &[&str]) -> Result<String> {
-        let out = Command::new("schtasks")
+        let out = background_command("schtasks")
             .args(args)
             .output()
             .map_err(Error::Io)?;

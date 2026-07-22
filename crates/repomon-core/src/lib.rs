@@ -20,6 +20,7 @@ pub mod lane;
 pub mod launch;
 pub mod model;
 pub mod notify;
+pub mod process;
 pub mod protocol;
 pub mod registry;
 pub mod service;

@@ -5,8 +5,10 @@
 //! clipboard is reached through Windows PowerShell (`Set-Clipboard`/`Get-Clipboard`); the
 //! argv/script builders are pure and unit-tested on every OS.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
+
+use crate::process::background_command;
 
 /// The clipboard-write command for this platform, probed once per process. `None` when no
 /// clipboard tool is installed (callers fall back to tmux's OSC52 path or skip the copy).
@@ -63,7 +65,7 @@ pub fn copy_pipe_command() -> Option<String> {
 pub fn copy_text(text: &str) {
     use std::io::Write;
     let Some(argv) = copy_argv() else { return };
-    let mut cmd = Command::new(&argv[0]);
+    let mut cmd = background_command(&argv[0]);
     cmd.args(&argv[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
@@ -134,7 +136,7 @@ pub fn normalize_pasted_text(raw: &str) -> String {
 #[cfg(windows)]
 pub fn paste_text() -> Option<String> {
     let argv = windows_paste_argv();
-    let out = Command::new(&argv[0])
+    let out = background_command(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stderr(Stdio::null())

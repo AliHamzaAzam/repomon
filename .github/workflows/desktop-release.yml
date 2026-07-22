@@ -16,19 +16,19 @@ jobs:
           - platform: macos-14
             target: aarch64-apple-darwin
             bundles: dmg
+            config: apps/desktop/src-tauri/tauri.release.conf.json
           - platform: macos-14
             target: x86_64-apple-darwin
             bundles: dmg
+            config: apps/desktop/src-tauri/tauri.release.conf.json
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: appimage,deb,rpm
-          # This row becomes required when release/windows-preview merges. It remains an allowed
-          # preview failure until repomon-core supplies the named-pipe transport on the tag branch.
+            config: apps/desktop/src-tauri/tauri.release.conf.json
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: nsis
-            windows_preview: true
-    continue-on-error: ${{ matrix.windows_preview || false }}
+            config: apps/desktop/src-tauri/tauri.release.win.conf.json
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
         run: >-
           jq --arg key "$TAURI_SIGNING_PUBLIC_KEY"
           '.plugins.updater.pubkey = $key'
-          apps/desktop/src-tauri/tauri.release.conf.json
+          "${{ matrix.config }}"
           > apps/desktop/src-tauri/tauri.signed.conf.json
       - name: Build daemon sidecar
         shell: bash
@@ -70,6 +70,12 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
           fi
+      - name: Build agent-host sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release --locked -p repomon-host --target "${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/repomon-agent-host.exe" "apps/desktop/src-tauri/binaries/repomon-agent-host-${{ matrix.target }}.exe"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}

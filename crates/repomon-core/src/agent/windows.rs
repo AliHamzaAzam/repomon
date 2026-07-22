@@ -13,6 +13,7 @@
 //! client, host spawning, and the byte-stream pump are `#[cfg(windows)]`.
 
 use crate::error::{Error, Result};
+use crate::process::{WINDOWS_CREATE_NEW_PROCESS_GROUP, WINDOWS_CREATE_NO_WINDOW};
 
 use super::backend::AttachCommand;
 
@@ -25,7 +26,8 @@ pub type EnvPairs = Vec<(String, String)>;
 
 /// Process flags for background Windows helpers. `CREATE_NO_WINDOW` must not be combined with
 /// `DETACHED_PROCESS`, because Windows ignores it in that combination.
-pub const WINDOWS_BACKGROUND_PROCESS_FLAGS: u32 = 0x0800_0000 | 0x0000_0200;
+pub const WINDOWS_BACKGROUND_PROCESS_FLAGS: u32 =
+    WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP;
 
 /// Split a [`SpawnSpec`](super::backend::SpawnSpec) `program` string into environment
 /// assignments and an argv. On Unix the program is a shell fragment run via `sh -c`; there is

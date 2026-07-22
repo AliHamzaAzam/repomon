@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: desktop-preview
+  cancel-in-progress: false
+
 jobs:
   preview:
     strategy:
@@ -116,3 +120,29 @@ jobs:
           prerelease: true
           includeUpdaterJson: true
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config ${{ matrix.config }}
+
+  cleanup:
+    needs: preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove stale preview assets and verify updater manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          gh release view desktop-preview --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+            case "$asset" in
+              latest.json|Repomon_universal.app.tar.gz|Repomon_universal.app.tar.gz.sig|*"$version"*) ;;
+              *) gh release delete-asset desktop-preview "$asset" -y ;;
+            esac
+          done
+          asset_id="$(gh api repos/${{ github.repository }}/releases/tags/desktop-preview --jq '.assets[] | select(.name == "latest.json") | .id')"
+          gh api "repos/${{ github.repository }}/releases/assets/$asset_id" -H "Accept: application/octet-stream" > latest.json
+          jq -e --arg version "$version" '
+            .version == $version
+            and (.platforms["darwin-aarch64"].signature | length > 0)
+            and (.platforms["linux-x86_64"].signature | length > 0)
+            and (.platforms["windows-x86_64"].signature | length > 0)
+          ' latest.json

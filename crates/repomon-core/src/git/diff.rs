@@ -5,9 +5,9 @@
 //! "done" claim.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::error::{Error, Result};
+use crate::process::background_command;
 
 /// Commit log lines are capped this low; a lane with more than this many commits ahead still
 /// reports a useful headline without shipping an unbounded log to the caller.
@@ -70,7 +70,7 @@ pub fn diff_patch(worktree_path: &Path) -> Result<String> {
 }
 
 fn run(worktree_path: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = background_command("git")
         .arg("-C")
         .arg(worktree_path)
         .args(args)
