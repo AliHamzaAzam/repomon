@@ -1,7 +1,7 @@
 import { createMemo, createSignal } from "solid-js";
 
 import type { ExtSnapshot, PluginInfo, SkillInfo } from "../bindings";
-import { daemonCall, type ExtScopeParams } from "../ipc/rpc";
+import { daemonCall, subscribeDaemon, type DaemonEvent, type ExtScopeParams } from "../ipc/rpc";
 
 export type ExtFilter = "all" | "plugins" | "skills" | "marketplaces";
 
@@ -12,12 +12,14 @@ export type ExtRow =
 export interface ExtSource {
   list(scope: ExtScopeParams): Promise<ExtSnapshot>;
   setEnabled(id: string, enabled: boolean, scope: ExtScopeParams): Promise<unknown>;
+  subscribe?(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
 }
 
 export const daemonExtSource: ExtSource = {
   list: (scope) => daemonCall("ext.list", scope),
   setEnabled: (id, enabled, scope) =>
     daemonCall(enabled ? "plugin.enable" : "plugin.disable", { id, ...scope }),
+  subscribe: subscribeDaemon,
 };
 
 function message(error: unknown): string {
@@ -84,6 +86,15 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   });
 
   void refresh();
+
+  // Every client (this app, the TUI, iOS) refreshes on event.ext.changed so a toggle made
+  // elsewhere shows up here without waiting on a poll. Fire-and-forget: this store is created
+  // once for the app's lifetime, so there is no matching teardown to unsubscribe against.
+  void source
+    .subscribe?.((event) => {
+      if (event.method === "event.ext.changed") void refresh();
+    })
+    ?.catch(() => undefined);
 
   return { scope, setScope, query, setQuery, filter, setFilter, snapshot, rows, busy, error, refresh, setEnabled };
 }

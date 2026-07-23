@@ -3,6 +3,7 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import ActionModals from "./components/ActionModals";
 import FleetSidebar from "./components/FleetSidebar";
 import ControlCenter from "./components/ControlCenter";
+import ExtensionsView from "./components/ExtensionsView";
 import RepomindPanel from "./components/RepomindPanel";
 import TerminalWorkspace from "./components/TerminalWorkspace";
 import UpdateBanner from "./components/UpdateBanner";
@@ -17,6 +18,7 @@ import {
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
 import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
+import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
 
@@ -49,11 +51,13 @@ function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(true);
+  const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const [appVersion, setAppVersion] = createSignal("");
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const actions = createActionsStore(fleet);
+  const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   let stopListening: (() => void) | undefined;
   let fleetStarted = false;
@@ -89,8 +93,16 @@ function App(props: AppProps) {
     }
   };
 
+  const onExtensionsShortcut = (event: KeyboardEvent) => {
+    if (event.key !== "6" || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target as HTMLElement | null;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+    setExtensionsOpen((open) => !open);
+  };
+
   onMount(() => {
     window.addEventListener("keydown", onSettingsShortcut);
+    window.addEventListener("keydown", onExtensionsShortcut);
     void getVersion().then(setAppVersion).catch(() => undefined);
 
     // Check for a newer build once on launch; silent if current or if not a Tauri build.
@@ -127,6 +139,7 @@ function App(props: AppProps) {
   onCleanup(() => {
     active = false;
     window.removeEventListener("keydown", onSettingsShortcut);
+    window.removeEventListener("keydown", onExtensionsShortcut);
     stopListening?.();
     fleet.stop();
     notifications.stop();
@@ -195,6 +208,13 @@ function App(props: AppProps) {
           >Settings</button>
           <button
             type="button"
+            class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${extensionsOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
+            onClick={() => setExtensionsOpen(!extensionsOpen())}
+            aria-pressed={extensionsOpen()}
+            title="Extensions (6)"
+          >Extensions</button>
+          <button
+            type="button"
             class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${repomindOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
             onClick={() => setRepomindOpen(!repomindOpen())}
             aria-pressed={repomindOpen()}
@@ -227,7 +247,9 @@ function App(props: AppProps) {
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
-          <TerminalWorkspace fleet={fleet} actions={actions} />
+          <Show when={extensionsOpen()} fallback={<TerminalWorkspace fleet={fleet} actions={actions} />}>
+            <ExtensionsView store={ext} fleet={fleet} />
+          </Show>
         </main>
 
         <aside
