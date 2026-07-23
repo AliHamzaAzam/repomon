@@ -12,6 +12,13 @@ export type ExtRow =
 export interface ExtSource {
   list(scope: ExtScopeParams): Promise<ExtSnapshot>;
   setEnabled(id: string, enabled: boolean, scope: ExtScopeParams): Promise<unknown>;
+  install(ref: string, scope: ExtScopeParams): Promise<unknown>;
+  remove(id: string, scope: ExtScopeParams): Promise<unknown>;
+  update(id: string | undefined): Promise<unknown>;
+  details(id: string): Promise<string>;
+  marketplaceAdd(source: string): Promise<unknown>;
+  marketplaceRemove(name: string): Promise<unknown>;
+  marketplaceRefresh(name: string | undefined): Promise<unknown>;
   subscribe?(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
 }
 
@@ -19,6 +26,13 @@ export const daemonExtSource: ExtSource = {
   list: (scope) => daemonCall("ext.list", scope),
   setEnabled: (id, enabled, scope) =>
     daemonCall(enabled ? "plugin.enable" : "plugin.disable", { id, ...scope }),
+  install: (ref, scope) => daemonCall("plugin.install", { ref, ...scope }),
+  remove: (id, scope) => daemonCall("plugin.remove", { id, ...scope }),
+  update: (id) => daemonCall("plugin.update", { id }),
+  details: async (id) => (await daemonCall("plugin.details", { id })).text,
+  marketplaceAdd: (source) => daemonCall("marketplace.add", { source }),
+  marketplaceRemove: (name) => daemonCall("marketplace.remove", { name }),
+  marketplaceRefresh: (name) => daemonCall("marketplace.refresh", { name }),
   subscribe: subscribeDaemon,
 };
 
@@ -51,10 +65,10 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
     void refresh();
   }
 
-  async function setEnabled(id: string, enabled: boolean) {
+  async function mutate(op: () => Promise<unknown>) {
     setBusy(true);
     try {
-      await source.setEnabled(id, enabled, scope());
+      await op();
       setError(null);
       await refresh();
     } catch (cause) {
@@ -62,6 +76,42 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function setEnabled(id: string, enabled: boolean) {
+    await mutate(() => source.setEnabled(id, enabled, scope()));
+  }
+
+  async function install(ref: string) {
+    await mutate(() => source.install(ref, scope()));
+  }
+
+  async function remove(id: string) {
+    await mutate(() => source.remove(id, scope()));
+  }
+
+  async function update(id?: string) {
+    await mutate(() => source.update(id));
+  }
+
+  async function marketplaceAdd(value: string) {
+    await mutate(() => source.marketplaceAdd(value));
+  }
+
+  async function marketplaceRemove(name: string) {
+    await mutate(() => source.marketplaceRemove(name));
+  }
+
+  async function marketplaceRefresh(name?: string) {
+    await mutate(() => source.marketplaceRefresh(name));
+  }
+
+  async function details(id: string): Promise<string> {
+    return source.details(id);
+  }
+
+  function cliAvailable(): boolean {
+    return snapshot()?.cli_version != null;
   }
 
   const rows = createMemo<ExtRow[]>(() => {
@@ -96,7 +146,28 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
     })
     ?.catch(() => undefined);
 
-  return { scope, setScope, query, setQuery, filter, setFilter, snapshot, rows, busy, error, refresh, setEnabled };
+  return {
+    scope,
+    setScope,
+    query,
+    setQuery,
+    filter,
+    setFilter,
+    snapshot,
+    rows,
+    busy,
+    error,
+    refresh,
+    setEnabled,
+    install,
+    remove,
+    update,
+    details,
+    marketplaceAdd,
+    marketplaceRemove,
+    marketplaceRefresh,
+    cliAvailable,
+  };
 }
 
 export type ExtensionsStore = ReturnType<typeof createExtensionsStore>;

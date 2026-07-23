@@ -18,6 +18,13 @@ function source(overrides: Partial<ExtSource> = {}): ExtSource {
   return {
     list: vi.fn().mockResolvedValue(snapshot),
     setEnabled: vi.fn().mockResolvedValue({ ok: true, fanout: null }),
+    install: vi.fn().mockResolvedValue({ ok: true, stdout: "", fanout: null }),
+    remove: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
+    update: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
+    details: vi.fn().mockResolvedValue("plugin details text"),
+    marketplaceAdd: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
+    marketplaceRemove: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
+    marketplaceRefresh: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
     ...overrides,
   };
 }
@@ -63,6 +70,18 @@ describe("extensions store", () => {
       await store.setEnabled("github@official", true);
       expect(store.error()).toContain("nope");
       expect(store.busy()).toBe(false);
+      dispose();
+    });
+  });
+
+  it("install goes through the active scope and cli availability gates on cli_version", async () => {
+    await createRoot(async (dispose) => {
+      const src = source();
+      const store = createExtensionsStore(src);
+      await flush();
+      expect(store.cliAvailable()).toBe(false); // fixture cli_version: null
+      await store.install("x@official");
+      expect(src.install).toHaveBeenCalledWith("x@official", { scope: "global" });
       dispose();
     });
   });

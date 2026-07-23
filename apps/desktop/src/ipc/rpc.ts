@@ -141,6 +141,13 @@ interface RpcMap {
   "ext.list": { params: ExtScopeParams; result: ExtSnapshot };
   "plugin.enable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
   "plugin.disable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
+  "plugin.install": { params: { ref: string } & ExtScopeParams; result: { ok: boolean; stdout: string; fanout: FanoutSummary | null } };
+  "plugin.remove": { params: { id: string } & ExtScopeParams; result: { ok: boolean; stdout: string } };
+  "plugin.update": { params: { id?: string }; result: { ok: boolean; stdout: string } };
+  "plugin.details": { params: { id: string }; result: { text: string } };
+  "marketplace.add": { params: { source: string }; result: { ok: boolean; stdout: string } };
+  "marketplace.remove": { params: { name: string }; result: { ok: boolean; stdout: string } };
+  "marketplace.refresh": { params: { name?: string }; result: { ok: boolean; stdout: string } };
 }
 
 export type RpcMethod = keyof RpcMap;
