@@ -5,6 +5,8 @@ import type {
   AgentChoice,
   BrowseResult,
   Commit,
+  ExtSnapshot,
+  FanoutSummary,
   Lane,
   PendingDialog,
   Repo,
@@ -36,6 +38,8 @@ export interface DaemonEvent<T = unknown> {
   method: `event.${string}`;
   params: T;
 }
+
+export type ExtScopeParams = { scope: "global" } | { scope: "repo"; repo_id: number };
 
 export interface ConfigView {
   accent?: string | null;
@@ -134,6 +138,9 @@ interface RpcMap {
   "orchestrator.key": { params: { key: string; literal?: boolean }; result: null };
   "orchestrator.watch": { params: { on: boolean }; result: null };
   "orchestrator.resize": { params: { cols: number; rows: number }; result: null };
+  "ext.list": { params: ExtScopeParams; result: ExtSnapshot };
+  "plugin.enable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
+  "plugin.disable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
 }
 
 export type RpcMethod = keyof RpcMap;
