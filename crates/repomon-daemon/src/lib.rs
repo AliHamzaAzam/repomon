@@ -7,6 +7,7 @@
 pub mod auto_continue;
 pub mod bytes_stream;
 pub mod conn;
+pub mod ext;
 pub mod notify_watch;
 pub mod pubsub;
 pub mod push;
