@@ -85,7 +85,7 @@ impl DaemonClient {
             .await
             .with_context(|| format!("connecting to daemon at {}", path.display()))?;
 
-        let (events_tx, _rx) = broadcast::channel(256);
+        let (events_tx, _rx) = broadcast::channel(2048);
         // Placeholder sender, immediately replaced by `spawn_io`.
         let (placeholder, _) = mpsc::channel(1);
         let inner = Arc::new(Inner {

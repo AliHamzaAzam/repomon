@@ -44,7 +44,7 @@ describe("Repomon desktop shell", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Connected")).toBeInTheDocument();
-      expect(screen.getByText("Version 0.5.0")).toBeInTheDocument();
+      expect(screen.getByText(/daemon 0\.5\.0/)).toBeInTheDocument();
       expect(screen.getByText("3 repos / 5 lanes")).toBeInTheDocument();
       expect(screen.getByText("Uptime 1h 01m")).toBeInTheDocument();
     });

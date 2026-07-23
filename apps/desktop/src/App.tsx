@@ -6,6 +6,7 @@ import ControlCenter from "./components/ControlCenter";
 import RepomindPanel from "./components/RepomindPanel";
 import TerminalWorkspace from "./components/TerminalWorkspace";
 import UpdateBanner from "./components/UpdateBanner";
+import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate, type AvailableUpdate } from "./ipc/updater";
 import { createActionsStore } from "./stores/actions";
 import {
@@ -49,6 +50,7 @@ function App(props: AppProps) {
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(true);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
+  const [appVersion, setAppVersion] = createSignal("");
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const actions = createActionsStore(fleet);
@@ -89,6 +91,7 @@ function App(props: AppProps) {
 
   onMount(() => {
     window.addEventListener("keydown", onSettingsShortcut);
+    void getVersion().then(setAppVersion).catch(() => undefined);
 
     // Check for a newer build once on launch; silent if current or if not a Tauri build.
     void checkForUpdate()
@@ -256,7 +259,7 @@ function App(props: AppProps) {
             <span class="truncate text-fault">{connection().message}</span>
           ) : null}
         </span>
-        <span>Version {connection().daemon?.version ?? "--"}</span>
+        <span>App {appVersion() || "--"} · daemon {connection().daemon?.version ?? "--"}</span>
         <span>
           {connection().daemon?.repos ?? 0} repos / {connection().daemon?.lanes ?? 0} lanes
         </span>

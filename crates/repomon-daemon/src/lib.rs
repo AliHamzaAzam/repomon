@@ -294,7 +294,7 @@ impl Ctx {
         if backend.session_exists() {
             backend.configure();
         }
-        let (events, _rx) = broadcast::channel(512);
+        let (events, _rx) = broadcast::channel(2048);
         Arc::new(Ctx {
             store,
             registry,
