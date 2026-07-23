@@ -40,10 +40,10 @@ export default function RepoExtMenu(props: RepoExtMenuProps) {
     event.stopPropagation();
     props.onClose();
   }
-  onMount(() => window.addEventListener("keydown", onKey));
-  onCleanup(() => window.removeEventListener("keydown", onKey));
+  onMount(() => window.addEventListener("keydown", onKey, true));
+  onCleanup(() => window.removeEventListener("keydown", onKey, true));
 
-  const top = () => Math.max(8, Math.min(props.y, window.innerHeight - 320));
+  const top = () => Math.max(8, Math.min(props.y, window.innerHeight - window.innerHeight * 0.6 - 8));
 
   return (
     <>
