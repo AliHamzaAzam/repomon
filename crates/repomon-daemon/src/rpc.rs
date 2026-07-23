@@ -234,6 +234,29 @@ struct AgentPrompt {
     #[serde(default)]
     window: Option<String>,
 }
+#[derive(Debug, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+enum ExtScope {
+    Global,
+    Repo { repo_id: RepoId },
+}
+#[derive(Deserialize)]
+struct ExtList {
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+#[derive(Deserialize)]
+struct PluginToggle {
+    id: String,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+fn ext_scope_json(scope: &ExtScope) -> Value {
+    match scope {
+        ExtScope::Global => json!({ "scope": "global" }),
+        ExtScope::Repo { repo_id } => json!({ "scope": "repo", "repo_id": repo_id }),
+    }
+}
 #[derive(Deserialize)]
 struct AgentWatchBytes {
     lane_id: repomon_core::model::LaneId,
@@ -629,6 +652,15 @@ pub async fn dispatch(
                 );
             }
             let lane = ctx.lanes.create(p).await.map_err(internal)?;
+            // Seed the new worktree with the repo's extension config (best-effort; a failure only
+            // means the lane starts with whatever git checked out).
+            let repo_root = lane.repo.path.clone();
+            let wt_path = lane.worktree.path.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = crate::ext::sync_worktree(&repo_root, &wt_path) {
+                    tracing::debug!("lane.create ext seed skipped: {e}");
+                }
+            });
             ctx.broadcast(crate::pubsub::topic::LANE_CREATED, json!({ "lane": lane }));
             ctx.invalidate_overlay().await;
             to_value(lane)
@@ -704,6 +736,52 @@ pub async fn dispatch(
                 }
             }
             Ok(result)
+        }
+
+        // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----
+        "ext.list" => {
+            let p: ExtList = parse(params)?;
+            let home = crate::ext::claude_home()
+                .ok_or_else(|| internal("cannot resolve home directory"))?;
+            let repo_root = match p.scope {
+                ExtScope::Global => None,
+                ExtScope::Repo { repo_id } => {
+                    Some(ctx.store.get_repo(repo_id).await.map_err(internal)?.path)
+                }
+            };
+            let snap =
+                tokio::task::spawn_blocking(move || crate::ext::scan(&home, repo_root.as_deref()))
+                    .await
+                    .map_err(internal)?;
+            to_value(snap)
+        }
+        "plugin.enable" | "plugin.disable" => {
+            let enabled = method == "plugin.enable";
+            let p: PluginToggle = parse(params)?;
+            let (settings, fanout_root) = match &p.scope {
+                ExtScope::Global => {
+                    let home = crate::ext::claude_home()
+                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    (home.join("settings.json"), None)
+                }
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    (
+                        repo.path.join(".claude/settings.local.json"),
+                        Some(repo.path),
+                    )
+                }
+            };
+            let id = p.id.clone();
+            let fanout = tokio::task::spawn_blocking(move || {
+                crate::ext::set_plugin_enabled(&settings, &id, Some(enabled))?;
+                Ok::<_, std::io::Error>(fanout_root.map(|root| crate::ext::fan_out(&root)))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "ok": true, "fanout": fanout }))
         }
 
         // ---- commits (computed live via gix) ----

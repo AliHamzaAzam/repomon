@@ -5137,6 +5137,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "directories",
  "futures",
  "httparse",
  "repomon-core",
