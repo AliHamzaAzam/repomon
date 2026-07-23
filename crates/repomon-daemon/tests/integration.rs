@@ -1107,3 +1107,33 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn plugin_details_returns_cli_text_or_structured_error() {
+    // Missing CLI must produce -32021, not a crash. (PATH manipulation is process-global; if the
+    // real claude is installed this asserts the success path instead.)
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ext2-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+    let r = call(
+        &mut stream,
+        1,
+        "plugin.details",
+        Some(json!({ "id": "nonexistent-plugin-xyz@nowhere" })),
+    )
+    .await;
+    match (r.result, r.error) {
+        (Some(v), None) => assert!(v["text"].is_string()),
+        (None, Some(e)) => assert!(e.code == -32020 || e.code == -32021, "unexpected {e:?}"),
+        other => panic!("unexpected response {other:?}"),
+    }
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

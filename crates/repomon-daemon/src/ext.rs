@@ -204,9 +204,68 @@ fn scan_marketplaces(claude_home: &Path) -> Vec<MarketplaceInfo> {
         .collect()
 }
 
+/// A CLI operation failure with everything the GUI needs to show a useful error.
+#[derive(Debug)]
+pub struct CliFailure {
+    pub message: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+/// Handle to the `claude` CLI. Detection runs `claude --version` once per call site; the RPC
+/// layer caches via OnceLock so a missing CLI is cheap to re-report.
+pub struct ClaudeCli {
+    pub bin: PathBuf,
+    pub version: String,
+}
+
+impl ClaudeCli {
+    pub fn detect() -> Option<ClaudeCli> {
+        let out = std::process::Command::new("claude")
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(ClaudeCli {
+            bin: PathBuf::from("claude"),
+            version: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn run(&self, args: &[&str]) -> Result<String, CliFailure> {
+        let out = std::process::Command::new(&self.bin)
+            .args(args)
+            .output()
+            .map_err(|e| CliFailure {
+                message: format!("failed to launch claude: {e}"),
+                stderr: String::new(),
+                exit_code: None,
+            })?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(CliFailure {
+                message: format!("claude {} failed", args.join(" ")),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                exit_code: out.status.code(),
+            })
+        }
+    }
+}
+
 /// Build the full snapshot for one scope. Global scope passes `repo_root: None`; repo scope layers
 /// the repo's `.claude` (project skills, settings.local.json toggle overrides) on top.
-pub fn scan(claude_home: &Path, repo_root: Option<&Path>) -> ExtSnapshot {
+pub fn scan(
+    claude_home: &Path,
+    repo_root: Option<&Path>,
+    cli_version: Option<String>,
+) -> ExtSnapshot {
     let global_enabled = enabled_map(&claude_home.join("settings.json"));
     let repo_enabled = repo_root
         .map(|r| enabled_map(&r.join(".claude/settings.local.json")))
@@ -264,7 +323,7 @@ pub fn scan(claude_home: &Path, repo_root: Option<&Path>) -> ExtSnapshot {
     skills.sort_by(|a, b| a.name.cmp(&b.name));
 
     ExtSnapshot {
-        cli_version: None, // filled by the RPC layer once the CLI runner exists (Task 9)
+        cli_version,
         marketplaces: scan_marketplaces(claude_home),
         plugins,
         skills,
@@ -476,7 +535,7 @@ mod tests {
     fn scan_reads_global_skills_plugins_marketplaces() {
         let tmp = tempfile::tempdir().unwrap();
         fixture_home(tmp.path());
-        let snap = scan(tmp.path(), None);
+        let snap = scan(tmp.path(), None, None);
 
         assert_eq!(snap.skills.len(), 1);
         assert_eq!(snap.skills[0].name, "my-skill");
@@ -522,7 +581,7 @@ mod tests {
         )
         .unwrap();
 
-        let snap = scan(home.path(), Some(repo.path()));
+        let snap = scan(home.path(), Some(repo.path()), None);
         let sp = snap
             .plugins
             .iter()
@@ -545,7 +604,7 @@ mod tests {
     #[test]
     fn scan_of_empty_home_is_empty_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let snap = scan(tmp.path(), None);
+        let snap = scan(tmp.path(), None, None);
         assert!(snap.plugins.is_empty() && snap.skills.is_empty() && snap.marketplaces.is_empty());
     }
 
@@ -712,5 +771,38 @@ mod tests {
         assert_eq!(summary.skipped_lanes.len(), 1);
         assert_eq!(summary.skipped_lanes[0].lane, "wt_gone");
         assert!(wt_ok.join(".claude/settings.local.json").is_file());
+    }
+
+    fn fake_claude(dir: &Path, script: &str) -> ClaudeCli {
+        let bin = dir.join("claude");
+        std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        ClaudeCli {
+            bin,
+            version: "9.9.9-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn cli_run_captures_stdout_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = fake_claude(tmp.path(), "echo installed ok");
+        assert_eq!(
+            cli.run(&["plugin", "install", "x@m"]).unwrap().trim(),
+            "installed ok"
+        );
+    }
+
+    #[test]
+    fn cli_run_surfaces_stderr_and_exit_code_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = fake_claude(tmp.path(), "echo boom >&2; exit 3");
+        let err = cli.run(&["plugin", "install", "x@m"]).unwrap_err();
+        assert_eq!(err.exit_code, Some(3));
+        assert!(err.stderr.contains("boom"));
     }
 }

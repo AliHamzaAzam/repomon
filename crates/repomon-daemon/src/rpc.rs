@@ -258,6 +258,68 @@ fn ext_scope_json(scope: &ExtScope) -> Value {
     }
 }
 #[derive(Deserialize)]
+struct PluginInstall {
+    r#ref: String,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+#[derive(Deserialize)]
+struct NameOnly {
+    name: String,
+}
+#[derive(Deserialize)]
+struct OptionalName {
+    #[serde(default)]
+    name: Option<String>,
+}
+#[derive(Deserialize)]
+struct IdOnly {
+    id: String,
+}
+#[derive(Deserialize)]
+struct OptionalId {
+    #[serde(default)]
+    id: Option<String>,
+}
+#[derive(Deserialize)]
+struct SourceOnly {
+    source: String,
+}
+
+/// Detected once per daemon process and cached: repeated CLI-missing checks (eg. every
+/// `ext.list`) shouldn't repeatedly shell out to `claude --version`.
+static CLAUDE_CLI: std::sync::OnceLock<Option<std::sync::Arc<crate::ext::ClaudeCli>>> =
+    std::sync::OnceLock::new();
+
+fn claude_cli() -> Result<std::sync::Arc<crate::ext::ClaudeCli>, RpcError> {
+    CLAUDE_CLI
+        .get_or_init(|| crate::ext::ClaudeCli::detect().map(std::sync::Arc::new))
+        .clone()
+        .ok_or_else(|| RpcError::new(-32021, "claude CLI not found on PATH"))
+}
+
+fn cli_error(failure: crate::ext::CliFailure) -> RpcError {
+    RpcError {
+        code: -32020,
+        message: failure.message,
+        data: Some(json!({ "stderr": failure.stderr, "exit_code": failure.exit_code })),
+    }
+}
+
+/// Run a CLI op off the async runtime, emit event.ext.changed, and return {ok, stdout}.
+async fn run_cli_op(ctx: &Ctx, args: Vec<String>, changed_scope: Value) -> Result<Value, RpcError> {
+    let cli = claude_cli()?;
+    let stdout = tokio::task::spawn_blocking(move || {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        cli.run(&arg_refs)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(cli_error)?;
+    ctx.broadcast("event.ext.changed", changed_scope);
+    Ok(json!({ "ok": true, "stdout": stdout }))
+}
+#[derive(Deserialize)]
 struct AgentWatchBytes {
     lane_id: repomon_core::model::LaneId,
     #[serde(default)]
@@ -749,10 +811,17 @@ pub async fn dispatch(
                     Some(ctx.store.get_repo(repo_id).await.map_err(internal)?.path)
                 }
             };
-            let snap =
-                tokio::task::spawn_blocking(move || crate::ext::scan(&home, repo_root.as_deref()))
-                    .await
-                    .map_err(internal)?;
+            // A missing CLI is fine for listing: populate the cache if possible and just leave
+            // cli_version unset otherwise.
+            claude_cli().ok();
+            let cli_version = CLAUDE_CLI
+                .get()
+                .and_then(|c| c.as_ref().map(|c| c.version.clone()));
+            let snap = tokio::task::spawn_blocking(move || {
+                crate::ext::scan(&home, repo_root.as_deref(), cli_version)
+            })
+            .await
+            .map_err(internal)?;
             to_value(snap)
         }
         "plugin.enable" | "plugin.disable" => {
@@ -782,6 +851,102 @@ pub async fn dispatch(
             .map_err(internal)?;
             ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
             Ok(json!({ "ok": true, "fanout": fanout }))
+        }
+        "plugin.install" => {
+            // Always -s user: the cache and install record stay global; per-repo activation is
+            // purely an enabledPlugins toggle (worktree projectPath records would never match
+            // otherwise).
+            let p: PluginInstall = parse(params)?;
+            let result = run_cli_op(
+                ctx,
+                vec![
+                    "plugin".into(),
+                    "install".into(),
+                    p.r#ref.clone(),
+                    "-s".into(),
+                    "user".into(),
+                ],
+                ext_scope_json(&p.scope),
+            )
+            .await?;
+            // Repo-scope install also enables it there so "install to this repo" does what it says.
+            if let ExtScope::Repo { repo_id } = p.scope {
+                let repo = ctx.store.get_repo(repo_id).await.map_err(internal)?;
+                let settings = repo.path.join(".claude/settings.local.json");
+                let id = p.r#ref.clone();
+                let root = repo.path.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::ext::set_plugin_enabled(&settings, &id, Some(true))?;
+                    crate::ext::fan_out(&root);
+                    Ok::<_, std::io::Error>(())
+                })
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+            }
+            Ok(result)
+        }
+        "plugin.remove" => {
+            let p: PluginToggle = parse(params)?;
+            run_cli_op(
+                ctx,
+                vec!["plugin".into(), "uninstall".into(), p.id.clone()],
+                ext_scope_json(&p.scope),
+            )
+            .await
+        }
+        "plugin.update" => {
+            let p: OptionalId = parse(params)?;
+            let mut args = vec!["plugin".into(), "update".into()];
+            if let Some(id) = p.id {
+                args.push(id)
+            }
+            run_cli_op(ctx, args, json!({ "scope": "global" })).await
+        }
+        "plugin.details" => {
+            let p: IdOnly = parse(params)?;
+            let cli = claude_cli()?;
+            let text = tokio::task::spawn_blocking(move || cli.run(&["plugin", "details", &p.id]))
+                .await
+                .map_err(internal)?
+                .map_err(cli_error)?;
+            Ok(json!({ "text": text }))
+        }
+        "marketplace.add" => {
+            let p: SourceOnly = parse(params)?;
+            run_cli_op(
+                ctx,
+                vec![
+                    "plugin".into(),
+                    "marketplace".into(),
+                    "add".into(),
+                    p.source,
+                ],
+                json!({ "scope": "global" }),
+            )
+            .await
+        }
+        "marketplace.remove" => {
+            let p: NameOnly = parse(params)?;
+            run_cli_op(
+                ctx,
+                vec![
+                    "plugin".into(),
+                    "marketplace".into(),
+                    "remove".into(),
+                    p.name,
+                ],
+                json!({ "scope": "global" }),
+            )
+            .await
+        }
+        "marketplace.refresh" => {
+            let p: OptionalName = parse(params)?;
+            let mut args = vec!["plugin".into(), "marketplace".into(), "update".into()];
+            if let Some(name) = p.name {
+                args.push(name)
+            }
+            run_cli_op(ctx, args, json!({ "scope": "global" })).await
         }
 
         // ---- commits (computed live via gix) ----
