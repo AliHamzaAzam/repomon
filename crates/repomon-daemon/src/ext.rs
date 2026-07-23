@@ -680,4 +680,37 @@ mod tests {
         assert_eq!(summary.skipped_lanes.len(), 1);
         assert_eq!(summary.skipped_lanes[0].lane, "wt1");
     }
+
+    #[test]
+    fn fan_out_mixed_batch_syncs_survivors_and_reports_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("README"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let wt_ok = tmp.path().join("wt_ok");
+        let wt_gone = tmp.path().join("wt_gone");
+        git(
+            &repo,
+            &["worktree", "add", wt_ok.to_str().unwrap(), "-b", "ok"],
+        );
+        git(
+            &repo,
+            &["worktree", "add", wt_gone.to_str().unwrap(), "-b", "gone"],
+        );
+
+        // Write source settings to repo root.
+        set_plugin_enabled(&repo.join(".claude/settings.local.json"), "a@m", Some(true)).unwrap();
+
+        // Remove wt_gone directory to simulate a mixed batch.
+        std::fs::remove_dir_all(&wt_gone).unwrap();
+
+        let summary = fan_out(&repo);
+        assert_eq!(summary.synced_lanes, vec!["wt_ok"]);
+        assert_eq!(summary.skipped_lanes.len(), 1);
+        assert_eq!(summary.skipped_lanes[0].lane, "wt_gone");
+        assert!(wt_ok.join(".claude/settings.local.json").is_file());
+    }
 }
