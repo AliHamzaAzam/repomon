@@ -37,29 +37,75 @@ fn enabled_map(settings: &Path) -> BTreeMap<String, bool> {
         .unwrap_or_default()
 }
 
-/// Parse the `name:`/`description:` frontmatter lines from a SKILL.md.
+/// A YAML block scalar indicator (`|`, `>`, `|-`, `>-`) introducing a multi-line value: the real
+/// value is the following, more-indented lines, not the indicator itself.
+fn is_block_scalar_indicator(v: &str) -> bool {
+    matches!(v, "|" | ">" | "|-" | ">-")
+}
+
+/// Collect a YAML block scalar's body: consecutive lines indented deeper than `key_indent`,
+/// trimmed and joined with a single space. Stops at the first line at or below that indent
+/// (another key, or the closing `---`). Returns the joined value and how many lines were consumed.
+fn collect_block_scalar(lines: &[&str], key_indent: usize) -> (String, usize) {
+    let mut parts = Vec::new();
+    let mut consumed = 0;
+    for line in lines {
+        let indent = line.len() - line.trim_start().len();
+        if line.trim().is_empty() || indent <= key_indent {
+            break;
+        }
+        parts.push(line.trim());
+        consumed += 1;
+    }
+    (parts.join(" "), consumed)
+}
+
+/// Parse the `name:`/`description:` frontmatter lines from a SKILL.md. Handles both plain
+/// single-line values and YAML block scalars (`|`, `>`, `|-`, `>-`) commonly used for multi-line
+/// descriptions.
 fn skill_frontmatter(path: &Path) -> (Option<String>, Option<String>) {
     let Ok(text) = fs::read_to_string(path) else {
         return (None, None);
     };
+    let all_lines: Vec<&str> = text.lines().collect();
     let (mut name, mut description, mut in_fm) = (None, None, false);
-    for line in text.lines() {
+    let mut i = 0;
+    while i < all_lines.len() {
+        let line = all_lines[i];
         let t = line.trim();
         if t == "---" {
             if in_fm {
                 break;
             }
             in_fm = true;
+            i += 1;
             continue;
         }
         if !in_fm {
+            i += 1;
             continue;
         }
+        let key_indent = line.len() - line.trim_start().len();
         if let Some(v) = t.strip_prefix("name:") {
-            name = Some(v.trim().to_string())
+            let v = v.trim();
+            if is_block_scalar_indicator(v) {
+                let (joined, consumed) = collect_block_scalar(&all_lines[i + 1..], key_indent);
+                name = Some(joined);
+                i += consumed;
+            } else {
+                name = Some(v.to_string());
+            }
         } else if let Some(v) = t.strip_prefix("description:") {
-            description = Some(v.trim().to_string())
+            let v = v.trim();
+            if is_block_scalar_indicator(v) {
+                let (joined, consumed) = collect_block_scalar(&all_lines[i + 1..], key_indent);
+                description = Some(joined);
+                i += consumed;
+            } else {
+                description = Some(v.to_string());
+            }
         }
+        i += 1;
     }
     (name, description)
 }
@@ -346,5 +392,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let snap = scan(tmp.path(), None);
         assert!(snap.plugins.is_empty() && snap.skills.is_empty() && snap.marketplaces.is_empty());
+    }
+
+    #[test]
+    fn frontmatter_handles_block_scalar_descriptions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills/block");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: block\ndescription: |\n  First line of description.\n  Second line.\nother: x\n---\nbody\n",
+        )
+        .unwrap();
+        let skills = scan_skills(&tmp.path().join("skills"), SkillSource::User);
+        assert_eq!(
+            skills[0].description.as_deref(),
+            Some("First line of description. Second line.")
+        );
     }
 }
