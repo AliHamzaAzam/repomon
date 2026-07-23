@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use repomon_core::model::{
     EnabledSource, ExtSnapshot, MarketplaceInfo, PluginInfo, PluginProvides, SkillInfo, SkillSource,
@@ -268,6 +270,52 @@ pub fn scan(claude_home: &Path, repo_root: Option<&Path>) -> ExtSnapshot {
     }
 }
 
+/// Serializes all settings writes so concurrent RPCs cannot interleave read-modify-write cycles.
+static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
+
+/// Read-modify-write ONLY the `enabledPlugins` key, preserving every other byte of meaning in the
+/// file, then atomically replace it (temp file + rename). `enabled: None` removes the entry.
+/// A corrupt file is an error, never a clobber.
+pub fn set_plugin_enabled(settings: &Path, id: &str, enabled: Option<bool>) -> io::Result<()> {
+    let _guard = SETTINGS_WRITE.lock().unwrap();
+    let mut root: Value = match fs::read_to_string(settings) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("corrupt settings: {e}"))
+        })?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Object(Default::default()),
+        Err(e) => return Err(e),
+    };
+    let Value::Object(map) = &mut root else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "settings root is not an object",
+        ));
+    };
+    let plugins = map
+        .entry("enabledPlugins")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let Value::Object(plugins) = plugins else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "enabledPlugins is not an object",
+        ));
+    };
+    match enabled {
+        Some(value) => {
+            plugins.insert(id.to_string(), Value::Bool(value));
+        }
+        None => {
+            plugins.remove(id);
+        }
+    }
+    if let Some(dir) = settings.parent() {
+        fs::create_dir_all(dir)?
+    }
+    let tmp = settings.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
+    fs::rename(&tmp, settings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +457,53 @@ mod tests {
             skills[0].description.as_deref(),
             Some("First line of description. Second line.")
         );
+    }
+
+    #[test]
+    fn toggle_preserves_every_other_settings_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::json!({
+                "model": "opus",
+                "permissions": { "allow": ["Bash"] },
+                "enabledPlugins": { "a@m": true }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_plugin_enabled(&settings, "b@m", Some(false)).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(after["model"], "opus");
+        assert_eq!(after["permissions"]["allow"][0], "Bash");
+        assert_eq!(after["enabledPlugins"]["a@m"], true);
+        assert_eq!(after["enabledPlugins"]["b@m"], false);
+
+        set_plugin_enabled(&settings, "a@m", None).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(after["enabledPlugins"].get("a@m").is_none());
+    }
+
+    #[test]
+    fn toggle_creates_missing_settings_file_and_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("deep/.claude/settings.local.json");
+        set_plugin_enabled(&settings, "a@m", Some(true)).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(after["enabledPlugins"]["a@m"], true);
+    }
+
+    #[test]
+    fn toggle_refuses_corrupt_settings_rather_than_clobbering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(&settings, "not json {").unwrap();
+        assert!(set_plugin_enabled(&settings, "a@m", Some(true)).is_err());
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json {");
     }
 }
