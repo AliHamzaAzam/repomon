@@ -286,16 +286,31 @@ struct SourceOnly {
     source: String,
 }
 
-/// Detected once per daemon process and cached: repeated CLI-missing checks (eg. every
-/// `ext.list`) shouldn't repeatedly shell out to `claude --version`.
-static CLAUDE_CLI: std::sync::OnceLock<Option<std::sync::Arc<crate::ext::ClaudeCli>>> =
+/// Cached once a detection succeeds: repeated CLI-present checks (eg. every `ext.list`) shouldn't
+/// repeatedly shell out to `claude --version`. Failures are deliberately NOT cached (see
+/// `claude_cli` below) so installing the CLI after daemon start doesn't require a restart.
+static CLAUDE_CLI: std::sync::OnceLock<std::sync::Arc<crate::ext::ClaudeCli>> =
     std::sync::OnceLock::new();
 
-fn claude_cli() -> Result<std::sync::Arc<crate::ext::ClaudeCli>, RpcError> {
-    CLAUDE_CLI
-        .get_or_init(|| crate::ext::ClaudeCli::detect().map(std::sync::Arc::new))
-        .clone()
-        .ok_or_else(|| RpcError::new(-32021, "claude CLI not found on PATH"))
+/// Resolve the cached CLI handle, detecting off the async runtime on a cache miss. Only a
+/// successful detection is cached; a miss re-probes on the next call, so a CLI installed after
+/// the daemon started is picked up without a restart.
+async fn claude_cli() -> Result<std::sync::Arc<crate::ext::ClaudeCli>, RpcError> {
+    if let Some(cli) = CLAUDE_CLI.get() {
+        return Ok(cli.clone());
+    }
+    match tokio::task::spawn_blocking(crate::ext::ClaudeCli::detect)
+        .await
+        .map_err(internal)?
+    {
+        Some(cli) => {
+            let cli = std::sync::Arc::new(cli);
+            // A concurrent detection may have won the race; both results are equivalent, so
+            // either value is fine to return.
+            Ok(CLAUDE_CLI.get_or_init(|| cli).clone())
+        }
+        None => Err(RpcError::new(-32021, "claude CLI not found on PATH")),
+    }
 }
 
 fn cli_error(failure: crate::ext::CliFailure) -> RpcError {
@@ -308,7 +323,7 @@ fn cli_error(failure: crate::ext::CliFailure) -> RpcError {
 
 /// Run a CLI op off the async runtime, emit event.ext.changed, and return {ok, stdout}.
 async fn run_cli_op(ctx: &Ctx, args: Vec<String>, changed_scope: Value) -> Result<Value, RpcError> {
-    let cli = claude_cli()?;
+    let cli = claude_cli().await?;
     let stdout = tokio::task::spawn_blocking(move || {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         cli.run(&arg_refs)
@@ -811,12 +826,8 @@ pub async fn dispatch(
                     Some(ctx.store.get_repo(repo_id).await.map_err(internal)?.path)
                 }
             };
-            // A missing CLI is fine for listing: populate the cache if possible and just leave
-            // cli_version unset otherwise.
-            claude_cli().ok();
-            let cli_version = CLAUDE_CLI
-                .get()
-                .and_then(|c| c.as_ref().map(|c| c.version.clone()));
+            // A missing CLI is fine for listing: just leave cli_version unset.
+            let cli_version = claude_cli().await.ok().map(|c| c.version.clone());
             let snap = tokio::task::spawn_blocking(move || {
                 crate::ext::scan(&home, repo_root.as_deref(), cli_version)
             })
@@ -856,35 +867,49 @@ pub async fn dispatch(
             // Always -s user: the cache and install record stay global; per-repo activation is
             // purely an enabledPlugins toggle (worktree projectPath records would never match
             // otherwise).
+            //
+            // Deliberately NOT run_cli_op: that helper broadcasts event.ext.changed immediately
+            // after the CLI call, but repo-scope installs still have an enable + fan-out step to
+            // run afterward. Broadcasting before that lands let clients refresh into a
+            // half-applied state, and a failure in the enable/fan-out step (after the CLI install
+            // had already succeeded) still emitted the "changed" event. So here the broadcast is
+            // held until every side effect has actually succeeded.
             let p: PluginInstall = parse(params)?;
-            let result = run_cli_op(
-                ctx,
-                vec![
-                    "plugin".into(),
-                    "install".into(),
-                    p.r#ref.clone(),
-                    "-s".into(),
-                    "user".into(),
-                ],
-                ext_scope_json(&p.scope),
-            )
-            .await?;
+            let cli = claude_cli().await?;
+            let args: [String; 5] = [
+                "plugin".into(),
+                "install".into(),
+                p.r#ref.clone(),
+                "-s".into(),
+                "user".into(),
+            ];
+            let stdout = tokio::task::spawn_blocking(move || {
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                cli.run(&arg_refs)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(cli_error)?;
             // Repo-scope install also enables it there so "install to this repo" does what it says.
-            if let ExtScope::Repo { repo_id } = p.scope {
-                let repo = ctx.store.get_repo(repo_id).await.map_err(internal)?;
-                let settings = repo.path.join(".claude/settings.local.json");
-                let id = p.r#ref.clone();
-                let root = repo.path.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::ext::set_plugin_enabled(&settings, &id, Some(true))?;
-                    crate::ext::fan_out(&root);
-                    Ok::<_, std::io::Error>(())
-                })
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
-            }
-            Ok(result)
+            let fanout = match &p.scope {
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    let settings = repo.path.join(".claude/settings.local.json");
+                    let id = p.r#ref.clone();
+                    let root = repo.path.clone();
+                    let summary = tokio::task::spawn_blocking(move || {
+                        crate::ext::set_plugin_enabled(&settings, &id, Some(true))?;
+                        Ok::<_, std::io::Error>(crate::ext::fan_out(&root))
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+                    Some(summary)
+                }
+                ExtScope::Global => None,
+            };
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "ok": true, "stdout": stdout, "fanout": fanout }))
         }
         "plugin.remove" => {
             let p: PluginToggle = parse(params)?;
@@ -905,7 +930,7 @@ pub async fn dispatch(
         }
         "plugin.details" => {
             let p: IdOnly = parse(params)?;
-            let cli = claude_cli()?;
+            let cli = claude_cli().await?;
             let text = tokio::task::spawn_blocking(move || cli.run(&["plugin", "details", &p.id]))
                 .await
                 .map_err(internal)?

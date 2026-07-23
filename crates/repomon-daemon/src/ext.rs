@@ -221,7 +221,12 @@ pub struct ClaudeCli {
 
 impl ClaudeCli {
     pub fn detect() -> Option<ClaudeCli> {
-        let out = std::process::Command::new("claude")
+        // `REPOMON_CLAUDE_BIN` overrides the binary for tests (eg. pointing at a nonexistent path
+        // to deterministically exercise the -32021 "CLI not found" case).
+        let bin = std::env::var_os("REPOMON_CLAUDE_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("claude"));
+        let out = std::process::Command::new(&bin)
             .arg("--version")
             .output()
             .ok()?;
@@ -229,7 +234,7 @@ impl ClaudeCli {
             return None;
         }
         Some(ClaudeCli {
-            bin: PathBuf::from("claude"),
+            bin,
             version: String::from_utf8_lossy(&out.stdout).trim().to_string(),
         })
     }
