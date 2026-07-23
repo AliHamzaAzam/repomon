@@ -169,13 +169,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         </Show>
       </div>
 
-      <Show when={extMenu()}>
+      <Show keyed when={extMenu()}>
         {(menu) => (
           <RepoExtMenu
-            repoId={menu().repoId}
-            x={menu().x}
-            y={menu().y}
-            onOpenExtensions={() => props.onOpenExtensions?.(menu().repoId)}
+            repoId={menu.repoId}
+            x={menu.x}
+            y={menu.y}
+            onOpenExtensions={() => props.onOpenExtensions?.(menu.repoId)}
             onClose={() => setExtMenu(null)}
           />
         )}
