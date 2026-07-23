@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use repomon_core::model::{
-    EnabledSource, ExtSnapshot, MarketplaceInfo, PluginInfo, PluginProvides, SkillInfo, SkillSource,
+    EnabledSource, ExtSnapshot, FanoutSummary, MarketplaceInfo, PluginInfo, PluginProvides,
+    SkillInfo, SkillSource, SkippedLane,
 };
 use serde_json::Value;
 
@@ -316,9 +317,115 @@ pub fn set_plugin_enabled(settings: &Path, id: &str, enabled: Option<bool>) -> i
     fs::rename(&tmp, settings)
 }
 
+/// Worktrees of `repo_root` (excluding the root itself), via `git worktree list --porcelain`.
+fn repo_worktrees(repo_root: &Path) -> io::Result<Vec<PathBuf>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
+    }
+    let root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .filter(|p| p.canonicalize().map(|c| c != root).unwrap_or(true))
+        .collect())
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?
+        } else {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Mirror the repo root's `.claude/settings.local.json` and `.claude/skills/` into one worktree.
+/// Copy-over semantics: deletions are handled by the mutation RPCs re-running the fan-out after
+/// removing from the source, plus deleting the target path (see skill.delete).
+pub fn sync_worktree(repo_root: &Path, worktree: &Path) -> io::Result<()> {
+    if !worktree.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "worktree directory missing",
+        ));
+    }
+    let src = repo_root.join(".claude");
+    let dst = worktree.join(".claude");
+    let settings = src.join("settings.local.json");
+    if settings.is_file() {
+        fs::create_dir_all(&dst)?;
+        fs::copy(&settings, dst.join("settings.local.json"))?;
+    }
+    let skills = src.join("skills");
+    if skills.is_dir() {
+        copy_dir(&skills, &dst.join("skills"))?
+    }
+    Ok(())
+}
+
+/// Push the repo root's `.claude` to every lane worktree, best-effort per lane.
+pub fn fan_out(repo_root: &Path) -> FanoutSummary {
+    let mut summary = FanoutSummary::default();
+    let worktrees = match repo_worktrees(repo_root) {
+        Ok(w) => w,
+        Err(e) => {
+            summary.skipped_lanes.push(SkippedLane {
+                lane: repo_root.display().to_string(),
+                reason: format!("git worktree list failed: {e}"),
+            });
+            return summary;
+        }
+    };
+    for wt in worktrees {
+        let lane = wt
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| wt.display().to_string());
+        match sync_worktree(repo_root, &wt) {
+            Ok(()) => summary.synced_lanes.push(lane),
+            Err(e) => summary.skipped_lanes.push(SkippedLane {
+                lane,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
 
     fn fixture_home(dir: &Path) {
         let skills = dir.join("skills/my-skill");
@@ -505,5 +612,72 @@ mod tests {
         std::fs::write(&settings, "not json {").unwrap();
         assert!(set_plugin_enabled(&settings, "a@m", Some(true)).is_err());
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json {");
+    }
+
+    #[test]
+    fn fan_out_copies_settings_and_skills_to_every_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("README"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let wt1 = tmp.path().join("wt1");
+        let wt2 = tmp.path().join("wt2");
+        git(
+            &repo,
+            &["worktree", "add", wt1.to_str().unwrap(), "-b", "l1"],
+        );
+        git(
+            &repo,
+            &["worktree", "add", wt2.to_str().unwrap(), "-b", "l2"],
+        );
+
+        // Repo-root .claude is the source of truth (gitignored files included).
+        let src_skills = repo.join(".claude/skills/verify");
+        std::fs::create_dir_all(&src_skills).unwrap();
+        std::fs::write(src_skills.join("SKILL.md"), "---\nname: verify\n---\n").unwrap();
+        set_plugin_enabled(&repo.join(".claude/settings.local.json"), "a@m", Some(true)).unwrap();
+
+        let summary = fan_out(&repo);
+        assert_eq!(
+            summary.synced_lanes.len(),
+            2,
+            "skipped: {:?}",
+            summary.skipped_lanes
+        );
+        for wt in [&wt1, &wt2] {
+            assert!(wt.join(".claude/skills/verify/SKILL.md").is_file());
+            let s: Value = serde_json::from_str(
+                &std::fs::read_to_string(wt.join(".claude/settings.local.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(s["enabledPlugins"]["a@m"], true);
+        }
+    }
+
+    #[test]
+    fn fan_out_reports_unsyncable_worktrees_without_failing_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("README"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let wt1 = tmp.path().join("wt1");
+        git(
+            &repo,
+            &["worktree", "add", wt1.to_str().unwrap(), "-b", "l1"],
+        );
+        set_plugin_enabled(&repo.join(".claude/settings.local.json"), "a@m", Some(true)).unwrap();
+        // Simulate a vanished worktree dir (git still lists it).
+        std::fs::remove_dir_all(&wt1).unwrap();
+
+        let summary = fan_out(&repo);
+        assert!(summary.synced_lanes.is_empty());
+        assert_eq!(summary.skipped_lanes.len(), 1);
+        assert_eq!(summary.skipped_lanes[0].lane, "wt1");
     }
 }
