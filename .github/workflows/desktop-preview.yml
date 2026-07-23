@@ -16,9 +16,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Reset the moving release so the matrix rebuilds every asset + latest.json from scratch. Without
+  # this the version-less .app.tar.gz is not reliably replaced and latest.json's per-platform
+  # signatures go stale — which cryptographically breaks the macOS updater (a fresh artifact served
+  # against a stale signature). Runs before the (now serialized) matrix.
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the stale desktop-preview release + tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete desktop-preview -R ${{ github.repository }} --cleanup-tag --yes || true
+
   preview:
+    needs: reset
     strategy:
       fail-fast: false
+      # Serialize the platforms: each job read-modify-writes the SAME latest.json on the moving
+      # release, so running them in parallel clobbers each other's signatures. One at a time, each
+      # merges its platform onto the previous job's fresh result.
+      max-parallel: 1
       matrix:
         include:
           # One universal macOS build: a single dmg + one .app.tar.gz updater artifact that
