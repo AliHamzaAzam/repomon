@@ -1,13 +1,15 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 
 import type { Lane } from "../bindings";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
+import RepoExtMenu from "./RepoExtMenu";
 
 interface FleetSidebarProps {
   fleet: FleetStore;
   actions: ActionsStore;
   searchRef?: (element: HTMLInputElement) => void;
+  onOpenExtensions?: (repoId: number) => void;
 }
 
 function dirtyCount(lane: Lane): number {
@@ -52,6 +54,8 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
 }
 
 export default function FleetSidebar(props: FleetSidebarProps) {
+  const [extMenu, setExtMenu] = createSignal<{ repoId: number; x: number; y: number } | null>(null);
+
   return (
     <>
       <div class="space-y-2 border-b border-line p-3">
@@ -99,7 +103,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               return (
                 <Show when={laneList().length > 0 || !props.fleet.query()}>
                   <section class="group/repo mb-2" aria-label={repo.name}>
-                    <div class="flex items-center justify-between px-2 py-1.5">
+                    <div
+                      class="flex items-center justify-between px-2 py-1.5"
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        setExtMenu({ repoId: repo.id, x: event.clientX, y: event.clientY });
+                      }}
+                    >
                       <span class="truncate font-mono text-[0.61rem] font-semibold uppercase tracking-[0.08em] text-muted">
                         {repo.name}
                       </span>
@@ -158,6 +168,18 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </Show>
         </Show>
       </div>
+
+      <Show when={extMenu()}>
+        {(menu) => (
+          <RepoExtMenu
+            repoId={menu().repoId}
+            x={menu().x}
+            y={menu().y}
+            onOpenExtensions={() => props.onOpenExtensions?.(menu().repoId)}
+            onClose={() => setExtMenu(null)}
+          />
+        )}
+      </Show>
 
       <div class="border-t border-line p-3">
         <div class="grid grid-cols-2 gap-2 font-mono text-[0.58rem] uppercase tracking-[0.08em] text-muted">

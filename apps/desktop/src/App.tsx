@@ -243,7 +243,15 @@ function App(props: AppProps) {
                 {fleet.repos().length} / {fleet.lanes().length}
               </span>
           </div>
-          <FleetSidebar fleet={fleet} actions={actions} searchRef={(element) => { searchInput = element; }} />
+          <FleetSidebar
+            fleet={fleet}
+            actions={actions}
+            searchRef={(element) => { searchInput = element; }}
+            onOpenExtensions={(repoId) => {
+              ext.setScope({ scope: "repo", repo_id: repoId });
+              setExtensionsOpen(true);
+            }}
+          />
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
