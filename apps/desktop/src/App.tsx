@@ -247,8 +247,17 @@ function App(props: AppProps) {
         </nav>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
-          <Show when={extensionsOpen()} fallback={<TerminalWorkspace fleet={fleet} actions={actions} />}>
-            <ExtensionsView store={ext} fleet={fleet} />
+          <div
+            class={`absolute inset-0 ${extensionsOpen() ? "warm-terminal-hidden" : ""}`}
+            aria-hidden={extensionsOpen() ? "true" : undefined}
+            inert={extensionsOpen()}
+          >
+            <TerminalWorkspace fleet={fleet} actions={actions} />
+          </div>
+          <Show when={extensionsOpen()}>
+            <div class="absolute inset-0 z-10 bg-background">
+              <ExtensionsView store={ext} fleet={fleet} />
+            </div>
           </Show>
         </main>
 
