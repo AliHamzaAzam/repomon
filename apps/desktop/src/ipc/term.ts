@@ -19,10 +19,8 @@ export interface TranslatedKey {
   literal: boolean;
 }
 
-export interface WheelStep {
-  up: boolean;
-  ticks: number;
-}
+/// Pixels of wheel delta that count as one terminal line (trackpad pixel-mode deltas).
+const WHEEL_PX_PER_LINE = 40;
 
 const namedKeys: Record<string, string> = {
   Escape: "Escape",
@@ -54,20 +52,15 @@ export function translateKeyboardKey(event: KeyboardEvent): TranslatedKey | null
   return { key: `${control ? "C-" : alt ? "M-" : ""}${base}`, literal: false };
 }
 
-/// Turn browser wheel units into the small integer steps expected by the daemon. Pixel-mode
-/// trackpads can emit tiny deltas while conventional wheels often emit roughly 100 pixels.
-export function wheelStep(deltaY: number, deltaMode: number, pageRows: number): WheelStep | null {
-  if (!Number.isFinite(deltaY) || deltaY === 0) return null;
-  const magnitude = Math.abs(deltaY);
-  const rawTicks = deltaMode === 1
-    ? magnitude
-    : deltaMode === 2
-      ? magnitude * Math.max(1, pageRows)
-      : magnitude / 40;
-  return {
-    up: deltaY < 0,
-    ticks: Math.max(1, Math.min(40, Math.ceil(rawTicks))),
-  };
+/// Convert one wheel event's delta into a SIGNED, fractional number of terminal lines (positive =
+/// scroll down). The caller accumulates this across events and only emits whole lines, so a
+/// trackpad gesture (many tiny pixel deltas) scrolls proportionally instead of one line per event
+/// — which is what made scrolling feel over-sensitive and inaccurate.
+export function wheelLines(deltaY: number, deltaMode: number, pageRows: number): number {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return 0;
+  if (deltaMode === 1) return deltaY; // already in lines
+  if (deltaMode === 2) return deltaY * Math.max(1, pageRows); // pages
+  return deltaY / WHEEL_PX_PER_LINE; // pixels
 }
 
 /// Normalize whatever `invoke` rejected with into a real `Error`, so callers surface the

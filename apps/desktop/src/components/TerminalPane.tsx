@@ -11,7 +11,7 @@ import {
   createInputCoalescer,
   translateKeyboardKey,
   watchTerminal,
-  wheelStep,
+  wheelLines,
   type TerminalRenderer,
   type TerminalTarget,
 } from "../ipc/term";
@@ -204,27 +204,40 @@ export default function TerminalPane(props: TerminalPaneProps) {
         }
       }
 
+      // Accumulate fractional line deltas across wheel events and flush the whole-line net once per
+      // frame, so a trackpad gesture scrolls proportionally (one agent.scroll per frame) rather than
+      // firing a scroll for every tiny pixel event.
+      let wheelAccum = 0;
+      let wheelFlush: ReturnType<typeof setTimeout> | undefined;
       wheelListener = (event: WheelEvent) => {
         if (!terminal) return;
-        const step = wheelStep(event.deltaY, event.deltaMode, terminal.rows);
-        if (!step) return;
         event.preventDefault();
         event.stopPropagation();
-        const current = terminal;
-        wheelInFlight = wheelInFlight.then(async () => {
-          try {
-            const result = await daemonCall("agent.scroll", {
-              lane_id: props.laneId,
-              window: props.window,
-              up: step.up,
-              ticks: step.ticks,
-            });
-            if (!result.forwarded) current.scrollLines(step.up ? -step.ticks : step.ticks);
-          } catch (error) {
-            current.scrollLines(step.up ? -step.ticks : step.ticks);
-            setTransportError(errorMessage(error));
-          }
-        });
+        wheelAccum += wheelLines(event.deltaY, event.deltaMode, terminal.rows);
+        if (wheelFlush) return;
+        wheelFlush = setTimeout(() => {
+          wheelFlush = undefined;
+          const ticks = Math.trunc(wheelAccum);
+          if (ticks === 0 || !terminal) return;
+          wheelAccum -= ticks; // keep the sub-line remainder for the next flush
+          const up = ticks < 0;
+          const n = Math.min(40, Math.abs(ticks));
+          const current = terminal;
+          wheelInFlight = wheelInFlight.then(async () => {
+            try {
+              const result = await daemonCall("agent.scroll", {
+                lane_id: props.laneId,
+                window: props.window,
+                up,
+                ticks: n,
+              });
+              if (!result.forwarded) current.scrollLines(up ? -n : n);
+            } catch (error) {
+              current.scrollLines(up ? -n : n);
+              setTransportError(errorMessage(error));
+            }
+          });
+        }, 16);
       };
 
       container.addEventListener("wheel", wheelListener, { capture: true, passive: false });

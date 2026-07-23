@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DaemonRpcError } from "./rpc";
-import { asTransportError, translateKeyboardKey, wheelStep } from "./term";
+import { asTransportError, translateKeyboardKey, wheelLines } from "./term";
 
 function key(value: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return new KeyboardEvent("keydown", { key: value, ...modifiers });
@@ -37,17 +37,20 @@ describe("terminal key translation", () => {
   });
 });
 
-describe("wheelStep", () => {
-  it("normalizes pixel, line, and page wheel units", () => {
-    expect(wheelStep(-1, 0, 30)).toEqual({ up: true, ticks: 1 });
-    expect(wheelStep(100, 0, 30)).toEqual({ up: false, ticks: 3 });
-    expect(wheelStep(-2, 1, 30)).toEqual({ up: true, ticks: 2 });
-    expect(wheelStep(1, 2, 30)).toEqual({ up: false, ticks: 30 });
+describe("wheelLines", () => {
+  it("returns signed fractional lines by delta mode", () => {
+    expect(wheelLines(-40, 0, 30)).toBe(-1); // pixel up: 40px == 1 line
+    expect(wheelLines(100, 0, 30)).toBeCloseTo(2.5); // pixel down, fractional
+    expect(wheelLines(-2, 1, 30)).toBe(-2); // line mode passes through
+    expect(wheelLines(1, 2, 30)).toBe(30); // page mode scales by rows
   });
 
-  it("ignores empty deltas and caps daemon work", () => {
-    expect(wheelStep(0, 0, 30)).toBeNull();
-    expect(wheelStep(Number.NaN, 0, 30)).toBeNull();
-    expect(wheelStep(10_000, 0, 30)).toEqual({ up: false, ticks: 40 });
+  it("returns 0 for empty or invalid deltas", () => {
+    expect(wheelLines(0, 0, 30)).toBe(0);
+    expect(wheelLines(Number.NaN, 0, 30)).toBe(0);
+  });
+
+  it("a tiny trackpad delta is a fraction of a line (not a full line)", () => {
+    expect(Math.abs(wheelLines(3, 0, 30))).toBeLessThan(1);
   });
 });
