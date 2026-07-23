@@ -206,10 +206,7 @@ async fn daemon_spawns_and_drives_an_agent() {
     .await;
     let snapshot = captured.result.unwrap();
     assert_eq!(snapshot["alternate"], false);
-    let content = snapshot["content"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let content = snapshot["content"].as_str().unwrap().to_string();
     assert!(
         content.contains("HELLO_FROM_AGENT_XYZ"),
         "captured pane was: {content:?}"
