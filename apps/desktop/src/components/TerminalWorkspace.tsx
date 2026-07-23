@@ -4,7 +4,12 @@ import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import { dedupe, stabilizeTargets, type PaneTarget } from "./terminalTargets";
+import {
+  dedupe,
+  stabilizeTargets,
+  warmTargetWindows,
+  type PaneTarget,
+} from "./terminalTargets";
 
 const TerminalPane = lazy(() => import("./TerminalPane"));
 
@@ -32,6 +37,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [openingShell, setOpeningShell] = createSignal(false);
   const [closingShell, setClosingShell] = createSignal<string | null>(null);
   const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
+  const [warmWindows, setWarmWindows] = createSignal<string[]>([]);
 
   // Fleet polls every second and hands us a brand-new lanes array each time. Reconcile the
   // rebuilt targets against this cache so each window keeps a stable object reference, and the
@@ -78,6 +84,20 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
       ...laneTargets(),
       ...all.filter((target) => target.laneId !== props.fleet.selectedLaneId()),
     ].slice(0, 6);
+  });
+
+  createEffect(() => {
+    const available = targets();
+    const visible = visibleTargets();
+    setWarmWindows((previous) => warmTargetWindows(previous, visible, available));
+  });
+
+  const mountedTargets = createMemo(() => {
+    const byWindow = new Map(targets().map((target) => [target.window, target]));
+    return warmWindows().flatMap((window) => {
+      const target = byWindow.get(window);
+      return target ? [target] : [];
+    });
   });
 
   createEffect(() => {
@@ -248,22 +268,34 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         }
       >
         <div class={`terminal-layout is-${layout()} count-${visibleTargets().length}`}>
-          <For each={visibleTargets()}>
-            {(target) => (
-              <div class="min-h-0 min-w-0 border-line" onPointerDown={() => {
-                setActiveWindow(target.window);
-                props.fleet.setSelectedLaneId(target.laneId);
-              }}>
-                <TerminalPane
-                  laneId={target.laneId}
-                  window={target.window}
-                  label={target.label}
-                  renderer={renderer()}
-                  focused={activeWindow() === target.window}
-                  shell={target.shell}
-                />
-              </div>
-            )}
+          <For each={mountedTargets()}>
+            {(target) => {
+              const visibleIndex = createMemo(() => visibleTargets().findIndex((item) => item.window === target.window));
+              const visible = createMemo(() => visibleIndex() >= 0);
+              return (
+                <div
+                  class={`min-h-0 min-w-0 border-line ${visible() ? "" : "warm-terminal-hidden"}`}
+                  style={{ order: visible() ? visibleIndex() : undefined }}
+                  aria-hidden={visible() ? undefined : "true"}
+                  inert={!visible()}
+                  onPointerDown={() => {
+                    if (!visible()) return;
+                    setActiveWindow(target.window);
+                    props.fleet.setSelectedLaneId(target.laneId);
+                  }}
+                >
+                  <TerminalPane
+                    laneId={target.laneId}
+                    window={target.window}
+                    label={target.label}
+                    renderer={renderer()}
+                    focused={activeWindow() === target.window}
+                    visible={visible()}
+                    shell={target.shell}
+                  />
+                </div>
+              );
+            }}
           </For>
         </div>
       </Show>

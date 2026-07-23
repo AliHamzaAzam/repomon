@@ -62,9 +62,14 @@ fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
 /// tmux joins captured lines with a bare LF, which only moves the cursor DOWN in a raw stream, so
 /// re-anchor each line to column 0 (`\r\n`) — otherwise the repaint staircases to the right (the
 /// same reason the TUI's `Emu::seed_capture` rewrites newlines).
-fn resync_frame(content: &str) -> Vec<u8> {
+fn resync_frame(content: &str, alternate: bool) -> Vec<u8> {
     let body = content.replace('\n', "\r\n");
-    let mut bytes = Vec::with_capacity(body.len() + 8);
+    let mut bytes = Vec::with_capacity(body.len() + 16);
+    bytes.extend_from_slice(if alternate {
+        b"\x1b[?1049h"
+    } else {
+        b"\x1b[?1049l"
+    });
     bytes.extend_from_slice(b"\x1b[H\x1b[2J\x1b[3J");
     bytes.extend_from_slice(body.as_bytes());
     bytes
@@ -79,15 +84,24 @@ async fn capture_resync(
     let capture = client
         .call(
             "agent.capture",
-            Some(json!({ "lane_id": lane_id, "window": window, "lines": 500 })),
+            Some(json!({
+                "lane_id": lane_id,
+                "window": window,
+                "lines": 500,
+                "include_state": true
+            })),
         )
         .await;
     let Ok(value) = capture else { return true };
     let Some(content) = value.get("content").and_then(Value::as_str) else {
         return true;
     };
+    let alternate = value
+        .get("alternate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     channel
-        .send(InvokeResponseBody::Raw(resync_frame(content)))
+        .send(InvokeResponseBody::Raw(resync_frame(content, alternate)))
         .is_ok()
 }
 
@@ -120,6 +134,16 @@ pub async fn term_watch(
         .call("subscribe", None)
         .await
         .map_err(map_call_error)?;
+    // Unix byte streams contain future PTY output only. Paint the current screen first so a cold
+    // terminal is useful immediately, then attach the live stream for subsequent output.
+    #[cfg(not(target_os = "windows"))]
+    if !capture_resync(&client, &on_bytes, lane_id, &window).await {
+        return Err(RpcFailure {
+            code: -32000,
+            message: "terminal channel closed during initial repaint".into(),
+            data: None,
+        });
+    }
     let value = client
         .call(
             "agent.watch_bytes",
@@ -215,12 +239,18 @@ mod tests {
 
     #[test]
     fn resync_frame_reanchors_bare_newlines() {
-        let frame = resync_frame("line1\nline2");
+        let frame = resync_frame("line1\nline2", true);
         let text = String::from_utf8(frame).unwrap();
         // Clears screen + scrollback, homes, then repaints with CR-anchored lines.
-        assert!(text.starts_with("\x1b[H\x1b[2J\x1b[3J"));
+        assert!(text.starts_with("\x1b[?1049h\x1b[H\x1b[2J\x1b[3J"));
         assert!(text.contains("line1\r\nline2"));
         assert!(!text.contains("line1\nline2"));
+    }
+
+    #[test]
+    fn resync_frame_restores_normal_screen_mode() {
+        let frame = String::from_utf8(resync_frame("shell", false)).unwrap();
+        assert!(frame.starts_with("\x1b[?1049l\x1b[H\x1b[2J\x1b[3J"));
     }
 
     #[test]

@@ -92,7 +92,10 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(1024);
     let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
-            if protocol::write_frame(&mut write_half, &frame).await.is_err() {
+            if protocol::write_frame(&mut write_half, &frame)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -147,7 +150,11 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
             Ok(r) => r,
             Err(e) => {
                 let resp = Response::err(None, RpcError::new(-32700, format!("parse error: {e}")));
-                if out_tx.send(serde_json::to_vec(&resp).unwrap_or_default()).await.is_err() {
+                if out_tx
+                    .send(serde_json::to_vec(&resp).unwrap_or_default())
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 continue;
@@ -168,7 +175,11 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
             Ok(value) => Response::ok(id, value),
             Err(err) => Response::err(id, err),
         };
-        if out_tx.send(serde_json::to_vec(&resp).unwrap_or_default()).await.is_err() {
+        if out_tx
+            .send(serde_json::to_vec(&resp).unwrap_or_default())
+            .await
+            .is_err()
+        {
             break;
         }
     }

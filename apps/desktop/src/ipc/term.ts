@@ -19,9 +19,6 @@ export interface TranslatedKey {
   literal: boolean;
 }
 
-/// Pixels of wheel delta that count as one terminal line (trackpad pixel-mode deltas).
-const WHEEL_PX_PER_LINE = 40;
-
 const namedKeys: Record<string, string> = {
   Escape: "Escape",
   Enter: "Enter",
@@ -56,11 +53,26 @@ export function translateKeyboardKey(event: KeyboardEvent): TranslatedKey | null
 /// scroll down). The caller accumulates this across events and only emits whole lines, so a
 /// trackpad gesture (many tiny pixel deltas) scrolls proportionally instead of one line per event
 /// — which is what made scrolling feel over-sensitive and inaccurate.
-export function wheelLines(deltaY: number, deltaMode: number, pageRows: number): number {
+export function wheelLines(
+  deltaY: number,
+  deltaMode: number,
+  pageRows: number,
+  pixelsPerLine: number,
+): number {
   if (!Number.isFinite(deltaY) || deltaY === 0) return 0;
   if (deltaMode === 1) return deltaY; // already in lines
   if (deltaMode === 2) return deltaY * Math.max(1, pageRows); // pages
-  return deltaY / WHEEL_PX_PER_LINE; // pixels
+  return deltaY / Math.max(1, pixelsPerLine); // pixels
+}
+
+/// Take one bounded whole-line batch while preserving unsent lines and the fractional remainder.
+export function takeWheelBatch(accumulated: number, maxTicks = 40): {
+  ticks: number;
+  remainder: number;
+} {
+  const whole = Math.trunc(Number.isFinite(accumulated) ? accumulated : 0);
+  const ticks = Math.sign(whole) * Math.min(Math.abs(whole), Math.max(0, maxTicks));
+  return { ticks, remainder: accumulated - ticks };
 }
 
 /// Normalize whatever `invoke` rejected with into a real `Error`, so callers surface the

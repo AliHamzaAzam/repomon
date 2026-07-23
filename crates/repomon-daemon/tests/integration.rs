@@ -201,10 +201,12 @@ async fn daemon_spawns_and_drives_an_agent() {
         &mut stream,
         5,
         "agent.capture",
-        Some(json!({ "lane_id": lane_id })),
+        Some(json!({ "lane_id": lane_id, "include_state": true })),
     )
     .await;
-    let content = captured.result.unwrap()["content"]
+    let snapshot = captured.result.unwrap();
+    assert_eq!(snapshot["alternate"], false);
+    let content = snapshot["content"]
         .as_str()
         .unwrap()
         .to_string();

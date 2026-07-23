@@ -9,6 +9,7 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
+  takeWheelBatch,
   translateKeyboardKey,
   watchTerminal,
   wheelLines,
@@ -20,6 +21,7 @@ interface TerminalPaneProps extends TerminalTarget {
   label: string;
   renderer?: TerminalRenderer;
   focused?: boolean;
+  visible?: boolean;
   /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
   shell?: boolean;
 }
@@ -56,14 +58,18 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let terminal: Terminal | undefined;
   let search: SearchAddon | undefined;
   let webgl: WebglAddon | undefined;
+  let fit: FitAddon | undefined;
   let input: ReturnType<typeof createInputCoalescer> | undefined;
   let resize: ResizeObserver | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   let wheelListener: ((event: WheelEvent) => void) | undefined;
+  let wheelFrame: number | undefined;
+  let visibilityFrame: number | undefined;
   let stopWatch: (() => Promise<void>) | undefined;
+  let syncSize: (() => Promise<void>) | undefined;
   let rendererEpoch = 0;
   let disposed = false;
-  let wheelInFlight = Promise.resolve();
+  let scrollRequestInFlight = false;
   const [transportError, setTransportError] = createSignal<string | null>(null);
   const [renderer, setRenderer] = createSignal("DOM");
   const [ready, setReady] = createSignal(false);
@@ -132,7 +138,15 @@ export default function TerminalPane(props: TerminalPaneProps) {
   });
 
   createEffect(() => {
-    if (ready() && props.focused) terminal?.focus();
+    const visible = ready() && props.visible !== false;
+    const focused = props.focused;
+    if (!visible) return;
+    if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
+    visibilityFrame = requestAnimationFrame(() => {
+      visibilityFrame = undefined;
+      void syncSize?.();
+      if (focused) terminal?.focus();
+    });
   });
 
   onMount(() => {
@@ -150,9 +164,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
         fontSize: 12,
         lineHeight: 1.18,
         scrollback: 10_000,
+        smoothScrollDuration: 60,
         theme: terminalTheme(container),
       });
-      const fit = new FitAddon();
+      fit = new FitAddon();
       search = new SearchAddon();
       terminal.loadAddon(fit);
       terminal.loadAddon(search);
@@ -185,10 +200,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // Keep xterm and the backend pane on one authoritative grid. GUI-owned shells can be
       // resized directly. Shared agent panes use the arbitrated fit call so the TUI and desktop
       // never fight over dimensions.
-      async function syncSize() {
-        if (!terminal) return;
+      syncSize = async () => {
+        if (!terminal || props.visible === false) return;
         try {
-          fit.fit();
+          fit?.fit();
         } catch {
           return;
         }
@@ -202,51 +217,75 @@ export default function TerminalPane(props: TerminalPaneProps) {
           const grid = await daemonCall("agent.fit", args).catch(() => null);
           if (grid) applyGrid(grid.cols, grid.rows);
         }
-      }
+      };
 
-      // Accumulate fractional line deltas across wheel events and flush the whole-line net once per
-      // frame, so a trackpad gesture scrolls proportionally (one agent.scroll per frame) rather than
-      // firing a scroll for every tiny pixel event.
+      // Accumulate fractional movement and issue at most one remote scroll at a time. New movement
+      // is merged while the request is in flight, so long trackpad gestures cannot build a tail.
       let wheelAccum = 0;
-      let wheelFlush: ReturnType<typeof setTimeout> | undefined;
+
+      const scheduleWheelFlush = () => {
+        if (wheelFrame !== undefined || disposed) return;
+        wheelFrame = requestAnimationFrame(flushWheel);
+      };
+
+      const flushWheel = () => {
+        wheelFrame = undefined;
+        if (!terminal || scrollRequestInFlight) return;
+        const batch = takeWheelBatch(wheelAccum);
+        if (batch.ticks === 0) return;
+        wheelAccum = batch.remainder;
+        const current = terminal;
+
+        if (current.buffer.active.type === "normal") {
+          current.scrollLines(batch.ticks);
+          if (Math.abs(wheelAccum) >= 1) scheduleWheelFlush();
+          return;
+        }
+
+        scrollRequestInFlight = true;
+        void daemonCall("agent.scroll", {
+          lane_id: props.laneId,
+          window: props.window,
+          up: batch.ticks < 0,
+          ticks: Math.abs(batch.ticks),
+        })
+          .then((result) => {
+            if (!result.forwarded && !disposed) current.scrollLines(batch.ticks);
+          })
+          .catch((error) => {
+            if (!disposed) setTransportError(errorMessage(error));
+          })
+          .finally(() => {
+            scrollRequestInFlight = false;
+            if (Math.abs(wheelAccum) >= 1) scheduleWheelFlush();
+          });
+      };
+
       wheelListener = (event: WheelEvent) => {
         if (!terminal) return;
         event.preventDefault();
         event.stopPropagation();
-        wheelAccum += wheelLines(event.deltaY, event.deltaMode, terminal.rows);
-        if (wheelFlush) return;
-        wheelFlush = setTimeout(() => {
-          wheelFlush = undefined;
-          const ticks = Math.trunc(wheelAccum);
-          if (ticks === 0 || !terminal) return;
-          wheelAccum -= ticks; // keep the sub-line remainder for the next flush
-          const up = ticks < 0;
-          const n = Math.min(40, Math.abs(ticks));
-          const current = terminal;
-          wheelInFlight = wheelInFlight.then(async () => {
-            try {
-              const result = await daemonCall("agent.scroll", {
-                lane_id: props.laneId,
-                window: props.window,
-                up,
-                ticks: n,
-              });
-              if (!result.forwarded) current.scrollLines(up ? -n : n);
-            } catch (error) {
-              current.scrollLines(up ? -n : n);
-              setTransportError(errorMessage(error));
-            }
-          });
-        }, 16);
+        const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+        const screenHeight = screen?.getBoundingClientRect().height ?? 0;
+        const pixelsPerLine = screenHeight > 0 && terminal.rows > 0
+          ? screenHeight / terminal.rows
+          : (terminal.options.fontSize ?? 12) * (terminal.options.lineHeight ?? 1);
+        wheelAccum += wheelLines(
+          event.deltaY,
+          event.deltaMode,
+          terminal.rows,
+          pixelsPerLine,
+        );
+        scheduleWheelFlush();
       };
 
       container.addEventListener("wheel", wheelListener, { capture: true, passive: false });
       resize = new ResizeObserver(() => {
         if (resizeTimer) clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => void syncSize(), 100);
+        resizeTimer = setTimeout(() => void syncSize?.(), 100);
       });
       resize.observe(container);
-      fit.fit();
+      if (props.visible !== false) fit.fit();
       setReady(true);
 
       try {
@@ -257,7 +296,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         }
         stopWatch = watch.stop;
         setTransportError(null);
-        void syncSize();
+        void syncSize?.();
         if (props.focused) terminal.focus();
       } catch (error) {
         setTransportError(errorMessage(error));
@@ -271,6 +310,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
     resize?.disconnect();
     if (wheelListener) container.removeEventListener("wheel", wheelListener, true);
     if (resizeTimer) clearTimeout(resizeTimer);
+    if (wheelFrame !== undefined) cancelAnimationFrame(wheelFrame);
+    if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
     input?.dispose();
     void stopWatch?.();
     webgl?.dispose();

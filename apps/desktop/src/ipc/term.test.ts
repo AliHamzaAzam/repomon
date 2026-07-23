@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { DaemonRpcError } from "./rpc";
-import { asTransportError, translateKeyboardKey, wheelLines } from "./term";
+import {
+  asTransportError,
+  takeWheelBatch,
+  translateKeyboardKey,
+  wheelLines,
+} from "./term";
 
 function key(value: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return new KeyboardEvent("keydown", { key: value, ...modifiers });
@@ -39,18 +44,29 @@ describe("terminal key translation", () => {
 
 describe("wheelLines", () => {
   it("returns signed fractional lines by delta mode", () => {
-    expect(wheelLines(-40, 0, 30)).toBe(-1); // pixel up: 40px == 1 line
-    expect(wheelLines(100, 0, 30)).toBeCloseTo(2.5); // pixel down, fractional
-    expect(wheelLines(-2, 1, 30)).toBe(-2); // line mode passes through
-    expect(wheelLines(1, 2, 30)).toBe(30); // page mode scales by rows
+    expect(wheelLines(-14, 0, 30, 14)).toBe(-1);
+    expect(wheelLines(35, 0, 30, 14)).toBeCloseTo(2.5);
+    expect(wheelLines(-2, 1, 30, 14)).toBe(-2);
+    expect(wheelLines(1, 2, 30, 14)).toBe(30);
   });
 
   it("returns 0 for empty or invalid deltas", () => {
-    expect(wheelLines(0, 0, 30)).toBe(0);
-    expect(wheelLines(Number.NaN, 0, 30)).toBe(0);
+    expect(wheelLines(0, 0, 30, 14)).toBe(0);
+    expect(wheelLines(Number.NaN, 0, 30, 14)).toBe(0);
   });
 
   it("a tiny trackpad delta is a fraction of a line (not a full line)", () => {
-    expect(Math.abs(wheelLines(3, 0, 30))).toBeLessThan(1);
+    expect(Math.abs(wheelLines(3, 0, 30, 14))).toBeLessThan(1);
+  });
+});
+
+describe("takeWheelBatch", () => {
+  it("caps one send without discarding the queued tail", () => {
+    expect(takeWheelBatch(95.5)).toEqual({ ticks: 40, remainder: 55.5 });
+    expect(takeWheelBatch(-95.5)).toEqual({ ticks: -40, remainder: -55.5 });
+  });
+
+  it("keeps sub-line movement for a later frame", () => {
+    expect(takeWheelBatch(0.75)).toEqual({ ticks: 0, remainder: 0.75 });
   });
 });

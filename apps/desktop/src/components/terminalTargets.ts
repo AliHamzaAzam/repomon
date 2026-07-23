@@ -14,6 +14,25 @@ export function dedupe(targets: PaneTarget[]): PaneTarget[] {
   });
 }
 
+/// Keep visible windows hot and retain the most recently viewed live windows up to `capacity`.
+/// Visible windows are ordered first so CSS can place them in the active layout while the
+/// remaining panes stay mounted off-layout with their xterm state and byte watches intact.
+export function warmTargetWindows(
+  previous: string[],
+  visible: PaneTarget[],
+  available: PaneTarget[],
+  capacity = 6,
+): string[] {
+  const live = new Set(available.map((target) => target.window));
+  const next: string[] = [];
+  const append = (window: string) => {
+    if (live.has(window) && !next.includes(window)) next.push(window);
+  };
+  visible.forEach((target) => append(target.window));
+  previous.forEach(append);
+  return next.slice(0, Math.max(0, capacity));
+}
+
 /// Reconcile a freshly-built target list against a per-window cache, reusing the previous
 /// object reference for any window that still exists. Solid's `<For>` is reference-keyed, so
 /// returning stable references keeps each terminal pane mounted across the 1s fleet poll

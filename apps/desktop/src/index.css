@@ -103,11 +103,19 @@
 }
 
 .terminal-layout {
+  position: relative;
   display: grid;
   min-height: 0;
   height: 100%;
   gap: 1px;
   background: var(--line);
+}
+
+.warm-terminal-hidden {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .terminal-layout.is-focused {

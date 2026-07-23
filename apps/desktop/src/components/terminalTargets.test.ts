@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { dedupe, stabilizeTargets, type PaneTarget } from "./terminalTargets";
+import {
+  dedupe,
+  stabilizeTargets,
+  warmTargetWindows,
+  type PaneTarget,
+} from "./terminalTargets";
 
 function target(window: string, overrides: Partial<PaneTarget> = {}): PaneTarget {
   return { laneId: 1, window, label: window, shell: false, ...overrides };
@@ -43,5 +48,33 @@ describe("dedupe", () => {
   it("drops repeated windows, keeping first occurrence", () => {
     const out = dedupe([target("a"), target("a", { label: "dup" }), target("b")]);
     expect(out.map((t) => t.window)).toEqual(["a", "b"]);
+  });
+});
+
+describe("warmTargetWindows", () => {
+  it("moves visible windows to the front and retains recent live windows", () => {
+    const available = ["a", "b", "c", "d"].map((window) => target(window));
+    expect(warmTargetWindows(["a", "b", "c"], [target("d")], available)).toEqual([
+      "d",
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("evicts the least recent window at capacity", () => {
+    const available = ["a", "b", "c", "d"].map((window) => target(window));
+    expect(warmTargetWindows(["a", "b", "c"], [target("d")], available, 3)).toEqual([
+      "d",
+      "a",
+      "b",
+    ]);
+  });
+
+  it("drops windows that no longer exist", () => {
+    expect(warmTargetWindows(["gone", "a"], [target("b")], [target("a"), target("b")])).toEqual([
+      "b",
+      "a",
+    ]);
   });
 });

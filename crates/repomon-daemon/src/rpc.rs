@@ -225,6 +225,8 @@ struct AgentCapture {
     lines: Option<u32>,
     #[serde(default)]
     window: Option<String>,
+    #[serde(default)]
+    include_state: bool,
 }
 #[derive(Deserialize)]
 struct AgentPrompt {
@@ -1111,11 +1113,23 @@ pub async fn dispatch(
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            let content = tokio::task::spawn_blocking(move || tmux.capture_named(&window, opts))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
-            Ok(json!({ "content": content }))
+            let capture_window = window.clone();
+            let content =
+                tokio::task::spawn_blocking(move || tmux.capture_named(&capture_window, opts))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+            if p.include_state {
+                let tmux = ctx.backend.clone();
+                let window = window.clone();
+                let alternate =
+                    tokio::task::spawn_blocking(move || tmux.alternate_on_named(&window))
+                        .await
+                        .map_err(internal)?;
+                Ok(json!({ "content": content, "alternate": alternate }))
+            } else {
+                Ok(json!({ "content": content }))
+            }
         }
         "agent.send_input" => {
             let p: AgentInput = parse(params)?;
