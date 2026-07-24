@@ -383,7 +383,7 @@ pub fn set_plugin_enabled(settings: &Path, id: &str, enabled: Option<bool>) -> i
 }
 
 /// Kebab-case-ish skill names only: no separators means no traversal and no surprise dirs.
-fn valid_skill_name(name: &str) -> bool {
+pub(crate) fn valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
@@ -429,6 +429,16 @@ fn canonical_prefix(path: &Path) -> Option<PathBuf> {
     let mut probe = path.to_path_buf();
     let mut rest = Vec::new();
     while !probe.exists() {
+        // `Path::exists()` follows symlinks, so a DANGLING symlink (target doesn't exist yet)
+        // reads as absent here, same as a genuinely nonexistent future path component. Left
+        // unchecked, that lets a symlink to an as-yet-nonexistent outside location sail through
+        // this write-time guard and later resolve wherever the symlink points. Detect that case
+        // with `symlink_metadata`, which does NOT follow symlinks: if it succeeds, something
+        // (the symlink itself) really is here, dangling or not, so reject outright rather than
+        // treating it as a plain future component.
+        if probe.symlink_metadata().is_ok() {
+            return None;
+        }
         let name = probe.file_name().map(|n| n.to_os_string())?;
         rest.push(name);
         if !probe.pop() {
@@ -925,6 +935,27 @@ mod tests {
         assert!(skill_path_allowed(&ok2, &roots));
         assert!(!skill_path_allowed(&bad, &roots));
         assert!(!skill_path_allowed(Path::new("/etc/passwd"), &roots));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_leaf_cannot_escape_the_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let skills = root.path().join("skills");
+        let dir = skills.join("evil");
+        std::fs::create_dir_all(&dir).unwrap();
+        let leaf = dir.join("SKILL.md");
+        std::os::unix::fs::symlink(outside.path().join("planted"), &leaf).unwrap();
+        assert!(!skill_path_allowed(&leaf, std::slice::from_ref(&skills)));
+
+        // Existing behavior: a symlink leaf pointing at an EXISTING outside file is already
+        // rejected via full canonicalization (the target resolves outside every root).
+        let planted = outside.path().join("planted");
+        std::fs::write(&planted, "secret").unwrap();
+        let existing_leaf = dir.join("SKILL2.md");
+        std::os::unix::fs::symlink(&planted, &existing_leaf).unwrap();
+        assert!(!skill_path_allowed(&existing_leaf, &[skills]));
     }
 
     #[test]

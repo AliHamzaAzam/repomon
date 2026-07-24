@@ -1073,11 +1073,7 @@ pub async fn dispatch(
         }
         "skill.delete" => {
             let p: SkillDelete = parse(params)?;
-            if !p
-                .name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
+            if !crate::ext::valid_skill_name(&p.name) {
                 return Err(RpcError::invalid_params("invalid skill name"));
             }
             let (skills_dir, fanout_root) = match &p.scope {

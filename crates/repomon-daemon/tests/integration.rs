@@ -1163,6 +1163,24 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
     assert_eq!(r.result.unwrap()["ok"], true);
     assert!(!wt.join(".claude/skills/e2e-skill").exists());
 
+    // An empty skill name must be rejected, not treated as "the skills directory itself"
+    // (skills_dir.join("") == skills_dir would wipe every skill on delete).
+    let r = call(
+        &mut stream,
+        10,
+        "skill.delete",
+        Some(json!({ "name": "", "scope": "global" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "empty skill name must be rejected");
+    assert!(
+        claude_home
+            .path()
+            .join("skills/global-skill/SKILL.md")
+            .is_file(),
+        "the mass-delete bug would have wiped the whole skills directory"
+    );
+
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
