@@ -37,7 +37,7 @@ export default function SkillEditorModal(props: SkillEditorModalProps) {
       <button
         type="button"
         class="focus-ring rounded bg-signal px-4 py-2 font-mono text-[0.6rem] font-semibold uppercase text-background disabled:opacity-50"
-        disabled={saving() || content.loading}
+        disabled={saving() || content.loading || Boolean(content.error)}
         onClick={() => void save()}
       >
         {saving() ? "Saving…" : "Save"}
@@ -50,7 +50,7 @@ export default function SkillEditorModal(props: SkillEditorModalProps) {
       <div class="flex flex-col gap-3">
         <Show
           when={!content.error}
-          fallback={<p class="rounded-md border border-fault/40 bg-fault/8 p-2 font-mono text-[0.64rem] text-fault">{String(content.error)}</p>}
+          fallback={<p class="rounded-md border border-fault/40 bg-fault/8 p-2 font-mono text-[0.64rem] text-fault">{content.error instanceof Error ? content.error.message : String(content.error)}</p>}
         >
           <Show when={!content.loading} fallback={<p class="font-mono text-[0.64rem] text-muted">Loading…</p>}>
             <textarea

@@ -125,7 +125,8 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
                     confirmLabel: "Delete",
                     danger: true,
                     onConfirm: async () => {
-                      await props.store.deleteSkill(skill().name);
+                      const ok = await props.store.deleteSkill(skill().name);
+                      if (!ok) throw new Error(props.store.error() ?? "delete failed");
                     },
                   }}
                   onClose={() => setConfirmDelete(false)}

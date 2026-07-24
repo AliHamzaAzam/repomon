@@ -160,6 +160,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             <Show when={newSkillName().length > 0 && !newSkillNameValid()}>
               <p class="font-mono text-[0.6rem] text-fault">Use 1-64 letters, digits, dashes, or underscores.</p>
             </Show>
+            <p class="text-[0.62rem] text-muted">Changes apply to new agent sessions.</p>
           </form>
         </Show>
         <Show when={props.store.error()}>
