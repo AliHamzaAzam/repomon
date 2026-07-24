@@ -27,7 +27,9 @@ function readLayout(): WorkspaceLayout {
 
 function readRenderer(): TerminalRenderer {
   const value = localStorage.getItem("repomon.terminal.renderer");
-  return value === "webgl" || value === "auto" ? value : "dom";
+  // Default to "auto" (WebGL with automatic DOM fallback on context loss/failure): the DOM
+  // renderer re-lays-out on every frame and is by far the slowest way to run a busy terminal.
+  return value === "webgl" || value === "dom" ? value : "auto";
 }
 
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
@@ -44,6 +46,11 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   // reference-keyed <For> below keeps its TerminalPane (and its byte watch) mounted instead of
   // tearing it down every poll.
   const targetCache = new Map<string, PaneTarget>();
+  // `equals` keeps the previous array when the window set is unchanged (stabilizeTargets
+  // reuses object refs), so the 2s fleet poll stops cascading through laneTargets /
+  // visibleTargets / the viewport.set effect when nothing actually changed.
+  const sameTargets = (a: PaneTarget[], b: PaneTarget[]) =>
+    a.length === b.length && a.every((target, index) => target === b[index]);
   const targets = createMemo(() => stabilizeTargets(targetCache, dedupe(props.fleet.lanes().flatMap((lane) => [
     ...lane.agent_sessions.flatMap((agent, index): PaneTarget[] => agent.tmux_window ? [{
       laneId: lane.id,
@@ -61,7 +68,23 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         shell: true,
         sessionId: null,
       })),
-  ]))));
+  ]))), undefined, { equals: sameTargets });
+
+  // Labels read reactively from the fleet store: pane targets deliberately keep stable object
+  // identity across polls (so mounted panes never remount), which means a mutated target.label
+  // alone can't re-render — this memo tracks the store's fine-grained updates instead.
+  const labelByWindow = createMemo(() => {
+    const map = new Map<string, string>();
+    for (const lane of props.fleet.lanes()) {
+      lane.agent_sessions.forEach((agent, index) => {
+        if (agent.tmux_window) {
+          map.set(agent.tmux_window, agent.custom_label ?? agent.title ?? `${agent.agent} ${index + 1}`);
+        }
+      });
+    }
+    return map;
+  });
+  const labelOf = (target: PaneTarget) => labelByWindow().get(target.window) ?? target.label;
 
   const laneTargets = createMemo(() => targets().filter((target) => target.laneId === props.fleet.selectedLaneId()));
 
@@ -166,7 +189,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                   onClick={() => setActiveWindow(target.window)}
                 >
                   <span class={target.shell ? "text-attention" : "text-signal"}>{target.shell ? ">_" : "●"}</span>
-                  <span class="max-w-32 truncate">{target.label}</span>
+                  <span class="max-w-32 truncate">{labelOf(target)}</span>
                 </button>
                 <Show when={target.shell}>
                   <button
@@ -292,7 +315,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                   <TerminalPane
                     laneId={target.laneId}
                     window={target.window}
-                    label={target.label}
+                    label={labelOf(target)}
                     renderer={renderer()}
                     focused={activeWindow() === target.window}
                     visible={visible()}

@@ -78,3 +78,9 @@ repomon-mcp = { path = "crates/repomon-mcp" }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Dev builds run the daemon, agent hosts, and desktop app people actually interact with
+# during development; -O0 dependencies (vt100 parsing, gix, serde, tokio) dominate their
+# runtime cost. Optimize dependencies only — workspace crates stay -O0 for fast rebuilds.
+[profile.dev.package."*"]
+opt-level = 2

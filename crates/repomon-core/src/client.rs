@@ -226,15 +226,22 @@ impl Inner {
         let inner = self.clone();
         tokio::spawn(async move {
             while let Ok(Some(frame)) = read_frame(&mut rd).await {
-                if let Ok(resp) = serde_json::from_slice::<Response>(&frame) {
-                    if let Some(id) = resp.id {
-                        if let Some(tx) = inner.pending.lock().unwrap().remove(&id) {
-                            let _ = tx.send(resp);
+                // Parse each frame once. Notifications (no `id`) vastly outnumber responses on
+                // a busy stream, and every `event.agent.bytes` chunk carries a large base64
+                // payload — the old parse-as-Response-then-reparse-as-Notification walked that
+                // payload twice per chunk.
+                let Ok(value) = serde_json::from_slice::<Value>(&frame) else {
+                    continue;
+                };
+                if value.get("id").is_some_and(|id| !id.is_null()) {
+                    if let Ok(resp) = serde_json::from_value::<Response>(value) {
+                        if let Some(id) = resp.id {
+                            if let Some(tx) = inner.pending.lock().unwrap().remove(&id) {
+                                let _ = tx.send(resp);
+                            }
                         }
-                        continue;
                     }
-                }
-                if let Ok(note) = serde_json::from_slice::<Notification>(&frame) {
+                } else if let Ok(note) = serde_json::from_value::<Notification>(value) {
                     if note.method.starts_with("event.") {
                         let _ = inner.events_tx.send(note);
                     }

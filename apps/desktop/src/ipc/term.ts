@@ -172,27 +172,42 @@ export async function watchTerminal(
 
 export function createInputCoalescer(target: TerminalTarget, onError?: (error: unknown) => void) {
   let pending = "";
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let running: Promise<void> | null = null;
   const reportError = onError ?? (() => undefined);
 
+  // Leading edge: the first keystroke sends immediately, and keys typed while a send is in
+  // flight coalesce into the next one — the RPC roundtrip itself is the batching window.
+  // (The previous fixed 8ms trailing debounce taxed every keystroke with the full delay and
+  // never actually batched at human typing speed.)
+  function drain(): Promise<void> {
+    if (!running) {
+      running = (async () => {
+        try {
+          while (pending) {
+            const text = pending;
+            pending = "";
+            await daemonCall("agent.send_input", {
+              lane_id: target.laneId,
+              window: target.window,
+              text,
+              enter: false,
+            });
+          }
+        } finally {
+          running = null;
+        }
+      })();
+    }
+    return running;
+  }
+
   async function flush() {
-    if (timer) clearTimeout(timer);
-    timer = undefined;
-    if (!pending) return;
-    const text = pending;
-    pending = "";
-    await daemonCall("agent.send_input", {
-      lane_id: target.laneId,
-      window: target.window,
-      text,
-      enter: false,
-    });
+    while (pending || running) await drain();
   }
 
   function push(text: string) {
     pending += text;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => void flush().catch(reportError), 8);
+    void drain().catch(reportError);
   }
 
   async function key(translated: TranslatedKey) {
@@ -206,8 +221,6 @@ export function createInputCoalescer(target: TerminalTarget, onError?: (error: u
   }
 
   function dispose() {
-    if (timer) clearTimeout(timer);
-    timer = undefined;
     void flush().catch(reportError);
   }
 

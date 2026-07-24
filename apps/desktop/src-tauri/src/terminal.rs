@@ -77,9 +77,9 @@ fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
     if pending.is_empty() {
         return true;
     }
-    channel
-        .send(InvokeResponseBody::Raw(std::mem::take(pending)))
-        .is_ok()
+    // Swap in a pre-sized buffer: `mem::take` would leave capacity 0 and re-grow every tick.
+    let bytes = std::mem::replace(pending, Vec::with_capacity(FLUSH_BYTES));
+    channel.send(InvokeResponseBody::Raw(bytes)).is_ok()
 }
 
 /// Assemble a resync repaint: clear the screen + scrollback and home, then the captured screen.
@@ -271,9 +271,15 @@ pub async fn term_watch(
                                 continue;
                             }
                             stream_cursor = chunk.cursor;
+                            let was_idle = pending.is_empty();
                             if !append_pending(&mut pending, &chunk.bytes) {
                                 resync = true;
-                            } else if pending.len() >= FLUSH_BYTES && !flush(&on_bytes, &mut pending) {
+                            } else if (was_idle || pending.len() >= FLUSH_BYTES)
+                                && !flush(&on_bytes, &mut pending)
+                            {
+                                // Leading edge: a chunk arriving on an idle pane (a keystroke
+                                // echo) paints now instead of waiting out the 16ms ticker;
+                                // chunks that arrive while data is already pending coalesce.
                                 break;
                             }
                         }
