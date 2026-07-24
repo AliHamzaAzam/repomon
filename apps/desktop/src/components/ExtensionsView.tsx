@@ -3,6 +3,7 @@ import { For, Show, createSignal } from "solid-js";
 import type { FleetStore } from "../stores/fleet";
 import type { ExtensionsStore, ExtFilter, ExtRow } from "../stores/extensions";
 import ExtensionDrawer from "./ExtensionDrawer";
+import SkillEditorModal from "./SkillEditorModal";
 
 interface ExtensionsViewProps {
   store: ExtensionsStore;
@@ -10,6 +11,10 @@ interface ExtensionsViewProps {
 }
 
 const filters: ExtFilter[] = ["all", "plugins", "skills", "marketplaces"];
+
+// Mirrors the daemon's valid_skill_name check (repomon-daemon/src/ext.rs) so bad names are
+// rejected client-side instead of round-tripping to skill.create for an invalid_params error.
+const skillNamePattern = /^[A-Za-z0-9_-]{1,64}$/;
 
 function rowKey(row: ExtRow): string {
   return row.kind === "plugin" ? `p:${row.plugin.id}` : `s:${row.skill.path}`;
@@ -20,7 +25,12 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
   const [installOpen, setInstallOpen] = createSignal(false);
   const [installRef, setInstallRef] = createSignal("");
   const [marketplaceSource, setMarketplaceSource] = createSignal("");
+  const [newSkillOpen, setNewSkillOpen] = createSignal(false);
+  const [newSkillName, setNewSkillName] = createSignal("");
+  const [newSkillDescription, setNewSkillDescription] = createSignal("");
+  const [editorPath, setEditorPath] = createSignal<string | null>(null);
   const selected = () => props.store.rows().find((row) => rowKey(row) === selectedKey()) ?? null;
+  const newSkillNameValid = () => skillNamePattern.test(newSkillName().trim());
   const scopeIsRepo = (repoId: number) => {
     const scope = props.store.scope();
     return scope.scope === "repo" && scope.repo_id === repoId;
@@ -45,6 +55,19 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
     const ok = await props.store.marketplaceAdd(source);
     if (ok) {
       setMarketplaceSource("");
+    }
+  }
+
+  async function submitNewSkill(event: Event) {
+    event.preventDefault();
+    const name = newSkillName().trim();
+    if (!skillNamePattern.test(name)) return;
+    const description = newSkillDescription().trim() || undefined;
+    const ok = await props.store.createSkill(name, description);
+    if (ok) {
+      setNewSkillName("");
+      setNewSkillDescription("");
+      setNewSkillOpen(false);
     }
   }
 
@@ -90,6 +113,12 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             title={cliTitle()}
             onClick={() => setInstallOpen((open) => !open)}
           >+ Install</button>
+          <button
+            type="button"
+            class="focus-ring rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.58rem] uppercase text-muted disabled:opacity-40"
+            disabled={props.store.busy()}
+            onClick={() => setNewSkillOpen((open) => !open)}
+          >+ New skill</button>
         </div>
         <Show when={installOpen()}>
           <form class="flex items-center gap-2" onSubmit={submitInstall}>
@@ -105,6 +134,32 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
               disabled={props.store.busy() || !props.store.cliAvailable()}
               title={cliTitle()}
             >Install</button>
+          </form>
+        </Show>
+        <Show when={newSkillOpen()}>
+          <form class="flex flex-col gap-1.5" onSubmit={submitNewSkill}>
+            <div class="flex items-center gap-2">
+              <input
+                class="focus-ring min-w-0 flex-1 rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.7rem]"
+                placeholder="skill-name"
+                value={newSkillName()}
+                onInput={(event) => setNewSkillName(event.currentTarget.value)}
+              />
+              <input
+                class="focus-ring min-w-0 flex-[2] rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.7rem]"
+                placeholder="Description (optional)"
+                value={newSkillDescription()}
+                onInput={(event) => setNewSkillDescription(event.currentTarget.value)}
+              />
+              <button
+                type="submit"
+                class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1.5 font-mono text-[0.6rem] uppercase text-signal disabled:opacity-40"
+                disabled={props.store.busy() || !newSkillNameValid()}
+              >Create</button>
+            </div>
+            <Show when={newSkillName().length > 0 && !newSkillNameValid()}>
+              <p class="font-mono text-[0.6rem] text-fault">Use 1-64 letters, digits, dashes, or underscores.</p>
+            </Show>
           </form>
         </Show>
         <Show when={props.store.error()}>
@@ -192,7 +247,17 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
         </div>
       </div>
       <Show when={selected()}>
-        {(row) => <ExtensionDrawer row={row()} store={props.store} onClose={() => setSelectedKey(null)} />}
+        {(row) => (
+          <ExtensionDrawer
+            row={row()}
+            store={props.store}
+            onClose={() => setSelectedKey(null)}
+            onEdit={(path) => setEditorPath(path)}
+          />
+        )}
+      </Show>
+      <Show when={editorPath()}>
+        {(path) => <SkillEditorModal path={path()} onClose={() => setEditorPath(null)} />}
       </Show>
     </div>
   );

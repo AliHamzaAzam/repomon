@@ -1,14 +1,21 @@
-import { Show } from "solid-js";
+import { Show, createSignal } from "solid-js";
 
 import type { ExtensionsStore, ExtRow } from "../stores/extensions";
+import ConfirmDialog from "./ConfirmDialog";
 
 interface ExtensionDrawerProps {
   row: ExtRow;
   store: ExtensionsStore;
   onClose: () => void;
+  onEdit: (path: string) => void;
 }
 
 export default function ExtensionDrawer(props: ExtensionDrawerProps) {
+  // Lives at this level (not inside the keyed per-kind Show below) so a background store
+  // refresh, which rebuilds row objects on every snapshot, cannot silently dismiss the
+  // confirm dialog mid-flow.
+  const [confirmDelete, setConfirmDelete] = createSignal(false);
+
   return (
     <aside class="flex w-72 shrink-0 flex-col gap-3 border-l border-line bg-surface p-4 text-sm">
       <div class="flex items-center justify-between">
@@ -90,12 +97,40 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
               <h3 class="font-mono text-[0.8rem] text-foreground">{skill().name}</h3>
               <p class="text-[0.68rem] text-muted">{skill().description ?? "No description"}</p>
               <p class="font-mono text-[0.6rem] text-muted">{skill().source}</p>
-              <button
-                type="button"
-                class="focus-ring self-start rounded-md border border-line bg-raised px-2 py-1 font-mono text-[0.6rem] text-muted hover:text-foreground"
-                onClick={() => void navigator.clipboard.writeText(String(skill().path))}
-              >Copy path</button>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  class="focus-ring rounded-md border border-line bg-raised px-2 py-1 font-mono text-[0.6rem] uppercase text-muted hover:text-foreground"
+                  onClick={() => void navigator.clipboard.writeText(String(skill().path))}
+                >Copy path</button>
+                <button
+                  type="button"
+                  class="focus-ring rounded-md border border-line bg-raised px-2 py-1 font-mono text-[0.6rem] uppercase text-muted hover:text-foreground disabled:opacity-40"
+                  disabled={props.store.busy()}
+                  onClick={() => props.onEdit(skill().path)}
+                >Edit</button>
+                <button
+                  type="button"
+                  class="focus-ring rounded-md border border-fault/40 bg-fault/10 px-2 py-1 font-mono text-[0.6rem] uppercase text-fault disabled:opacity-40"
+                  disabled={props.store.busy()}
+                  onClick={() => setConfirmDelete(true)}
+                >Delete</button>
+              </div>
               <p class="text-[0.62rem] text-muted">Changes apply to new agent sessions.</p>
+              <Show when={confirmDelete()}>
+                <ConfirmDialog
+                  options={{
+                    title: `Delete ${skill().name}?`,
+                    message: "Removes SKILL.md from disk in this scope. This can't be undone.",
+                    confirmLabel: "Delete",
+                    danger: true,
+                    onConfirm: async () => {
+                      await props.store.deleteSkill(skill().name);
+                    },
+                  }}
+                  onClose={() => setConfirmDelete(false)}
+                />
+              </Show>
             </>
           );
         }}

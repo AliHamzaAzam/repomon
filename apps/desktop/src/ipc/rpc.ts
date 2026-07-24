@@ -148,6 +148,10 @@ interface RpcMap {
   "marketplace.add": { params: { source: string }; result: { ok: boolean; stdout: string } };
   "marketplace.remove": { params: { name: string }; result: { ok: boolean; stdout: string } };
   "marketplace.refresh": { params: { name?: string }; result: { ok: boolean; stdout: string } };
+  "skill.create": { params: { name: string; description?: string } & ExtScopeParams; result: { path: string } };
+  "skill.read": { params: { path: string }; result: { content: string } };
+  "skill.write": { params: { path: string; content: string }; result: { ok: boolean } };
+  "skill.delete": { params: { name: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
 }
 
 export type RpcMethod = keyof RpcMap;

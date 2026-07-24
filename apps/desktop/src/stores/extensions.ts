@@ -19,6 +19,8 @@ export interface ExtSource {
   marketplaceAdd(source: string): Promise<unknown>;
   marketplaceRemove(name: string): Promise<unknown>;
   marketplaceRefresh(name: string | undefined): Promise<unknown>;
+  createSkill(name: string, description: string | undefined, scope: ExtScopeParams): Promise<unknown>;
+  deleteSkill(name: string, scope: ExtScopeParams): Promise<unknown>;
   subscribe?(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
 }
 
@@ -33,6 +35,8 @@ export const daemonExtSource: ExtSource = {
   marketplaceAdd: (source) => daemonCall("marketplace.add", { source }),
   marketplaceRemove: (name) => daemonCall("marketplace.remove", { name }),
   marketplaceRefresh: (name) => daemonCall("marketplace.refresh", { name }),
+  createSkill: (name, description, scope) => daemonCall("skill.create", { name, description, ...scope }),
+  deleteSkill: (name, scope) => daemonCall("skill.delete", { name, ...scope }),
   subscribe: subscribeDaemon,
 };
 
@@ -112,6 +116,14 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
     return mutate(() => source.marketplaceRefresh(name));
   }
 
+  async function createSkill(name: string, description?: string): Promise<boolean> {
+    return mutate(() => source.createSkill(name, description, scope()));
+  }
+
+  async function deleteSkill(name: string): Promise<boolean> {
+    return mutate(() => source.deleteSkill(name, scope()));
+  }
+
   async function loadDetails(id: string): Promise<void> {
     try {
       const text = await source.details(id);
@@ -188,6 +200,8 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
     marketplaceAdd,
     marketplaceRemove,
     marketplaceRefresh,
+    createSkill,
+    deleteSkill,
     cliAvailable,
   };
 }

@@ -25,6 +25,8 @@ function source(overrides: Partial<ExtSource> = {}): ExtSource {
     marketplaceAdd: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
     marketplaceRemove: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
     marketplaceRefresh: vi.fn().mockResolvedValue({ ok: true, stdout: "" }),
+    createSkill: vi.fn().mockResolvedValue({ path: "/r/.claude/skills/new-skill" }),
+    deleteSkill: vi.fn().mockResolvedValue({ ok: true, fanout: null }),
     ...overrides,
   };
 }
