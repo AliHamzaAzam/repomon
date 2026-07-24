@@ -4,6 +4,10 @@
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+fn default_pointer_cell() -> u16 {
+    1
+}
+
 /// Protocol version answered in `hello`.
 pub const PROTO_VERSION: u32 = 1;
 
@@ -43,6 +47,10 @@ pub enum Op {
     ScrollWheel {
         up: bool,
         ticks: u32,
+        #[serde(default = "default_pointer_cell")]
+        col: u16,
+        #[serde(default = "default_pointer_cell")]
+        row: u16,
     },
     SubscribeBytes,
     Kill,
@@ -258,9 +266,14 @@ mod tests {
             (
                 Request {
                     id: 10,
-                    op: Op::ScrollWheel { up: true, ticks: 3 },
+                    op: Op::ScrollWheel {
+                        up: true,
+                        ticks: 3,
+                        col: 14,
+                        row: 7,
+                    },
                 },
-                r#"{"id":10,"op":"scroll_wheel","up":true,"ticks":3}"#,
+                r#"{"id":10,"op":"scroll_wheel","up":true,"ticks":3,"col":14,"row":7}"#,
             ),
             (
                 Request {

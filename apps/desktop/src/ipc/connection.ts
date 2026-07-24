@@ -9,6 +9,8 @@ export interface DaemonStatus {
   lanes: number;
   db_size_bytes: number;
   version: string;
+  protocol_revision?: number | null;
+  capabilities?: string[];
 }
 
 export interface ConnectionSnapshot {

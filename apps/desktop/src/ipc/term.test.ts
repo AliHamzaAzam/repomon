@@ -4,6 +4,7 @@ import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
   takeWheelBatch,
+  terminalPointerCell,
   translateKeyboardKey,
   wheelLines,
 } from "./term";
@@ -68,5 +69,22 @@ describe("takeWheelBatch", () => {
 
   it("keeps sub-line movement for a later frame", () => {
     expect(takeWheelBatch(0.75)).toEqual({ ticks: 0, remainder: 0.75 });
+  });
+});
+
+describe("terminalPointerCell", () => {
+  it("maps the pointer to a 1-based terminal cell", () => {
+    expect(terminalPointerCell(150, 70, 50, 20, 200, 100, 80, 40)).toEqual({
+      col: 41,
+      row: 21,
+    });
+  });
+
+  it("clamps outside positions and invalid geometry", () => {
+    expect(terminalPointerCell(-20, 999, 0, 0, 200, 100, 80, 40)).toEqual({
+      col: 1,
+      row: 40,
+    });
+    expect(terminalPointerCell(1, 1, 0, 0, 0, 0, 0, 0)).toEqual({ col: 1, row: 1 });
   });
 });

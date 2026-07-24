@@ -12,6 +12,8 @@ export interface TerminalTarget {
 export interface TermWatchAck {
   cols: number | null;
   rows: number | null;
+  generation: number | null;
+  sequence: number | null;
 }
 
 export interface TranslatedKey {
@@ -73,6 +75,26 @@ export function takeWheelBatch(accumulated: number, maxTicks = 40): {
   const whole = Math.trunc(Number.isFinite(accumulated) ? accumulated : 0);
   const ticks = Math.sign(whole) * Math.min(Math.abs(whole), Math.max(0, maxTicks));
   return { ticks, remainder: accumulated - ticks };
+}
+
+/// Map a browser pointer position to a clamped, 1-based terminal cell.
+export function terminalPointerCell(
+  clientX: number,
+  clientY: number,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  cols: number,
+  rows: number,
+): { col: number; row: number } {
+  if (width <= 0 || height <= 0 || cols <= 0 || rows <= 0) return { col: 1, row: 1 };
+  const col = Math.floor(((clientX - left) / width) * cols) + 1;
+  const row = Math.floor(((clientY - top) / height) * rows) + 1;
+  return {
+    col: Math.min(cols, Math.max(1, col)),
+    row: Math.min(rows, Math.max(1, row)),
+  };
 }
 
 /// Normalize whatever `invoke` rejected with into a real `Error`, so callers surface the

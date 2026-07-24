@@ -49,11 +49,29 @@ pub struct WatchEntry {
     /// Globally-unique tag for THIS stream instance; guards EOF cleanup against a stop→restart
     /// race (see the module doc).
     pub generation: u64,
+    /// Last raw PTY chunk accepted from this generation.
+    pub sequence: Arc<AtomicU64>,
 }
 
 /// The registry of live byte watches, keyed by window. `Arc<Mutex<…>>` so the forwarder task can
 /// hold its own handle and remove its entry when the stream closes.
 pub type Watches = Arc<Mutex<HashMap<String, WatchEntry>>>;
+
+/// One byte stream's stable identity and current position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamCursor {
+    pub generation: u64,
+    pub sequence: u64,
+}
+
+impl WatchEntry {
+    fn cursor(&self) -> StreamCursor {
+        StreamCursor {
+            generation: self.generation,
+            sequence: self.sequence.load(Ordering::Acquire),
+        }
+    }
+}
 
 /// Hands out a fresh generation to every new stream instance. Global and monotonic: uniqueness
 /// across all windows is all the EOF guard needs.
@@ -88,17 +106,18 @@ pub async fn watch(
     lane: LaneId,
     window: String,
     conn_id: u64,
-) -> Result<(), String> {
+) -> Result<StreamCursor, String> {
     // Hold the lock across setup: a concurrent watcher of the SAME window must either join the
     // entry we create or wait and find it — never start a second stream (the backend allows only
     // one per window).
     let mut map = watches.lock().await;
     if let Some(entry) = map.get_mut(&window) {
         entry.refs.insert(conn_id);
-        return Ok(());
+        return Ok(entry.cursor());
     }
 
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let sequence = Arc::new(AtomicU64::new(0));
     let stream = {
         let backend = backend.clone();
         let window = window.clone();
@@ -114,6 +133,7 @@ pub async fn watch(
             lane,
             refs: HashSet::from([conn_id]),
             generation,
+            sequence: sequence.clone(),
         },
     );
 
@@ -123,15 +143,19 @@ pub async fn watch(
     {
         let window = window.clone();
         let watches = watches.clone();
+        let stream_sequence = sequence.clone();
         tokio::spawn(async move {
             let mut rx = stream.rx;
             while let Some(chunk) = rx.recv().await {
+                let sequence = stream_sequence.fetch_add(1, Ordering::AcqRel) + 1;
                 let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
                 let note = Notification::new(
                     pubsub::topic::AGENT_BYTES,
                     serde_json::json!({
                         "lane_id": lane,
                         "window": window,
+                        "generation": generation,
+                        "sequence": sequence,
                         "data": data,
                     }),
                 );
@@ -145,7 +169,15 @@ pub async fn watch(
             }
         });
     }
-    Ok(())
+    Ok(StreamCursor {
+        generation,
+        sequence: 0,
+    })
+}
+
+/// The current stream position for `window`, if a byte watch is active.
+pub async fn cursor(watches: &Watches, window: &str) -> Option<StreamCursor> {
+    watches.lock().await.get(window).map(WatchEntry::cursor)
 }
 
 /// Release `conn_id` from `window`'s watch. When the last watcher leaves, close the window's
@@ -214,6 +246,7 @@ mod tests {
             lane: 1,
             refs: refs.iter().copied().collect(),
             generation,
+            sequence: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -244,6 +277,26 @@ mod tests {
         assert_eq!(e.refs.len(), 2);
         // The generation is untouched — the same stream, not a new one.
         assert_eq!(e.generation, 5);
+    }
+
+    #[test]
+    fn cursor_tracks_sequence_within_one_generation() {
+        let e = entry(&[1], 9);
+        assert_eq!(
+            e.cursor(),
+            StreamCursor {
+                generation: 9,
+                sequence: 0,
+            }
+        );
+        e.sequence.store(4, Ordering::Release);
+        assert_eq!(
+            e.cursor(),
+            StreamCursor {
+                generation: 9,
+                sequence: 4,
+            }
+        );
     }
 
     #[test]

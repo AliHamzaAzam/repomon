@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -910,6 +911,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 lane: 1,
                 refs: [a.id, b.id].into_iter().collect(),
                 generation: 0,
+                sequence: Arc::new(AtomicU64::new(0)),
             },
         );
         // A window only A watches.
@@ -919,6 +921,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 lane: 2,
                 refs: [a.id].into_iter().collect(),
                 generation: 1,
+                sequence: Arc::new(AtomicU64::new(0)),
             },
         );
     }

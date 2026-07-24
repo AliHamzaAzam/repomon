@@ -21,23 +21,47 @@ const MAX_PENDING: usize = 1024 * 1024;
 pub struct TermWatchAck {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
+    pub generation: Option<u64>,
+    pub sequence: Option<u64>,
 }
 
 fn dimensions(value: &Value) -> TermWatchAck {
     TermWatchAck {
         cols: value.get("cols").and_then(Value::as_u64).map(|n| n as u16),
         rows: value.get("rows").and_then(Value::as_u64).map(|n| n as u16),
+        generation: value.get("generation").and_then(Value::as_u64),
+        sequence: value.get("sequence").and_then(Value::as_u64),
     }
 }
 
-fn event_bytes(event: &Notification, window: &str) -> Option<Vec<u8>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamCursor {
+    generation: u64,
+    sequence: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ByteChunk {
+    cursor: StreamCursor,
+    bytes: Vec<u8>,
+}
+
+fn event_bytes(event: &Notification, window: &str) -> Option<ByteChunk> {
     if event.method != "event.agent.bytes"
         || event.params.get("window").and_then(Value::as_str) != Some(window)
     {
         return None;
     }
+    let generation = event.params.get("generation").and_then(Value::as_u64)?;
+    let sequence = event.params.get("sequence").and_then(Value::as_u64)?;
     let encoded = event.params.get("data").and_then(Value::as_str)?;
-    STANDARD.decode(encoded).ok()
+    Some(ByteChunk {
+        cursor: StreamCursor {
+            generation,
+            sequence,
+        },
+        bytes: STANDARD.decode(encoded).ok()?,
+    })
 }
 
 fn append_pending(pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
@@ -62,17 +86,35 @@ fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
 /// tmux joins captured lines with a bare LF, which only moves the cursor DOWN in a raw stream, so
 /// re-anchor each line to column 0 (`\r\n`) — otherwise the repaint staircases to the right (the
 /// same reason the TUI's `Emu::seed_capture` rewrites newlines).
-fn resync_frame(content: &str, alternate: bool) -> Vec<u8> {
-    let body = content.replace('\n', "\r\n");
-    let mut bytes = Vec::with_capacity(body.len() + 16);
+fn resync_frame(content: &str, alternate: bool, cursor: Option<(u16, u16)>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(content.len() + 64);
     bytes.extend_from_slice(if alternate {
         b"\x1b[?1049h"
     } else {
         b"\x1b[?1049l"
     });
-    bytes.extend_from_slice(b"\x1b[H\x1b[2J\x1b[3J");
-    bytes.extend_from_slice(body.as_bytes());
+    bytes.extend_from_slice(b"\x1b[?25l\x1b[?7h\x1b[H\x1b[2J\x1b[3J");
+    if alternate {
+        // A full-screen capture represents cells, not a raw terminal transcript. Position each
+        // row explicitly so wrapping or a grid-edge newline cannot shift the repaint.
+        for (row, line) in content.lines().enumerate() {
+            bytes.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+            bytes.extend_from_slice(line.as_bytes());
+        }
+    } else {
+        // Normal-screen captures may include shell history. Replaying rows sequentially seeds
+        // xterm's local scrollback while CR anchors tmux's bare LF line separators.
+        bytes.extend_from_slice(content.replace('\n', "\r\n").as_bytes());
+    }
+    if let Some((col, row)) = cursor {
+        bytes.extend_from_slice(format!("\x1b[{};{}H\x1b[?25h", row + 1, col + 1).as_bytes());
+    }
     bytes
+}
+
+struct Resync {
+    cursor: StreamCursor,
+    stable: bool,
 }
 
 async fn capture_resync(
@@ -80,7 +122,7 @@ async fn capture_resync(
     channel: &Channel<InvokeResponseBody>,
     lane_id: i64,
     window: &str,
-) -> bool {
+) -> Option<Resync> {
     let capture = client
         .call(
             "agent.capture",
@@ -92,17 +134,33 @@ async fn capture_resync(
             })),
         )
         .await;
-    let Ok(value) = capture else { return true };
+    let Ok(value) = capture else { return None };
     let Some(content) = value.get("content").and_then(Value::as_str) else {
-        return true;
+        return None;
     };
-    let alternate = value
-        .get("alternate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let alternate = value.get("alternate").and_then(Value::as_bool)?;
+    let cursor = value.get("cursor").and_then(|cursor| {
+        Some((
+            cursor.get("col")?.as_u64()? as u16,
+            cursor.get("row")?.as_u64()? as u16,
+        ))
+    });
+    let repaint_cursor = StreamCursor {
+        generation: value.get("generation").and_then(Value::as_u64)?,
+        sequence: value.get("sequence").and_then(Value::as_u64)?,
+    };
     channel
-        .send(InvokeResponseBody::Raw(resync_frame(content, alternate)))
+        .send(InvokeResponseBody::Raw(resync_frame(
+            content, alternate, cursor,
+        )))
         .is_ok()
+        .then_some(Resync {
+            cursor: repaint_cursor,
+            stable: value
+                .get("stable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
 }
 
 #[tauri::command]
@@ -134,16 +192,6 @@ pub async fn term_watch(
         .call("subscribe", None)
         .await
         .map_err(map_call_error)?;
-    // Unix byte streams contain future PTY output only. Paint the current screen first so a cold
-    // terminal is useful immediately, then attach the live stream for subsequent output.
-    #[cfg(not(target_os = "windows"))]
-    if !capture_resync(&client, &on_bytes, lane_id, &window).await {
-        return Err(RpcFailure {
-            code: -32000,
-            message: "terminal channel closed during initial repaint".into(),
-            data: None,
-        });
-    }
     let value = client
         .call(
             "agent.watch_bytes",
@@ -152,6 +200,38 @@ pub async fn term_watch(
         .await
         .map_err(map_call_error)?;
     let ack = dimensions(&value);
+    if ack.generation.is_none() || ack.sequence.is_none() {
+        let _ = client
+            .call(
+                "agent.watch_bytes",
+                Some(json!({ "lane_id": lane_id, "window": window, "on": false })),
+            )
+            .await;
+        return Err(RpcFailure {
+            code: -32012,
+            message: "The running daemon is too old for reliable terminal rendering. Restart the Repomon daemon, then reopen this agent.".into(),
+            data: None,
+        });
+    }
+
+    // Start the stream first, then capture a sequenced checkpoint and ignore every queued chunk
+    // already represented by that repaint. Unix needs this because pipe-pane is future-only;
+    // Windows uses the same contract so a raced first replay frame cannot leave the pane blank.
+    let Some(repaint) = capture_resync(&client, &on_bytes, lane_id, &window).await else {
+        let _ = client
+            .call(
+                "agent.watch_bytes",
+                Some(json!({ "lane_id": lane_id, "window": window, "on": false })),
+            )
+            .await;
+        return Err(RpcFailure {
+            code: -32000,
+            message: "could not establish an authoritative terminal repaint".into(),
+            data: None,
+        });
+    };
+    let mut stream_cursor = repaint.cursor;
+    let initial_resync = !repaint.stable;
 
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<oneshot::Sender<()>>();
     state
@@ -165,7 +245,7 @@ pub async fn term_watch(
         let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending = Vec::with_capacity(FLUSH_BYTES);
-        let mut resync = false;
+        let mut resync = initial_resync;
         let mut cancelled = None;
 
         loop {
@@ -176,8 +256,24 @@ pub async fn term_watch(
                 }
                 event = events.recv() => match event {
                     Ok(event) => {
-                        if let Some(bytes) = event_bytes(&event, &task_window) {
-                            if !append_pending(&mut pending, &bytes) {
+                        if let Some(chunk) = event_bytes(&event, &task_window) {
+                            // Events queued before a repaint are already visible in it. A later
+                            // generation or sequence gap means terminal-relative state is unsafe,
+                            // so stop applying bytes until an authoritative repaint replaces it.
+                            if chunk.cursor.generation == stream_cursor.generation
+                                && chunk.cursor.sequence <= stream_cursor.sequence
+                            {
+                                continue;
+                            }
+                            let contiguous = chunk.cursor.generation == stream_cursor.generation
+                                && chunk.cursor.sequence == stream_cursor.sequence + 1;
+                            if !contiguous {
+                                pending.clear();
+                                resync = true;
+                                continue;
+                            }
+                            stream_cursor = chunk.cursor;
+                            if !append_pending(&mut pending, &chunk.bytes) {
                                 resync = true;
                             } else if pending.len() >= FLUSH_BYTES && !flush(&on_bytes, &mut pending) {
                                 break;
@@ -190,10 +286,16 @@ pub async fn term_watch(
                 _ = ticker.tick() => {
                     if resync {
                         pending.clear();
-                        resync = false;
-                        if !capture_resync(&client, &on_bytes, lane_id, &task_window).await {
+                        let Some(repaint) =
+                            capture_resync(&client, &on_bytes, lane_id, &task_window).await
+                        else {
                             break;
-                        }
+                        };
+                        stream_cursor = repaint.cursor;
+                        // A continuously mutating pane may not yield a quiet checkpoint on the
+                        // first pass. Render the latest complete frame now and verify it again on
+                        // the next tick instead of mixing its bytes with an uncertain cursor.
+                        resync = !repaint.stable;
                     } else if !flush(&on_bytes, &mut pending) {
                         break;
                     }
@@ -235,22 +337,22 @@ mod tests {
     use repomon_core::protocol::Notification;
     use serde_json::json;
 
-    use super::{MAX_PENDING, append_pending, dimensions, event_bytes, resync_frame};
+    use super::{MAX_PENDING, StreamCursor, append_pending, dimensions, event_bytes, resync_frame};
 
     #[test]
     fn resync_frame_reanchors_bare_newlines() {
-        let frame = resync_frame("line1\nline2", true);
+        let frame = resync_frame("line1\nline2", true, Some((3, 4)));
         let text = String::from_utf8(frame).unwrap();
-        // Clears screen + scrollback, homes, then repaints with CR-anchored lines.
-        assert!(text.starts_with("\x1b[?1049h\x1b[H\x1b[2J\x1b[3J"));
-        assert!(text.contains("line1\r\nline2"));
-        assert!(!text.contains("line1\nline2"));
+        assert!(text.starts_with("\x1b[?1049h\x1b[?25l\x1b[?7h\x1b[H\x1b[2J\x1b[3J"));
+        assert!(text.contains("\x1b[1;1Hline1\x1b[2;1Hline2"));
+        assert!(text.ends_with("\x1b[5;4H\x1b[?25h"));
     }
 
     #[test]
     fn resync_frame_restores_normal_screen_mode() {
-        let frame = String::from_utf8(resync_frame("shell", false)).unwrap();
-        assert!(frame.starts_with("\x1b[?1049l\x1b[H\x1b[2J\x1b[3J"));
+        let frame = String::from_utf8(resync_frame("shell\nprompt", false, None)).unwrap();
+        assert!(frame.starts_with("\x1b[?1049l\x1b[?25l\x1b[?7h\x1b[H\x1b[2J\x1b[3J"));
+        assert!(frame.contains("shell\r\nprompt"));
     }
 
     #[test]
@@ -260,7 +362,25 @@ mod tests {
             "event.agent.bytes",
             json!({ "window": "lane-7", "data": STANDARD.encode(bytes) }),
         );
-        assert_eq!(event_bytes(&event, "lane-7"), Some(bytes.to_vec()));
+        assert!(event_bytes(&event, "lane-7").is_none());
+        let event = Notification::new(
+            "event.agent.bytes",
+            json!({
+                "window": "lane-7",
+                "generation": 3,
+                "sequence": 8,
+                "data": STANDARD.encode(bytes)
+            }),
+        );
+        let chunk = event_bytes(&event, "lane-7").unwrap();
+        assert_eq!(chunk.bytes, bytes);
+        assert_eq!(
+            chunk.cursor,
+            StreamCursor {
+                generation: 3,
+                sequence: 8,
+            }
+        );
         assert_eq!(event_bytes(&event, "lane-8"), None);
     }
 
@@ -281,5 +401,13 @@ mod tests {
             dimensions(&json!({ "cols": null, "rows": null })).rows,
             None
         );
+        let ack = dimensions(&json!({
+            "cols": 120,
+            "rows": 40,
+            "generation": 7,
+            "sequence": 11
+        }));
+        assert_eq!(ack.generation, Some(7));
+        assert_eq!(ack.sequence, Some(11));
     }
 }

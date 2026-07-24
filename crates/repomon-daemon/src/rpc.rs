@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
+use repomon_core::agent::backend::{CaptureOpts, ScrollEvent, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use crate::conn::ConnSession;
 use crate::{Ctx, ORCHESTRATOR_WINDOW};
+
+const DAEMON_PROTOCOL_REVISION: u32 = 2;
 
 fn internal<E: std::fmt::Display>(e: E) -> RpcError {
     RpcError::internal(e.to_string())
@@ -436,10 +438,17 @@ struct AgentScroll {
     up: bool,
     #[serde(default = "default_scroll_ticks")]
     ticks: u32,
+    #[serde(default = "default_pointer_cell")]
+    col: u16,
+    #[serde(default = "default_pointer_cell")]
+    row: u16,
     #[serde(default)]
     window: Option<String>,
 }
 fn default_scroll_ticks() -> u32 {
+    1
+}
+fn default_pointer_cell() -> u16 {
     1
 }
 #[derive(Deserialize)]
@@ -1545,28 +1554,65 @@ pub async fn dispatch(
         }
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
-            let tmux = ctx.backend.clone();
             let opts = CaptureOpts {
                 last_lines: p.lines,
             };
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            let capture_window = window.clone();
-            let content =
-                tokio::task::spawn_blocking(move || tmux.capture_named(&capture_window, opts))
+            if p.include_state {
+                // A capture is useful as a terminal checkpoint only when no raw PTY chunk crossed
+                // it. Retry short active bursts until the stream cursor is stable, then return the
+                // exact cursor represented by the repaint. The desktop discards queued chunks at
+                // or below this cursor before resuming incremental rendering.
+                let mut state = None;
+                let mut checkpoint = None;
+                let mut stable = false;
+                for _ in 0..4 {
+                    let before = crate::bytes_stream::cursor(&ctx.bytes_watches, &window).await;
+                    let backend = ctx.backend.clone();
+                    let capture_window = window.clone();
+                    let next = tokio::task::spawn_blocking(move || {
+                        let content = backend.capture_named(&capture_window, opts)?;
+                        let alternate = backend.alternate_on_named(&capture_window);
+                        let size = backend.size_named(&capture_window);
+                        let cursor = backend.cursor_named(&capture_window);
+                        Ok::<_, repomon_core::Error>((content, alternate, size, cursor))
+                    })
                     .await
                     .map_err(internal)?
                     .map_err(internal)?;
-            if p.include_state {
-                let tmux = ctx.backend.clone();
-                let window = window.clone();
-                let alternate =
-                    tokio::task::spawn_blocking(move || tmux.alternate_on_named(&window))
-                        .await
-                        .map_err(internal)?;
-                Ok(json!({ "content": content, "alternate": alternate }))
+                    // Let pipe-pane deliver output tmux had already applied when capture-pane ran.
+                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                    let after = crate::bytes_stream::cursor(&ctx.bytes_watches, &window).await;
+                    state = Some(next);
+                    checkpoint = after;
+                    stable = before == after;
+                    if stable {
+                        break;
+                    }
+                }
+                let (content, alternate, size, cursor) =
+                    state.ok_or_else(|| RpcError::internal("terminal capture unavailable"))?;
+                Ok(json!({
+                    "content": content,
+                    "alternate": alternate,
+                    "cols": size.map(|d| d.0),
+                    "rows": size.map(|d| d.1),
+                    "cursor": cursor.map(|c| json!({ "col": c.col, "row": c.row })),
+                    "generation": checkpoint.map(|c| c.generation),
+                    "sequence": checkpoint.map(|c| c.sequence),
+                    "stable": stable,
+                }))
             } else {
+                let backend = ctx.backend.clone();
+                let capture_window = window.clone();
+                let content = tokio::task::spawn_blocking(move || {
+                    backend.capture_named(&capture_window, opts)
+                })
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
                 Ok(json!({ "content": content }))
             }
         }
@@ -1633,7 +1679,7 @@ pub async fn dispatch(
                     .window
                     .clone()
                     .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-                crate::bytes_stream::watch(
+                let stream = crate::bytes_stream::watch(
                     ctx.backend.clone(),
                     ctx.events.clone(),
                     &ctx.bytes_watches,
@@ -1654,6 +1700,8 @@ pub async fn dispatch(
                 return Ok(json!({
                     "cols": dims.map(|d| d.0),
                     "rows": dims.map(|d| d.1),
+                    "generation": stream.generation,
+                    "sequence": stream.sequence,
                 }));
             }
             // `on:false`. With an explicit window, release just that one. WITHOUT a window (the
@@ -1886,19 +1934,30 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
-            let (up, ticks) = (p.up, p.ticks.min(40));
+            let (up, ticks, col, row) = (p.up, p.ticks.min(40), p.col, p.row);
             // Only forward to a full-screen agent (alternate screen) — it owns its scrollback, so
             // it can scroll itself. A plain shell would just get junk on its command line; the
             // caller falls back to the capture-based scroll when `forwarded` is false.
-            let forwarded = tokio::task::spawn_blocking(move || {
+            let forwarded = tokio::task::spawn_blocking(move || -> repomon_core::Result<bool> {
                 if tmux.alternate_on_named(&window) {
-                    let _ = tmux.scroll_wheel_named(&window, up, ticks);
-                    true
+                    let (max_col, max_row) =
+                        tmux.size_named(&window).unwrap_or((u16::MAX, u16::MAX));
+                    tmux.scroll_wheel_named(
+                        &window,
+                        ScrollEvent {
+                            up,
+                            ticks,
+                            col: col.clamp(1, max_col.max(1)),
+                            row: row.clamp(1, max_row.max(1)),
+                        },
+                    )?;
+                    Ok(true)
                 } else {
-                    false
+                    Ok(false)
                 }
             })
             .await
+            .map_err(internal)?
             .map_err(internal)?;
             if forwarded {
                 // Fast-poll the pane so the scrolled view shows immediately (reuses the typing
@@ -2182,6 +2241,11 @@ pub async fn dispatch(
                 "lanes": lanes,
                 "db_size_bytes": db_size,
                 "version": repomon_core::version(),
+                "protocol_revision": DAEMON_PROTOCOL_REVISION,
+                "capabilities": [
+                    "terminal.checkpoint.v1",
+                    "terminal.stream-sequence.v1"
+                ],
             }))
         }
         "daemon.shutdown" => {

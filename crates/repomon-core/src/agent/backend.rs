@@ -86,6 +86,15 @@ pub struct Cursor {
     pub row: u16,
 }
 
+/// One mouse-wheel gesture at a 1-based terminal cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollEvent {
+    pub up: bool,
+    pub ticks: u32,
+    pub col: u16,
+    pub row: u16,
+}
+
 /// One window as the orphan reaper sees it: its name, the pane's current working directory,
 /// and the last pane-activity time (Unix epoch seconds).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,7 +191,7 @@ pub trait SessionBackend: Send + Sync {
     fn alternate_on_named(&self, window: &str) -> bool;
 
     /// Forward `ticks` mouse-wheel events (up or down) to the window's app.
-    fn scroll_wheel_named(&self, window: &str, up: bool, ticks: u32) -> Result<()>;
+    fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()>;
 
     /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
     fn send_literal_named(&self, window: &str, text: &str) -> Result<()>;

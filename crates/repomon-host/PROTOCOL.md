@@ -220,13 +220,13 @@ The host translates to conventional VT input sequences (e.g. `C-c` → `0x03`, `
 
 ### 7.10 `scroll_wheel`
 
-Request: `{"id": 10, "op": "scroll_wheel", "up": true, "ticks": 3}`
+Request: `{"id": 10, "op": "scroll_wheel", "up": true, "ticks": 3, "col": 14, "row": 7}`
 
 Response: `{"id": 10, "ok": {}}`
 
-Writes SGR mouse-wheel sequences to the child's input at the pane's top-left, `ticks` times:
-button 64 (up) / 65 (down), i.e. `ESC [ < 64 ; 1 ; 1 M` per tick (exact tmux
-`scroll_wheel_named` parity). `ticks: 0` is a no-op success.
+Writes SGR mouse-wheel sequences to the child's input at the 1-based `col` and `row`, `ticks`
+times: button 64 (up) / 65 (down), i.e. `ESC [ < 64 ; 14 ; 7 M` per tick. Old clients may omit
+`col` and `row`; both default to 1. `ticks: 0` is a no-op success.
 
 ### 7.11 `subscribe_bytes`
 

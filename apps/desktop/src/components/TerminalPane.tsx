@@ -10,6 +10,7 @@ import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
   takeWheelBatch,
+  terminalPointerCell,
   translateKeyboardKey,
   watchTerminal,
   wheelLines,
@@ -222,6 +223,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // Accumulate fractional movement and issue at most one remote scroll at a time. New movement
       // is merged while the request is in flight, so long trackpad gestures cannot build a tail.
       let wheelAccum = 0;
+      let wheelCell = { col: 1, row: 1 };
 
       const scheduleWheelFlush = () => {
         if (wheelFrame !== undefined || disposed) return;
@@ -248,6 +250,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
           window: props.window,
           up: batch.ticks < 0,
           ticks: Math.abs(batch.ticks),
+          col: wheelCell.col,
+          row: wheelCell.row,
         })
           .then((result) => {
             if (!result.forwarded && !disposed) current.scrollLines(batch.ticks);
@@ -266,10 +270,23 @@ export default function TerminalPane(props: TerminalPaneProps) {
         event.preventDefault();
         event.stopPropagation();
         const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
-        const screenHeight = screen?.getBoundingClientRect().height ?? 0;
+        const screenRect = screen?.getBoundingClientRect();
+        const screenHeight = screenRect?.height ?? 0;
         const pixelsPerLine = screenHeight > 0 && terminal.rows > 0
           ? screenHeight / terminal.rows
           : (terminal.options.fontSize ?? 12) * (terminal.options.lineHeight ?? 1);
+        if (screenRect) {
+          wheelCell = terminalPointerCell(
+            event.clientX,
+            event.clientY,
+            screenRect.left,
+            screenRect.top,
+            screenRect.width,
+            screenRect.height,
+            terminal.cols,
+            terminal.rows,
+          );
+        }
         wheelAccum += wheelLines(
           event.deltaY,
           event.deltaMode,
@@ -286,6 +303,9 @@ export default function TerminalPane(props: TerminalPaneProps) {
       });
       resize.observe(container);
       if (props.visible !== false) fit.fit();
+      // Establish the pane's authoritative grid before the first checkpoint is painted. Painting
+      // at one width and resizing afterward corrupts cursor-relative full-screen output.
+      await syncSize?.();
       setReady(true);
 
       try {
@@ -296,7 +316,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         }
         stopWatch = watch.stop;
         setTransportError(null);
-        void syncSize?.();
+        applyGrid(watch.ack.cols, watch.ack.rows);
         if (props.focused) terminal.focus();
       } catch (error) {
         setTransportError(errorMessage(error));

@@ -25,8 +25,8 @@ use chrono::{DateTime, Utc};
 use crate::model::{AgentKind, AgentStatus};
 
 pub use backend::{
-    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, SessionBackend, SpawnSpec,
-    WindowActivity,
+    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, ScrollEvent, SessionBackend,
+    SpawnSpec, WindowActivity,
 };
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
