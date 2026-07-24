@@ -1127,7 +1127,19 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
         Some(json!({ "path": skill_path, "content": "---\nname: e2e-skill\n---\nedited" })),
     )
     .await;
-    assert_eq!(r.result.unwrap()["ok"], true);
+    let result = r.result.unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(
+        result["fanout"]["synced_lanes"].as_array().unwrap().len(),
+        1
+    );
+    // The repo-scoped edit must reach the worktree, not just the repo root: a stale worktree
+    // copy would silently diverge from what the GUI just saved.
+    assert!(
+        std::fs::read_to_string(wt.join(".claude/skills/e2e-skill/SKILL.md"))
+            .unwrap()
+            .contains("edited")
+    );
     let r = call(
         &mut stream,
         7,

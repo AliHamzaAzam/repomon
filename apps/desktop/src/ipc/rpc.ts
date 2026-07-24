@@ -150,7 +150,7 @@ interface RpcMap {
   "marketplace.refresh": { params: { name?: string }; result: { ok: boolean; stdout: string } };
   "skill.create": { params: { name: string; description?: string } & ExtScopeParams; result: { path: string } };
   "skill.read": { params: { path: string }; result: { content: string } };
-  "skill.write": { params: { path: string; content: string }; result: { ok: boolean } };
+  "skill.write": { params: { path: string; content: string }; result: { ok: boolean; fanout: FanoutSummary | null } };
   "skill.delete": { params: { name: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
 }
 

@@ -358,6 +358,23 @@ async fn run_cli_op(ctx: &Ctx, args: Vec<String>, changed_scope: Value) -> Resul
     Ok(json!({ "ok": true, "stdout": stdout }))
 }
 
+/// Registered repos paired with their skills root (`.claude/skills`). Lets `skill.write` figure
+/// out which repo (if any) a written path belongs to, so a repo-scoped edit can fan out to that
+/// repo's lane worktrees the same way skill.create/skill.delete/plugin.enable already do.
+async fn skill_repo_roots(ctx: &Ctx) -> Result<Vec<(PathBuf, PathBuf)>, RpcError> {
+    Ok(ctx
+        .registry
+        .list()
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|repo| {
+            let skills_root = repo.path.join(".claude/skills");
+            (repo.path, skills_root)
+        })
+        .collect())
+}
+
 /// Every directory `skill.read`/`skill.write`/`skill.delete` are allowed to touch: the global
 /// `claude_home()/skills` (when resolvable) plus `.claude/skills` for every registered repo.
 async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
@@ -365,9 +382,12 @@ async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
     if let Some(home) = crate::ext::claude_home() {
         roots.push(home.join("skills"));
     }
-    for repo in ctx.registry.list().await.map_err(internal)? {
-        roots.push(repo.path.join(".claude/skills"));
-    }
+    roots.extend(
+        skill_repo_roots(ctx)
+            .await?
+            .into_iter()
+            .map(|(_, skills_root)| skills_root),
+    );
     Ok(roots)
 }
 #[derive(Deserialize)]
@@ -1068,8 +1088,31 @@ pub async fn dispatch(
                 p.path.join("SKILL.md")
             };
             tokio::fs::write(&md, p.content).await.map_err(internal)?;
+            // create/delete/toggle all fan a repo-scoped change out to every lane worktree; find
+            // out whether this write landed under a registered repo's skills root so it does the
+            // same, instead of leaving existing worktrees with a stale copy.
+            let mut fanout_repo = None;
+            if let Ok(resolved_md) = md.canonicalize() {
+                for (repo_path, skills_root) in skill_repo_roots(ctx).await? {
+                    if skills_root
+                        .canonicalize()
+                        .is_ok_and(|root| resolved_md.starts_with(&root))
+                    {
+                        fanout_repo = Some(repo_path);
+                        break;
+                    }
+                }
+            }
+            let fanout = match fanout_repo {
+                Some(repo_path) => Some(
+                    tokio::task::spawn_blocking(move || crate::ext::fan_out(&repo_path))
+                        .await
+                        .map_err(internal)?,
+                ),
+                None => None,
+            };
             ctx.broadcast("event.ext.changed", json!({ "scope": "global" }));
-            Ok(json!({ "ok": true }))
+            Ok(json!({ "ok": true, "fanout": fanout }))
         }
         "skill.delete" => {
             let p: SkillDelete = parse(params)?;
