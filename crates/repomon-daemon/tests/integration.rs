@@ -1104,6 +1104,65 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
     assert_eq!(plugin["enabled"], true);
     assert_eq!(plugin["enabled_source"], "repo");
 
+    // Create a repo-scope skill: the daemon writes it under the repo's .claude/skills and fans
+    // it out to the worktree.
+    let r = call(
+        &mut stream,
+        5,
+        "skill.create",
+        Some(
+            json!({ "name": "e2e-skill", "description": "d", "scope": "repo", "repo_id": repo_id }),
+        ),
+    )
+    .await;
+    let skill_path = r.result.unwrap()["path"].as_str().unwrap().to_string();
+    assert!(Path::new(&skill_path).join("SKILL.md").is_file());
+    assert!(wt.join(".claude/skills/e2e-skill/SKILL.md").is_file());
+
+    // Write then read round-trips the content.
+    let r = call(
+        &mut stream,
+        6,
+        "skill.write",
+        Some(json!({ "path": skill_path, "content": "---\nname: e2e-skill\n---\nedited" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["ok"], true);
+    let r = call(
+        &mut stream,
+        7,
+        "skill.read",
+        Some(json!({ "path": skill_path })),
+    )
+    .await;
+    assert!(
+        r.result.unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("edited")
+    );
+
+    // A path outside the managed skill roots is rejected.
+    let r = call(
+        &mut stream,
+        8,
+        "skill.read",
+        Some(json!({ "path": "/etc/passwd" })),
+    )
+    .await;
+    assert!(r.error.is_some());
+
+    // Delete removes it from the repo root and (via the re-run fan-out) the worktree.
+    let r = call(
+        &mut stream,
+        9,
+        "skill.delete",
+        Some(json!({ "name": "e2e-skill", "scope": "repo", "repo_id": repo_id })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["ok"], true);
+    assert!(!wt.join(".claude/skills/e2e-skill").exists());
+
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }

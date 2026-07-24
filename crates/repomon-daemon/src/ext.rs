@@ -213,7 +213,8 @@ pub struct CliFailure {
 }
 
 /// Handle to the `claude` CLI. Detection runs `claude --version` once per call site; the RPC
-/// layer caches via OnceLock so a missing CLI is cheap to re-report.
+/// layer caches via OnceLock, but only a success is cached, so a CLI installed after the daemon
+/// started is picked up on the next call without a restart.
 pub struct ClaudeCli {
     pub bin: PathBuf,
     pub version: String,
@@ -381,6 +382,80 @@ pub fn set_plugin_enabled(settings: &Path, id: &str, enabled: Option<bool>) -> i
     fs::rename(&tmp, settings)
 }
 
+/// Kebab-case-ish skill names only: no separators means no traversal and no surprise dirs.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Create `skills_dir/<name>/SKILL.md` with minimal frontmatter. Errors on invalid names and
+/// existing skills (never overwrites).
+pub fn scaffold_skill(
+    skills_dir: &Path,
+    name: &str,
+    description: Option<&str>,
+) -> io::Result<PathBuf> {
+    if !valid_skill_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid skill name",
+        ));
+    }
+    let dir = skills_dir.join(name);
+    if dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "skill already exists",
+        ));
+    }
+    fs::create_dir_all(&dir)?;
+    let description = description.unwrap_or("TODO: when to use this skill");
+    fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
+    )?;
+    Ok(dir)
+}
+
+/// Resolve `path` as canonically as possible without requiring it to exist: walk up to the
+/// nearest existing ancestor, canonicalize that ancestor, then rejoin the (possibly
+/// nonexistent) tail. Applying this to both sides of a comparison keeps them on the same
+/// footing when an ancestor is a symlink (e.g. macOS's `/var` -> `/private/var`), whether or
+/// not the full path exists yet.
+fn canonical_prefix(path: &Path) -> Option<PathBuf> {
+    let mut probe = path.to_path_buf();
+    let mut rest = Vec::new();
+    while !probe.exists() {
+        let name = probe.file_name().map(|n| n.to_os_string())?;
+        rest.push(name);
+        if !probe.pop() {
+            return None;
+        }
+    }
+    let mut resolved = probe.canonicalize().ok()?;
+    for part in rest.iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// True when `path` resolves inside one of the managed skills roots. Guards skill.read/write/
+/// delete against arbitrary filesystem access through a crafted path.
+pub fn skill_path_allowed(path: &Path, roots: &[PathBuf]) -> bool {
+    // The file may not exist yet (write): canonicalize the nearest existing ancestor.
+    let Some(resolved) = canonical_prefix(path) else {
+        return false;
+    };
+    roots.iter().any(|root| {
+        canonical_prefix(root)
+            .map(|r| resolved.starts_with(&r))
+            .unwrap_or(false)
+    })
+}
+
 /// Worktrees of `repo_root` (excluding the root itself), via `git worktree list --porcelain`.
 fn repo_worktrees(repo_root: &Path) -> io::Result<Vec<PathBuf>> {
     let out = std::process::Command::new("git")
@@ -436,7 +511,17 @@ pub fn sync_worktree(repo_root: &Path, worktree: &Path) -> io::Result<()> {
         fs::copy(&settings, dst.join("settings.local.json"))?;
     }
     let skills = src.join("skills");
+    // Only touch worktree skills when the source dir exists (an absent source means this repo
+    // is unmanaged; touch nothing).
     if skills.is_dir() {
+        // Drop worktree skills whose source is gone first, so deletes propagate.
+        if let Ok(entries) = fs::read_dir(dst.join("skills")) {
+            for entry in entries.flatten() {
+                if !skills.join(entry.file_name()).exists() {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
+        }
         copy_dir(&skills, &dst.join("skills"))?
     }
     Ok(())
@@ -809,5 +894,66 @@ mod tests {
         let err = cli.run(&["plugin", "install", "x@m"]).unwrap_err();
         assert_eq!(err.exit_code, Some(3));
         assert!(err.stderr.contains("boom"));
+    }
+
+    #[test]
+    fn scaffold_skill_writes_frontmatter_and_rejects_bad_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = scaffold_skill(tmp.path(), "my-skill", Some("does x")).unwrap();
+        let text = std::fs::read_to_string(path.join("SKILL.md")).unwrap();
+        assert!(text.starts_with("---\nname: my-skill\ndescription: does x\n---\n"));
+        assert!(
+            scaffold_skill(tmp.path(), "my-skill", None).is_err(),
+            "duplicate must fail"
+        );
+        assert!(scaffold_skill(tmp.path(), "../escape", None).is_err());
+        assert!(scaffold_skill(tmp.path(), "has space", None).is_err());
+    }
+
+    #[test]
+    fn skill_path_guard_only_allows_managed_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let ok = home.path().join("skills/a/SKILL.md");
+        let ok2 = repo.path().join(".claude/skills/b/SKILL.md");
+        let bad = home.path().join("settings.json");
+        let roots = [
+            home.path().join("skills"),
+            repo.path().join(".claude/skills"),
+        ];
+        assert!(skill_path_allowed(&ok, &roots));
+        assert!(skill_path_allowed(&ok2, &roots));
+        assert!(!skill_path_allowed(&bad, &roots));
+        assert!(!skill_path_allowed(Path::new("/etc/passwd"), &roots));
+    }
+
+    #[test]
+    fn sync_prunes_worktree_skills_deleted_at_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("README"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let wt = tmp.path().join("wt");
+        git(
+            &repo,
+            &["worktree", "add", wt.to_str().unwrap(), "-b", "l1"],
+        );
+
+        for name in ["keep", "drop"] {
+            let dir = repo.join(".claude/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: s\n---\n").unwrap();
+        }
+        fan_out(&repo);
+        assert!(wt.join(".claude/skills/drop/SKILL.md").is_file());
+
+        std::fs::remove_dir_all(repo.join(".claude/skills/drop")).unwrap();
+        let summary = fan_out(&repo);
+        assert_eq!(summary.synced_lanes.len(), 1);
+        assert!(wt.join(".claude/skills/keep/SKILL.md").is_file());
+        assert!(!wt.join(".claude/skills/drop").exists());
     }
 }

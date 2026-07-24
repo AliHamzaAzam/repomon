@@ -285,6 +285,29 @@ struct OptionalId {
 struct SourceOnly {
     source: String,
 }
+#[derive(Deserialize)]
+struct SkillCreate {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+#[derive(Deserialize)]
+struct SkillPath {
+    path: PathBuf,
+}
+#[derive(Deserialize)]
+struct SkillWrite {
+    path: PathBuf,
+    content: String,
+}
+#[derive(Deserialize)]
+struct SkillDelete {
+    name: String,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
 
 /// Cached once a detection succeeds: repeated CLI-present checks (eg. every `ext.list`) shouldn't
 /// repeatedly shell out to `claude --version`. Failures are deliberately NOT cached (see
@@ -333,6 +356,19 @@ async fn run_cli_op(ctx: &Ctx, args: Vec<String>, changed_scope: Value) -> Resul
     .map_err(cli_error)?;
     ctx.broadcast("event.ext.changed", changed_scope);
     Ok(json!({ "ok": true, "stdout": stdout }))
+}
+
+/// Every directory `skill.read`/`skill.write`/`skill.delete` are allowed to touch: the global
+/// `claude_home()/skills` (when resolvable) plus `.claude/skills` for every registered repo.
+async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
+    let mut roots = Vec::new();
+    if let Some(home) = crate::ext::claude_home() {
+        roots.push(home.join("skills"));
+    }
+    for repo in ctx.registry.list().await.map_err(internal)? {
+        roots.push(repo.path.join(".claude/skills"));
+    }
+    Ok(roots)
 }
 #[derive(Deserialize)]
 struct AgentWatchBytes {
@@ -972,6 +1008,102 @@ pub async fn dispatch(
                 args.push(name)
             }
             run_cli_op(ctx, args, json!({ "scope": "global" })).await
+        }
+
+        // ---- skills (create/read/write/delete SKILL.md, path-guarded) ----
+        "skill.create" => {
+            let p: SkillCreate = parse(params)?;
+            let (skills_dir, fanout_root) = match &p.scope {
+                ExtScope::Global => {
+                    let home = crate::ext::claude_home()
+                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    (home.join("skills"), None)
+                }
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    (repo.path.join(".claude/skills"), Some(repo.path))
+                }
+            };
+            let (name, description) = (p.name.clone(), p.description.clone());
+            let path = tokio::task::spawn_blocking(move || {
+                let path = crate::ext::scaffold_skill(&skills_dir, &name, description.as_deref())?;
+                if let Some(root) = fanout_root {
+                    crate::ext::fan_out(&root);
+                }
+                Ok::<_, std::io::Error>(path)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "path": path }))
+        }
+        "skill.read" => {
+            let p: SkillPath = parse(params)?;
+            let roots = skill_roots(ctx).await?;
+            if !crate::ext::skill_path_allowed(&p.path, &roots) {
+                return Err(RpcError::invalid_params(
+                    "path is outside managed skill directories",
+                ));
+            }
+            let md = if p.path.ends_with("SKILL.md") {
+                p.path.clone()
+            } else {
+                p.path.join("SKILL.md")
+            };
+            let content = tokio::fs::read_to_string(&md).await.map_err(internal)?;
+            Ok(json!({ "content": content }))
+        }
+        "skill.write" => {
+            let p: SkillWrite = parse(params)?;
+            let roots = skill_roots(ctx).await?;
+            if !crate::ext::skill_path_allowed(&p.path, &roots) {
+                return Err(RpcError::invalid_params(
+                    "path is outside managed skill directories",
+                ));
+            }
+            let md = if p.path.ends_with("SKILL.md") {
+                p.path.clone()
+            } else {
+                p.path.join("SKILL.md")
+            };
+            tokio::fs::write(&md, p.content).await.map_err(internal)?;
+            ctx.broadcast("event.ext.changed", json!({ "scope": "global" }));
+            Ok(json!({ "ok": true }))
+        }
+        "skill.delete" => {
+            let p: SkillDelete = parse(params)?;
+            if !p
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(RpcError::invalid_params("invalid skill name"));
+            }
+            let (skills_dir, fanout_root) = match &p.scope {
+                ExtScope::Global => {
+                    let home = crate::ext::claude_home()
+                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    (home.join("skills"), None)
+                }
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    (repo.path.join(".claude/skills"), Some(repo.path))
+                }
+            };
+            let name = p.name.clone();
+            let fanout = tokio::task::spawn_blocking(move || {
+                std::fs::remove_dir_all(skills_dir.join(&name))?;
+                // sync_worktree prunes skills whose source dir is gone (see this task's ext.rs
+                // change), so one fan-out both deletes the skill everywhere and re-syncs the
+                // survivors.
+                Ok::<_, std::io::Error>(fanout_root.map(|root| crate::ext::fan_out(&root)))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "ok": true, "fanout": fanout }))
         }
 
         // ---- commits (computed live via gix) ----
