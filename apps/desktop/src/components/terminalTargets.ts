@@ -3,6 +3,7 @@ export interface PaneTarget {
   window: string;
   label: string;
   shell: boolean;
+  sessionId: string | null;
 }
 
 export function dedupe(targets: PaneTarget[]): PaneTarget[] {
@@ -14,9 +15,10 @@ export function dedupe(targets: PaneTarget[]): PaneTarget[] {
   });
 }
 
-/// Keep visible windows hot and retain the most recently viewed live windows up to `capacity`.
-/// Visible windows are ordered first so CSS can place them in the active layout while the
-/// remaining panes stay mounted off-layout with their xterm state and byte watches intact.
+/// Keep visible windows hot, retain recently viewed windows, then proactively warm unvisited
+/// live windows up to `capacity`. Visible windows are ordered first so CSS can place them in the
+/// active layout while the remaining panes stay mounted off-layout with their xterm state and
+/// byte watches intact.
 export function warmTargetWindows(
   previous: string[],
   visible: PaneTarget[],
@@ -30,6 +32,7 @@ export function warmTargetWindows(
   };
   visible.forEach((target) => append(target.window));
   previous.forEach(append);
+  available.forEach((target) => append(target.window));
   return next.slice(0, Math.max(0, capacity));
 }
 
@@ -54,6 +57,7 @@ export function stabilizeTargets(
     prev.laneId = target.laneId;
     prev.label = target.label;
     prev.shell = target.shell;
+    prev.sessionId = target.sessionId;
     return prev;
   });
   for (const window of [...cache.keys()]) {

@@ -105,14 +105,39 @@ export function asTransportError(error: unknown): Error {
   return new Error(typeof error === "string" ? error : "terminal transport unavailable");
 }
 
+export function createTerminalFrameGate(onBytes: (bytes: Uint8Array) => void) {
+  let active = true;
+  let streaming = false;
+  let queued: Uint8Array[] = [];
+
+  return {
+    push(bytes: Uint8Array) {
+      if (!active) return;
+      if (streaming) onBytes(bytes);
+      else queued.push(bytes);
+    },
+    open() {
+      if (!active) return;
+      streaming = true;
+      for (const bytes of queued) onBytes(bytes);
+      queued = [];
+    },
+    close() {
+      active = false;
+      queued = [];
+    },
+  };
+}
+
 export async function watchTerminal(
   target: TerminalTarget,
   onBytes: (bytes: Uint8Array) => void,
+  onReady?: (ack: TermWatchAck) => void,
 ): Promise<{ ack: TermWatchAck; stop: () => Promise<void> }> {
   const channel = new Channel<ArrayBuffer>();
-  let active = true;
+  const gate = createTerminalFrameGate(onBytes);
   channel.onmessage = (buffer) => {
-    if (active) onBytes(new Uint8Array(buffer));
+    gate.push(new Uint8Array(buffer));
   };
   let ack: TermWatchAck;
   try {
@@ -122,12 +147,24 @@ export async function watchTerminal(
       onBytes: channel,
     });
   } catch (error) {
+    gate.close();
     throw asTransportError(error);
   }
+  // The host can deliver its authoritative repaint before the invoke promise resolves. Resize
+  // the emulator to the acknowledged pane grid before releasing any queued frame, including for
+  // proactively warmed panes that have never been visible.
+  try {
+    onReady?.(ack);
+  } catch (error) {
+    gate.close();
+    await invoke("term_unwatch", { window: target.window }).catch(() => undefined);
+    throw error;
+  }
+  gate.open();
   return {
     ack,
     async stop() {
-      active = false;
+      gate.close();
       await invoke("term_unwatch", { window: target.window });
     },
   };

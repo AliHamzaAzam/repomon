@@ -1068,6 +1068,15 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         .await
         .unwrap_or_else(|e| panic!("watch {window} errored: {e:?}"));
         assert!(ack.get("cols").is_some(), "ack shape carries dims: {ack}");
+        assert!(
+            ack["generation"].as_u64().is_some(),
+            "ack carries a stream generation: {ack}"
+        );
+        assert_eq!(
+            ack["sequence"],
+            json!(0),
+            "a new pipe starts before its first emitted byte"
+        );
     }
     {
         let watched = sess.watched_bytes.lock().unwrap();

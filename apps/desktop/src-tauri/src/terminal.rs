@@ -135,9 +135,7 @@ async fn capture_resync(
         )
         .await;
     let Ok(value) = capture else { return None };
-    let Some(content) = value.get("content").and_then(Value::as_str) else {
-        return None;
-    };
+    let content = value.get("content").and_then(Value::as_str)?;
     let alternate = value.get("alternate").and_then(Value::as_bool)?;
     let cursor = value.get("cursor").and_then(|cursor| {
         Some((

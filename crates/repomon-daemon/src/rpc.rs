@@ -549,6 +549,16 @@ fn default_transcript_limit() -> usize {
     50
 }
 #[derive(Deserialize)]
+struct AgentTranscriptPage {
+    lane_id: repomon_core::model::LaneId,
+    /// Which session's transcript; `None` = the lane's most recent.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// Exclusive byte offset returned as `next_before` by the previous page.
+    #[serde(default)]
+    before: Option<u64>,
+}
+#[derive(Deserialize)]
 struct AgentAdopt {
     lane_id: repomon_core::model::LaneId,
     /// Resume this exact session (`claude --resume <id>`); `None` resumes the most recent.
@@ -1692,7 +1702,8 @@ pub async fn dispatch(
                 sess.watched_bytes.lock().unwrap().insert(window.clone());
                 // The ack carries the pane's grid so a remote emulator renders at exactly
                 // this size instead of resizing the real pane (which would squeeze a
-                // simultaneously attached TUI's mediated view). Shape UNCHANGED (iOS depends on it).
+                // simultaneously attached TUI's mediated view). The stream cursor is additive,
+                // so existing clients that only read the grid remain compatible.
                 let tmux = ctx.backend.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&window))
                     .await
@@ -2127,6 +2138,35 @@ pub async fn dispatch(
             .await
             .unwrap_or_default();
             to_value(items)
+        }
+        // A bounded page read backwards from a stable JSONL byte offset. The desktop uses this
+        // for native full-history scrolling without putting an unbounded transcript in xterm.
+        "agent.transcript_page" => {
+            let p: AgentTranscriptPage = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let page = tokio::task::spawn_blocking(move || {
+                let manifest = match &p.session_id {
+                    Some(id) => agent::claude::transcript_path_for_session(&path, id),
+                    None => {
+                        let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
+                        agent::claude::summaries_for(&path, within, MAX_SESSIONS_PER_LANE)
+                            .first()
+                            .map(|summary| summary.manifest_path.clone())
+                    }
+                };
+                manifest
+                    .map(|manifest| agent::claude::transcript_page(&manifest, p.before))
+                    .map(|page| {
+                        json!({
+                            "items": page.items,
+                            "next_before": page.next_before,
+                        })
+                    })
+                    .unwrap_or_else(|| json!({ "items": [], "next_before": null }))
+            })
+            .await
+            .map_err(internal)?;
+            Ok(page)
         }
         // Push-notification device registration (the iOS companion).
         // ---- remote devices (LOCAL SOCKET ONLY — blocked over the bridge by the allowlist) ----

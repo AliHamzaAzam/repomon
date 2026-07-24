@@ -101,6 +101,10 @@ interface RpcMap {
   "agent.adopt": { params: { lane_id: number; session_id?: string }; result: { lane_id: number; window: string } };
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };
   "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };
+  "agent.transcript_page": {
+    params: { lane_id: number; session_id?: string; before?: number };
+    result: { items: TranscriptItem[]; next_before: number | null };
+  };
   "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };
   "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: null };
   "agent.pin": { params: { lane_id: number; pinned: boolean }; result: null };

@@ -60,7 +60,7 @@ fn remote_method_allowed(method: &str) -> bool {
         // reads
         | "repo.list" | "lane.list" | "lane.get"
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
-        | "agent.capture" | "agent.transcript"
+        | "agent.capture" | "agent.transcript" | "agent.transcript_page"
         | "usage.get" | "daemon.status"
         // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
         | "terminal.list_all"
@@ -579,6 +579,7 @@ mod tests {
             "commit.recent",
             "agent.capture",
             "agent.transcript",
+            "agent.transcript_page",
             "agent.prompt",
             "agent.answer",
             "agent.watch_bytes",

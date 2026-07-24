@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
+  createTerminalFrameGate,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
@@ -27,6 +28,28 @@ describe("asTransportError", () => {
   it("keeps an existing Error untouched", () => {
     const original = new Error("already an error");
     expect(asTransportError(original)).toBe(original);
+  });
+});
+
+describe("createTerminalFrameGate", () => {
+  it("holds the initial repaint until the caller has applied the acknowledged grid", () => {
+    const seen: number[] = [];
+    const gate = createTerminalFrameGate((bytes) => seen.push(...bytes));
+    gate.push(Uint8Array.of(1, 2));
+    expect(seen).toEqual([]);
+    gate.open();
+    gate.push(Uint8Array.of(3));
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it("drops queued and future frames after close", () => {
+    const seen: number[] = [];
+    const gate = createTerminalFrameGate((bytes) => seen.push(...bytes));
+    gate.push(Uint8Array.of(1));
+    gate.close();
+    gate.open();
+    gate.push(Uint8Array.of(2));
+    expect(seen).toEqual([]);
   });
 });
 
