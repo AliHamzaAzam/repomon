@@ -232,10 +232,16 @@ pub fn account_label(config_dir: Option<&Path>) -> String {
 }
 
 /// Encode a working directory to Claude Code's project directory name.
+///
+/// Windows paths encode their separators too: `C:\Users\me\code` becomes
+/// `C--Users-me-code` (the drive colon and each backslash map to `-`, same as `/`).
 pub fn encode_project_dir(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .map(|c| match c {
+            '/' | '.' | '\\' | ':' => '-',
+            c => c,
+        })
         .collect()
 }
 
@@ -969,6 +975,12 @@ mod tests {
         assert_eq!(
             encode_project_dir(Path::new("/Users/x/.config/app")),
             "-Users-x--config-app"
+        );
+        // Windows: the drive colon and backslashes map to dashes (verified against a real
+        // Claude Code projects dir: C:\Users\me\Documents\Dev → C--Users-me-Documents-Dev).
+        assert_eq!(
+            encode_project_dir(Path::new(r"C:\Users\me\Documents\Dev")),
+            "C--Users-me-Documents-Dev"
         );
     }
 

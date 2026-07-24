@@ -93,7 +93,9 @@ pub async fn connect_with_retry(socket: &Path, tries: usize) -> Result<DaemonCli
     })
 }
 
-#[cfg(test)]
+// Unix-only: the delayed server binds a real Unix socket (Windows named-pipe servers need a
+// different setup and connect_with_retry is transport-agnostic either way).
+#[cfg(all(test, unix))]
 mod tests {
     use std::time::Duration;
 

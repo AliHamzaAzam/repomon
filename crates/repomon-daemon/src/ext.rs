@@ -873,14 +873,40 @@ mod tests {
         assert!(wt_ok.join(".claude/settings.local.json").is_file());
     }
 
-    fn fake_claude(dir: &Path, script: &str) -> ClaudeCli {
-        let bin = dir.join("claude");
-        std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
-        #[cfg(unix)]
-        {
+    /// A fake `claude` CLI that prints `out`, prints `err` to stderr, and exits with `code` —
+    /// a real runnable program on each OS (sh script on Unix, `.cmd` on Windows, where a
+    /// shebang script is not executable and `CreateProcess` fails with error 193).
+    fn fake_claude(dir: &Path, out: &str, err: &str, code: i32) -> ClaudeCli {
+        #[cfg(not(windows))]
+        let bin = {
+            let bin = dir.join("claude");
+            let mut script = String::from("#!/bin/sh\n");
+            if !out.is_empty() {
+                script.push_str(&format!("echo {out}\n"));
+            }
+            if !err.is_empty() {
+                script.push_str(&format!("echo {err} >&2\n"));
+            }
+            script.push_str(&format!("exit {code}\n"));
+            std::fs::write(&bin, script).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+            bin
+        };
+        #[cfg(windows)]
+        let bin = {
+            let bin = dir.join("claude.cmd");
+            let mut script = String::from("@echo off\r\n");
+            if !out.is_empty() {
+                script.push_str(&format!("echo {out}\r\n"));
+            }
+            if !err.is_empty() {
+                script.push_str(&format!("echo {err} 1>&2\r\n"));
+            }
+            script.push_str(&format!("exit /b {code}\r\n"));
+            std::fs::write(&bin, script).unwrap();
+            bin
+        };
         ClaudeCli {
             bin,
             version: "9.9.9-test".to_string(),
@@ -890,7 +916,7 @@ mod tests {
     #[test]
     fn cli_run_captures_stdout_on_success() {
         let tmp = tempfile::tempdir().unwrap();
-        let cli = fake_claude(tmp.path(), "echo installed ok");
+        let cli = fake_claude(tmp.path(), "installed ok", "", 0);
         assert_eq!(
             cli.run(&["plugin", "install", "x@m"]).unwrap().trim(),
             "installed ok"
@@ -900,7 +926,7 @@ mod tests {
     #[test]
     fn cli_run_surfaces_stderr_and_exit_code_on_failure() {
         let tmp = tempfile::tempdir().unwrap();
-        let cli = fake_claude(tmp.path(), "echo boom >&2; exit 3");
+        let cli = fake_claude(tmp.path(), "", "boom", 3);
         let err = cli.run(&["plugin", "install", "x@m"]).unwrap_err();
         assert_eq!(err.exit_code, Some(3));
         assert!(err.stderr.contains("boom"));

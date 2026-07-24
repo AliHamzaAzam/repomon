@@ -36,8 +36,28 @@ pub const WINDOWS_BACKGROUND_PROCESS_FLAGS: u32 =
 /// whitespace-split with single/double quotes respected (quotes group, backslashes are plain
 /// path characters). An empty program is an error.
 pub fn split_spawn_program(program: &str) -> Result<(EnvPairs, Vec<String>)> {
-    let tokens = tokenize(program);
+    let mut tokens = tokenize(program).into_iter().peekable();
     let mut env: Vec<(String, String)> = Vec::new();
+    // A leading `env [-i] [-u NAME]… [KEY=VALUE]… program` — Unix launch commands route
+    // environment through `env` (the default Claude account launches as
+    // `env -u CLAUDE_CONFIG_DIR claude`), but there is no `env` on Windows. Translate it:
+    // `-u NAME` becomes a `NAME=` override with an empty value, which the host applies as a
+    // removal, and assignments fold into the same overrides as the bare `KEY=VALUE …` shape.
+    if tokens.peek().map(String::as_str) == Some("env") {
+        tokens.next();
+        while let Some(tok) = tokens.peek() {
+            if tok == "-u" {
+                tokens.next();
+                if let Some(name) = tokens.next() {
+                    env.push((name, String::new()));
+                }
+            } else if tok.starts_with('-') {
+                tokens.next();
+            } else {
+                break;
+            }
+        }
+    }
     let mut argv: Vec<String> = Vec::new();
     for tok in tokens {
         if argv.is_empty()
@@ -333,6 +353,7 @@ mod host_backend {
     }
 
     /// One live, adopted host as a registry scan sees it.
+    #[derive(Clone)]
     struct LiveHost {
         hello: HelloInfo,
     }
@@ -376,7 +397,17 @@ mod host_backend {
         data_dir: PathBuf,
         /// Live byte-stream readers, one per window at most (trait contract).
         streams: Arc<Mutex<HashMap<String, ActiveStream>>>,
+        /// Short-TTL cache of the last registry scan. One overlay pass calls `scan()` several
+        /// times (`list_windows` + `live_agent_cwds`), and the GUI's fleet refresh adds
+        /// `terminal.list_all` — without this, each call re-reads the registry dir and does a
+        /// fresh pipe connect + hello roundtrip to EVERY live host, several times per 2s.
+        scan_cache: Arc<Mutex<Option<(Instant, Vec<LiveHost>)>>>,
     }
+
+    /// How long a cached registry scan stays valid. Long enough to collapse the calls within
+    /// one overlay pass / fleet refresh into a single real scan; short enough that a host
+    /// dying externally is noticed within half a tick. Spawn/kill paths invalidate explicitly.
+    const SCAN_CACHE_TTL: Duration = Duration::from_millis(400);
 
     impl WindowsBackend {
         pub fn new(
@@ -389,7 +420,15 @@ mod host_backend {
                 owner: owner.into(),
                 data_dir: data_dir.into(),
                 streams: Arc::new(Mutex::new(HashMap::new())),
+                scan_cache: Arc::new(Mutex::new(None)),
             }
+        }
+
+        /// Drop the cached scan so the next `scan()` re-reads reality. Called whenever this
+        /// daemon changes the set of hosts (spawn/kill) — external changes are covered by the
+        /// TTL.
+        fn invalidate_scan(&self) {
+            *self.scan_cache.lock().expect("scan cache lock") = None;
         }
 
         fn hosts_dir(&self) -> PathBuf {
@@ -449,7 +488,24 @@ mod host_backend {
 
         /// Scan the registry, GC stale entries, and return every live host we own
         /// (PROTOCOL.md §6 + §8) — re-adoption *is* this scan run on a fresh daemon.
+        /// Served from a [`SCAN_CACHE_TTL`] cache so the several callers within one overlay
+        /// pass share a single real scan; see `scan_cache`.
         fn scan(&self) -> Vec<LiveHost> {
+            {
+                let cache = self.scan_cache.lock().expect("scan cache lock");
+                if let Some((at, hosts)) = &*cache {
+                    if at.elapsed() < SCAN_CACHE_TTL {
+                        return hosts.clone();
+                    }
+                }
+            }
+            let fresh = self.scan_fresh();
+            *self.scan_cache.lock().expect("scan cache lock") =
+                Some((Instant::now(), fresh.clone()));
+            fresh
+        }
+
+        fn scan_fresh(&self) -> Vec<LiveHost> {
             let dir = self.hosts_dir();
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 return Vec::new();
@@ -529,6 +585,7 @@ mod host_backend {
                 if let Connect::Ok(mut f) = connect_pipe(&pipe, SCAN_BUSY_CEILING)
                     && roundtrip(&mut f, &mut FrameDecoder::new(), Op::Hello).is_ok()
                 {
+                    self.invalidate_scan();
                     return Ok(());
                 }
                 if let Ok(Some(status)) = child.try_wait() {
@@ -639,11 +696,21 @@ mod host_backend {
         }
 
         fn spawn(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String> {
+            // Slot allocation must see reality, not a ≤400ms-old cache: a stale window list
+            // here could hand out a just-taken slot.
+            self.invalidate_scan();
             let taken = self.windows_for(lane).unwrap_or_default();
-            let window = (1..)
-                .map(|slot| TmuxRuntime::slot_name(lane, slot))
-                .find(|name| !taken.contains(name))
-                .expect("unbounded slot range");
+            // Allocate above the highest live slot rather than refilling a freed low one:
+            // slot order must keep tracking spawn order while any window lives, because the
+            // overlay's transcript↔window pairing (and its placeholder mapping) assumes the
+            // oldest slots hold the oldest agents. `windows_for` is slot-ascending, so the
+            // last entry carries the highest slot.
+            let next = taken
+                .last()
+                .and_then(|name| TmuxRuntime::slot_of_window(name))
+                .unwrap_or(0)
+                + 1;
+            let window = TmuxRuntime::slot_name(lane, next);
             self.spawn_spec(&window, spec)?;
             Ok(exact_target_of(&self.session, &window))
         }
@@ -760,6 +827,7 @@ mod host_backend {
         fn kill_named(&self, window: &str) -> Result<()> {
             // The host answers `ok` then exits, removing its own registry entry.
             self.request(window, Op::Kill)?;
+            self.invalidate_scan();
             Ok(())
         }
 
@@ -923,6 +991,19 @@ mod tests {
             )]
         );
         assert_eq!(argv, vec!["claude"]);
+    }
+
+    #[test]
+    fn env_dash_u_prefix_becomes_empty_override() {
+        // The default Claude account's launch shape: `env -u CLAUDE_CONFIG_DIR claude`.
+        let (env, argv) = split_spawn_program("env -u CLAUDE_CONFIG_DIR claude").unwrap();
+        assert_eq!(env, vec![("CLAUDE_CONFIG_DIR".to_string(), String::new())]);
+        assert_eq!(argv, vec!["claude"]);
+        // Assignments after the `env` prefix fold into env; `env` alone runs nothing.
+        let (env, argv) = split_spawn_program("env FOO=bar aider --model x").unwrap();
+        assert_eq!(env, vec![("FOO".to_string(), "bar".to_string())]);
+        assert_eq!(argv, vec!["aider", "--model", "x"]);
+        assert!(split_spawn_program("env -u CLAUDE_CONFIG_DIR").is_err());
     }
 
     #[test]

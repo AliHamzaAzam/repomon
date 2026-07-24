@@ -2650,10 +2650,12 @@ const INFERRED_GRACE_SECS: i64 = 30;
 /// actively-working agent can't vanish even if the probe momentarily misses it.
 const RECENTLY_ACTIVE_SECS: i64 = 60;
 
-/// TTL for the cached lane overlay. Short enough that a freshly-spawned agent's window placeholder
-/// (and exited-agent / rate-limit transitions) still surface within a refresh or two; long enough
-/// that several clients polling ~1s apart share a single tmux/lsof/transcript scan.
-const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(750);
+/// TTL for the cached lane overlay. The notify watcher recomputes a fresh overlay every ~2s
+/// (and every state-transition event it emits is preceded by that fresh recompute, so
+/// event-triggered client refreshes always read current data). Keeping the TTL just under
+/// that cadence lets the GUI's 2s heartbeat poll ride the watcher's scan instead of running
+/// its own — halving overlay recomputes — while transition-less drift stays ≤ one watcher tick.
+const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(1900);
 
 /// The full lane list with live agent sessions overlaid — what `lane.list` serves — from a
 /// short-TTL cache so a stream of per-second client polls collapses into ~1 scan per TTL. Stale
@@ -2835,27 +2837,29 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
                 lane.agent_sessions.push(session);
             }
-            // A second agent spawned into this worktree gets its own window but hasn't written a
-            // transcript yet (claude creates the .jsonl a beat after launch). Surface it right
-            // away as a window-only placeholder so it isn't invisible until then. At most one
-            // (the `SessKey::Fallback` model allows a single no-transcript session per lane): the
-            // newest unpaired window, which is the slot the latest spawn took.
-            if let Some(w) = placeholder_window_index(paired, managed_n) {
-                let kind = lane_meta_kind(&metas, lane.id);
+            // Agents spawned into this worktree get their own windows but haven't written a
+            // transcript yet (claude creates the .jsonl a beat after launch). Surface EVERY
+            // unpaired live window as a window-only placeholder right away — a lane can hold
+            // several transcript-less agents at once, and hiding all but one made them
+            // invisible and uninteractable until an older agent exited.
+            let kind = lane_meta_kind(&metas, lane.id);
+            for w in placeholder_window_indexes(paired, managed_n) {
                 lane.agent_sessions.push(window_placeholder_session(
                     lane,
-                    kind,
+                    kind.clone(),
                     lane_windows[w].clone(),
                 ));
             }
         } else if managed_n > 0 {
-            // No parseable transcript: surface a repomon-spawned agent if its window is alive.
+            // No parseable transcript at all: surface every live repomon-spawned window.
             let kind = lane_meta_kind(&metas, lane.id);
-            lane.agent_sessions.push(window_placeholder_session(
-                lane,
-                kind,
-                lane_windows[0].clone(),
-            ));
+            for window in &lane_windows {
+                lane.agent_sessions.push(window_placeholder_session(
+                    lane,
+                    kind.clone(),
+                    window.clone(),
+                ));
+            }
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
             // an active agent we can't name (e.g. a Claude Code worktree-isolated subagent, which
@@ -3599,14 +3603,14 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
     }
 }
 
-/// Whether a lane needs a window-only placeholder for a just-spawned agent whose transcript
-/// hasn't appeared yet, and which managed-window index it maps to. `shown` = transcript-backed
-/// sessions already emitted; `managed_n` = live managed windows. A managed window exists only
-/// while its agent's process lives (tmux closes it on exit), so an unpaired window is a real
-/// agent that simply hasn't written its `.jsonl` yet. Returns the newest unpaired window's index
-/// (at most one, per the `SessKey::Fallback` single-no-transcript-session model), or `None`.
-fn placeholder_window_index(shown: usize, managed_n: usize) -> Option<usize> {
-    (managed_n > shown).then(|| managed_n - 1)
+/// Which managed-window indexes need a window-only placeholder: every live window beyond the
+/// `shown` transcript-backed ones. `shown` = transcript-backed sessions already emitted;
+/// `managed_n` = live managed windows. A managed window exists only while its agent's process
+/// lives (tmux closes it on exit), so each unpaired window is a real agent that simply hasn't
+/// written its `.jsonl` yet — hiding any of them (the old at-most-one rule) left a second
+/// just-spawned agent invisible and uninteractable until an older agent exited.
+fn placeholder_window_indexes(shown: usize, managed_n: usize) -> std::ops::Range<usize> {
+    shown.min(managed_n)..managed_n
 }
 
 /// A Claude session id is safe to interpolate into a resume command (`claude --resume <id>`).
@@ -3869,12 +3873,10 @@ fn on_path(command: &str) -> bool {
         Some(p) => p,
         None => return false,
     };
-    if prog.contains('/') {
+    if prog.contains('/') || prog.contains(std::path::MAIN_SEPARATOR) {
         return Path::new(prog).exists();
     }
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(prog).is_file()))
-        .unwrap_or(false)
+    repomon_core::exec::find_in_path(prog).is_some()
 }
 
 async fn repo_names(ctx: &Ctx) -> HashMap<RepoId, String> {
@@ -4487,18 +4489,19 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_for_the_newest_unpaired_window() {
+    fn placeholders_for_every_unpaired_window() {
         // One existing agent (transcript) + a freshly-spawned second window: surface the new
-        // window immediately, mapped to the newest slot, so it isn't invisible until its
-        // transcript lands.
-        assert_eq!(placeholder_window_index(1, 2), Some(1));
+        // window immediately so it isn't invisible until its transcript lands.
+        assert_eq!(placeholder_window_indexes(1, 2).collect::<Vec<_>>(), vec![1]);
         // Every managed window already transcript-backed → no placeholder.
-        assert_eq!(placeholder_window_index(2, 2), None);
-        assert_eq!(placeholder_window_index(1, 1), None);
-        assert_eq!(placeholder_window_index(0, 0), None);
-        // Three windows, one transcript: still a single placeholder (the Fallback invariant),
-        // mapped to the newest window.
-        assert_eq!(placeholder_window_index(1, 3), Some(2));
+        assert!(placeholder_window_indexes(2, 2).is_empty());
+        assert!(placeholder_window_indexes(1, 1).is_empty());
+        assert!(placeholder_window_indexes(0, 0).is_empty());
+        // Three windows, one transcript: BOTH unpaired windows surface (hiding one made a
+        // second just-spawned agent unreachable until an older agent exited).
+        assert_eq!(placeholder_window_indexes(1, 3).collect::<Vec<_>>(), vec![1, 2]);
+        // No transcripts at all: every window gets a placeholder.
+        assert_eq!(placeholder_window_indexes(0, 2).collect::<Vec<_>>(), vec![0, 1]);
     }
 
     #[test]

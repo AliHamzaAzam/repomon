@@ -112,7 +112,13 @@ pub fn spawn_child(
     cmd.args(args);
     cmd.cwd(cwd);
     for (k, v) in env {
-        cmd.env(k, v);
+        // An empty value means "unset" (the daemon translates Unix `env -u NAME` prefixes
+        // into `NAME=`), matching Windows `set FOO=` semantics.
+        if v.is_empty() {
+            cmd.env_remove(k);
+        } else {
+            cmd.env(k, v);
+        }
     }
     let child = pair
         .slave
