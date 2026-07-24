@@ -99,7 +99,10 @@ pub(crate) async fn ensure_demux(state: &State<'_, AppState>) -> Result<(), RpcF
         .demux_started
         .get_or_try_init(|| async move {
             let mut events = client.subscribe();
-            client.call("subscribe", None).await.map_err(map_call_error)?;
+            client
+                .call("subscribe", None)
+                .await
+                .map_err(map_call_error)?;
             tauri::async_runtime::spawn(async move {
                 loop {
                     match events.recv().await {

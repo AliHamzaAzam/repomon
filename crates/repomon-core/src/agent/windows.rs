@@ -876,7 +876,10 @@ mod host_backend {
             // The host answers `ok` then exits, removing its own registry entry.
             self.request(window, Op::Kill)?;
             self.invalidate_scan();
-            self.control.lock().expect("control pool lock").remove(window);
+            self.control
+                .lock()
+                .expect("control pool lock")
+                .remove(window);
             Ok(())
         }
 

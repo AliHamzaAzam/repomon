@@ -4492,16 +4492,25 @@ mod tests {
     fn placeholders_for_every_unpaired_window() {
         // One existing agent (transcript) + a freshly-spawned second window: surface the new
         // window immediately so it isn't invisible until its transcript lands.
-        assert_eq!(placeholder_window_indexes(1, 2).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            placeholder_window_indexes(1, 2).collect::<Vec<_>>(),
+            vec![1]
+        );
         // Every managed window already transcript-backed → no placeholder.
         assert!(placeholder_window_indexes(2, 2).is_empty());
         assert!(placeholder_window_indexes(1, 1).is_empty());
         assert!(placeholder_window_indexes(0, 0).is_empty());
         // Three windows, one transcript: BOTH unpaired windows surface (hiding one made a
         // second just-spawned agent unreachable until an older agent exited).
-        assert_eq!(placeholder_window_indexes(1, 3).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            placeholder_window_indexes(1, 3).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         // No transcripts at all: every window gets a placeholder.
-        assert_eq!(placeholder_window_indexes(0, 2).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            placeholder_window_indexes(0, 2).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]
