@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -8,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::ipc::{RpcFailure, map_call_error};
 use crate::state::AppState;
@@ -16,6 +17,11 @@ use crate::state::AppState;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 const FLUSH_BYTES: usize = 32 * 1024;
 const MAX_PENDING: usize = 1024 * 1024;
+/// Minimum spacing between resync capture attempts. While a pane streams heavily the daemon
+/// keeps answering `stable: false`; retrying on every 16ms flush tick hammered a 500-line
+/// scrollback capture (held under the host's dispatcher lock) ~60x/s. One attempt per 100ms
+/// still repaints within a frame or two of the pane going quiet.
+const RESYNC_RETRY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TermWatchAck {
@@ -41,27 +47,88 @@ struct StreamCursor {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ByteChunk {
+pub struct ByteChunk {
     cursor: StreamCursor,
     bytes: Vec<u8>,
 }
 
-fn event_bytes(event: &Notification, window: &str) -> Option<ByteChunk> {
-    if event.method != "event.agent.bytes"
-        || event.params.get("window").and_then(Value::as_str) != Some(window)
-    {
+/// One routed item on a window's byte channel: a decoded chunk, or notice that the upstream
+/// daemon subscription lagged (every receiver must resync — chunks were dropped).
+#[derive(Debug, PartialEq, Eq)]
+pub enum RouteFrame {
+    Chunk(ByteChunk),
+    Lagged,
+}
+
+/// Match and decode one `event.agent.bytes` notification into `(window, chunk)`. Base64 is
+/// decoded exactly once, in the demux — panes receive ready bytes instead of each scanning
+/// and decoding every event on the connection.
+fn event_chunk(event: &Notification) -> Option<(String, ByteChunk)> {
+    if event.method != "event.agent.bytes" {
         return None;
     }
+    let window = event.params.get("window").and_then(Value::as_str)?;
     let generation = event.params.get("generation").and_then(Value::as_u64)?;
     let sequence = event.params.get("sequence").and_then(Value::as_u64)?;
     let encoded = event.params.get("data").and_then(Value::as_str)?;
-    Some(ByteChunk {
-        cursor: StreamCursor {
-            generation,
-            sequence,
+    Some((
+        window.to_string(),
+        ByteChunk {
+            cursor: StreamCursor {
+                generation,
+                sequence,
+            },
+            bytes: STANDARD.decode(encoded).ok()?,
         },
-        bytes: STANDARD.decode(encoded).ok()?,
-    })
+    ))
+}
+
+/// Start the one demux task that owns the app's daemon event subscription: byte chunks are
+/// decoded once and routed to exactly their window's channel; every other event is
+/// re-broadcast on `ui_events` for `daemon_subscribe`. Before this, every mounted pane held
+/// its own subscription — each byte chunk was cloned per pane and filtered N-1 times.
+pub(crate) async fn ensure_demux(state: &State<'_, AppState>) -> Result<(), RpcFailure> {
+    let client = state
+        .client
+        .get()
+        .ok_or_else(RpcFailure::not_connected)?
+        .clone();
+    let routes = state.terminal_routes.clone();
+    let ui_events = state.ui_events.clone();
+    state
+        .demux_started
+        .get_or_try_init(|| async move {
+            let mut events = client.subscribe();
+            client.call("subscribe", None).await.map_err(map_call_error)?;
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            if let Some((window, chunk)) = event_chunk(&event) {
+                                let tx = routes.lock().unwrap().get(&window).cloned();
+                                if let Some(tx) = tx {
+                                    let _ = tx.send(Arc::new(RouteFrame::Chunk(chunk)));
+                                }
+                            } else {
+                                let _ = ui_events.send(event);
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // Chunks were dropped upstream; every routed pane must resync.
+                            let senders: Vec<_> =
+                                routes.lock().unwrap().values().cloned().collect();
+                            for tx in senders {
+                                let _ = tx.send(Arc::new(RouteFrame::Lagged));
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            Ok(())
+        })
+        .await
+        .map(|_: &()| ())
 }
 
 fn append_pending(pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
@@ -180,16 +247,21 @@ pub async fn term_watch(
         }
     }
 
+    ensure_demux(&state).await?;
     let client = state
         .client
         .get()
         .ok_or_else(RpcFailure::not_connected)?
         .clone();
-    let mut events = client.subscribe();
-    client
-        .call("subscribe", None)
-        .await
-        .map_err(map_call_error)?;
+    // Register this window's byte route (after the stale-watch teardown above, whose ack
+    // guarantees the old watch's cleanup — including its route removal — already ran).
+    let mut route_rx = {
+        let mut routes = state.terminal_routes.lock().unwrap();
+        routes
+            .entry(window.clone())
+            .or_insert_with(|| broadcast::channel(512).0)
+            .subscribe()
+    };
     let value = client
         .call(
             "agent.watch_bytes",
@@ -238,12 +310,14 @@ pub async fn term_watch(
         .unwrap()
         .insert(window.clone(), cancel_tx);
     let watches = state.terminal_watches.clone();
+    let routes = state.terminal_routes.clone();
     let task_window = window.clone();
     tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending = Vec::with_capacity(FLUSH_BYTES);
         let mut resync = initial_resync;
+        let mut last_resync = std::time::Instant::now();
         let mut cancelled = None;
 
         loop {
@@ -252,9 +326,10 @@ pub async fn term_watch(
                     cancelled = ack.ok();
                     break;
                 }
-                event = events.recv() => match event {
-                    Ok(event) => {
-                        if let Some(chunk) = event_bytes(&event, &task_window) {
+                frame = route_rx.recv() => match frame {
+                    Ok(frame) => match frame.as_ref() {
+                        RouteFrame::Lagged => resync = true,
+                        RouteFrame::Chunk(chunk) => {
                             // Events queued before a repaint are already visible in it. A later
                             // generation or sequence gap means terminal-relative state is unsafe,
                             // so stop applying bytes until an authoritative repaint replaces it.
@@ -283,12 +358,16 @@ pub async fn term_watch(
                                 break;
                             }
                         }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => resync = true,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    Err(broadcast::error::RecvError::Lagged(_)) => resync = true,
+                    Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = ticker.tick() => {
                     if resync {
+                        if last_resync.elapsed() < RESYNC_RETRY {
+                            continue;
+                        }
+                        last_resync = std::time::Instant::now();
                         pending.clear();
                         let Some(repaint) =
                             capture_resync(&client, &on_bytes, lane_id, &task_window).await
@@ -314,6 +393,7 @@ pub async fn term_watch(
             )
             .await;
         watches.lock().unwrap().remove(&window);
+        routes.lock().unwrap().remove(&window);
         if let Some(ack) = cancelled {
             let _ = ack.send(());
         }
@@ -341,7 +421,7 @@ mod tests {
     use repomon_core::protocol::Notification;
     use serde_json::json;
 
-    use super::{MAX_PENDING, StreamCursor, append_pending, dimensions, event_bytes, resync_frame};
+    use super::{MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, resync_frame};
 
     #[test]
     fn resync_frame_reanchors_bare_newlines() {
@@ -360,13 +440,14 @@ mod tests {
     }
 
     #[test]
-    fn routes_and_decodes_only_the_requested_window() {
+    fn event_chunk_decodes_and_names_the_window() {
         let bytes = b"\x1b[32mready\x1b[0m";
+        // Missing generation/sequence: not routable.
         let event = Notification::new(
             "event.agent.bytes",
             json!({ "window": "lane-7", "data": STANDARD.encode(bytes) }),
         );
-        assert!(event_bytes(&event, "lane-7").is_none());
+        assert!(event_chunk(&event).is_none());
         let event = Notification::new(
             "event.agent.bytes",
             json!({
@@ -376,7 +457,8 @@ mod tests {
                 "data": STANDARD.encode(bytes)
             }),
         );
-        let chunk = event_bytes(&event, "lane-7").unwrap();
+        let (window, chunk) = event_chunk(&event).unwrap();
+        assert_eq!(window, "lane-7");
         assert_eq!(chunk.bytes, bytes);
         assert_eq!(
             chunk.cursor,
@@ -385,7 +467,9 @@ mod tests {
                 sequence: 8,
             }
         );
-        assert_eq!(event_bytes(&event, "lane-8"), None);
+        // Non-bytes events route to the UI event channel, not a pane.
+        let other = Notification::new("event.notification", json!({ "window": "lane-7" }));
+        assert!(event_chunk(&other).is_none());
     }
 
     #[test]

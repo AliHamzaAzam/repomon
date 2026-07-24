@@ -45,8 +45,9 @@ const STATE_TTL: Duration = Duration::from_secs(180);
 /// without this, every `lane.list` would run a fresh (uncapped) gix status walk of that worktree.
 /// Within the debounce a dirty worktree reuses its last state and refreshes via the capped stale
 /// path instead, coalescing the burst into at most one walk per window. Kept short so a real change
-/// still surfaces within a poll or two.
-const DIRTY_DEBOUNCE: Duration = Duration::from_millis(1500);
+/// still surfaces within a poll or two. Must sit ABOVE the clients' 2s poll cadence: at 1.5s every
+/// single poll re-walked an actively-edited worktree; at 2.5s it's every other poll.
+const DIRTY_DEBOUNCE: Duration = Duration::from_millis(2500);
 /// How long a repo's cached `git worktree list` stays valid. Worktrees change only on lane
 /// create/delete (which clear the cache) or external `git worktree` ops; this TTL bounds the
 /// latter while sparing a git subprocess per repo on every overlay.

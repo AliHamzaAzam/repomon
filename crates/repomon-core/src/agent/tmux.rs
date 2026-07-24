@@ -275,10 +275,17 @@ impl TmuxRuntime {
     /// new window's exact target.
     pub fn spawn(&self, lane: LaneId, cwd: &Path, command: &str) -> Result<String> {
         let taken = self.windows_for(lane).unwrap_or_default();
-        let window = (1..)
-            .map(|slot| Self::slot_name(lane, slot))
-            .find(|name| !taken.contains(name))
-            .expect("unbounded slot range");
+        // Allocate above the highest live slot rather than refilling a freed low one: slot
+        // order must keep tracking spawn order while any window lives, because the overlay's
+        // transcript↔window pairing (and its placeholder mapping) assumes the oldest slots
+        // hold the oldest agents. `windows_for` is slot-ascending, so the last entry carries
+        // the highest slot. (Mirrors the Windows backend's allocator.)
+        let next = taken
+            .last()
+            .and_then(|name| Self::slot_of_window(name))
+            .unwrap_or(0)
+            + 1;
+        let window = Self::slot_name(lane, next);
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
             // `-d`: create the window WITHOUT making it the session's active window. tmux's default

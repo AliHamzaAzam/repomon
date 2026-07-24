@@ -62,26 +62,20 @@ pub async fn daemon_subscribe(
     state: State<'_, AppState>,
     on_event: Channel<Notification>,
 ) -> Result<(), RpcFailure> {
-    let client = state
-        .client
-        .get()
-        .ok_or_else(RpcFailure::not_connected)?
-        .clone();
-    let mut events = client.subscribe();
-    client
-        .call("subscribe", None)
-        .await
-        .map_err(map_call_error)?;
+    // The demux owns the single daemon subscription; UI listeners get the non-bytes stream
+    // it re-broadcasts, so the terminal byte firehose is never cloned into (and dropped by)
+    // this channel.
+    crate::terminal::ensure_demux(&state).await?;
+    let mut events = state.ui_events.subscribe();
 
     tauri::async_runtime::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(event) if event.method != "event.agent.bytes" => {
+                Ok(event) => {
                     if on_event.send(event).is_err() {
                         break;
                     }
                 }
-                Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

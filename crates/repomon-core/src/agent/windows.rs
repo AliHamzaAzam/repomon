@@ -342,8 +342,15 @@ mod host_backend {
     fn roundtrip(f: &mut File, dec: &mut FrameDecoder, op: Op) -> Result<serde_json::Value> {
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         write_request(f, id, op)?;
-        let payload = read_frame(f, dec)?
-            .ok_or_else(|| Error::Agent("host closed the pipe mid-request".into()))?;
+        // EOF here is a transport-level death (the host only closes on kill or a corrupt
+        // frame), surfaced as `Error::Io` so the pooled-request path can classify it as a
+        // reconnect-and-retry rather than a host-answered failure.
+        let payload = read_frame(f, dec)?.ok_or_else(|| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "host closed the pipe mid-request",
+            ))
+        })?;
         let v: serde_json::Value = serde_json::from_slice(&payload)
             .map_err(|e| Error::Agent(format!("host response: {e}")))?;
         if let Some(err) = v.get("err").and_then(|e| e.as_str()) {
@@ -356,6 +363,14 @@ mod host_backend {
     #[derive(Clone)]
     struct LiveHost {
         hello: HelloInfo,
+    }
+
+    /// A pooled control connection to one window's host: the open pipe plus its frame
+    /// decoder (responses are exactly one frame, but the decoder travels with the connection
+    /// so a torn read can never bleed into a later request).
+    struct ControlConn {
+        file: File,
+        dec: FrameDecoder,
     }
 
     /// A running byte-stream reader for one window.
@@ -402,6 +417,10 @@ mod host_backend {
         /// `terminal.list_all` — without this, each call re-reads the registry dir and does a
         /// fresh pipe connect + hello roundtrip to EVERY live host, several times per 2s.
         scan_cache: Arc<Mutex<Option<(Instant, Vec<LiveHost>)>>>,
+        /// Pooled control connections, one slot per window. Requests to one window serialize
+        /// on the slot (roundtrips are sub-ms on a local pipe); different windows don't block
+        /// each other.
+        control: Arc<Mutex<HashMap<String, Arc<Mutex<Option<ControlConn>>>>>>,
     }
 
     /// How long a cached registry scan stays valid. Long enough to collapse the calls within
@@ -421,6 +440,7 @@ mod host_backend {
                 data_dir: data_dir.into(),
                 streams: Arc::new(Mutex::new(HashMap::new())),
                 scan_cache: Arc::new(Mutex::new(None)),
+                control: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -465,10 +485,38 @@ mod host_backend {
             crate::exec::find_in_path("repomon-agent-host")
         }
 
-        /// One request/response against a window's host on a fresh control connection.
+        /// One request/response against a window's host on a pooled control connection.
+        /// A fresh pipe connect per request made every keystroke, capture, cursor, and size
+        /// query pay connect overhead; the connection is reused and rebuilt once on a
+        /// transport error (`Error::Io` — the host died or the pipe tore; a rebuilt connect
+        /// against a dead host correctly reports Absent). A host-ANSWERED error is returned
+        /// as-is and never retried: the op already executed once.
         fn request(&self, window: &str, op: Op) -> Result<serde_json::Value> {
+            let slot = {
+                let mut pool = self.control.lock().expect("control pool lock");
+                pool.entry(window.to_string()).or_default().clone()
+            };
+            let mut conn = slot.lock().expect("control conn lock");
+            if let Some(c) = conn.as_mut() {
+                match roundtrip(&mut c.file, &mut c.dec, op.clone()) {
+                    Ok(v) => return Ok(v),
+                    Err(Error::Io(_)) => *conn = None, // stale — reconnect below
+                    Err(e) => {
+                        *conn = None;
+                        return Err(e);
+                    }
+                }
+            }
             match connect_pipe(&self.pipe_name(window), BUSY_CEILING) {
-                Connect::Ok(mut f) => roundtrip(&mut f, &mut FrameDecoder::new(), op),
+                Connect::Ok(file) => {
+                    let mut c = ControlConn {
+                        file,
+                        dec: FrameDecoder::new(),
+                    };
+                    let v = roundtrip(&mut c.file, &mut c.dec, op)?;
+                    *conn = Some(c);
+                    Ok(v)
+                }
                 Connect::Absent => Err(absent(window)),
                 Connect::Busy => Err(Error::Agent(format!(
                     "host pipe for window {window} is busy"
@@ -828,6 +876,7 @@ mod host_backend {
             // The host answers `ok` then exits, removing its own registry entry.
             self.request(window, Op::Kill)?;
             self.invalidate_scan();
+            self.control.lock().expect("control pool lock").remove(window);
             Ok(())
         }
 

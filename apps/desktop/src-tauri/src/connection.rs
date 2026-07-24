@@ -127,12 +127,20 @@ async fn publish(app: &AppHandle, snapshot: ConnectionSnapshot) {
 
 #[cfg(test)]
 mod tests {
+    // The framed-socket test binds a real Unix socket; on Windows the daemon transport is a
+    // named pipe and the equivalent end-to-end path is covered by the daemon's own tests.
+    #[cfg(unix)]
     use repomon_core::client::DaemonClient;
+    #[cfg(unix)]
     use repomon_core::protocol::{Request, Response, read_frame, write_message};
+    #[cfg(unix)]
     use serde_json::json;
+    #[cfg(unix)]
     use tokio::net::UnixListener;
 
-    use super::{ConnectionSnapshot, DaemonStatus, fetch_daemon_status};
+    #[cfg(unix)]
+    use super::fetch_daemon_status;
+    use super::{ConnectionSnapshot, DaemonStatus};
 
     #[test]
     fn snapshots_keep_phase_endpoint_and_status_together() {
@@ -161,6 +169,7 @@ mod tests {
         assert_eq!(retrying.message.as_deref(), Some("socket closed"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn maps_daemon_status_from_a_framed_socket() {
         let dir = tempfile::tempdir().unwrap();
