@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentSession, Lane } from "../bindings";
-import { laneIndicator, matchesLane } from "./fleet";
+import { laneIndicator, matchesLane, withSessionKeys } from "./fleet";
 
 function lane(overrides: Partial<Lane> = {}): Lane {
   return {
@@ -78,5 +78,25 @@ describe("fleet presentation", () => {
     expect(matchesLane(target, "rpmndsk")).toBe(true);
     expect(matchesLane(target, "featdesktop")).toBe(true);
     expect(matchesLane(target, "unrelated")).toBe(false);
+  });
+
+  it("gives overlay sessions distinct stable reconcile keys", () => {
+    // Overlay sessions all arrive with id 0; duplicate keys would make reconcile collapse
+    // the lane's sessions to one (the missing-second-agent-tab bug).
+    const target = lane({
+      agent_sessions: [
+        agent({ id: 0, session_id: "s1", tmux_window: "lane-7" }),
+        agent({ id: 0, session_id: null, tmux_window: "lane-7-2" }),
+      ],
+    });
+
+    const [first, second] = withSessionKeys([target])[0].agent_sessions;
+    expect(first.id).not.toBe(0);
+    expect(second.id).not.toBe(0);
+    expect(first.id).not.toBe(second.id);
+    // Stable across polls: the same identity hashes to the same key.
+    expect(withSessionKeys([target])[0].agent_sessions[0].id).toBe(first.id);
+    // A persisted (non-zero) id passes through untouched.
+    expect(withSessionKeys([lane({ agent_sessions: [agent({ id: 42 })] })])[0].agent_sessions[0].id).toBe(42);
   });
 });

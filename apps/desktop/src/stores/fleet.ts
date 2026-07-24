@@ -95,6 +95,23 @@ export function matchesLane(lane: Lane, query: string): boolean {
   return false;
 }
 
+/// Overlay sessions all arrive with `id: 0` (they have no store row), but `reconcile` keys
+/// nested arrays by `id` too — duplicate keys collapse a lane's sessions to one, hiding every
+/// agent tab after the first. Re-key each session by its stable identity (transcript id, else
+/// its window) hashed to a number, so reconcile can tell them apart across polls.
+export function withSessionKeys(lanes: Lane[]): Lane[] {
+  return lanes.map((lane) => ({
+    ...lane,
+    agent_sessions: lane.agent_sessions.map((agent, index) => {
+      if (agent.id !== 0) return agent;
+      const seed = agent.session_id ?? agent.tmux_window ?? `idx-${index}`;
+      let hash = 0;
+      for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+      return { ...agent, id: hash || index + 1 };
+    }),
+  }));
+}
+
 function byPriority(a: Lane, b: Lane): number {
   if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
   const urgent = Number(laneIndicator(b).urgent) - Number(laneIndicator(a).urgent);
@@ -147,7 +164,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       const snapshot = await source.load();
       if (!active) return;
       setRepoStore(reconcile(snapshot.repos, { key: "id" }));
-      setLaneStore(reconcile(snapshot.lanes, { key: "id" }));
+      setLaneStore(reconcile(withSessionKeys(snapshot.lanes), { key: "id" }));
       setUsage(snapshot.usage);
       setTerminals(snapshot.terminals);
       setError(null);

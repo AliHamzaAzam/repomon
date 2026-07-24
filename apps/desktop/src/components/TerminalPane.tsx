@@ -32,12 +32,26 @@ interface TerminalPaneProps extends TerminalTarget {
 type PaneView = "live" | "history";
 
 function terminalTheme(element: HTMLElement) {
+  // The theme vars hold modern color syntax (space-separated hsl()) that xterm's color
+  // parser rejects — it then silently falls back to its defaults (pure-black background,
+  // visibly darker than the app's). Resolve each var through the browser to plain rgb().
+  const resolve = (value: string) => {
+    const probe = document.createElement("span");
+    probe.style.color = value;
+    element.appendChild(probe);
+    const rgb = getComputedStyle(probe).color;
+    probe.remove();
+    return rgb;
+  };
   const style = getComputedStyle(element);
+  const varColor = (name: string) => resolve(style.getPropertyValue(name).trim());
+  const signal = varColor("--signal");
+  const [r, g, b] = signal.match(/\d+(?:\.\d+)?/g) ?? ["100", "196", "187"];
   return {
-    background: style.getPropertyValue("--background").trim(),
-    foreground: style.getPropertyValue("--foreground").trim(),
-    cursor: style.getPropertyValue("--signal").trim(),
-    selectionBackground: `color-mix(in srgb, ${style.getPropertyValue("--signal").trim()} 24%, transparent)`,
+    background: varColor("--background"),
+    foreground: varColor("--foreground"),
+    cursor: signal,
+    selectionBackground: `rgba(${r}, ${g}, ${b}, 0.24)`,
     black: "#101418",
     red: "#e66b61",
     green: "#62c49a",
@@ -352,9 +366,12 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
   return (
     <section class="relative h-full min-h-0 overflow-hidden bg-background" aria-label={props.label}>
+      {/* Insets, not padding: FitAddon measures this element's full box and only subtracts
+          xterm's own padding, so container padding would overshoot the fit by its size —
+          the bottom rows would then render past the pane (hidden under the status bar). */}
       <div
         ref={container}
-        class={`terminal-host absolute inset-0 px-2 pb-2 pt-7 ${view() === "live" ? "" : "invisible pointer-events-none"}`}
+        class={`terminal-host absolute inset-x-2 bottom-2 top-7 ${view() === "live" ? "" : "invisible pointer-events-none"}`}
         aria-hidden={view() !== "live"}
       />
       <Show when={props.sessionId}>
