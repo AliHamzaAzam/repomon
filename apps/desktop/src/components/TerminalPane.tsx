@@ -10,12 +10,14 @@ import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
   takeWheelBatch,
+  terminalPointerCell,
   translateKeyboardKey,
   watchTerminal,
   wheelLines,
   type TerminalRenderer,
   type TerminalTarget,
 } from "../ipc/term";
+import AgentHistory from "./AgentHistory";
 
 interface TerminalPaneProps extends TerminalTarget {
   label: string;
@@ -24,7 +26,10 @@ interface TerminalPaneProps extends TerminalTarget {
   visible?: boolean;
   /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
   shell?: boolean;
+  sessionId?: string | null;
 }
+
+type PaneView = "live" | "history";
 
 function terminalTheme(element: HTMLElement) {
   const style = getComputedStyle(element);
@@ -75,6 +80,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   const [ready, setReady] = createSignal(false);
   const [finding, setFinding] = createSignal(false);
   const [query, setQuery] = createSignal("");
+  const [view, setView] = createSignal<PaneView>("live");
 
   function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error);
@@ -140,13 +146,17 @@ export default function TerminalPane(props: TerminalPaneProps) {
   createEffect(() => {
     const visible = ready() && props.visible !== false;
     const focused = props.focused;
-    if (!visible) return;
+    if (!visible || view() !== "live") return;
     if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
     visibilityFrame = requestAnimationFrame(() => {
       visibilityFrame = undefined;
       void syncSize?.();
       if (focused) terminal?.focus();
     });
+  });
+
+  createEffect(() => {
+    if (!props.sessionId && view() === "history") setView("live");
   });
 
   onMount(() => {
@@ -222,6 +232,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // Accumulate fractional movement and issue at most one remote scroll at a time. New movement
       // is merged while the request is in flight, so long trackpad gestures cannot build a tail.
       let wheelAccum = 0;
+      let wheelCell = { col: 1, row: 1 };
 
       const scheduleWheelFlush = () => {
         if (wheelFrame !== undefined || disposed) return;
@@ -248,6 +259,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
           window: props.window,
           up: batch.ticks < 0,
           ticks: Math.abs(batch.ticks),
+          col: wheelCell.col,
+          row: wheelCell.row,
         })
           .then((result) => {
             if (!result.forwarded && !disposed) current.scrollLines(batch.ticks);
@@ -266,10 +279,23 @@ export default function TerminalPane(props: TerminalPaneProps) {
         event.preventDefault();
         event.stopPropagation();
         const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
-        const screenHeight = screen?.getBoundingClientRect().height ?? 0;
+        const screenRect = screen?.getBoundingClientRect();
+        const screenHeight = screenRect?.height ?? 0;
         const pixelsPerLine = screenHeight > 0 && terminal.rows > 0
           ? screenHeight / terminal.rows
           : (terminal.options.fontSize ?? 12) * (terminal.options.lineHeight ?? 1);
+        if (screenRect) {
+          wheelCell = terminalPointerCell(
+            event.clientX,
+            event.clientY,
+            screenRect.left,
+            screenRect.top,
+            screenRect.width,
+            screenRect.height,
+            terminal.cols,
+            terminal.rows,
+          );
+        }
         wheelAccum += wheelLines(
           event.deltaY,
           event.deltaMode,
@@ -286,18 +312,24 @@ export default function TerminalPane(props: TerminalPaneProps) {
       });
       resize.observe(container);
       if (props.visible !== false) fit.fit();
+      // Establish the pane's authoritative grid before the first checkpoint is painted. Painting
+      // at one width and resizing afterward corrupts cursor-relative full-screen output.
+      await syncSize?.();
       setReady(true);
 
       try {
-        const watch = await watchTerminal(target, (bytes) => terminal?.write(bytes));
+        const watch = await watchTerminal(
+          target,
+          (bytes) => terminal?.write(bytes),
+          (ack) => applyGrid(ack.cols, ack.rows),
+        );
         if (disposed) {
           await watch.stop();
           return;
         }
         stopWatch = watch.stop;
         setTransportError(null);
-        void syncSize?.();
-        if (props.focused) terminal.focus();
+        if (props.focused && view() === "live") terminal.focus();
       } catch (error) {
         setTransportError(errorMessage(error));
       }
@@ -320,7 +352,20 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
   return (
     <section class="relative h-full min-h-0 overflow-hidden bg-background" aria-label={props.label}>
-      <div ref={container} class="terminal-host absolute inset-0 px-2 pb-2 pt-7" />
+      <div
+        ref={container}
+        class={`terminal-host absolute inset-0 px-2 pb-2 pt-7 ${view() === "live" ? "" : "invisible pointer-events-none"}`}
+        aria-hidden={view() !== "live"}
+      />
+      <Show when={props.sessionId}>
+        <div class={`absolute inset-0 z-[5] pt-6 ${view() === "history" ? "" : "hidden"}`}>
+          <AgentHistory
+            laneId={props.laneId}
+            sessionId={props.sessionId ?? null}
+            visible={props.visible !== false && view() === "history"}
+          />
+        </div>
+      </Show>
       <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-6 items-center justify-between border-b border-line bg-surface/90 px-2 font-mono text-[0.52rem] uppercase tracking-[0.08em] text-muted backdrop-blur">
         <Show
           when={finding()}
@@ -361,9 +406,35 @@ export default function TerminalPane(props: TerminalPaneProps) {
             }}>×</button>
           </form>
         </Show>
-        <span class="ml-2 shrink-0">{renderer()}</span>
+        <div class="ml-2 flex shrink-0 items-center gap-1">
+          <Show when={props.sessionId && !finding()}>
+            <div class="pointer-events-auto flex items-center gap-0.5" role="tablist" aria-label="Agent pane views">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view() === "live"}
+                class={`focus-ring rounded px-1.5 py-0.5 ${view() === "live" ? "bg-signal/10 text-signal" : "hover:text-foreground"}`}
+                onClick={() => {
+                  setView("live");
+                  queueMicrotask(() => terminal?.focus());
+                }}
+              >Live</button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view() === "history"}
+                class={`focus-ring rounded px-1.5 py-0.5 ${view() === "history" ? "bg-signal/10 text-signal" : "hover:text-foreground"}`}
+                onClick={() => {
+                  setFinding(false);
+                  setView("history");
+                }}
+              >History</button>
+            </div>
+          </Show>
+          <span>{view() === "history" ? "HISTORY" : renderer()}</span>
+        </div>
       </div>
-      <Show when={transportError()}>
+      <Show when={view() === "live" && transportError()}>
         <div class="absolute inset-x-4 top-10 z-20 rounded-md border border-fault/40 bg-surface p-2 text-xs text-fault shadow-lg">
           Terminal transport unavailable: {transportError()}
         </div>

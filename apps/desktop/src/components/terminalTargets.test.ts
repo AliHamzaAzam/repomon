@@ -8,7 +8,7 @@ import {
 } from "./terminalTargets";
 
 function target(window: string, overrides: Partial<PaneTarget> = {}): PaneTarget {
-  return { laneId: 1, window, label: window, shell: false, ...overrides };
+  return { laneId: 1, window, label: window, shell: false, sessionId: null, ...overrides };
 }
 
 describe("stabilizeTargets", () => {
@@ -59,6 +59,15 @@ describe("warmTargetWindows", () => {
       "a",
       "b",
       "c",
+    ]);
+  });
+
+  it("prewarms unvisited windows up to capacity", () => {
+    const available = ["a", "b", "c", "d"].map((window) => target(window));
+    expect(warmTargetWindows([], [target("c")], available, 3)).toEqual([
+      "c",
+      "a",
+      "b",
     ]);
   });
 

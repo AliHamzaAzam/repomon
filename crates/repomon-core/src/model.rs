@@ -532,6 +532,108 @@ pub struct BrowseResult {
     pub entries: Vec<BrowseEntry>,
 }
 
+/// Where a plugin's enabled/disabled value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum EnabledSource {
+    Global,
+    Repo,
+    Default,
+}
+
+/// Component counts inside an installed plugin's cache directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct PluginProvides {
+    pub skills: u32,
+    pub commands: u32,
+    pub agents: u32,
+}
+
+/// One Claude Code plugin as seen by the extensions manager.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct PluginInfo {
+    /// Full id, e.g. "superpowers@claude-plugins-official".
+    pub id: String,
+    pub name: String,
+    pub marketplace: String,
+    pub version: Option<String>,
+    pub enabled: bool,
+    pub enabled_source: EnabledSource,
+    pub provides: Option<PluginProvides>,
+    /// False when the plugin appears in enabledPlugins but has no install record.
+    pub installed: bool,
+}
+
+/// Where a skill lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSource {
+    User,
+    Project,
+}
+
+/// One standalone skill (SKILL.md directory) as seen by the extensions manager.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub source: SkillSource,
+    pub path: PathBuf,
+}
+
+/// One configured plugin marketplace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct MarketplaceInfo {
+    pub name: String,
+    /// "github", "url", or "local".
+    pub kind: String,
+    /// Repo slug, URL, or path.
+    pub reference: String,
+    pub last_updated: Option<String>,
+}
+
+/// The full extensions snapshot for one scope, returned by `ext.list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct ExtSnapshot {
+    /// None when the `claude` CLI is not on PATH (install/update UI disables).
+    pub cli_version: Option<String>,
+    pub marketplaces: Vec<MarketplaceInfo>,
+    pub plugins: Vec<PluginInfo>,
+    pub skills: Vec<SkillInfo>,
+}
+
+/// A lane worktree the repo-scope fan-out could not sync.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SkippedLane {
+    pub lane: String,
+    pub reason: String,
+}
+
+/// Result of fanning a repo-scope change out to lane worktrees.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FanoutSummary {
+    pub synced_lanes: Vec<String>,
+    pub skipped_lanes: Vec<SkippedLane>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

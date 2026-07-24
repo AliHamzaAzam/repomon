@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -910,6 +911,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 lane: 1,
                 refs: [a.id, b.id].into_iter().collect(),
                 generation: 0,
+                sequence: Arc::new(AtomicU64::new(0)),
             },
         );
         // A window only A watches.
@@ -919,6 +921,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 lane: 2,
                 refs: [a.id].into_iter().collect(),
                 generation: 1,
+                sequence: Arc::new(AtomicU64::new(0)),
             },
         );
     }
@@ -1065,6 +1068,15 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         .await
         .unwrap_or_else(|e| panic!("watch {window} errored: {e:?}"));
         assert!(ack.get("cols").is_some(), "ack shape carries dims: {ack}");
+        assert!(
+            ack["generation"].as_u64().is_some(),
+            "ack carries a stream generation: {ack}"
+        );
+        assert_eq!(
+            ack["sequence"],
+            json!(0),
+            "a new pipe starts before its first emitted byte"
+        );
     }
     {
         let watched = sess.watched_bytes.lock().unwrap();

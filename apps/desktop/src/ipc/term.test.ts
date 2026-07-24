@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
+  createTerminalFrameGate,
   takeWheelBatch,
+  terminalPointerCell,
   translateKeyboardKey,
   wheelLines,
 } from "./term";
@@ -26,6 +28,28 @@ describe("asTransportError", () => {
   it("keeps an existing Error untouched", () => {
     const original = new Error("already an error");
     expect(asTransportError(original)).toBe(original);
+  });
+});
+
+describe("createTerminalFrameGate", () => {
+  it("holds the initial repaint until the caller has applied the acknowledged grid", () => {
+    const seen: number[] = [];
+    const gate = createTerminalFrameGate((bytes) => seen.push(...bytes));
+    gate.push(Uint8Array.of(1, 2));
+    expect(seen).toEqual([]);
+    gate.open();
+    gate.push(Uint8Array.of(3));
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it("drops queued and future frames after close", () => {
+    const seen: number[] = [];
+    const gate = createTerminalFrameGate((bytes) => seen.push(...bytes));
+    gate.push(Uint8Array.of(1));
+    gate.close();
+    gate.open();
+    gate.push(Uint8Array.of(2));
+    expect(seen).toEqual([]);
   });
 });
 
@@ -68,5 +92,22 @@ describe("takeWheelBatch", () => {
 
   it("keeps sub-line movement for a later frame", () => {
     expect(takeWheelBatch(0.75)).toEqual({ ticks: 0, remainder: 0.75 });
+  });
+});
+
+describe("terminalPointerCell", () => {
+  it("maps the pointer to a 1-based terminal cell", () => {
+    expect(terminalPointerCell(150, 70, 50, 20, 200, 100, 80, 40)).toEqual({
+      col: 41,
+      row: 21,
+    });
+  });
+
+  it("clamps outside positions and invalid geometry", () => {
+    expect(terminalPointerCell(-20, 999, 0, 0, 200, 100, 80, 40)).toEqual({
+      col: 1,
+      row: 40,
+    });
+    expect(terminalPointerCell(1, 1, 0, 0, 0, 0, 0, 0)).toEqual({ col: 1, row: 1 });
   });
 });

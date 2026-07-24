@@ -190,12 +190,18 @@ impl Dispatcher {
                     Effect::None,
                 ),
             },
-            Op::ScrollWheel { up, ticks } => {
+            Op::ScrollWheel {
+                up,
+                ticks,
+                col,
+                row,
+            } => {
                 if ticks == 0 {
                     (to_vec(&Response::empty_ok(id)), Effect::None)
                 } else {
                     let button = if up { 64 } else { 65 };
-                    let seq = format!("\x1b[<{button};1;1M").repeat(ticks as usize);
+                    let seq = format!("\x1b[<{button};{};{}M", col.max(1), row.max(1))
+                        .repeat(ticks as usize);
                     (self.write_ok(id, seq.as_bytes()), Effect::None)
                 }
             }
@@ -406,11 +412,11 @@ mod tests {
         let (mut d, calls) = dispatcher();
         handle(
             &mut d,
-            r#"{"id":11,"op":"scroll_wheel","up":true,"ticks":2}"#,
+            r#"{"id":11,"op":"scroll_wheel","up":true,"ticks":2,"col":12,"row":8}"#,
         );
         handle(
             &mut d,
-            r#"{"id":12,"op":"scroll_wheel","up":false,"ticks":1}"#,
+            r#"{"id":12,"op":"scroll_wheel","up":false,"ticks":1,"col":4,"row":3}"#,
         );
         handle(
             &mut d,
@@ -419,10 +425,10 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[
-                PtyCall::Write(b"\x1b[<64;1;1M\x1b[<64;1;1M".to_vec()),
-                PtyCall::Write(b"\x1b[<65;1;1M".to_vec()),
+                PtyCall::Write(b"\x1b[<64;12;8M\x1b[<64;12;8M".to_vec()),
+                PtyCall::Write(b"\x1b[<65;4;3M".to_vec()),
             ],
-            "64=up, 65=down, ticks=0 writes nothing"
+            "64=up, 65=down, pointer coordinates preserved, ticks=0 writes nothing"
         );
     }
 

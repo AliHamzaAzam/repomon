@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
+use repomon_core::agent::backend::{CaptureOpts, ScrollEvent, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use crate::conn::ConnSession;
 use crate::{Ctx, ORCHESTRATOR_WINDOW};
+
+const DAEMON_PROTOCOL_REVISION: u32 = 2;
 
 fn internal<E: std::fmt::Display>(e: E) -> RpcError {
     RpcError::internal(e.to_string())
@@ -234,6 +236,162 @@ struct AgentPrompt {
     #[serde(default)]
     window: Option<String>,
 }
+#[derive(Debug, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+enum ExtScope {
+    Global,
+    Repo { repo_id: RepoId },
+}
+#[derive(Deserialize)]
+struct ExtList {
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+#[derive(Deserialize)]
+struct PluginToggle {
+    id: String,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+fn ext_scope_json(scope: &ExtScope) -> Value {
+    match scope {
+        ExtScope::Global => json!({ "scope": "global" }),
+        ExtScope::Repo { repo_id } => json!({ "scope": "repo", "repo_id": repo_id }),
+    }
+}
+#[derive(Deserialize)]
+struct PluginInstall {
+    r#ref: String,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+#[derive(Deserialize)]
+struct NameOnly {
+    name: String,
+}
+#[derive(Deserialize)]
+struct OptionalName {
+    #[serde(default)]
+    name: Option<String>,
+}
+#[derive(Deserialize)]
+struct IdOnly {
+    id: String,
+}
+#[derive(Deserialize)]
+struct OptionalId {
+    #[serde(default)]
+    id: Option<String>,
+}
+#[derive(Deserialize)]
+struct SourceOnly {
+    source: String,
+}
+#[derive(Deserialize)]
+struct SkillCreate {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+#[derive(Deserialize)]
+struct SkillPath {
+    path: PathBuf,
+}
+#[derive(Deserialize)]
+struct SkillWrite {
+    path: PathBuf,
+    content: String,
+}
+#[derive(Deserialize)]
+struct SkillDelete {
+    name: String,
+    #[serde(flatten)]
+    scope: ExtScope,
+}
+
+/// Cached once a detection succeeds: repeated CLI-present checks (eg. every `ext.list`) shouldn't
+/// repeatedly shell out to `claude --version`. Failures are deliberately NOT cached (see
+/// `claude_cli` below) so installing the CLI after daemon start doesn't require a restart.
+static CLAUDE_CLI: std::sync::OnceLock<std::sync::Arc<crate::ext::ClaudeCli>> =
+    std::sync::OnceLock::new();
+
+/// Resolve the cached CLI handle, detecting off the async runtime on a cache miss. Only a
+/// successful detection is cached; a miss re-probes on the next call, so a CLI installed after
+/// the daemon started is picked up without a restart.
+async fn claude_cli() -> Result<std::sync::Arc<crate::ext::ClaudeCli>, RpcError> {
+    if let Some(cli) = CLAUDE_CLI.get() {
+        return Ok(cli.clone());
+    }
+    match tokio::task::spawn_blocking(crate::ext::ClaudeCli::detect)
+        .await
+        .map_err(internal)?
+    {
+        Some(cli) => {
+            let cli = std::sync::Arc::new(cli);
+            // A concurrent detection may have won the race; both results are equivalent, so
+            // either value is fine to return.
+            Ok(CLAUDE_CLI.get_or_init(|| cli).clone())
+        }
+        None => Err(RpcError::new(-32021, "claude CLI not found on PATH")),
+    }
+}
+
+fn cli_error(failure: crate::ext::CliFailure) -> RpcError {
+    RpcError {
+        code: -32020,
+        message: failure.message,
+        data: Some(json!({ "stderr": failure.stderr, "exit_code": failure.exit_code })),
+    }
+}
+
+/// Run a CLI op off the async runtime, emit event.ext.changed, and return {ok, stdout}.
+async fn run_cli_op(ctx: &Ctx, args: Vec<String>, changed_scope: Value) -> Result<Value, RpcError> {
+    let cli = claude_cli().await?;
+    let stdout = tokio::task::spawn_blocking(move || {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        cli.run(&arg_refs)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(cli_error)?;
+    ctx.broadcast("event.ext.changed", changed_scope);
+    Ok(json!({ "ok": true, "stdout": stdout }))
+}
+
+/// Registered repos paired with their skills root (`.claude/skills`). Lets `skill.write` figure
+/// out which repo (if any) a written path belongs to, so a repo-scoped edit can fan out to that
+/// repo's lane worktrees the same way skill.create/skill.delete/plugin.enable already do.
+async fn skill_repo_roots(ctx: &Ctx) -> Result<Vec<(PathBuf, PathBuf)>, RpcError> {
+    Ok(ctx
+        .registry
+        .list()
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|repo| {
+            let skills_root = repo.path.join(".claude/skills");
+            (repo.path, skills_root)
+        })
+        .collect())
+}
+
+/// Every directory `skill.read`/`skill.write`/`skill.delete` are allowed to touch: the global
+/// `claude_home()/skills` (when resolvable) plus `.claude/skills` for every registered repo.
+async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
+    let mut roots = Vec::new();
+    if let Some(home) = crate::ext::claude_home() {
+        roots.push(home.join("skills"));
+    }
+    roots.extend(
+        skill_repo_roots(ctx)
+            .await?
+            .into_iter()
+            .map(|(_, skills_root)| skills_root),
+    );
+    Ok(roots)
+}
 #[derive(Deserialize)]
 struct AgentWatchBytes {
     lane_id: repomon_core::model::LaneId,
@@ -280,10 +438,17 @@ struct AgentScroll {
     up: bool,
     #[serde(default = "default_scroll_ticks")]
     ticks: u32,
+    #[serde(default = "default_pointer_cell")]
+    col: u16,
+    #[serde(default = "default_pointer_cell")]
+    row: u16,
     #[serde(default)]
     window: Option<String>,
 }
 fn default_scroll_ticks() -> u32 {
+    1
+}
+fn default_pointer_cell() -> u16 {
     1
 }
 #[derive(Deserialize)]
@@ -382,6 +547,16 @@ struct AgentTranscript {
 }
 fn default_transcript_limit() -> usize {
     50
+}
+#[derive(Deserialize)]
+struct AgentTranscriptPage {
+    lane_id: repomon_core::model::LaneId,
+    /// Which session's transcript; `None` = the lane's most recent.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// Exclusive byte offset returned as `next_before` by the previous page.
+    #[serde(default)]
+    before: Option<u64>,
 }
 #[derive(Deserialize)]
 struct AgentAdopt {
@@ -629,6 +804,15 @@ pub async fn dispatch(
                 );
             }
             let lane = ctx.lanes.create(p).await.map_err(internal)?;
+            // Seed the new worktree with the repo's extension config (best-effort; a failure only
+            // means the lane starts with whatever git checked out).
+            let repo_root = lane.repo.path.clone();
+            let wt_path = lane.worktree.path.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = crate::ext::sync_worktree(&repo_root, &wt_path) {
+                    tracing::debug!("lane.create ext seed skipped: {e}");
+                }
+            });
             ctx.broadcast(crate::pubsub::topic::LANE_CREATED, json!({ "lane": lane }));
             ctx.invalidate_overlay().await;
             to_value(lane)
@@ -704,6 +888,280 @@ pub async fn dispatch(
                 }
             }
             Ok(result)
+        }
+
+        // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----
+        "ext.list" => {
+            let p: ExtList = parse(params)?;
+            let home = crate::ext::claude_home()
+                .ok_or_else(|| internal("cannot resolve home directory"))?;
+            let repo_root = match p.scope {
+                ExtScope::Global => None,
+                ExtScope::Repo { repo_id } => {
+                    Some(ctx.store.get_repo(repo_id).await.map_err(internal)?.path)
+                }
+            };
+            // A missing CLI is fine for listing: just leave cli_version unset.
+            let cli_version = claude_cli().await.ok().map(|c| c.version.clone());
+            let snap = tokio::task::spawn_blocking(move || {
+                crate::ext::scan(&home, repo_root.as_deref(), cli_version)
+            })
+            .await
+            .map_err(internal)?;
+            to_value(snap)
+        }
+        "plugin.enable" | "plugin.disable" => {
+            let enabled = method == "plugin.enable";
+            let p: PluginToggle = parse(params)?;
+            let (settings, fanout_root) = match &p.scope {
+                ExtScope::Global => {
+                    let home = crate::ext::claude_home()
+                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    (home.join("settings.json"), None)
+                }
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    (
+                        repo.path.join(".claude/settings.local.json"),
+                        Some(repo.path),
+                    )
+                }
+            };
+            let id = p.id.clone();
+            let fanout = tokio::task::spawn_blocking(move || {
+                crate::ext::set_plugin_enabled(&settings, &id, Some(enabled))?;
+                Ok::<_, std::io::Error>(fanout_root.map(|root| crate::ext::fan_out(&root)))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "ok": true, "fanout": fanout }))
+        }
+        "plugin.install" => {
+            // Always -s user: the cache and install record stay global; per-repo activation is
+            // purely an enabledPlugins toggle (worktree projectPath records would never match
+            // otherwise).
+            //
+            // Deliberately NOT run_cli_op: that helper broadcasts event.ext.changed immediately
+            // after the CLI call, but repo-scope installs still have an enable + fan-out step to
+            // run afterward. Broadcasting before that lands let clients refresh into a
+            // half-applied state, and a failure in the enable/fan-out step (after the CLI install
+            // had already succeeded) still emitted the "changed" event. So here the broadcast is
+            // held until every side effect has actually succeeded.
+            let p: PluginInstall = parse(params)?;
+            let cli = claude_cli().await?;
+            let args: [String; 5] = [
+                "plugin".into(),
+                "install".into(),
+                p.r#ref.clone(),
+                "-s".into(),
+                "user".into(),
+            ];
+            let stdout = tokio::task::spawn_blocking(move || {
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                cli.run(&arg_refs)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(cli_error)?;
+            // Repo-scope install also enables it there so "install to this repo" does what it says.
+            let fanout = match &p.scope {
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    let settings = repo.path.join(".claude/settings.local.json");
+                    let id = p.r#ref.clone();
+                    let root = repo.path.clone();
+                    let summary = tokio::task::spawn_blocking(move || {
+                        crate::ext::set_plugin_enabled(&settings, &id, Some(true))?;
+                        Ok::<_, std::io::Error>(crate::ext::fan_out(&root))
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+                    Some(summary)
+                }
+                ExtScope::Global => None,
+            };
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "ok": true, "stdout": stdout, "fanout": fanout }))
+        }
+        "plugin.remove" => {
+            let p: PluginToggle = parse(params)?;
+            run_cli_op(
+                ctx,
+                vec!["plugin".into(), "uninstall".into(), p.id.clone()],
+                ext_scope_json(&p.scope),
+            )
+            .await
+        }
+        "plugin.update" => {
+            let p: OptionalId = parse(params)?;
+            let mut args = vec!["plugin".into(), "update".into()];
+            if let Some(id) = p.id {
+                args.push(id)
+            }
+            run_cli_op(ctx, args, json!({ "scope": "global" })).await
+        }
+        "plugin.details" => {
+            let p: IdOnly = parse(params)?;
+            let cli = claude_cli().await?;
+            let text = tokio::task::spawn_blocking(move || cli.run(&["plugin", "details", &p.id]))
+                .await
+                .map_err(internal)?
+                .map_err(cli_error)?;
+            Ok(json!({ "text": text }))
+        }
+        "marketplace.add" => {
+            let p: SourceOnly = parse(params)?;
+            run_cli_op(
+                ctx,
+                vec![
+                    "plugin".into(),
+                    "marketplace".into(),
+                    "add".into(),
+                    p.source,
+                ],
+                json!({ "scope": "global" }),
+            )
+            .await
+        }
+        "marketplace.remove" => {
+            let p: NameOnly = parse(params)?;
+            run_cli_op(
+                ctx,
+                vec![
+                    "plugin".into(),
+                    "marketplace".into(),
+                    "remove".into(),
+                    p.name,
+                ],
+                json!({ "scope": "global" }),
+            )
+            .await
+        }
+        "marketplace.refresh" => {
+            let p: OptionalName = parse(params)?;
+            let mut args = vec!["plugin".into(), "marketplace".into(), "update".into()];
+            if let Some(name) = p.name {
+                args.push(name)
+            }
+            run_cli_op(ctx, args, json!({ "scope": "global" })).await
+        }
+
+        // ---- skills (create/read/write/delete SKILL.md, path-guarded) ----
+        "skill.create" => {
+            let p: SkillCreate = parse(params)?;
+            let (skills_dir, fanout_root) = match &p.scope {
+                ExtScope::Global => {
+                    let home = crate::ext::claude_home()
+                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    (home.join("skills"), None)
+                }
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    (repo.path.join(".claude/skills"), Some(repo.path))
+                }
+            };
+            let (name, description) = (p.name.clone(), p.description.clone());
+            let path = tokio::task::spawn_blocking(move || {
+                let path = crate::ext::scaffold_skill(&skills_dir, &name, description.as_deref())?;
+                if let Some(root) = fanout_root {
+                    crate::ext::fan_out(&root);
+                }
+                Ok::<_, std::io::Error>(path)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "path": path }))
+        }
+        "skill.read" => {
+            let p: SkillPath = parse(params)?;
+            let roots = skill_roots(ctx).await?;
+            if !crate::ext::skill_path_allowed(&p.path, &roots) {
+                return Err(RpcError::invalid_params(
+                    "path is outside managed skill directories",
+                ));
+            }
+            let md = if p.path.ends_with("SKILL.md") {
+                p.path.clone()
+            } else {
+                p.path.join("SKILL.md")
+            };
+            let content = tokio::fs::read_to_string(&md).await.map_err(internal)?;
+            Ok(json!({ "content": content }))
+        }
+        "skill.write" => {
+            let p: SkillWrite = parse(params)?;
+            let roots = skill_roots(ctx).await?;
+            if !crate::ext::skill_path_allowed(&p.path, &roots) {
+                return Err(RpcError::invalid_params(
+                    "path is outside managed skill directories",
+                ));
+            }
+            let md = if p.path.ends_with("SKILL.md") {
+                p.path.clone()
+            } else {
+                p.path.join("SKILL.md")
+            };
+            tokio::fs::write(&md, p.content).await.map_err(internal)?;
+            // create/delete/toggle all fan a repo-scoped change out to every lane worktree; find
+            // out whether this write landed under a registered repo's skills root so it does the
+            // same, instead of leaving existing worktrees with a stale copy.
+            let mut fanout_repo = None;
+            if let Ok(resolved_md) = md.canonicalize() {
+                for (repo_path, skills_root) in skill_repo_roots(ctx).await? {
+                    if skills_root
+                        .canonicalize()
+                        .is_ok_and(|root| resolved_md.starts_with(&root))
+                    {
+                        fanout_repo = Some(repo_path);
+                        break;
+                    }
+                }
+            }
+            let fanout = match fanout_repo {
+                Some(repo_path) => Some(
+                    tokio::task::spawn_blocking(move || crate::ext::fan_out(&repo_path))
+                        .await
+                        .map_err(internal)?,
+                ),
+                None => None,
+            };
+            ctx.broadcast("event.ext.changed", json!({ "scope": "global" }));
+            Ok(json!({ "ok": true, "fanout": fanout }))
+        }
+        "skill.delete" => {
+            let p: SkillDelete = parse(params)?;
+            if !crate::ext::valid_skill_name(&p.name) {
+                return Err(RpcError::invalid_params("invalid skill name"));
+            }
+            let (skills_dir, fanout_root) = match &p.scope {
+                ExtScope::Global => {
+                    let home = crate::ext::claude_home()
+                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    (home.join("skills"), None)
+                }
+                ExtScope::Repo { repo_id } => {
+                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                    (repo.path.join(".claude/skills"), Some(repo.path))
+                }
+            };
+            let name = p.name.clone();
+            let fanout = tokio::task::spawn_blocking(move || {
+                std::fs::remove_dir_all(skills_dir.join(&name))?;
+                // sync_worktree prunes skills whose source dir is gone (see this task's ext.rs
+                // change), so one fan-out both deletes the skill everywhere and re-syncs the
+                // survivors.
+                Ok::<_, std::io::Error>(fanout_root.map(|root| crate::ext::fan_out(&root)))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+            Ok(json!({ "ok": true, "fanout": fanout }))
         }
 
         // ---- commits (computed live via gix) ----
@@ -1106,28 +1564,65 @@ pub async fn dispatch(
         }
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
-            let tmux = ctx.backend.clone();
             let opts = CaptureOpts {
                 last_lines: p.lines,
             };
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            let capture_window = window.clone();
-            let content =
-                tokio::task::spawn_blocking(move || tmux.capture_named(&capture_window, opts))
+            if p.include_state {
+                // A capture is useful as a terminal checkpoint only when no raw PTY chunk crossed
+                // it. Retry short active bursts until the stream cursor is stable, then return the
+                // exact cursor represented by the repaint. The desktop discards queued chunks at
+                // or below this cursor before resuming incremental rendering.
+                let mut state = None;
+                let mut checkpoint = None;
+                let mut stable = false;
+                for _ in 0..4 {
+                    let before = crate::bytes_stream::cursor(&ctx.bytes_watches, &window).await;
+                    let backend = ctx.backend.clone();
+                    let capture_window = window.clone();
+                    let next = tokio::task::spawn_blocking(move || {
+                        let content = backend.capture_named(&capture_window, opts)?;
+                        let alternate = backend.alternate_on_named(&capture_window);
+                        let size = backend.size_named(&capture_window);
+                        let cursor = backend.cursor_named(&capture_window);
+                        Ok::<_, repomon_core::Error>((content, alternate, size, cursor))
+                    })
                     .await
                     .map_err(internal)?
                     .map_err(internal)?;
-            if p.include_state {
-                let tmux = ctx.backend.clone();
-                let window = window.clone();
-                let alternate =
-                    tokio::task::spawn_blocking(move || tmux.alternate_on_named(&window))
-                        .await
-                        .map_err(internal)?;
-                Ok(json!({ "content": content, "alternate": alternate }))
+                    // Let pipe-pane deliver output tmux had already applied when capture-pane ran.
+                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                    let after = crate::bytes_stream::cursor(&ctx.bytes_watches, &window).await;
+                    state = Some(next);
+                    checkpoint = after;
+                    stable = before == after;
+                    if stable {
+                        break;
+                    }
+                }
+                let (content, alternate, size, cursor) =
+                    state.ok_or_else(|| RpcError::internal("terminal capture unavailable"))?;
+                Ok(json!({
+                    "content": content,
+                    "alternate": alternate,
+                    "cols": size.map(|d| d.0),
+                    "rows": size.map(|d| d.1),
+                    "cursor": cursor.map(|c| json!({ "col": c.col, "row": c.row })),
+                    "generation": checkpoint.map(|c| c.generation),
+                    "sequence": checkpoint.map(|c| c.sequence),
+                    "stable": stable,
+                }))
             } else {
+                let backend = ctx.backend.clone();
+                let capture_window = window.clone();
+                let content = tokio::task::spawn_blocking(move || {
+                    backend.capture_named(&capture_window, opts)
+                })
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
                 Ok(json!({ "content": content }))
             }
         }
@@ -1194,7 +1689,7 @@ pub async fn dispatch(
                     .window
                     .clone()
                     .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-                crate::bytes_stream::watch(
+                let stream = crate::bytes_stream::watch(
                     ctx.backend.clone(),
                     ctx.events.clone(),
                     &ctx.bytes_watches,
@@ -1207,7 +1702,8 @@ pub async fn dispatch(
                 sess.watched_bytes.lock().unwrap().insert(window.clone());
                 // The ack carries the pane's grid so a remote emulator renders at exactly
                 // this size instead of resizing the real pane (which would squeeze a
-                // simultaneously attached TUI's mediated view). Shape UNCHANGED (iOS depends on it).
+                // simultaneously attached TUI's mediated view). The stream cursor is additive,
+                // so existing clients that only read the grid remain compatible.
                 let tmux = ctx.backend.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&window))
                     .await
@@ -1215,6 +1711,8 @@ pub async fn dispatch(
                 return Ok(json!({
                     "cols": dims.map(|d| d.0),
                     "rows": dims.map(|d| d.1),
+                    "generation": stream.generation,
+                    "sequence": stream.sequence,
                 }));
             }
             // `on:false`. With an explicit window, release just that one. WITHOUT a window (the
@@ -1447,19 +1945,30 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
-            let (up, ticks) = (p.up, p.ticks.min(40));
+            let (up, ticks, col, row) = (p.up, p.ticks.min(40), p.col, p.row);
             // Only forward to a full-screen agent (alternate screen) — it owns its scrollback, so
             // it can scroll itself. A plain shell would just get junk on its command line; the
             // caller falls back to the capture-based scroll when `forwarded` is false.
-            let forwarded = tokio::task::spawn_blocking(move || {
+            let forwarded = tokio::task::spawn_blocking(move || -> repomon_core::Result<bool> {
                 if tmux.alternate_on_named(&window) {
-                    let _ = tmux.scroll_wheel_named(&window, up, ticks);
-                    true
+                    let (max_col, max_row) =
+                        tmux.size_named(&window).unwrap_or((u16::MAX, u16::MAX));
+                    tmux.scroll_wheel_named(
+                        &window,
+                        ScrollEvent {
+                            up,
+                            ticks,
+                            col: col.clamp(1, max_col.max(1)),
+                            row: row.clamp(1, max_row.max(1)),
+                        },
+                    )?;
+                    Ok(true)
                 } else {
-                    false
+                    Ok(false)
                 }
             })
             .await
+            .map_err(internal)?
             .map_err(internal)?;
             if forwarded {
                 // Fast-poll the pane so the scrolled view shows immediately (reuses the typing
@@ -1630,6 +2139,35 @@ pub async fn dispatch(
             .unwrap_or_default();
             to_value(items)
         }
+        // A bounded page read backwards from a stable JSONL byte offset. The desktop uses this
+        // for native full-history scrolling without putting an unbounded transcript in xterm.
+        "agent.transcript_page" => {
+            let p: AgentTranscriptPage = parse(params)?;
+            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            let page = tokio::task::spawn_blocking(move || {
+                let manifest = match &p.session_id {
+                    Some(id) => agent::claude::transcript_path_for_session(&path, id),
+                    None => {
+                        let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
+                        agent::claude::summaries_for(&path, within, MAX_SESSIONS_PER_LANE)
+                            .first()
+                            .map(|summary| summary.manifest_path.clone())
+                    }
+                };
+                manifest
+                    .map(|manifest| agent::claude::transcript_page(&manifest, p.before))
+                    .map(|page| {
+                        json!({
+                            "items": page.items,
+                            "next_before": page.next_before,
+                        })
+                    })
+                    .unwrap_or_else(|| json!({ "items": [], "next_before": null }))
+            })
+            .await
+            .map_err(internal)?;
+            Ok(page)
+        }
         // Push-notification device registration (the iOS companion).
         // ---- remote devices (LOCAL SOCKET ONLY — blocked over the bridge by the allowlist) ----
         "remote.pair" => {
@@ -1743,6 +2281,11 @@ pub async fn dispatch(
                 "lanes": lanes,
                 "db_size_bytes": db_size,
                 "version": repomon_core::version(),
+                "protocol_revision": DAEMON_PROTOCOL_REVISION,
+                "capabilities": [
+                    "terminal.checkpoint.v1",
+                    "terminal.stream-sequence.v1"
+                ],
             }))
         }
         "daemon.shutdown" => {

@@ -12,6 +12,8 @@ export interface TerminalTarget {
 export interface TermWatchAck {
   cols: number | null;
   rows: number | null;
+  generation: number | null;
+  sequence: number | null;
 }
 
 export interface TranslatedKey {
@@ -75,6 +77,26 @@ export function takeWheelBatch(accumulated: number, maxTicks = 40): {
   return { ticks, remainder: accumulated - ticks };
 }
 
+/// Map a browser pointer position to a clamped, 1-based terminal cell.
+export function terminalPointerCell(
+  clientX: number,
+  clientY: number,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  cols: number,
+  rows: number,
+): { col: number; row: number } {
+  if (width <= 0 || height <= 0 || cols <= 0 || rows <= 0) return { col: 1, row: 1 };
+  const col = Math.floor(((clientX - left) / width) * cols) + 1;
+  const row = Math.floor(((clientY - top) / height) * rows) + 1;
+  return {
+    col: Math.min(cols, Math.max(1, col)),
+    row: Math.min(rows, Math.max(1, row)),
+  };
+}
+
 /// Normalize whatever `invoke` rejected with into a real `Error`, so callers surface the
 /// daemon's message instead of stringifying a `{code, message}` object into `[object Object]`.
 export function asTransportError(error: unknown): Error {
@@ -83,14 +105,39 @@ export function asTransportError(error: unknown): Error {
   return new Error(typeof error === "string" ? error : "terminal transport unavailable");
 }
 
+export function createTerminalFrameGate(onBytes: (bytes: Uint8Array) => void) {
+  let active = true;
+  let streaming = false;
+  let queued: Uint8Array[] = [];
+
+  return {
+    push(bytes: Uint8Array) {
+      if (!active) return;
+      if (streaming) onBytes(bytes);
+      else queued.push(bytes);
+    },
+    open() {
+      if (!active) return;
+      streaming = true;
+      for (const bytes of queued) onBytes(bytes);
+      queued = [];
+    },
+    close() {
+      active = false;
+      queued = [];
+    },
+  };
+}
+
 export async function watchTerminal(
   target: TerminalTarget,
   onBytes: (bytes: Uint8Array) => void,
+  onReady?: (ack: TermWatchAck) => void,
 ): Promise<{ ack: TermWatchAck; stop: () => Promise<void> }> {
   const channel = new Channel<ArrayBuffer>();
-  let active = true;
+  const gate = createTerminalFrameGate(onBytes);
   channel.onmessage = (buffer) => {
-    if (active) onBytes(new Uint8Array(buffer));
+    gate.push(new Uint8Array(buffer));
   };
   let ack: TermWatchAck;
   try {
@@ -100,12 +147,24 @@ export async function watchTerminal(
       onBytes: channel,
     });
   } catch (error) {
+    gate.close();
     throw asTransportError(error);
   }
+  // The host can deliver its authoritative repaint before the invoke promise resolves. Resize
+  // the emulator to the acknowledged pane grid before releasing any queued frame, including for
+  // proactively warmed panes that have never been visible.
+  try {
+    onReady?.(ack);
+  } catch (error) {
+    gate.close();
+    await invoke("term_unwatch", { window: target.window }).catch(() => undefined);
+    throw error;
+  }
+  gate.open();
   return {
     ack,
     async stop() {
-      active = false;
+      gate.close();
       await invoke("term_unwatch", { window: target.window });
     },
   };

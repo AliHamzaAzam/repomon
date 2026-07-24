@@ -238,8 +238,8 @@ mod host_backend {
     use repomon_host::registry::{self, RegistryEntry};
 
     use super::super::backend::{
-        AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, SessionBackend, SpawnSpec,
-        WindowActivity,
+        AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, ScrollEvent, SessionBackend,
+        SpawnSpec, WindowActivity,
     };
     use super::super::tmux::TmuxRuntime;
     use super::{
@@ -711,11 +711,19 @@ mod host_backend {
                 .unwrap_or(false)
         }
 
-        fn scroll_wheel_named(&self, window: &str, up: bool, ticks: u32) -> Result<()> {
-            if ticks == 0 {
+        fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()> {
+            if event.ticks == 0 {
                 return Ok(());
             }
-            self.request_allow_absent(window, Op::ScrollWheel { up, ticks })?;
+            self.request_allow_absent(
+                window,
+                Op::ScrollWheel {
+                    up: event.up,
+                    ticks: event.ticks,
+                    col: event.col,
+                    row: event.row,
+                },
+            )?;
             Ok(())
         }
 

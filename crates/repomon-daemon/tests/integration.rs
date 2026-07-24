@@ -1003,3 +1003,226 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn extension_rpcs_list_toggle_and_fan_out() {
+    // Point the daemon at an isolated Claude home (process-global env: keep this the only test
+    // that sets it).
+    let claude_home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("REPOMON_CLAUDE_HOME", claude_home.path());
+    }
+    std::fs::create_dir_all(claude_home.path().join("skills/global-skill")).unwrap();
+    std::fs::write(
+        claude_home.path().join("skills/global-skill/SKILL.md"),
+        "---\nname: global-skill\ndescription: g\n---\n",
+    )
+    .unwrap();
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ext-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    // Global list sees the skill.
+    let r = call(
+        &mut stream,
+        1,
+        "ext.list",
+        Some(json!({ "scope": "global" })),
+    )
+    .await;
+    let snap = r.result.unwrap();
+    assert_eq!(snap["skills"][0]["name"], "global-skill");
+
+    // Register a repo with one worktree, then toggle a plugin at repo scope.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("README"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "init"]);
+    let wt = tmp.path().join("wt");
+    git(
+        &repo,
+        &["worktree", "add", wt.to_str().unwrap(), "-b", "l1"],
+    );
+    let r = call(
+        &mut stream,
+        2,
+        "repo.add",
+        Some(json!({ "path": repo.to_str().unwrap() })),
+    )
+    .await;
+    let repo_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    let r = call(
+        &mut stream,
+        3,
+        "plugin.enable",
+        Some(json!({ "id": "superpowers@official", "scope": "repo", "repo_id": repo_id })),
+    )
+    .await;
+    let result = r.result.unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(
+        result["fanout"]["synced_lanes"].as_array().unwrap().len(),
+        1
+    );
+
+    // The toggle landed in the repo root AND the worktree.
+    for base in [&repo, &wt] {
+        let s: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(base.join(".claude/settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(s["enabledPlugins"]["superpowers@official"], true);
+    }
+
+    // Repo-scope list reflects it with enabled_source repo.
+    let r = call(
+        &mut stream,
+        4,
+        "ext.list",
+        Some(json!({ "scope": "repo", "repo_id": repo_id })),
+    )
+    .await;
+    let snap = r.result.unwrap();
+    let plugin = snap["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "superpowers@official")
+        .unwrap();
+    assert_eq!(plugin["enabled"], true);
+    assert_eq!(plugin["enabled_source"], "repo");
+
+    // Create a repo-scope skill: the daemon writes it under the repo's .claude/skills and fans
+    // it out to the worktree.
+    let r = call(
+        &mut stream,
+        5,
+        "skill.create",
+        Some(
+            json!({ "name": "e2e-skill", "description": "d", "scope": "repo", "repo_id": repo_id }),
+        ),
+    )
+    .await;
+    let skill_path = r.result.unwrap()["path"].as_str().unwrap().to_string();
+    assert!(Path::new(&skill_path).join("SKILL.md").is_file());
+    assert!(wt.join(".claude/skills/e2e-skill/SKILL.md").is_file());
+
+    // Write then read round-trips the content.
+    let r = call(
+        &mut stream,
+        6,
+        "skill.write",
+        Some(json!({ "path": skill_path, "content": "---\nname: e2e-skill\n---\nedited" })),
+    )
+    .await;
+    let result = r.result.unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(
+        result["fanout"]["synced_lanes"].as_array().unwrap().len(),
+        1
+    );
+    // The repo-scoped edit must reach the worktree, not just the repo root: a stale worktree
+    // copy would silently diverge from what the GUI just saved.
+    assert!(
+        std::fs::read_to_string(wt.join(".claude/skills/e2e-skill/SKILL.md"))
+            .unwrap()
+            .contains("edited")
+    );
+    let r = call(
+        &mut stream,
+        7,
+        "skill.read",
+        Some(json!({ "path": skill_path })),
+    )
+    .await;
+    assert!(
+        r.result.unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("edited")
+    );
+
+    // A path outside the managed skill roots is rejected.
+    let r = call(
+        &mut stream,
+        8,
+        "skill.read",
+        Some(json!({ "path": "/etc/passwd" })),
+    )
+    .await;
+    assert!(r.error.is_some());
+
+    // Delete removes it from the repo root and (via the re-run fan-out) the worktree.
+    let r = call(
+        &mut stream,
+        9,
+        "skill.delete",
+        Some(json!({ "name": "e2e-skill", "scope": "repo", "repo_id": repo_id })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["ok"], true);
+    assert!(!wt.join(".claude/skills/e2e-skill").exists());
+
+    // An empty skill name must be rejected, not treated as "the skills directory itself"
+    // (skills_dir.join("") == skills_dir would wipe every skill on delete).
+    let r = call(
+        &mut stream,
+        10,
+        "skill.delete",
+        Some(json!({ "name": "", "scope": "global" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "empty skill name must be rejected");
+    assert!(
+        claude_home
+            .path()
+            .join("skills/global-skill/SKILL.md")
+            .is_file(),
+        "the mass-delete bug would have wiped the whole skills directory"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn plugin_details_returns_cli_text_or_structured_error() {
+    // Missing CLI must produce -32021, not a crash. (PATH manipulation is process-global; if the
+    // real claude is installed this asserts the success path instead.)
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ext2-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+    let r = call(
+        &mut stream,
+        1,
+        "plugin.details",
+        Some(json!({ "id": "nonexistent-plugin-xyz@nowhere" })),
+    )
+    .await;
+    match (r.result, r.error) {
+        (Some(v), None) => assert!(v["text"].is_string()),
+        (None, Some(e)) => assert!(e.code == -32020 || e.code == -32021, "unexpected {e:?}"),
+        other => panic!("unexpected response {other:?}"),
+    }
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

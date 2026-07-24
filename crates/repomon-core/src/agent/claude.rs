@@ -609,15 +609,36 @@ pub fn summaries_for(cwd: &Path, within: Duration, max: usize) -> Vec<Transcript
 /// Which config dir holds `session_id`'s transcript for `cwd` (so adopt can resume it against
 /// the right account). `Some(None)` = the default `~/.claude`; `Some(Some(dir))` = a variant.
 pub fn config_base_for_session(cwd: &Path, session_id: &str) -> Option<Option<PathBuf>> {
+    transcript_location(cwd, session_id).map(|(_, config_dir)| config_dir)
+}
+
+fn transcript_location(cwd: &Path, session_id: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    if !valid_session_id(session_id) {
+        return None;
+    }
     let encoded = encode_project_dir(cwd);
     let file = format!("{session_id}.jsonl");
+
+    // Test override: a single projects dir, treated as the default account.
+    if let Ok(projects) = std::env::var("REPOMON_CLAUDE_PROJECTS") {
+        let path = PathBuf::from(projects).join(&encoded).join(&file);
+        return path.is_file().then_some((path, None));
+    }
+
     let default = default_config_base();
     for base in config_bases() {
-        if base.join("projects").join(&encoded).join(&file).is_file() {
-            return Some((base != default).then_some(base));
+        let path = base.join("projects").join(&encoded).join(&file);
+        if path.is_file() {
+            let config_dir = (base != default).then_some(base);
+            return Some((path, config_dir));
         }
     }
     None
+}
+
+/// Locate a known session's JSONL file without parsing the whole transcript.
+pub fn transcript_path_for_session(cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    transcript_location(cwd, session_id).map(|(path, _)| path)
 }
 
 /// Locate one specific Claude session's transcript by id — the direct-lookup counterpart to
@@ -628,24 +649,19 @@ pub fn config_base_for_session(cwd: &Path, session_id: &str) -> Option<Option<Pa
 /// recency — so it is never misattributed to some *other* active Claude session on the machine,
 /// however much more recently that one happened to touch its own transcript.
 pub fn transcript_for_session(cwd: &Path, session_id: &str) -> Option<TranscriptSummary> {
-    let encoded = encode_project_dir(cwd);
-    let file = format!("{session_id}.jsonl");
+    let (path, config_dir) = transcript_location(cwd, session_id)?;
+    let mut summary = parse_transcript(&path)?;
+    summary.config_dir = config_dir;
+    Some(summary)
+}
 
-    // Test override: a single projects dir, treated as the default account (mirrors `summary_for`).
-    if let Ok(p) = std::env::var("REPOMON_CLAUDE_PROJECTS") {
-        let path = PathBuf::from(p).join(&encoded).join(&file);
-        return parse_transcript(&path);
-    }
-
-    let default = default_config_base();
-    for base in config_bases() {
-        let path = base.join("projects").join(&encoded).join(&file);
-        if let Some(mut s) = parse_transcript(&path) {
-            s.config_dir = (base != default).then_some(base);
-            return Some(s);
-        }
-    }
-    None
+fn valid_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id != "."
+        && session_id != ".."
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -696,32 +712,14 @@ fn truncate(s: &str, n: usize) -> String {
 const TAIL_BYTES: u64 = 512 * 1024;
 /// Cap per-item text so payloads stay bounded (full messages, not titles).
 const ITEM_TEXT_MAX: usize = 4000;
+/// One backwards history page. A partial JSONL line at the front is deferred to the next page.
+const TRANSCRIPT_PAGE_BYTES: u64 = 128 * 1024;
 
-/// The last `max_items` conversation items from a transcript: user/assistant messages with
-/// their full unwrapped text, tool calls between messages aggregated into one "tools" item
-/// ("Bash ×2 · Edit"). The mobile client renders these natively instead of a desktop-width
-/// pane capture. Only the file tail is read.
-pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::TranscriptItem> {
+fn transcript_items<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    text_limit: Option<usize>,
+) -> Vec<crate::model::TranscriptItem> {
     use crate::model::TranscriptItem;
-    use std::io::{Read, Seek, SeekFrom};
-
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return Vec::new();
-    };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(TAIL_BYTES);
-    if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
-    let mut bytes = Vec::new();
-    if f.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines = text.lines();
-    if start > 0 {
-        lines.next(); // the seek likely landed mid-line — drop the partial one
-    }
 
     let mut items: Vec<TranscriptItem> = Vec::new();
     // Tool calls accumulated since the last message, in first-use order.
@@ -785,7 +783,9 @@ pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::Trans
                                     flush_tools(&mut items, &mut tools, &mut tools_at);
                                     items.push(TranscriptItem {
                                         role: "assistant".into(),
-                                        text: truncate(t, ITEM_TEXT_MAX),
+                                        text: text_limit
+                                            .map(|limit| truncate(t, limit))
+                                            .unwrap_or_else(|| t.to_string()),
                                         at,
                                     });
                                 }
@@ -815,7 +815,7 @@ pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::Trans
                         flush_tools(&mut items, &mut tools, &mut tools_at);
                         items.push(TranscriptItem {
                             role: "user".into(),
-                            text: truncate(&t, ITEM_TEXT_MAX),
+                            text: text_limit.map(|limit| truncate(&t, limit)).unwrap_or(t),
                             at,
                         });
                     }
@@ -825,11 +825,106 @@ pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::Trans
         }
     }
     flush_tools(&mut items, &mut tools, &mut tools_at);
+    items
+}
+
+/// The last `max_items` conversation items from a transcript: user/assistant messages with
+/// their full unwrapped text, tool calls between messages aggregated into one "tools" item
+/// ("Bash ×2 · Edit"). The mobile client renders these natively instead of a desktop-width
+/// pane capture. Only the file tail is read.
+pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::TranscriptItem> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(TAIL_BYTES);
+    if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if f.read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next();
+    }
+    let mut items = transcript_items(lines, Some(ITEM_TEXT_MAX));
 
     if items.len() > max_items {
         items.drain(..items.len() - max_items);
     }
     items
+}
+
+/// One bounded, backwards-readable page of a Claude transcript.
+pub struct TranscriptPage {
+    pub items: Vec<crate::model::TranscriptItem>,
+    pub next_before: Option<u64>,
+}
+
+fn transcript_page_with_bytes(path: &Path, before: Option<u64>, page_bytes: u64) -> TranscriptPage {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return TranscriptPage {
+            items: Vec::new(),
+            next_before: None,
+        };
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let end = before.unwrap_or(len).min(len);
+    if end == 0 {
+        return TranscriptPage {
+            items: Vec::new(),
+            next_before: None,
+        };
+    }
+
+    let mut requested = page_bytes.max(1).min(end);
+    loop {
+        let start = end.saturating_sub(requested);
+        let read_start = start.saturating_sub(1);
+        if file.seek(SeekFrom::Start(read_start)).is_err() {
+            return TranscriptPage {
+                items: Vec::new(),
+                next_before: None,
+            };
+        }
+        let mut bytes = vec![0; (end - read_start) as usize];
+        if file.read_exact(&mut bytes).is_err() {
+            return TranscriptPage {
+                items: Vec::new(),
+                next_before: None,
+            };
+        }
+
+        let (actual_start, body) = if start == 0 {
+            (0, bytes.as_slice())
+        } else if bytes.first() == Some(&b'\n') {
+            (start, &bytes[1..])
+        } else if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            (read_start + newline as u64 + 1, &bytes[newline + 1..])
+        } else {
+            requested = requested.saturating_mul(2).min(end);
+            continue;
+        };
+
+        let text = String::from_utf8_lossy(body);
+        return TranscriptPage {
+            items: transcript_items(text.lines(), None),
+            next_before: (actual_start > 0).then_some(actual_start),
+        };
+    }
+}
+
+/// Read the newest page when `before` is `None`, then progressively older pages by passing the
+/// returned `next_before`. Pages meet on JSONL line boundaries, so no message is skipped.
+pub fn transcript_page(path: &Path, before: Option<u64>) -> TranscriptPage {
+    transcript_page_with_bytes(path, before, TRANSCRIPT_PAGE_BYTES)
 }
 
 #[cfg(test)]
@@ -1029,6 +1124,15 @@ mod tests {
     }
 
     #[test]
+    fn transcript_session_lookup_rejects_path_components() {
+        let cwd = Path::new("/code/pinned");
+        for invalid in ["", ".", "..", "../secret", r"..\secret", "/tmp/secret"] {
+            assert!(transcript_for_session(cwd, invalid).is_none());
+            assert!(config_base_for_session(cwd, invalid).is_none());
+        }
+    }
+
+    #[test]
     fn waiting_when_last_entry_is_assistant_text() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = "/code/proj";
@@ -1110,6 +1214,73 @@ mod tests {
 
         // Missing file → empty, not an error.
         assert!(transcript_tail(&dir.path().join("nope.jsonl"), 10).is_empty());
+    }
+
+    #[test]
+    fn transcript_pages_walk_to_the_first_message_without_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "x".repeat(5000);
+        let lines = [
+            r#"{"type":"user","message":{"content":"first"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#
+                .to_string(),
+            r#"{"type":"user","message":{"content":"third"}}"#.to_string(),
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
+            ),
+        ];
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = write_transcript(dir.path(), "paged.jsonl", &refs);
+
+        let mut before = None;
+        let mut collected = Vec::new();
+        loop {
+            let page = transcript_page_with_bytes(&path, before, 96);
+            let mut items = page.items;
+            items.append(&mut collected);
+            collected = items;
+            match page.next_before {
+                Some(next) => {
+                    if let Some(previous) = before {
+                        assert!(next < previous, "the history cursor always moves backwards");
+                    }
+                    before = Some(next);
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(collected.len(), 4);
+        assert_eq!(collected[0].text, "first");
+        assert_eq!(collected[1].text, "second");
+        assert_eq!(collected[2].text, "third");
+        assert_eq!(collected[3].text, long);
+    }
+
+    #[test]
+    fn transcript_page_keeps_a_line_when_the_window_starts_at_its_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [
+            r#"{"type":"user","message":{"content":"first"}}"#,
+            r#"{"type":"user","message":{"content":"second"}}"#,
+            r#"{"type":"user","message":{"content":"third"}}"#,
+        ];
+        let path = write_transcript(dir.path(), "boundary.jsonl", &lines);
+        let boundary = (lines[0].len() + 1) as u64;
+        let page = transcript_page_with_bytes(
+            &path,
+            None,
+            std::fs::metadata(&path).unwrap().len() - boundary,
+        );
+
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "third"]
+        );
+        assert_eq!(page.next_before, Some(boundary));
     }
 
     #[test]

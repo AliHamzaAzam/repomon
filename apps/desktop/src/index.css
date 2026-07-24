@@ -149,6 +149,25 @@
   border-color: var(--attention);
 }
 
+.agent-history-message {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 5rem;
+  border-left: 2px solid var(--line);
+  padding-left: 0.75rem;
+}
+
+.agent-history-message.is-assistant {
+  border-color: var(--signal);
+}
+
+.agent-history-message.is-user {
+  border-color: var(--attention);
+}
+
+.agent-history-message.is-tools {
+  color: var(--muted);
+}
+
 .action-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

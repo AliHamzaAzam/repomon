@@ -5,6 +5,8 @@ import type {
   AgentChoice,
   BrowseResult,
   Commit,
+  ExtSnapshot,
+  FanoutSummary,
   Lane,
   PendingDialog,
   Repo,
@@ -36,6 +38,8 @@ export interface DaemonEvent<T = unknown> {
   method: `event.${string}`;
   params: T;
 }
+
+export type ExtScopeParams = { scope: "global" } | { scope: "repo"; repo_id: number };
 
 export interface ConfigView {
   accent?: string | null;
@@ -97,6 +101,10 @@ interface RpcMap {
   "agent.adopt": { params: { lane_id: number; session_id?: string }; result: { lane_id: number; window: string } };
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };
   "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };
+  "agent.transcript_page": {
+    params: { lane_id: number; session_id?: string; before?: number };
+    result: { items: TranscriptItem[]; next_before: number | null };
+  };
   "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };
   "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: null };
   "agent.pin": { params: { lane_id: number; pinned: boolean }; result: null };
@@ -104,7 +112,7 @@ interface RpcMap {
   "agent.send_input": { params: { lane_id: number; window?: string; text: string; enter?: boolean }; result: null };
   "agent.key": { params: { lane_id: number; window?: string; key: string; literal?: boolean }; result: null };
   "agent.scroll": {
-    params: { lane_id: number; window?: string; up: boolean; ticks: number };
+    params: { lane_id: number; window?: string; up: boolean; ticks: number; col: number; row: number };
     result: { forwarded: boolean };
   };
   "agent.resize": { params: { lane_id: number; window?: string; cols: number; rows: number }; result: null };
@@ -134,6 +142,20 @@ interface RpcMap {
   "orchestrator.key": { params: { key: string; literal?: boolean }; result: null };
   "orchestrator.watch": { params: { on: boolean }; result: null };
   "orchestrator.resize": { params: { cols: number; rows: number }; result: null };
+  "ext.list": { params: ExtScopeParams; result: ExtSnapshot };
+  "plugin.enable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
+  "plugin.disable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
+  "plugin.install": { params: { ref: string } & ExtScopeParams; result: { ok: boolean; stdout: string; fanout: FanoutSummary | null } };
+  "plugin.remove": { params: { id: string } & ExtScopeParams; result: { ok: boolean; stdout: string } };
+  "plugin.update": { params: { id?: string }; result: { ok: boolean; stdout: string } };
+  "plugin.details": { params: { id: string }; result: { text: string } };
+  "marketplace.add": { params: { source: string }; result: { ok: boolean; stdout: string } };
+  "marketplace.remove": { params: { name: string }; result: { ok: boolean; stdout: string } };
+  "marketplace.refresh": { params: { name?: string }; result: { ok: boolean; stdout: string } };
+  "skill.create": { params: { name: string; description?: string } & ExtScopeParams; result: { path: string } };
+  "skill.read": { params: { path: string }; result: { content: string } };
+  "skill.write": { params: { path: string; content: string }; result: { ok: boolean; fanout: FanoutSummary | null } };
+  "skill.delete": { params: { name: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
 }
 
 export type RpcMethod = keyof RpcMap;

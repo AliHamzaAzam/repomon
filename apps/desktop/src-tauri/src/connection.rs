@@ -18,6 +18,10 @@ pub struct DaemonStatus {
     pub lanes: usize,
     pub db_size_bytes: u64,
     pub version: String,
+    #[serde(default)]
+    pub protocol_revision: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -139,6 +143,8 @@ mod tests {
             lanes: 7,
             db_size_bytes: 8192,
             version: "0.5.0".into(),
+            protocol_revision: Some(2),
+            capabilities: vec!["terminal.checkpoint.v1".into()],
         };
 
         let connecting = ConnectionSnapshot::connecting(endpoint);
@@ -176,7 +182,9 @@ mod tests {
                         "repos": 3,
                         "lanes": 5,
                         "db_size_bytes": 4096,
-                        "version": "0.5.0"
+                        "version": "0.5.0",
+                        "protocol_revision": 2,
+                        "capabilities": ["terminal.checkpoint.v1"]
                     }),
                 ),
             )
@@ -191,5 +199,7 @@ mod tests {
         assert_eq!(status.repos, 3);
         assert_eq!(status.lanes, 5);
         assert_eq!(status.version, "0.5.0");
+        assert_eq!(status.protocol_revision, Some(2));
+        assert_eq!(status.capabilities, vec!["terminal.checkpoint.v1"]);
     }
 }

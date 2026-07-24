@@ -14,8 +14,8 @@ use crate::error::{Error, Result};
 use crate::model::LaneId;
 
 use super::backend::{
-    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, SessionBackend, SpawnSpec,
-    WindowActivity,
+    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, ScrollEvent, SessionBackend,
+    SpawnSpec, WindowActivity,
 };
 
 /// A handle to a managed tmux session. Cheap to clone.
@@ -418,13 +418,15 @@ impl TmuxRuntime {
 
     /// Forward `ticks` mouse-wheel scroll events to `window`'s app, so a full-screen agent scrolls
     /// its own history (the mediated pane can't otherwise — alternate-screen apps keep no tmux
-    /// scrollback). Sends SGR wheel sequences (button 64 = up, 65 = down) at the pane's top-left.
-    pub fn scroll_wheel_named(&self, window: &str, up: bool, ticks: u32) -> Result<()> {
-        if ticks == 0 {
+    /// scrollback). Sends SGR wheel sequences (button 64 = up, 65 = down) at the pointer cell.
+    pub fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()> {
+        if event.ticks == 0 {
             return Ok(());
         }
-        let button = if up { 64 } else { 65 };
-        let seq = format!("\x1b[<{button};1;1M").repeat(ticks as usize);
+        let button = if event.up { 64 } else { 65 };
+        let col = event.col.max(1);
+        let row = event.row.max(1);
+        let seq = format!("\x1b[<{button};{col};{row}M").repeat(event.ticks as usize);
         let target = self.exact_target(window);
         self.run_allow_absent(&["send-keys", "-t", &target, "-l", &seq])?;
         Ok(())
@@ -758,8 +760,8 @@ impl SessionBackend for TmuxRuntime {
         TmuxRuntime::alternate_on_named(self, window)
     }
 
-    fn scroll_wheel_named(&self, window: &str, up: bool, ticks: u32) -> Result<()> {
-        TmuxRuntime::scroll_wheel_named(self, window, up, ticks)
+    fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()> {
+        TmuxRuntime::scroll_wheel_named(self, window, event)
     }
 
     fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {

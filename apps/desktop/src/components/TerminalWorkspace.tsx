@@ -50,6 +50,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
       window: agent.tmux_window,
       label: agent.custom_label ?? agent.title ?? `${agent.agent} ${index + 1}`,
       shell: false,
+      sessionId: agent.session_id,
     }] : []),
     ...props.fleet.terminals()
       .filter((terminal) => terminal.lane_id === lane.id)
@@ -58,6 +59,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         window: terminal.id,
         label: `shell ${terminal.id.split("-").slice(-1)[0]}`,
         shell: true,
+        sessionId: null,
       })),
   ]))));
 
@@ -272,6 +274,9 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             {(target) => {
               const visibleIndex = createMemo(() => visibleTargets().findIndex((item) => item.window === target.window));
               const visible = createMemo(() => visibleIndex() >= 0);
+              const sessionId = createMemo(() => (
+                targets().find((item) => item.window === target.window)?.sessionId ?? null
+              ));
               return (
                 <div
                   class={`min-h-0 min-w-0 border-line ${visible() ? "" : "warm-terminal-hidden"}`}
@@ -292,6 +297,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     focused={activeWindow() === target.window}
                     visible={visible()}
                     shell={target.shell}
+                    sessionId={sessionId()}
                   />
                 </div>
               );
