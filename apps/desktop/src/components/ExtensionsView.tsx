@@ -27,21 +27,25 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
   };
   const cliTitle = () => (props.store.cliAvailable() ? undefined : "Requires the claude CLI");
 
-  function submitInstall(event: Event) {
+  async function submitInstall(event: Event) {
     event.preventDefault();
     const ref = installRef().trim();
     if (!ref) return;
-    void props.store.install(ref);
-    setInstallRef("");
-    setInstallOpen(false);
+    const ok = await props.store.install(ref);
+    if (ok) {
+      setInstallRef("");
+      setInstallOpen(false);
+    }
   }
 
-  function submitMarketplaceAdd(event: Event) {
+  async function submitMarketplaceAdd(event: Event) {
     event.preventDefault();
     const source = marketplaceSource().trim();
     if (!source) return;
-    void props.store.marketplaceAdd(source);
-    setMarketplaceSource("");
+    const ok = await props.store.marketplaceAdd(source);
+    if (ok) {
+      setMarketplaceSource("");
+    }
   }
 
   return (
@@ -82,7 +86,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
           <button
             type="button"
             class="focus-ring rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.58rem] uppercase text-muted disabled:opacity-40"
-            disabled={!props.store.cliAvailable()}
+            disabled={props.store.busy() || !props.store.cliAvailable()}
             title={cliTitle()}
             onClick={() => setInstallOpen((open) => !open)}
           >+ Install</button>
@@ -98,7 +102,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             <button
               type="submit"
               class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1.5 font-mono text-[0.6rem] uppercase text-signal disabled:opacity-40"
-              disabled={!props.store.cliAvailable()}
+              disabled={props.store.busy() || !props.store.cliAvailable()}
               title={cliTitle()}
             >Install</button>
           </form>

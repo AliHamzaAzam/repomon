@@ -1,4 +1,4 @@
-import { Show, createSignal } from "solid-js";
+import { Show } from "solid-js";
 
 import type { ExtensionsStore, ExtRow } from "../stores/extensions";
 
@@ -18,13 +18,8 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
       <Show when={props.row.kind === "plugin" ? props.row : null} keyed>
         {(row) => {
           const plugin = () => row.plugin;
-          const [detailsText, setDetailsText] = createSignal<string | null>(null);
+          const details = () => props.store.detailsFor(plugin().id);
           const cliTitle = () => (props.store.cliAvailable() ? undefined : "Requires the claude CLI");
-
-          async function loadDetails() {
-            const text = await props.store.details(plugin().id);
-            setDetailsText(text);
-          }
 
           return (
             <>
@@ -52,8 +47,10 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
               <div class="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  class="focus-ring rounded-md border border-line bg-raised px-2 py-1 font-mono text-[0.6rem] uppercase text-muted hover:text-foreground"
-                  onClick={() => void loadDetails()}
+                  class="focus-ring rounded-md border border-line bg-raised px-2 py-1 font-mono text-[0.6rem] uppercase text-muted hover:text-foreground disabled:opacity-40"
+                  disabled={props.store.busy() || !props.store.cliAvailable()}
+                  title={cliTitle()}
+                  onClick={() => void props.store.loadDetails(plugin().id)}
                 >Details</button>
                 <button
                   type="button"
@@ -70,8 +67,15 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
                   onClick={() => void props.store.remove(plugin().id)}
                 >Remove</button>
               </div>
-              <Show when={detailsText() !== null}>
-                <pre class="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[0.58rem]">{detailsText()}</pre>
+              <Show
+                when={details().error}
+                fallback={
+                  <Show when={details().text !== null}>
+                    <pre class="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[0.58rem]">{details().text}</pre>
+                  </Show>
+                }
+              >
+                {(err) => <p class="rounded-md border border-fault/40 bg-fault/10 px-2 py-1 font-mono text-[0.6rem] text-fault">{err()}</p>}
               </Show>
               <p class="text-[0.62rem] text-muted">Changes apply to new agent sessions.</p>
             </>

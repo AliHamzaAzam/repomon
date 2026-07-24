@@ -85,4 +85,25 @@ describe("extensions store", () => {
       dispose();
     });
   });
+
+  it("loadDetails caches text per id and scope change clears the cache", async () => {
+    await createRoot(async (dispose) => {
+      const src = source({
+        details: vi.fn().mockImplementation(async (id: string) => `details for ${id}`),
+      });
+      const store = createExtensionsStore(src);
+      await flush();
+
+      await store.loadDetails("superpowers@official");
+      await store.loadDetails("github@official");
+      expect(store.detailsFor("superpowers@official").text).toBe("details for superpowers@official");
+      expect(store.detailsFor("github@official").text).toBe("details for github@official");
+
+      store.setScope({ scope: "repo", repo_id: 7 });
+      await flush();
+      expect(store.detailsFor("superpowers@official").text).toBeNull();
+      expect(store.detailsFor("github@official").text).toBeNull();
+      dispose();
+    });
+  });
 });

@@ -47,6 +47,8 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   const [snapshot, setSnapshot] = createSignal<ExtSnapshot | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [detailsCache, setDetailsCache] = createSignal<Record<string, string>>({});
+  const [detailsErrorCache, setDetailsErrorCache] = createSignal<Record<string, string>>({});
 
   async function refresh() {
     setBusy(true);
@@ -62,52 +64,71 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
 
   function setScope(next: ExtScopeParams) {
     setScopeSignal(next);
+    setDetailsCache({});
+    setDetailsErrorCache({});
     void refresh();
   }
 
-  async function mutate(op: () => Promise<unknown>) {
+  async function mutate(op: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
     try {
       await op();
       setError(null);
       await refresh();
+      return true;
     } catch (cause) {
       setError(message(cause));
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
-  async function setEnabled(id: string, enabled: boolean) {
-    await mutate(() => source.setEnabled(id, enabled, scope()));
+  async function setEnabled(id: string, enabled: boolean): Promise<boolean> {
+    return mutate(() => source.setEnabled(id, enabled, scope()));
   }
 
-  async function install(ref: string) {
-    await mutate(() => source.install(ref, scope()));
+  async function install(ref: string): Promise<boolean> {
+    return mutate(() => source.install(ref, scope()));
   }
 
-  async function remove(id: string) {
-    await mutate(() => source.remove(id, scope()));
+  async function remove(id: string): Promise<boolean> {
+    return mutate(() => source.remove(id, scope()));
   }
 
-  async function update(id?: string) {
-    await mutate(() => source.update(id));
+  async function update(id?: string): Promise<boolean> {
+    return mutate(() => source.update(id));
   }
 
-  async function marketplaceAdd(value: string) {
-    await mutate(() => source.marketplaceAdd(value));
+  async function marketplaceAdd(value: string): Promise<boolean> {
+    return mutate(() => source.marketplaceAdd(value));
   }
 
-  async function marketplaceRemove(name: string) {
-    await mutate(() => source.marketplaceRemove(name));
+  async function marketplaceRemove(name: string): Promise<boolean> {
+    return mutate(() => source.marketplaceRemove(name));
   }
 
-  async function marketplaceRefresh(name?: string) {
-    await mutate(() => source.marketplaceRefresh(name));
+  async function marketplaceRefresh(name?: string): Promise<boolean> {
+    return mutate(() => source.marketplaceRefresh(name));
   }
 
-  async function details(id: string): Promise<string> {
-    return source.details(id);
+  async function loadDetails(id: string): Promise<void> {
+    try {
+      const text = await source.details(id);
+      setDetailsCache((prev) => ({ ...prev, [id]: text }));
+      setDetailsErrorCache((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    } catch (cause) {
+      setDetailsErrorCache((prev) => ({ ...prev, [id]: message(cause) }));
+    }
+  }
+
+  function detailsFor(id: string): { text: string | null; error: string | null } {
+    return { text: detailsCache()[id] ?? null, error: detailsErrorCache()[id] ?? null };
   }
 
   function cliAvailable(): boolean {
@@ -162,7 +183,8 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
     install,
     remove,
     update,
-    details,
+    detailsFor,
+    loadDetails,
     marketplaceAdd,
     marketplaceRemove,
     marketplaceRefresh,
