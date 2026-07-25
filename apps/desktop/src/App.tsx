@@ -21,6 +21,7 @@ import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./the
 import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
+import { createWorkspaceStore } from "./stores/workspace";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -57,6 +58,7 @@ function App(props: AppProps) {
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const actions = createActionsStore(fleet);
+  const workspace = createWorkspaceStore(fleet);
   const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   let stopListening: (() => void) | undefined;
@@ -260,7 +262,7 @@ function App(props: AppProps) {
             aria-hidden={extensionsOpen() ? "true" : undefined}
             inert={extensionsOpen()}
           >
-            <TerminalWorkspace fleet={fleet} actions={actions} />
+            <TerminalWorkspace fleet={fleet} actions={actions} workspace={workspace} />
           </div>
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">
