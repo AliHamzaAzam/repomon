@@ -215,8 +215,16 @@ export default function TerminalPane(props: TerminalPaneProps) {
       });
       terminal.onData((data) => input?.push(data));
 
+      // The last grid the backend actually confirmed (the watch ack, or an arbitrated fit). xterm
+      // must never be left sitting on a size the pane does not share: a column mismatch moves where
+      // lines wrap, so an agent's relative-cursor redraw (cursor-up, carriage return, erase-line)
+      // lands in the wrong columns and weaves fresh text through stale text.
+      let confirmedGrid: { cols: number; rows: number } | null = null;
+
       function applyGrid(cols?: number | null, rows?: number | null) {
-        if (terminal && cols && rows && (cols !== terminal.cols || rows !== terminal.rows)) {
+        if (!terminal || !cols || !rows) return;
+        confirmedGrid = { cols, rows };
+        if (cols !== terminal.cols || rows !== terminal.rows) {
           terminal.resize(cols, rows);
         }
       }
@@ -236,10 +244,21 @@ export default function TerminalPane(props: TerminalPaneProps) {
         if (!cols || !rows) return;
         const args = { lane_id: props.laneId, window: props.window, cols, rows };
         if (props.shell) {
+          // A GUI-owned shell has no other viewer, so our own resize is the authoritative one.
           await daemonCall("agent.resize", args).catch(() => undefined);
+          confirmedGrid = { cols, rows };
         } else {
+          const pinned = confirmedGrid;
           const grid = await daemonCall("agent.fit", args).catch(() => null);
-          if (grid) applyGrid(grid.cols, grid.rows);
+          if (grid?.cols && grid?.rows) {
+            applyGrid(grid.cols, grid.rows);
+          } else if (pinned) {
+            // Arbitration came back without a grid: the call failed, or the pane size query
+            // returned nothing. `fit()` already resized xterm locally, and keeping that unilateral
+            // size would leave us wrapping differently from the real pane, so pin back to the last
+            // size the backend confirmed rather than trusting the local guess.
+            applyGrid(pinned.cols, pinned.rows);
+          }
         }
       };
 
