@@ -4,6 +4,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
@@ -184,6 +185,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
         allowProposedApi: true,
         cursorBlink: true,
         cursorStyle: "bar",
+        // Send hyperlinks to the system browser. xterm's default opens them with `window.open`,
+        // which the webview treats as a navigation request: it prompts, and then goes nowhere
+        // because the app's own window cannot navigate off to an external site.
+        linkHandler: {
+          activate: (_event, uri) => {
+            void openUrl(uri).catch((error: unknown) => setTransportError(errorMessage(error)));
+          },
+        },
         fontFamily: '"Berkeley Mono", "SFMono-Regular", "Cascadia Code", monospace',
         fontSize: 12,
         lineHeight: 1.18,
