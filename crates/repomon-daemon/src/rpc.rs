@@ -246,12 +246,18 @@ enum ExtScope {
 struct ExtList {
     #[serde(flatten)]
     scope: ExtScope,
+    /// Which Claude account (config dir) to target. `None`/`"default"` = `~/.claude`.
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct PluginToggle {
     id: String,
     #[serde(flatten)]
     scope: ExtScope,
+    /// Which Claude account (config dir) to target. `None`/`"default"` = `~/.claude`.
+    #[serde(default)]
+    account: Option<String>,
 }
 fn ext_scope_json(scope: &ExtScope) -> Value {
     match scope {
@@ -264,28 +270,41 @@ struct PluginInstall {
     r#ref: String,
     #[serde(flatten)]
     scope: ExtScope,
+    /// Which Claude account (config dir) to target. `None`/`"default"` = `~/.claude`.
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct NameOnly {
     name: String,
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct OptionalName {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct IdOnly {
     id: String,
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct OptionalId {
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct SourceOnly {
     source: String,
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct SkillCreate {
@@ -294,6 +313,9 @@ struct SkillCreate {
     description: Option<String>,
     #[serde(flatten)]
     scope: ExtScope,
+    /// Which Claude account (config dir) to target. `None`/`"default"` = `~/.claude`.
+    #[serde(default)]
+    account: Option<String>,
 }
 #[derive(Deserialize)]
 struct SkillPath {
@@ -309,6 +331,9 @@ struct SkillDelete {
     name: String,
     #[serde(flatten)]
     scope: ExtScope,
+    /// Which Claude account (config dir) to target. `None`/`"default"` = `~/.claude`.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 /// Cached once a detection succeeds: repeated CLI-present checks (eg. every `ext.list`) shouldn't
@@ -346,12 +371,19 @@ fn cli_error(failure: crate::ext::CliFailure) -> RpcError {
     }
 }
 
-/// Run a CLI op off the async runtime, emit event.ext.changed, and return {ok, stdout}.
-async fn run_cli_op(ctx: &Ctx, args: Vec<String>, changed_scope: Value) -> Result<Value, RpcError> {
+/// Run a CLI op off the async runtime under the given account, emit event.ext.changed, and return
+/// {ok, stdout}. `account` picks the `CLAUDE_CONFIG_DIR` the `claude` CLI runs under.
+async fn run_cli_op(
+    ctx: &Ctx,
+    account: Option<&str>,
+    args: Vec<String>,
+    changed_scope: Value,
+) -> Result<Value, RpcError> {
     let cli = claude_cli().await?;
+    let config_dir = crate::ext::account_config_dir(account);
     let stdout = tokio::task::spawn_blocking(move || {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        cli.run(&arg_refs)
+        cli.run_for(config_dir.as_deref(), &arg_refs)
     })
     .await
     .map_err(internal)?
@@ -893,8 +925,7 @@ pub async fn dispatch(
         // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----
         "ext.list" => {
             let p: ExtList = parse(params)?;
-            let home = crate::ext::claude_home()
-                .ok_or_else(|| internal("cannot resolve home directory"))?;
+            let account = p.account.clone().unwrap_or_else(|| "default".to_string());
             let repo_root = match p.scope {
                 ExtScope::Global => None,
                 ExtScope::Repo { repo_id } => {
@@ -903,8 +934,26 @@ pub async fn dispatch(
             };
             // A missing CLI is fine for listing: just leave cli_version unset.
             let cli_version = claude_cli().await.ok().map(|c| c.version.clone());
-            let snap = tokio::task::spawn_blocking(move || {
-                crate::ext::scan(&home, repo_root.as_deref(), cli_version)
+            let accounts = crate::ext::ext_accounts();
+            // `claude_home_for` returns None for Codex (no Claude-style extension home).
+            let home = crate::ext::claude_home_for(p.account.as_deref());
+            let snap = tokio::task::spawn_blocking(move || match home {
+                Some(home) => {
+                    let mut snap = crate::ext::scan(&home, repo_root.as_deref(), cli_version);
+                    snap.accounts = accounts;
+                    snap.account = account;
+                    snap
+                }
+                // Codex or an unknown account: return an empty, correctly-attributed snapshot
+                // rather than silently falling back to the default account's extensions.
+                None => repomon_core::model::ExtSnapshot {
+                    cli_version,
+                    marketplaces: Vec::new(),
+                    plugins: Vec::new(),
+                    skills: Vec::new(),
+                    accounts,
+                    account,
+                },
             })
             .await
             .map_err(internal)?;
@@ -915,8 +964,8 @@ pub async fn dispatch(
             let p: PluginToggle = parse(params)?;
             let (settings, fanout_root) = match &p.scope {
                 ExtScope::Global => {
-                    let home = crate::ext::claude_home()
-                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    let home = crate::ext::claude_home_for(p.account.as_deref())
+                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
                     (home.join("settings.json"), None)
                 }
                 ExtScope::Repo { repo_id } => {
@@ -951,6 +1000,7 @@ pub async fn dispatch(
             // held until every side effect has actually succeeded.
             let p: PluginInstall = parse(params)?;
             let cli = claude_cli().await?;
+            let config_dir = crate::ext::account_config_dir(p.account.as_deref());
             let args: [String; 5] = [
                 "plugin".into(),
                 "install".into(),
@@ -960,7 +1010,7 @@ pub async fn dispatch(
             ];
             let stdout = tokio::task::spawn_blocking(move || {
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                cli.run(&arg_refs)
+                cli.run_for(config_dir.as_deref(), &arg_refs)
             })
             .await
             .map_err(internal)?
@@ -990,6 +1040,7 @@ pub async fn dispatch(
             let p: PluginToggle = parse(params)?;
             run_cli_op(
                 ctx,
+                p.account.as_deref(),
                 vec!["plugin".into(), "uninstall".into(), p.id.clone()],
                 ext_scope_json(&p.scope),
             )
@@ -1001,12 +1052,15 @@ pub async fn dispatch(
             if let Some(id) = p.id {
                 args.push(id)
             }
-            run_cli_op(ctx, args, json!({ "scope": "global" })).await
+            run_cli_op(ctx, p.account.as_deref(), args, json!({ "scope": "global" })).await
         }
         "plugin.details" => {
             let p: IdOnly = parse(params)?;
             let cli = claude_cli().await?;
-            let text = tokio::task::spawn_blocking(move || cli.run(&["plugin", "details", &p.id]))
+            let config_dir = crate::ext::account_config_dir(p.account.as_deref());
+            let text = tokio::task::spawn_blocking(move || {
+                cli.run_for(config_dir.as_deref(), &["plugin", "details", &p.id])
+            })
                 .await
                 .map_err(internal)?
                 .map_err(cli_error)?;
@@ -1016,6 +1070,7 @@ pub async fn dispatch(
             let p: SourceOnly = parse(params)?;
             run_cli_op(
                 ctx,
+                p.account.as_deref(),
                 vec![
                     "plugin".into(),
                     "marketplace".into(),
@@ -1030,6 +1085,7 @@ pub async fn dispatch(
             let p: NameOnly = parse(params)?;
             run_cli_op(
                 ctx,
+                p.account.as_deref(),
                 vec![
                     "plugin".into(),
                     "marketplace".into(),
@@ -1046,7 +1102,7 @@ pub async fn dispatch(
             if let Some(name) = p.name {
                 args.push(name)
             }
-            run_cli_op(ctx, args, json!({ "scope": "global" })).await
+            run_cli_op(ctx, p.account.as_deref(), args, json!({ "scope": "global" })).await
         }
 
         // ---- skills (create/read/write/delete SKILL.md, path-guarded) ----
@@ -1054,8 +1110,8 @@ pub async fn dispatch(
             let p: SkillCreate = parse(params)?;
             let (skills_dir, fanout_root) = match &p.scope {
                 ExtScope::Global => {
-                    let home = crate::ext::claude_home()
-                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    let home = crate::ext::claude_home_for(p.account.as_deref())
+                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
                     (home.join("skills"), None)
                 }
                 ExtScope::Repo { repo_id } => {
@@ -1140,8 +1196,8 @@ pub async fn dispatch(
             }
             let (skills_dir, fanout_root) = match &p.scope {
                 ExtScope::Global => {
-                    let home = crate::ext::claude_home()
-                        .ok_or_else(|| internal("cannot resolve home directory"))?;
+                    let home = crate::ext::claude_home_for(p.account.as_deref())
+                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
                     (home.join("skills"), None)
                 }
                 ExtScope::Repo { repo_id } => {

@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { FleetStore } from "../stores/fleet";
 import type { ExtensionsStore, ExtFilter, ExtRow } from "../stores/extensions";
@@ -37,6 +37,18 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
   };
   const cliTitle = () => (props.store.cliAvailable() ? undefined : "Requires the claude CLI");
 
+  // The daemon only emits event.ext.changed for its own operations. Skills or marketplaces added
+  // externally (the claude CLI, editing files, another client) fire nothing, and the store loads
+  // once at app start. Re-list whenever this view opens and whenever the window regains focus, so
+  // an external addition shows up without needing an in-app mutation. Scoped to the view's lifetime
+  // (it mounts on open, unmounts on close) so we don't poll the daemon while the tab is closed.
+  onMount(() => {
+    void props.store.refresh();
+    const onFocus = () => void props.store.refresh();
+    window.addEventListener("focus", onFocus);
+    onCleanup(() => window.removeEventListener("focus", onFocus));
+  });
+
   async function submitInstall(event: Event) {
     event.preventDefault();
     const ref = installRef().trim();
@@ -74,6 +86,26 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
   return (
     <div class="flex h-full min-h-0">
       <div class="flex min-w-0 flex-1 flex-col gap-3 p-4">
+        <Show when={props.store.accounts().length > 1}>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-mono text-[0.55rem] uppercase tracking-[0.1em] text-muted">Account</span>
+            <For each={props.store.accounts()}>
+              {(acct) => (
+                <button
+                  type="button"
+                  class={`focus-ring rounded-md border px-2.5 py-1 font-mono text-[0.62rem] ${props.store.account() === acct.key ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
+                  onClick={() => props.store.setAccount(acct.key)}
+                  title={acct.claude ? undefined : "Codex uses a different extension model"}
+                >{acct.label}</button>
+              )}
+            </For>
+          </div>
+        </Show>
+        <Show when={props.store.accounts().find((a) => a.key === props.store.account())?.claude === false}>
+          <p class="font-mono text-[0.6rem] leading-relaxed text-muted">
+            Codex uses a different extension model. Claude marketplaces, plugins, and skills do not apply here.
+          </p>
+        </Show>
         <div class="flex flex-wrap items-center gap-2">
           <button
             type="button"

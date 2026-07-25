@@ -14,11 +14,11 @@ export interface ExtSource {
   setEnabled(id: string, enabled: boolean, scope: ExtScopeParams): Promise<unknown>;
   install(ref: string, scope: ExtScopeParams): Promise<unknown>;
   remove(id: string, scope: ExtScopeParams): Promise<unknown>;
-  update(id: string | undefined): Promise<unknown>;
-  details(id: string): Promise<string>;
-  marketplaceAdd(source: string): Promise<unknown>;
-  marketplaceRemove(name: string): Promise<unknown>;
-  marketplaceRefresh(name: string | undefined): Promise<unknown>;
+  update(id: string | undefined, account: string): Promise<unknown>;
+  details(id: string, account: string): Promise<string>;
+  marketplaceAdd(source: string, account: string): Promise<unknown>;
+  marketplaceRemove(name: string, account: string): Promise<unknown>;
+  marketplaceRefresh(name: string | undefined, account: string): Promise<unknown>;
   createSkill(name: string, description: string | undefined, scope: ExtScopeParams): Promise<unknown>;
   deleteSkill(name: string, scope: ExtScopeParams): Promise<unknown>;
   subscribe?(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
@@ -30,11 +30,11 @@ export const daemonExtSource: ExtSource = {
     daemonCall(enabled ? "plugin.enable" : "plugin.disable", { id, ...scope }),
   install: (ref, scope) => daemonCall("plugin.install", { ref, ...scope }),
   remove: (id, scope) => daemonCall("plugin.remove", { id, ...scope }),
-  update: (id) => daemonCall("plugin.update", { id }),
-  details: async (id) => (await daemonCall("plugin.details", { id })).text,
-  marketplaceAdd: (source) => daemonCall("marketplace.add", { source }),
-  marketplaceRemove: (name) => daemonCall("marketplace.remove", { name }),
-  marketplaceRefresh: (name) => daemonCall("marketplace.refresh", { name }),
+  update: (id, account) => daemonCall("plugin.update", { id, account }),
+  details: async (id, account) => (await daemonCall("plugin.details", { id, account })).text,
+  marketplaceAdd: (source, account) => daemonCall("marketplace.add", { source, account }),
+  marketplaceRemove: (name, account) => daemonCall("marketplace.remove", { name, account }),
+  marketplaceRefresh: (name, account) => daemonCall("marketplace.refresh", { name, account }),
   createSkill: (name, description, scope) => daemonCall("skill.create", { name, description, ...scope }),
   deleteSkill: (name, scope) => daemonCall("skill.delete", { name, ...scope }),
   subscribe: subscribeDaemon,
@@ -46,6 +46,9 @@ function message(error: unknown): string {
 
 export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   const [scope, setScopeSignal] = createSignal<ExtScopeParams>({ scope: "global" });
+  // Which Claude account (config dir) the view targets. Orthogonal to global/repo scope. Keyed the
+  // same as the usage probe: "default" = ~/.claude, a config-dir path for a variant, "codex".
+  const [account, setAccountSignal] = createSignal<string>("default");
   const [query, setQuery] = createSignal("");
   const [filter, setFilter] = createSignal<ExtFilter>("all");
   const [snapshot, setSnapshot] = createSignal<ExtSnapshot | null>(null);
@@ -54,10 +57,16 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   const [detailsCache, setDetailsCache] = createSignal<Record<string, string>>({});
   const [detailsErrorCache, setDetailsErrorCache] = createSignal<Record<string, string>>({});
 
+  // Every daemon call carries the scope and the selected account.
+  const params = (): ExtScopeParams => ({ ...scope(), account: account() });
+
+  // Accounts to offer in the picker, surfaced by the daemon in each snapshot.
+  const accounts = createMemo(() => snapshot()?.accounts ?? []);
+
   async function refresh() {
     setBusy(true);
     try {
-      setSnapshot(await source.list(scope()));
+      setSnapshot(await source.list(params()));
       setError(null);
     } catch (cause) {
       setError(message(cause));
@@ -68,6 +77,13 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
 
   function setScope(next: ExtScopeParams) {
     setScopeSignal(next);
+    setDetailsCache({});
+    setDetailsErrorCache({});
+    void refresh();
+  }
+
+  function setAccount(next: string) {
+    setAccountSignal(next);
     setDetailsCache({});
     setDetailsErrorCache({});
     void refresh();
@@ -89,44 +105,44 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   }
 
   async function setEnabled(id: string, enabled: boolean): Promise<boolean> {
-    return mutate(() => source.setEnabled(id, enabled, scope()));
+    return mutate(() => source.setEnabled(id, enabled, params()));
   }
 
   async function install(ref: string): Promise<boolean> {
-    return mutate(() => source.install(ref, scope()));
+    return mutate(() => source.install(ref, params()));
   }
 
   async function remove(id: string): Promise<boolean> {
-    return mutate(() => source.remove(id, scope()));
+    return mutate(() => source.remove(id, params()));
   }
 
   async function update(id?: string): Promise<boolean> {
-    return mutate(() => source.update(id));
+    return mutate(() => source.update(id, account()));
   }
 
   async function marketplaceAdd(value: string): Promise<boolean> {
-    return mutate(() => source.marketplaceAdd(value));
+    return mutate(() => source.marketplaceAdd(value, account()));
   }
 
   async function marketplaceRemove(name: string): Promise<boolean> {
-    return mutate(() => source.marketplaceRemove(name));
+    return mutate(() => source.marketplaceRemove(name, account()));
   }
 
   async function marketplaceRefresh(name?: string): Promise<boolean> {
-    return mutate(() => source.marketplaceRefresh(name));
+    return mutate(() => source.marketplaceRefresh(name, account()));
   }
 
   async function createSkill(name: string, description?: string): Promise<boolean> {
-    return mutate(() => source.createSkill(name, description, scope()));
+    return mutate(() => source.createSkill(name, description, params()));
   }
 
   async function deleteSkill(name: string): Promise<boolean> {
-    return mutate(() => source.deleteSkill(name, scope()));
+    return mutate(() => source.deleteSkill(name, params()));
   }
 
   async function loadDetails(id: string): Promise<void> {
     try {
-      const text = await source.details(id);
+      const text = await source.details(id, account());
       setDetailsCache((prev) => ({ ...prev, [id]: text }));
       setDetailsErrorCache((prev) => {
         if (!(id in prev)) return prev;
@@ -182,6 +198,9 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   return {
     scope,
     setScope,
+    account,
+    setAccount,
+    accounts,
     query,
     setQuery,
     filter,

@@ -39,7 +39,9 @@ export interface DaemonEvent<T = unknown> {
   params: T;
 }
 
-export type ExtScopeParams = { scope: "global" } | { scope: "repo"; repo_id: number };
+export type ExtScope = { scope: "global" } | { scope: "repo"; repo_id: number };
+/** Ext RPC params: a scope plus the Claude account (config dir) to target. Omitted = "default" (~/.claude). */
+export type ExtScopeParams = ExtScope & { account?: string };
 
 export interface ConfigView {
   accent?: string | null;
@@ -147,11 +149,11 @@ interface RpcMap {
   "plugin.disable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
   "plugin.install": { params: { ref: string } & ExtScopeParams; result: { ok: boolean; stdout: string; fanout: FanoutSummary | null } };
   "plugin.remove": { params: { id: string } & ExtScopeParams; result: { ok: boolean; stdout: string } };
-  "plugin.update": { params: { id?: string }; result: { ok: boolean; stdout: string } };
-  "plugin.details": { params: { id: string }; result: { text: string } };
-  "marketplace.add": { params: { source: string }; result: { ok: boolean; stdout: string } };
-  "marketplace.remove": { params: { name: string }; result: { ok: boolean; stdout: string } };
-  "marketplace.refresh": { params: { name?: string }; result: { ok: boolean; stdout: string } };
+  "plugin.update": { params: { id?: string; account?: string }; result: { ok: boolean; stdout: string } };
+  "plugin.details": { params: { id: string; account?: string }; result: { text: string } };
+  "marketplace.add": { params: { source: string; account?: string }; result: { ok: boolean; stdout: string } };
+  "marketplace.remove": { params: { name: string; account?: string }; result: { ok: boolean; stdout: string } };
+  "marketplace.refresh": { params: { name?: string; account?: string }; result: { ok: boolean; stdout: string } };
   "skill.create": { params: { name: string; description?: string } & ExtScopeParams; result: { path: string } };
   "skill.read": { params: { path: string }; result: { content: string } };
   "skill.write": { params: { path: string; content: string }; result: { ok: boolean; fanout: FanoutSummary | null } };

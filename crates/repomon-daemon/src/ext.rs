@@ -7,9 +7,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use repomon_core::agent::claude::{account_key, account_label, config_bases, default_config_base};
 use repomon_core::model::{
-    EnabledSource, ExtSnapshot, FanoutSummary, MarketplaceInfo, PluginInfo, PluginProvides,
-    SkillInfo, SkillSource, SkippedLane,
+    EnabledSource, ExtAccount, ExtSnapshot, FanoutSummary, MarketplaceInfo, PluginInfo,
+    PluginProvides, SkillInfo, SkillSource, SkippedLane,
 };
 use serde_json::Value;
 
@@ -20,6 +21,56 @@ pub fn claude_home() -> Option<PathBuf> {
         return Some(PathBuf::from(dir));
     }
     directories::BaseDirs::new().map(|b| b.home_dir().join(".claude"))
+}
+
+/// Accounts to offer in the extensions picker: each detected Claude config dir that has actually
+/// been used (has a `projects/` dir), plus Codex if `~/.codex` exists. Keys match the usage probe's
+/// `account_key`, so the extensions and usage surfaces agree on account identity.
+pub fn ext_accounts() -> Vec<ExtAccount> {
+    let default = default_config_base();
+    let mut out: Vec<ExtAccount> = config_bases()
+        .into_iter()
+        .filter(|base| base.join("projects").is_dir())
+        .map(|base| {
+            let cfg = (base != default).then(|| base.clone());
+            ExtAccount {
+                key: account_key(cfg.as_deref()),
+                label: account_label(cfg.as_deref()),
+                claude: true,
+            }
+        })
+        .collect();
+    if let Some(dirs) = directories::BaseDirs::new() {
+        if dirs.home_dir().join(".codex").is_dir() {
+            out.push(ExtAccount {
+                key: "codex".to_string(),
+                label: "codex".to_string(),
+                claude: false,
+            });
+        }
+    }
+    out
+}
+
+/// Resolve an account key (see `ExtAccount::key`) to the Claude config home to scan and mutate.
+/// `None`/`"default"` -> the default `~/.claude` (honoring `REPOMON_CLAUDE_HOME`). A config-dir
+/// path -> that path. `"codex"` -> `None`: Codex has no Claude-style extension home to scan.
+pub fn claude_home_for(account: Option<&str>) -> Option<PathBuf> {
+    match account {
+        None | Some("default") => claude_home(),
+        Some("codex") => None,
+        Some(path) => Some(PathBuf::from(path)),
+    }
+}
+
+/// The `CLAUDE_CONFIG_DIR` a `claude` CLI op should run under for an account. `None` = the default
+/// account, where the variable is *unset* so a bare `claude` cannot inherit the daemon's own leaked
+/// `CLAUDE_CONFIG_DIR`. `Some(dir)` pins a variant account.
+pub fn account_config_dir(account: Option<&str>) -> Option<PathBuf> {
+    match account {
+        Some(path) if path != "default" && path != "codex" => Some(PathBuf::from(path)),
+        _ => None,
+    }
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -245,14 +296,29 @@ impl ClaudeCli {
     }
 
     pub fn run(&self, args: &[&str]) -> Result<String, CliFailure> {
-        let out = std::process::Command::new(&self.bin)
-            .args(args)
-            .output()
-            .map_err(|e| CliFailure {
-                message: format!("failed to launch claude: {e}"),
-                stderr: String::new(),
-                exit_code: None,
-            })?;
+        self.run_for(None, args)
+    }
+
+    /// Like [`run`], but pinned to an account's config dir. `Some(dir)` sets `CLAUDE_CONFIG_DIR`;
+    /// `None` unsets it so the default `~/.claude` account is used regardless of the daemon's own
+    /// environment (the daemon is often started from a `claude-work` shell, which would otherwise
+    /// leak into a bare `claude` and target the wrong account).
+    pub fn run_for(&self, config_dir: Option<&Path>, args: &[&str]) -> Result<String, CliFailure> {
+        let mut cmd = std::process::Command::new(&self.bin);
+        cmd.args(args);
+        match config_dir {
+            Some(dir) => {
+                cmd.env("CLAUDE_CONFIG_DIR", dir);
+            }
+            None => {
+                cmd.env_remove("CLAUDE_CONFIG_DIR");
+            }
+        }
+        let out = cmd.output().map_err(|e| CliFailure {
+            message: format!("failed to launch claude: {e}"),
+            stderr: String::new(),
+            exit_code: None,
+        })?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
@@ -333,6 +399,10 @@ pub fn scan(
         marketplaces: scan_marketplaces(claude_home),
         plugins,
         skills,
+        // The RPC handler fills these in from the requested account; scan stays hermetic so tests
+        // do not read the real home to enumerate accounts.
+        accounts: Vec::new(),
+        account: String::new(),
     }
 }
 

@@ -604,6 +604,23 @@ pub struct MarketplaceInfo {
     pub last_updated: Option<String>,
 }
 
+/// One account the extensions view can target. Keyed the same way as the usage probe
+/// (`agent::claude::account_key`) so the two surfaces agree on account identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct ExtAccount {
+    /// Stable key: `"default"` for `~/.claude`, the config-dir path for a variant
+    /// (e.g. `~/.claude-work`), or `"codex"` for Codex.
+    pub key: String,
+    /// Short human label: `"main"`, `"work"`, `"codex"`.
+    pub label: String,
+    /// Whether repomon manages Claude-style extensions (marketplaces/plugins/skills) for this
+    /// account. False for Codex, which uses a different model, so the UI can show an honest empty
+    /// state instead of pretending it has Claude plugins.
+    pub claude: bool,
+}
+
 /// The full extensions snapshot for one scope, returned by `ext.list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -614,6 +631,10 @@ pub struct ExtSnapshot {
     pub marketplaces: Vec<MarketplaceInfo>,
     pub plugins: Vec<PluginInfo>,
     pub skills: Vec<SkillInfo>,
+    /// Accounts available to view and manage. The account picker is built from this.
+    pub accounts: Vec<ExtAccount>,
+    /// The account key this snapshot reflects (echo of the request; `"default"` when unspecified).
+    pub account: String,
 }
 
 /// A lane worktree the repo-scope fan-out could not sync.

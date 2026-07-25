@@ -12,6 +12,8 @@ const snapshot: ExtSnapshot = {
     { id: "github@official", name: "github", marketplace: "official", version: null, enabled: false, enabled_source: "default", provides: null, installed: true },
   ],
   skills: [{ name: "verify", description: "checks things", source: "project", path: "/r/.claude/skills/verify" }],
+  accounts: [{ key: "default", label: "main", claude: true }],
+  account: "default",
 };
 
 function source(overrides: Partial<ExtSource> = {}): ExtSource {
@@ -58,8 +60,24 @@ describe("extensions store", () => {
       store.setScope({ scope: "repo", repo_id: 7 });
       await flush();
       await store.setEnabled("github@official", true);
-      expect(src.setEnabled).toHaveBeenCalledWith("github@official", true, { scope: "repo", repo_id: 7 });
+      expect(src.setEnabled).toHaveBeenCalledWith("github@official", true, { scope: "repo", repo_id: 7, account: "default" });
       expect(src.list).toHaveBeenCalledTimes(3); // initial + scope change + post-toggle refresh
+      dispose();
+    });
+  });
+
+  it("targets the selected account in scope-based and CLI calls", async () => {
+    await createRoot(async (dispose) => {
+      const src = source();
+      const store = createExtensionsStore(src);
+      await flush();
+      store.setAccount("/Users/me/.claude-work");
+      await flush();
+      // Scope-based call carries the account merged into the scope params...
+      expect(src.list).toHaveBeenLastCalledWith({ scope: "global", account: "/Users/me/.claude-work" });
+      // ...and a CLI mutation carries it as its own argument.
+      await store.marketplaceAdd("owner/repo");
+      expect(src.marketplaceAdd).toHaveBeenCalledWith("owner/repo", "/Users/me/.claude-work");
       dispose();
     });
   });
@@ -83,7 +101,7 @@ describe("extensions store", () => {
       await flush();
       expect(store.cliAvailable()).toBe(false); // fixture cli_version: null
       await store.install("x@official");
-      expect(src.install).toHaveBeenCalledWith("x@official", { scope: "global" });
+      expect(src.install).toHaveBeenCalledWith("x@official", { scope: "global", account: "default" });
       dispose();
     });
   });
