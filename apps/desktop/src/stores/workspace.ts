@@ -41,12 +41,8 @@ export function createWorkspaceStore(fleet: FleetStore) {
   // visibleTargets / the viewport.set effect when nothing actually changed.
   const sameTargets = (a: PaneTarget[], b: PaneTarget[]) =>
     a.length === b.length && a.every((target, index) => target === b[index]);
-  // `createMemo` runs its computation once immediately (not lazily on first read), so guard the
-  // fleet reads with a fallback: unit tests that only stub the store methods they exercise
-  // (`refresh`, `selectedLaneId`) would otherwise throw the moment the store is constructed. The
-  // real FleetStore from `createFleetStore` always provides both accessors.
-  const lanes = () => fleet.lanes?.() ?? [];
-  const terminals = () => fleet.terminals?.() ?? [];
+  const lanes = () => fleet.lanes();
+  const terminals = () => fleet.terminals();
   const targets = createMemo(() => stabilizeTargets(targetCache, dedupe(lanes().flatMap((lane) => [
     ...lane.agent_sessions.flatMap((agent, index): PaneTarget[] => agent.tmux_window ? [{
       laneId: lane.id,

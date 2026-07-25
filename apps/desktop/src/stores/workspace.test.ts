@@ -12,7 +12,12 @@ function target(window: string): PaneTarget {
 }
 
 function fleetStub(): FleetStore {
-  return { refresh: vi.fn().mockResolvedValue(undefined), selectedLaneId: () => 7 } as unknown as FleetStore;
+  return {
+    refresh: vi.fn().mockResolvedValue(undefined),
+    selectedLaneId: () => 7,
+    lanes: () => [],
+    terminals: () => [],
+  } as unknown as FleetStore;
 }
 
 describe("workspace store", () => {
