@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 
-import type { Lane, Repo } from "../bindings";
+import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ConfirmOptions } from "../components/ConfirmDialog";
 import { pickDirectory } from "../ipc/dialog";
 import { daemonCall } from "../ipc/rpc";
@@ -47,6 +47,65 @@ export function createActionsStore(fleet: FleetStore) {
     });
   }
 
+  /// Pin or unpin the lane. Pinning is not destructive, so it applies immediately.
+  async function pinLane(lane: Lane) {
+    setError(null);
+    try {
+      await daemonCall("agent.pin", { lane_id: lane.id, pinned: !lane.pinned });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function mergeLane(lane: Lane) {
+    setConfirmOptions({
+      title: "Merge lane?",
+      message: `Merge ${lane.worktree.branch ?? lane.worktree.name} into the repository base branch.`,
+      confirmLabel: "Merge",
+      onConfirm: async () => {
+        await daemonCall("lane.merge", { lane_id: lane.id });
+        await fleet.refresh();
+      },
+    });
+  }
+
+  function deleteLane(lane: Lane) {
+    setConfirmOptions({
+      title: "Delete lane?",
+      message: `Remove the ${lane.worktree.name} worktree. The branch is kept.`,
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm: async () => {
+        await daemonCall("lane.delete", { lane_id: lane.id, also_delete_branch: false });
+        await fleet.refresh();
+      },
+    });
+  }
+
+  function stopAgent(lane: Lane, agent: AgentSession | null) {
+    setConfirmOptions({
+      title: "Stop agent?",
+      message: "Stop this managed agent. Its terminal session ends.",
+      confirmLabel: "Stop",
+      danger: true,
+      onConfirm: async () => {
+        await daemonCall("agent.stop", { lane_id: lane.id, window: agent?.tmux_window ?? undefined });
+        await fleet.refresh();
+      },
+    });
+  }
+
+  async function adoptAgent(lane: Lane, agent: AgentSession | null) {
+    setError(null);
+    try {
+      await daemonCall("agent.adopt", { lane_id: lane.id, session_id: agent?.session_id ?? undefined });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   return {
     fleet,
     error,
@@ -72,6 +131,11 @@ export function createActionsStore(fleet: FleetStore) {
     closeConfirm: () => setConfirmOptions(null),
     addRepo,
     removeRepo,
+    pinLane,
+    mergeLane,
+    deleteLane,
+    stopAgent,
+    adoptAgent,
   };
 }
 
