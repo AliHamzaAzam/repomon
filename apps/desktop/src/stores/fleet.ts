@@ -69,6 +69,21 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   return { label: agents.length ? "idle" : "open", tone: "muted", urgent: false };
 }
 
+/// The usage report for the focused lane's Claude account, matched by account key. Each agent
+/// carries the config dir it runs under (`config_dir: null` = the default `~/.claude`), and each
+/// usage report carries the same key (`account_key`: `"default"` for the default account, else the
+/// dir path). So the pill follows whichever account the focused lane actually uses instead of always
+/// showing the first probed account (which is how a `claude-work` probe leaked onto default-account
+/// lanes). Returns `null` when the focused account has not been probed, rather than another
+/// account's numbers; falls back to the first report only when there is no agent to attribute to.
+export function pickFocusedUsage(reports: AccountUsage[], lane: Lane | null): AccountUsage | null {
+  if (!reports.length) return null;
+  const agent = lane?.agent_sessions.find((session) => !session.inferred) ?? lane?.agent_sessions[0];
+  if (!agent) return reports[0];
+  const key = agent.config_dir ?? "default";
+  return reports.find((report) => report.key === key) ?? null;
+}
+
 export function matchesLane(lane: Lane, query: string): boolean {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
@@ -152,6 +167,9 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     lanes().find((lane) => lane.id === selectedLaneId()) ?? null,
   );
 
+  // The usage pill follows the focused lane's Claude account rather than always the first probe.
+  const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane()));
+
   const counts = createMemo(() => ({
     urgent: lanes().filter((lane) => laneIndicator(lane).urgent).length,
     running: lanes().filter((lane) => lane.agent_sessions.some((agent) => agent.status === "running")).length,
@@ -226,6 +244,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     repos,
     lanes,
     usage,
+    focusedUsage,
     terminals,
     selectedLane,
     selectedLaneId,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentSession, Lane } from "../bindings";
-import { laneIndicator, matchesLane, withSessionKeys } from "./fleet";
+import type { AccountUsage, AgentSession, Lane } from "../bindings";
+import { laneIndicator, matchesLane, pickFocusedUsage, withSessionKeys } from "./fleet";
 
 function lane(overrides: Partial<Lane> = {}): Lane {
   return {
@@ -78,6 +78,37 @@ describe("fleet presentation", () => {
     expect(matchesLane(target, "rpmndsk")).toBe(true);
     expect(matchesLane(target, "featdesktop")).toBe(true);
     expect(matchesLane(target, "unrelated")).toBe(false);
+  });
+
+  it("attributes usage to the focused lane's account, not the first probe", () => {
+    const usage = (key: string, pct: number): AccountUsage => ({
+      key,
+      label: key,
+      report: { windows: [{ label: "5h", pct_used: pct, reset_at: null }] },
+      age_secs: 10,
+    });
+    const workFirst = [usage("/Users/me/.claude-work", 48), usage("default", 9)];
+
+    // Default-account lane must show the default report even though work is first in the list.
+    const onDefault = lane({ agent_sessions: [agent({ config_dir: null })] });
+    expect(pickFocusedUsage(workFirst, onDefault)?.key).toBe("default");
+
+    // A work-account lane shows work.
+    const onWork = lane({ agent_sessions: [agent({ config_dir: "/Users/me/.claude-work" })] });
+    expect(pickFocusedUsage(workFirst, onWork)?.key).toBe("/Users/me/.claude-work");
+
+    // Focused account not yet probed: show nothing rather than another account's numbers.
+    expect(pickFocusedUsage([usage("/Users/me/.claude-work", 48)], onDefault)).toBeNull();
+
+    // Inferred sessions carry no account, so the real session's account wins.
+    const mixed = lane({
+      agent_sessions: [agent({ inferred: true, config_dir: null }), agent({ config_dir: "/Users/me/.claude-work" })],
+    });
+    expect(pickFocusedUsage(workFirst, mixed)?.key).toBe("/Users/me/.claude-work");
+
+    // No agent to attribute to: fall back to the first report.
+    expect(pickFocusedUsage(workFirst, lane())?.key).toBe("/Users/me/.claude-work");
+    expect(pickFocusedUsage([], onDefault)).toBeNull();
   });
 
   it("gives overlay sessions distinct stable reconcile keys", () => {

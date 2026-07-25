@@ -65,11 +65,17 @@ export function createNotificationStore(onActivate?: (laneId: number) => void) {
           received_at: Date.now(),
           read: false,
         };
+        let isNew = false;
         setItems((current) => {
           if (current.some((item) => item.id === notification.id)) return current;
+          isNew = true;
           return [notification, ...current].slice(0, 200);
         });
-        if (nativeEnabled()) {
+        // Alert only for notifications we actually added. The daemon deliberately
+        // re-sends the same id on a flap (see notify_watch's dedup_id) so clients
+        // can drop the duplicate; without this guard the popup and its sound fire
+        // again on every re-send even though the feed already has the entry.
+        if (isNew && nativeEnabled()) {
           showNativeNotification(notification, onActivate);
         }
       });

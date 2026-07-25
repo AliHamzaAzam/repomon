@@ -34,6 +34,15 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
       <span class="min-w-0 flex-1 text-left">
         <span class="flex items-center gap-1.5">
           <span class="truncate text-xs font-medium text-foreground">{title()}</span>
+          <Show when={props.lane.agent_sessions.length > 1}>
+            <span
+              class="shrink-0 rounded border border-line bg-raised px-1 font-mono text-[0.55rem] leading-none text-muted"
+              title={`${props.lane.agent_sessions.length} agents open in this lane`}
+              aria-label={`${props.lane.agent_sessions.length} agents open`}
+            >
+              ⧉{props.lane.agent_sessions.length}
+            </span>
+          </Show>
           <Show when={props.lane.pinned}>
             <span class="text-[0.6rem] text-signal" aria-label="Pinned">◆</span>
           </Show>
@@ -186,7 +195,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           <span>Needs you <b class="ml-1 text-attention">{props.fleet.counts().urgent}</b></span>
           <span>Running <b class="ml-1 text-signal">{props.fleet.counts().running}</b></span>
         </div>
-        <Show when={props.fleet.usage()[0]}>
+        <Show when={props.fleet.focusedUsage()}>
           {(usage) => (
             <div class="mt-2 border-t border-line pt-2">
               <div class="mb-1 flex items-center justify-between font-mono text-[0.56rem] text-muted">
