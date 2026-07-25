@@ -9,6 +9,7 @@ pub mod bytes_stream;
 pub mod conn;
 pub mod ext;
 pub mod notify_watch;
+pub mod path_env;
 pub mod pubsub;
 pub mod push;
 pub mod reap;

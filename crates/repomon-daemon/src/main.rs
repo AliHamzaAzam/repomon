@@ -33,8 +33,19 @@ enum Command {
     Mcp,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Before any thread exists: a Finder/Dock launch (and a launchd service) hands the daemon a
+    // stripped PATH, which would hide tmux and every agent binary from the whole process tree.
+    // `set_var` is only sound while single-threaded, so this must precede the runtime.
+    unsafe { repomon_daemon::path_env::repair_path_before_threads() };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the tokio runtime")
+        .block_on(run());
+}
+
+async fn run() {
     let args = Args::parse();
 
     // The MCP subcommand is a stdio protocol server: keep all logging on stderr and never run
