@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, onMount, type JSX } from "solid-js";
 
 import type { AgentChoice } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
@@ -7,6 +7,7 @@ import { applyAccent } from "../theme";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
 import Switch from "./controls/Switch";
+import KeyboardHelp from "./KeyboardHelp";
 import Modal from "./Modal";
 
 export type SettingsTab = "general" | "notifications" | "appearance" | "keyboard";
@@ -76,6 +77,14 @@ function TextField(props: {
 
 export default function SettingsModal(props: SettingsModalProps) {
   const [tab, setTab] = createSignal<SettingsTab>(props.initialTab ?? "general");
+
+  // Keep the visible tab in sync if the opener changes it. Today the shortcut handler cannot
+  // fire while a modal is open, so this only matters if that guard ever relaxes, but a tab
+  // signal that silently ignores its own prop is a trap worth closing.
+  createEffect(() => {
+    const requested = props.initialTab;
+    if (requested) setTab(requested);
+  });
   const [config, setConfig] = createSignal<ConfigView | null>(null);
   const [agents, setAgents] = createSignal<AgentChoice[]>([]);
   const [error, setError] = createSignal<string | null>(null);
@@ -266,7 +275,7 @@ export default function SettingsModal(props: SettingsModalProps) {
             <Show when={tab() === "keyboard"}>
               <section class="space-y-3">
                 <p class="section-label text-signal">Keyboard</p>
-                <p class="text-xs text-muted">Keyboard reference arrives with the help component.</p>
+                <KeyboardHelp />
               </section>
             </Show>
           </div>
