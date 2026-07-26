@@ -101,7 +101,13 @@ function App(props: AppProps) {
 
     const lane = fleet.selectedLane();
     if (binding.when && !lane) return;
-    const agent = lane?.agent_sessions.find((session) => session.tmux_window) ?? null;
+    // Prefer the agent whose terminal is actually focused: on a multi-agent lane the first
+    // windowed session is not necessarily the one the user is looking at, and lane.stop must
+    // never guess.
+    const active = workspace.activeWindow();
+    const agent = lane?.agent_sessions.find((session) => session.tmux_window === active)
+      ?? lane?.agent_sessions.find((session) => session.tmux_window)
+      ?? null;
     if (binding.when === "agent" && !agent) return;
 
     event.preventDefault();
@@ -120,7 +126,7 @@ function App(props: AppProps) {
       case "fleet.addRepo": void actions.addRepo(); break;
       case "fleet.jumpUrgent": fleet.moveSelection(1, true); break;
       case "lane.spawn": if (lane) actions.spawn(lane); break;
-      case "lane.terminal": void workspace.openShell(); break;
+      case "lane.terminal": void workspace.openShell(actions.reportError); break;
       case "lane.pin": if (lane) void actions.pinLane(lane); break;
       case "lane.delete": if (lane) actions.deleteLane(lane); break;
       case "lane.merge": if (lane) actions.mergeLane(lane); break;
@@ -128,6 +134,10 @@ function App(props: AppProps) {
       case "agents.prev": workspace.cycleTab(-1, workspace.laneTargets()); break;
       case "agents.next": workspace.cycleTab(1, workspace.laneTargets()); break;
       case "help.open": actions.openSettingsTab("keyboard"); break;
+      default:
+        // A binding exists in the table with no handler. Warn rather than silently eating the key.
+        console.warn(`No handler for keyboard binding: ${binding.id}`);
+        break;
     }
   };
 

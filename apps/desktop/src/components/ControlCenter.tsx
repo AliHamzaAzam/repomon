@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 
 import type { AgentSession, BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
+import { isMac } from "../keymap";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import type { ActionsStore } from "../stores/actions";
@@ -75,7 +76,10 @@ export default function ControlCenter(props: ControlCenterProps) {
   }
 
   const onKey = (event: KeyboardEvent) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    // Same platform gate as keymap.ts: Cmd is mod on macOS and a held Ctrl there is a terminal
+    // chord meant for the agent, not this shortcut. Elsewhere mod is Ctrl.
+    const mod = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey;
+    if (mod && event.key.toLowerCase() === "k") {
       event.preventDefault();
       if (open()) closeControl();
       else openControl();

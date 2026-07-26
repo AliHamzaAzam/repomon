@@ -84,12 +84,19 @@ export function createWorkspaceStore(fleet: FleetStore) {
     setActiveWindow(targets[next].window);
   }
 
-  async function openShell() {
+  /// Opens a shell terminal for the selected lane. Never rejects: a caller that does not pass
+  /// `onError` (the keyboard shortcut path, unlike the toolbar) would otherwise turn a daemon
+  /// failure into an unhandled rejection with no feedback for the user.
+  async function openShell(onError?: (message: string) => void) {
     const laneId = fleet.selectedLaneId();
     if (laneId === null) return;
-    const terminal = await daemonCall("terminal.open", { lane_id: laneId });
-    await fleet.refresh();
-    setActiveWindow(terminal.id);
+    try {
+      const terminal = await daemonCall("terminal.open", { lane_id: laneId });
+      await fleet.refresh();
+      setActiveWindow(terminal.id);
+    } catch (cause) {
+      onError?.(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   return {

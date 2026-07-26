@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
@@ -13,6 +13,15 @@ function sourceFor(snapshot: ConnectionSnapshot): ConnectionSource {
 }
 
 describe("Repomon desktop shell", () => {
+  beforeAll(() => {
+    // App.tsx's shortcut handler resolves "mod" from navigator.platform when no explicit
+    // platform is passed in (the real, unmocked path the app uses at runtime). jsdom reports an
+    // empty platform string, so pin it to macOS here: the fixtures below fire metaKey to mean
+    // "mod", matching how the app actually runs on macOS.
+    Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  });
+
+
   it("renders the mission control frame and connection rail", () => {
     render(() => <App connectionSource={sourceFor({
       phase: "starting",

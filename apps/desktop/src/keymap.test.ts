@@ -29,33 +29,45 @@ describe("matchChord", () => {
     expect(matchChord(key({ key: "?", shiftKey: true }))).toBeNull();
   });
 
-  it("matches a modifier chord on either platform modifier", () => {
-    expect(matchChord(key({ key: "e", metaKey: true }))?.id).toBe("lane.spawn");
-    expect(matchChord(key({ key: "e", ctrlKey: true }))?.id).toBe("lane.spawn");
+  it("requires Cmd on macOS and rejects a Ctrl chord there", () => {
+    expect(matchChord(key({ key: "e", metaKey: true }), "mac")?.id).toBe("lane.spawn");
+    expect(matchChord(key({ key: "e", ctrlKey: true }), "mac")).toBeNull();
+  });
+
+  it("requires Ctrl on non-macOS platforms", () => {
+    expect(matchChord(key({ key: "e", ctrlKey: true }), "other")?.id).toBe("lane.spawn");
+    expect(matchChord(key({ key: "e", metaKey: true }), "other")).toBeNull();
+  });
+
+  it("never lets a Ctrl chord reach a destructive binding on macOS", () => {
+    // Ctrl+D sends EOF to a focused terminal. On mac it must not also match lane.delete, or
+    // every agent session that reads EOF would also pop a destructive confirm dialog.
+    expect(matchChord(key({ key: "d", ctrlKey: true }), "mac")).toBeNull();
   });
 
   it("distinguishes shifted chords from their unshifted twin", () => {
-    expect(matchChord(key({ key: "n", metaKey: true }))?.id).toBe("fleet.newLane");
-    expect(matchChord(key({ key: "N", metaKey: true, shiftKey: true }))?.id).toBe("fleet.addRepo");
+    expect(matchChord(key({ key: "n", metaKey: true }), "mac")?.id).toBe("fleet.newLane");
+    expect(matchChord(key({ key: "N", metaKey: true, shiftKey: true }), "mac")?.id).toBe("fleet.addRepo");
   });
 
   it("returns null for an unbound chord", () => {
-    expect(matchChord(key({ key: "z", metaKey: true }))).toBeNull();
+    expect(matchChord(key({ key: "z", metaKey: true }), "mac")).toBeNull();
   });
 
   it("matches the settings chord, whose ad-hoc listener was removed", () => {
-    expect(matchChord(key({ key: ",", metaKey: true }))?.id).toBe("panel.settings");
+    expect(matchChord(key({ key: ",", metaKey: true }), "mac")?.id).toBe("panel.settings");
   });
 
   it("matches shifted digit chords, which report a symbol in event.key", () => {
     // Cmd+Shift+1 on a US layout delivers key "!" — only event.code still says Digit1.
-    expect(matchChord(key({ key: "!", code: "Digit1", metaKey: true, shiftKey: true }))?.id).toBe("layout.focused");
-    expect(matchChord(key({ key: "@", code: "Digit2", metaKey: true, shiftKey: true }))?.id).toBe("layout.split");
-    expect(matchChord(key({ key: "#", code: "Digit3", metaKey: true, shiftKey: true }))?.id).toBe("layout.grid");
+    expect(matchChord(key({ key: "!", code: "Digit1", metaKey: true, shiftKey: true }), "mac")?.id).toBe("layout.focused");
+    expect(matchChord(key({ key: "@", code: "Digit2", metaKey: true, shiftKey: true }), "mac")?.id).toBe("layout.split");
+    // Grid uses mod+shift+0, not mod+shift+3: that chord is the macOS screenshot shortcut.
+    expect(matchChord(key({ key: ")", code: "Digit0", metaKey: true, shiftKey: true }), "mac")?.id).toBe("layout.grid");
   });
 
   it("still matches unshifted digit chords", () => {
-    expect(matchChord(key({ key: "4", code: "Digit4", metaKey: true }))?.id).toBe("panel.extensions");
+    expect(matchChord(key({ key: "4", code: "Digit4", metaKey: true }), "mac")?.id).toBe("panel.extensions");
   });
 });
 

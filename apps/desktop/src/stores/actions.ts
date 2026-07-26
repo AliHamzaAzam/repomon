@@ -61,6 +61,9 @@ export function createActionsStore(fleet: FleetStore) {
   }
 
   function mergeLane(lane: Lane) {
+    // The daemon refuses to delete or merge a main worktree, so do not raise a destructive
+    // prompt for an operation that cannot succeed.
+    if (lane.worktree.is_main) return;
     setConfirmOptions({
       title: "Merge lane?",
       message: `Merge ${lane.worktree.branch ?? lane.worktree.name} into the repository base branch.`,
@@ -73,9 +76,12 @@ export function createActionsStore(fleet: FleetStore) {
   }
 
   function deleteLane(lane: Lane) {
+    // The daemon refuses to delete or merge a main worktree, so do not raise a destructive
+    // prompt for an operation that cannot succeed.
+    if (lane.worktree.is_main) return;
     setConfirmOptions({
       title: "Delete lane?",
-      message: `Remove the ${lane.worktree.name} worktree. The branch is kept.`,
+      message: `Remove the ${lane.worktree.branch ?? lane.worktree.name} worktree. The branch is kept.`,
       confirmLabel: "Delete",
       danger: true,
       onConfirm: async () => {
@@ -86,9 +92,10 @@ export function createActionsStore(fleet: FleetStore) {
   }
 
   function stopAgent(lane: Lane, agent: AgentSession | null) {
+    const name = agent?.custom_label ?? agent?.title ?? agent?.agent;
     setConfirmOptions({
       title: "Stop agent?",
-      message: "Stop this managed agent. Its terminal session ends.",
+      message: name ? `Stop ${name}. Its terminal session ends.` : "Stop this managed agent. Its terminal session ends.",
       confirmLabel: "Stop",
       danger: true,
       onConfirm: async () => {
@@ -112,6 +119,7 @@ export function createActionsStore(fleet: FleetStore) {
     fleet,
     error,
     dismissError: () => setError(null),
+    reportError: (message: string) => setError(message),
     settingsOpen,
     settingsTab,
     openSettings: () => {

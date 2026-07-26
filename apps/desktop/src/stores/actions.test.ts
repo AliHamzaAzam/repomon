@@ -68,6 +68,22 @@ describe("lane operations", () => {
     });
   });
 
+  it("delete and merge on a main worktree raise no confirm and send no RPC", async () => {
+    await createRoot(async (dispose) => {
+      const actions = createActionsStore(fleetStub());
+      const main = lane({ worktree: { id: 3, repo_id: 2, path: "/code/r", branch: "main", head: "abc", is_main: true, name: "r" } });
+
+      actions.deleteLane(main);
+      expect(actions.confirmOptions()).toBeNull();
+      expect(calls.list).toHaveLength(0);
+
+      actions.mergeLane(main);
+      expect(actions.confirmOptions()).toBeNull();
+      expect(calls.list).toHaveLength(0);
+      dispose();
+    });
+  });
+
   it("stop targets the agent's tmux window", async () => {
     await createRoot(async (dispose) => {
       const actions = createActionsStore(fleetStub());

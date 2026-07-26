@@ -27,7 +27,8 @@ export const BINDINGS: Binding[] = [
 
   { id: "layout.focused", chord: "mod+shift+1", label: "Focused layout", section: "Layout" },
   { id: "layout.split", chord: "mod+shift+2", label: "Split layout", section: "Layout" },
-  { id: "layout.grid", chord: "mod+shift+3", label: "Grid layout", section: "Layout" },
+  // Not mod+shift+3: that chord is the macOS system screenshot shortcut and never reaches the app.
+  { id: "layout.grid", chord: "mod+shift+0", label: "Grid layout", section: "Layout" },
 
   { id: "fleet.filter", chord: "mod+/", label: "Filter the fleet", section: "Fleet" },
   { id: "fleet.urgent", chord: "mod+u", label: "Show only lanes needing attention", section: "Fleet" },
@@ -51,15 +52,23 @@ export const BINDINGS: Binding[] = [
 
 const BY_CHORD = new Map(BINDINGS.map((binding) => [binding.chord, binding]));
 
-function isMac(platform?: string): boolean {
+export function isMac(platform?: string): boolean {
   if (platform) return platform === "mac";
   return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 }
 
-/// Normalize an event to a chord string, or null when no platform modifier is held. Returning
-/// null for unmodified keys is what keeps ordinary typing (and a focused terminal) untouched.
-export function chordOf(event: KeyboardEvent): string | null {
-  if (!event.metaKey && !event.ctrlKey) return null;
+/// Normalize an event to a chord string, or null when the platform modifier is not held. Mod is
+/// Cmd on macOS and Ctrl elsewhere; the two are never interchangeable. A focused terminal
+/// forwards Ctrl chords straight to the agent (EOF, text navigation, and so on), so on macOS a
+/// held Ctrl must never also satisfy "mod", or the same keystroke would fire a GUI action in
+/// addition to reaching the agent. Returning null for unmodified keys is what keeps ordinary
+/// typing untouched.
+export function chordOf(event: KeyboardEvent, platform?: string): string | null {
+  if (isMac(platform)) {
+    if (!event.metaKey || event.ctrlKey) return null;
+  } else if (!event.ctrlKey) {
+    return null;
+  }
   // Digits come from `code`, not `key`: shift turns "1" into "!" (and non-US layouts move the
   // number row entirely), so keying off `event.key` would make every shifted digit chord
   // unreachable while still rendering as available in the help reference.
@@ -70,8 +79,8 @@ export function chordOf(event: KeyboardEvent): string | null {
   return `mod+${shift}${key}`;
 }
 
-export function matchChord(event: KeyboardEvent): Binding | null {
-  const chord = chordOf(event);
+export function matchChord(event: KeyboardEvent, platform?: string): Binding | null {
+  const chord = chordOf(event, platform);
   return chord ? BY_CHORD.get(chord) ?? null : null;
 }
 

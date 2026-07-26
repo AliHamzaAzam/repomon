@@ -102,9 +102,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     setOpeningShell(true);
     setWorkspaceError(null);
     try {
-      await props.workspace.openShell();
-    } catch (error) {
-      setWorkspaceError(error instanceof Error ? error.message : String(error));
+      await props.workspace.openShell(setWorkspaceError);
     } finally {
       setOpeningShell(false);
     }
