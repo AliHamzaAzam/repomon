@@ -114,6 +114,19 @@ Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repo
 per-arch (`aarch64`/`x86_64`) or the `universal` build, then extract, and put `repomon` and `repomond`
 on your `PATH`.
 
+**Mission Control** (the desktop app) ships separately, for macOS, Windows, and Linux, from the
+[`desktop-preview`](https://github.com/AliHamzaAzam/repomon/releases/tag/desktop-preview) release:
+
+| Platform | File |
+|---|---|
+| macOS (Apple silicon and Intel) | `Repomon_<version>_universal.dmg` |
+| Windows | `Repomon_<version>_x64-setup.exe` |
+| Linux | `Repomon_<version>_amd64.AppImage`, `.deb`, or `.rpm` |
+
+The bundle carries its own daemon, so it needs no separate `repomond`, and it updates itself after
+the first download. It drives the same fleet as the TUI and can be run entirely from the keyboard.
+See [docs/desktop.md](docs/desktop.md) for the shortcut reference and settings.
+
 **From source**: any platform with the Rust toolchain (anywhere without a prebuilt binary):
 
 ```sh
@@ -303,6 +316,7 @@ Manage it with `repomon remote status` (shows the bind and a masked token),
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md): how the daemon, TUI, and core fit together.
+- [docs/desktop.md](docs/desktop.md): Mission Control, its keyboard shortcuts, and settings.
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC socket reference.
 - [docs/agents.md](docs/agents.md): how agents run and how status is detected.
 - [docs/windows-validation.md](docs/windows-validation.md): the manual Windows 11 end-to-end validation gate.

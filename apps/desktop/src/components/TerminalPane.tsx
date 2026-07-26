@@ -10,6 +10,7 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
+  isTerminalReleaseChord,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
@@ -214,6 +215,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
         if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f") {
           event.preventDefault();
           openFind();
+          return false;
+        }
+        // Shift+Escape hands focus back to the app shell so the fleet list can be driven by
+        // keyboard. Plain Escape still goes to the agent: Claude Code uses it to interrupt.
+        if (isTerminalReleaseChord(event)) {
+          event.preventDefault();
+          terminal?.blur();
+          document.querySelector<HTMLElement>('nav[aria-label="Fleet"]')?.focus();
           return false;
         }
         const translated = translateKeyboardKey(event);

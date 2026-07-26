@@ -1052,7 +1052,13 @@ pub async fn dispatch(
             if let Some(id) = p.id {
                 args.push(id)
             }
-            run_cli_op(ctx, p.account.as_deref(), args, json!({ "scope": "global" })).await
+            run_cli_op(
+                ctx,
+                p.account.as_deref(),
+                args,
+                json!({ "scope": "global" }),
+            )
+            .await
         }
         "plugin.details" => {
             let p: IdOnly = parse(params)?;
@@ -1061,9 +1067,9 @@ pub async fn dispatch(
             let text = tokio::task::spawn_blocking(move || {
                 cli.run_for(config_dir.as_deref(), &["plugin", "details", &p.id])
             })
-                .await
-                .map_err(internal)?
-                .map_err(cli_error)?;
+            .await
+            .map_err(internal)?
+            .map_err(cli_error)?;
             Ok(json!({ "text": text }))
         }
         "marketplace.add" => {
@@ -1102,7 +1108,13 @@ pub async fn dispatch(
             if let Some(name) = p.name {
                 args.push(name)
             }
-            run_cli_op(ctx, p.account.as_deref(), args, json!({ "scope": "global" })).await
+            run_cli_op(
+                ctx,
+                p.account.as_deref(),
+                args,
+                json!({ "scope": "global" }),
+            )
+            .await
         }
 
         // ---- skills (create/read/write/delete SKILL.md, path-guarded) ----

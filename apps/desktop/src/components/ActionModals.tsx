@@ -13,7 +13,7 @@ export default function ActionModals(props: { actions: ActionsStore }) {
   return (
     <>
       <Show when={actions.settingsOpen()}>
-        <SettingsModal onClose={actions.closeSettings} />
+        <SettingsModal onClose={actions.closeSettings} initialTab={actions.settingsTab()} />
       </Show>
       <Show when={actions.spawnLane()}>
         {(lane) => <SpawnModal lane={lane()} onClose={actions.closeSpawn} onDone={() => actions.fleet.refresh()} />}

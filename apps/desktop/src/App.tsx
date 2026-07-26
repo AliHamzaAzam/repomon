@@ -17,10 +17,12 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
+import { matchChord } from "./keymap";
 import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
+import { createWorkspaceStore } from "./stores/workspace";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -57,6 +59,7 @@ function App(props: AppProps) {
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const actions = createActionsStore(fleet);
+  const workspace = createWorkspaceStore(fleet);
   const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   let stopListening: (() => void) | undefined;
@@ -86,23 +89,60 @@ function App(props: AppProps) {
     }
   });
 
-  const onSettingsShortcut = (event: KeyboardEvent) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === ",") {
-      event.preventDefault();
-      actions.openSettings();
+  /// One listener for every shortcut. Registered in bubble phase so an open Modal (which listens
+  /// in capture phase and stops propagation on Escape) still closes first.
+  const onShortcut = (event: KeyboardEvent) => {
+    const binding = matchChord(event);
+    if (!binding) return;
+
+    // A modal owns the keyboard while it is open. ControlCenter keeps its own Cmd+K listener.
+    if (actions.settingsOpen() || actions.spawnLane() || actions.newLaneOpen()
+      || actions.renameTarget() || actions.confirmOptions()) return;
+
+    const lane = fleet.selectedLane();
+    if (binding.when && !lane) return;
+    // Prefer the agent whose terminal is actually focused: on a multi-agent lane the first
+    // windowed session is not necessarily the one the user is looking at, and lane.stop must
+    // never guess.
+    const active = workspace.activeWindow();
+    const agent = lane?.agent_sessions.find((session) => session.tmux_window === active)
+      ?? lane?.agent_sessions.find((session) => session.tmux_window)
+      ?? null;
+    if (binding.when === "agent" && !agent) return;
+
+    event.preventDefault();
+    switch (binding.id) {
+      case "panel.settings": actions.openSettings(); break;
+      case "panel.extensions": setExtensionsOpen((open) => !open); break;
+      case "panel.repomind": setRepomindOpen((open) => !open); break;
+      case "panel.theme": cycleTheme(); break;
+      case "layout.focused": workspace.chooseLayout("focused"); break;
+      case "layout.split": workspace.chooseLayout("split"); break;
+      case "layout.grid": workspace.chooseLayout("grid"); break;
+      case "fleet.filter": searchInput?.focus(); break;
+      case "fleet.urgent": fleet.setUrgentOnly(!fleet.urgentOnly()); break;
+      case "fleet.refresh": void fleet.refresh(); break;
+      case "fleet.newLane": actions.newLane(); break;
+      case "fleet.addRepo": void actions.addRepo(); break;
+      case "fleet.jumpUrgent": fleet.moveSelection(1, true); break;
+      case "lane.spawn": if (lane) actions.spawn(lane); break;
+      case "lane.terminal": void workspace.openShell(actions.reportError); break;
+      case "lane.pin": if (lane) void actions.pinLane(lane); break;
+      case "lane.delete": if (lane) actions.deleteLane(lane); break;
+      case "lane.merge": if (lane) actions.mergeLane(lane); break;
+      case "lane.stop": if (lane) actions.stopAgent(lane, agent); break;
+      case "agents.prev": workspace.cycleTab(-1, workspace.laneTargets()); break;
+      case "agents.next": workspace.cycleTab(1, workspace.laneTargets()); break;
+      case "help.open": actions.openSettingsTab("keyboard"); break;
+      default:
+        // A binding exists in the table with no handler. Warn rather than silently eating the key.
+        console.warn(`No handler for keyboard binding: ${binding.id}`);
+        break;
     }
   };
 
-  const onExtensionsShortcut = (event: KeyboardEvent) => {
-    if (event.key !== "6" || event.metaKey || event.ctrlKey || event.altKey) return;
-    const target = event.target as HTMLElement | null;
-    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-    setExtensionsOpen((open) => !open);
-  };
-
   onMount(() => {
-    window.addEventListener("keydown", onSettingsShortcut);
-    window.addEventListener("keydown", onExtensionsShortcut);
+    window.addEventListener("keydown", onShortcut);
     void getVersion().then(setAppVersion).catch(() => undefined);
 
     // Check for a newer build once on launch; silent if current or if not a Tauri build.
@@ -138,8 +178,7 @@ function App(props: AppProps) {
 
   onCleanup(() => {
     active = false;
-    window.removeEventListener("keydown", onSettingsShortcut);
-    window.removeEventListener("keydown", onExtensionsShortcut);
+    window.removeEventListener("keydown", onShortcut);
     stopListening?.();
     fleet.stop();
     notifications.stop();
@@ -211,7 +250,7 @@ function App(props: AppProps) {
             class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${extensionsOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
             onClick={() => setExtensionsOpen(!extensionsOpen())}
             aria-pressed={extensionsOpen()}
-            title="Extensions (6)"
+            title="Extensions (⌘4)"
           >Extensions</button>
           <button
             type="button"
@@ -260,7 +299,7 @@ function App(props: AppProps) {
             aria-hidden={extensionsOpen() ? "true" : undefined}
             inert={extensionsOpen()}
           >
-            <TerminalWorkspace fleet={fleet} actions={actions} />
+            <TerminalWorkspace fleet={fleet} actions={actions} workspace={workspace} />
           </div>
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">

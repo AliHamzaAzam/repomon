@@ -4,71 +4,32 @@ import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
+import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import {
-  dedupe,
-  stabilizeTargets,
   warmTargetWindows,
   type PaneTarget,
 } from "./terminalTargets";
 
 const TerminalPane = lazy(() => import("./TerminalPane"));
 
-export type WorkspaceLayout = "focused" | "split" | "grid";
-
 interface TerminalWorkspaceProps {
   fleet: FleetStore;
   actions: ActionsStore;
-}
-
-function readLayout(): WorkspaceLayout {
-  const value = localStorage.getItem("repomon.workspace.layout");
-  return value === "split" || value === "grid" ? value : "focused";
-}
-
-function readRenderer(): TerminalRenderer {
-  const value = localStorage.getItem("repomon.terminal.renderer");
-  // Default to "auto" (WebGL with automatic DOM fallback on context loss/failure): the DOM
-  // renderer re-lays-out on every frame and is by far the slowest way to run a busy terminal.
-  return value === "webgl" || value === "dom" ? value : "auto";
+  workspace: WorkspaceStore;
 }
 
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
-  const [layout, setLayout] = createSignal<WorkspaceLayout>(readLayout());
-  const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
-  const [activeWindow, setActiveWindow] = createSignal<string | null>(null);
   const [openingShell, setOpeningShell] = createSignal(false);
   const [closingShell, setClosingShell] = createSignal<string | null>(null);
   const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
   const [warmWindows, setWarmWindows] = createSignal<string[]>([]);
 
-  // Fleet polls every second and hands us a brand-new lanes array each time. Reconcile the
-  // rebuilt targets against this cache so each window keeps a stable object reference, and the
-  // reference-keyed <For> below keeps its TerminalPane (and its byte watch) mounted instead of
-  // tearing it down every poll.
-  const targetCache = new Map<string, PaneTarget>();
-  // `equals` keeps the previous array when the window set is unchanged (stabilizeTargets
-  // reuses object refs), so the 2s fleet poll stops cascading through laneTargets /
-  // visibleTargets / the viewport.set effect when nothing actually changed.
-  const sameTargets = (a: PaneTarget[], b: PaneTarget[]) =>
-    a.length === b.length && a.every((target, index) => target === b[index]);
-  const targets = createMemo(() => stabilizeTargets(targetCache, dedupe(props.fleet.lanes().flatMap((lane) => [
-    ...lane.agent_sessions.flatMap((agent, index): PaneTarget[] => agent.tmux_window ? [{
-      laneId: lane.id,
-      window: agent.tmux_window,
-      label: agent.custom_label ?? agent.title ?? `${agent.agent} ${index + 1}`,
-      shell: false,
-      sessionId: agent.session_id,
-    }] : []),
-    ...props.fleet.terminals()
-      .filter((terminal) => terminal.lane_id === lane.id)
-      .map((terminal): PaneTarget => ({
-        laneId: lane.id,
-        window: terminal.id,
-        label: `shell ${terminal.id.split("-").slice(-1)[0]}`,
-        shell: true,
-        sessionId: null,
-      })),
-  ]))), undefined, { equals: sameTargets });
+  const layout = () => props.workspace.layout();
+  const renderer = () => props.workspace.renderer();
+  const activeWindow = () => props.workspace.activeWindow();
+  const setActiveWindow = props.workspace.setActiveWindow;
+  const targets = () => props.workspace.targets();
+  const laneTargets = () => props.workspace.laneTargets();
 
   // Labels read reactively from the fleet store: pane targets deliberately keep stable object
   // identity across polls (so mounted panes never remount), which means a mutated target.label
@@ -85,8 +46,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     return map;
   });
   const labelOf = (target: PaneTarget) => labelByWindow().get(target.window) ?? target.label;
-
-  const laneTargets = createMemo(() => targets().filter((target) => target.laneId === props.fleet.selectedLaneId()));
 
   createEffect(() => {
     const available = laneTargets();
@@ -135,27 +94,15 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     }).catch(() => undefined);
   });
 
-  function chooseLayout(next: WorkspaceLayout) {
-    setLayout(next);
-    localStorage.setItem("repomon.workspace.layout", next);
-  }
-
-  function chooseRenderer(next: TerminalRenderer) {
-    setRenderer(next);
-    localStorage.setItem("repomon.terminal.renderer", next);
-  }
+  const chooseLayout = props.workspace.chooseLayout;
+  const chooseRenderer = props.workspace.chooseRenderer;
 
   async function openShell() {
-    const laneId = props.fleet.selectedLaneId();
-    if (laneId === null) return;
+    if (props.fleet.selectedLaneId() === null) return;
     setOpeningShell(true);
     setWorkspaceError(null);
     try {
-      const terminal = await daemonCall("terminal.open", { lane_id: laneId });
-      await props.fleet.refresh();
-      setActiveWindow(terminal.id);
-    } catch (error) {
-      setWorkspaceError(error instanceof Error ? error.message : String(error));
+      await props.workspace.openShell(setWorkspaceError);
     } finally {
       setOpeningShell(false);
     }

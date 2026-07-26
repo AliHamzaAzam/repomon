@@ -4,6 +4,7 @@ import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
   createTerminalFrameGate,
+  isTerminalReleaseChord,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
@@ -63,6 +64,20 @@ describe("terminal key translation", () => {
     expect(translateKeyboardKey(key("ArrowLeft", { altKey: true }))).toEqual({ key: "M-Left", literal: false });
     expect(translateKeyboardKey(key("Tab", { shiftKey: true }))).toEqual({ key: "BTab", literal: false });
     expect(translateKeyboardKey(key("Escape"))).toEqual({ key: "Escape", literal: false });
+  });
+});
+
+describe("isTerminalReleaseChord", () => {
+  it("releases on shift+escape", () => {
+    expect(isTerminalReleaseChord(new KeyboardEvent("keydown", { key: "Escape", shiftKey: true }))).toBe(true);
+  });
+
+  it("leaves a plain escape for the agent, which uses it to interrupt", () => {
+    expect(isTerminalReleaseChord(new KeyboardEvent("keydown", { key: "Escape" }))).toBe(false);
+  });
+
+  it("ignores other shifted keys", () => {
+    expect(isTerminalReleaseChord(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true }))).toBe(false);
   });
 });
 

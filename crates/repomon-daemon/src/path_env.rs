@@ -46,12 +46,11 @@ fn login_shell_path() -> Option<String> {
 /// Existing well-known tool directories not already on `path`, in the order they should be added.
 fn fallback_dirs(path: &str) -> Vec<String> {
     let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
-    let candidates = FALLBACK_ABSOLUTE
-        .iter()
-        .map(PathBuf::from)
-        .chain(FALLBACK_HOME_RELATIVE.iter().filter_map(|rel| {
-            home.as_ref().map(|home| home.join(rel))
-        }));
+    let candidates = FALLBACK_ABSOLUTE.iter().map(PathBuf::from).chain(
+        FALLBACK_HOME_RELATIVE
+            .iter()
+            .filter_map(|rel| home.as_ref().map(|home| home.join(rel))),
+    );
     let mut dirs = Vec::new();
     for dir in candidates {
         if !dir.is_dir() {
@@ -101,7 +100,9 @@ mod tests {
         assert!(looks_minimal("/usr/bin:/bin:/usr/sbin:/sbin"));
         assert!(looks_minimal("  /usr/bin:/bin:/usr/sbin:/sbin  "));
         // A real user PATH, or any deliberate one, is left alone.
-        assert!(!looks_minimal("/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
+        assert!(!looks_minimal(
+            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        ));
         assert!(!looks_minimal("/usr/bin:/bin"));
         assert!(!looks_minimal(""));
     }

@@ -1,7 +1,8 @@
 import { createSignal } from "solid-js";
 
-import type { Lane, Repo } from "../bindings";
+import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ConfirmOptions } from "../components/ConfirmDialog";
+import type { SettingsTab } from "../components/SettingsModal";
 import { pickDirectory } from "../ipc/dialog";
 import { daemonCall } from "../ipc/rpc";
 import type { FleetStore } from "./fleet";
@@ -15,6 +16,7 @@ export interface RenameTarget {
 /// header) can open one without threading callbacks. The matching <ActionModals> renders them.
 export function createActionsStore(fleet: FleetStore) {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general");
   const [spawnLane, setSpawnLane] = createSignal<Lane | null>(null);
   const [newLaneOpen, setNewLaneOpen] = createSignal(false);
   const [newLaneRepoId, setNewLaneRepoId] = createSignal<number | null>(null);
@@ -47,12 +49,87 @@ export function createActionsStore(fleet: FleetStore) {
     });
   }
 
+  /// Pin or unpin the lane. Pinning is not destructive, so it applies immediately.
+  async function pinLane(lane: Lane) {
+    setError(null);
+    try {
+      await daemonCall("agent.pin", { lane_id: lane.id, pinned: !lane.pinned });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function mergeLane(lane: Lane) {
+    // The daemon refuses to delete or merge a main worktree, so do not raise a destructive
+    // prompt for an operation that cannot succeed.
+    if (lane.worktree.is_main) return;
+    setConfirmOptions({
+      title: "Merge lane?",
+      message: `Merge ${lane.worktree.branch ?? lane.worktree.name} into the repository base branch.`,
+      confirmLabel: "Merge",
+      onConfirm: async () => {
+        await daemonCall("lane.merge", { lane_id: lane.id });
+        await fleet.refresh();
+      },
+    });
+  }
+
+  function deleteLane(lane: Lane) {
+    // The daemon refuses to delete or merge a main worktree, so do not raise a destructive
+    // prompt for an operation that cannot succeed.
+    if (lane.worktree.is_main) return;
+    setConfirmOptions({
+      title: "Delete lane?",
+      message: `Remove the ${lane.worktree.branch ?? lane.worktree.name} worktree. The branch is kept.`,
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm: async () => {
+        await daemonCall("lane.delete", { lane_id: lane.id, also_delete_branch: false });
+        await fleet.refresh();
+      },
+    });
+  }
+
+  function stopAgent(lane: Lane, agent: AgentSession | null) {
+    const name = agent?.custom_label ?? agent?.title ?? agent?.agent;
+    setConfirmOptions({
+      title: "Stop agent?",
+      message: name ? `Stop ${name}. Its terminal session ends.` : "Stop this managed agent. Its terminal session ends.",
+      confirmLabel: "Stop",
+      danger: true,
+      onConfirm: async () => {
+        await daemonCall("agent.stop", { lane_id: lane.id, window: agent?.tmux_window ?? undefined });
+        await fleet.refresh();
+      },
+    });
+  }
+
+  async function adoptAgent(lane: Lane, agent: AgentSession | null) {
+    setError(null);
+    try {
+      await daemonCall("agent.adopt", { lane_id: lane.id, session_id: agent?.session_id ?? undefined });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   return {
     fleet,
     error,
     dismissError: () => setError(null),
+    reportError: (message: string) => setError(message),
     settingsOpen,
-    openSettings: () => setSettingsOpen(true),
+    settingsTab,
+    openSettings: () => {
+      setSettingsTab("general");
+      setSettingsOpen(true);
+    },
+    openSettingsTab: (tab: SettingsTab) => {
+      setSettingsTab(tab);
+      setSettingsOpen(true);
+    },
     closeSettings: () => setSettingsOpen(false),
     spawnLane,
     spawn: (lane: Lane) => setSpawnLane(lane),
@@ -72,6 +149,11 @@ export function createActionsStore(fleet: FleetStore) {
     closeConfirm: () => setConfirmOptions(null),
     addRepo,
     removeRepo,
+    pinLane,
+    mergeLane,
+    deleteLane,
+    stopAgent,
+    adoptAgent,
   };
 }
 

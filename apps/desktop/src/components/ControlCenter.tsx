@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 
 import type { AgentSession, BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
+import { isMac } from "../keymap";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import type { ActionsStore } from "../stores/actions";
@@ -75,7 +76,10 @@ export default function ControlCenter(props: ControlCenterProps) {
   }
 
   const onKey = (event: KeyboardEvent) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    // Same platform gate as keymap.ts: Cmd is mod on macOS and a held Ctrl there is a terminal
+    // chord meant for the agent, not this shortcut. Elsewhere mod is Ctrl.
+    const mod = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey;
+    if (mod && event.key.toLowerCase() === "k") {
       event.preventDefault();
       if (open()) closeControl();
       else openControl();
@@ -145,11 +149,6 @@ export default function ControlCenter(props: ControlCenterProps) {
     const agent = selectedAgent();
     if (!agent?.session_id) return;
     props.actions.rename({ sessionId: agent.session_id, current: agent.custom_label ?? "" });
-    closeControl(false);
-  }
-
-  function confirmAction(options: Parameters<ActionsStore["confirm"]>[0]) {
-    props.actions.confirm(options);
     closeControl(false);
   }
 
@@ -308,15 +307,15 @@ export default function ControlCenter(props: ControlCenterProps) {
                     </Show>
                     <div class="action-grid">
                       <button onClick={() => spawnAgent()} disabled={!selectedLane()}>Spawn agent</button>
-                      <button onClick={() => void run("adopt", () => daemonCall("agent.adopt", { lane_id: selectedLane()!.id, session_id: selectedAgent()?.session_id ?? undefined }))} disabled={!selectedLane() || !selectedAgent()?.external}>Adopt external</button>
+                      <button onClick={() => void run("adopt", () => props.actions.adoptAgent(selectedLane()!, selectedAgent()))} disabled={!selectedLane() || !selectedAgent()?.external}>Adopt external</button>
                       <button onClick={() => renameSession()} disabled={!selectedAgent()?.session_id}>Rename session</button>
-                      <button onClick={() => void run("pin", () => daemonCall("agent.pin", { lane_id: selectedLane()!.id, pinned: !selectedLane()!.pinned }))} disabled={!selectedLane()}>{selectedLane()?.pinned ? "Unpin lane" : "Pin lane"}</button>
+                      <button onClick={() => void run("pin", () => props.actions.pinLane(selectedLane()!))} disabled={!selectedLane()}>{selectedLane()?.pinned ? "Unpin lane" : "Pin lane"}</button>
                       <button onClick={() => void run("continue", () => daemonCall("agent.auto_continue", { lane_id: selectedLane()!.id, enabled: true }))} disabled={!selectedLane()}>Arm auto-continue</button>
                       <button class="is-danger" onClick={() => {
                         const lane = selectedLane();
-                        const agent = selectedAgent();
                         if (!lane) return;
-                        confirmAction({ title: "Stop agent?", message: "Stop this managed agent. Its terminal session ends.", confirmLabel: "Stop", danger: true, onConfirm: async () => { await daemonCall("agent.stop", { lane_id: lane.id, window: agent?.tmux_window ?? undefined }); await props.fleet.refresh(); } });
+                        props.actions.stopAgent(lane, selectedAgent());
+                        closeControl(false);
                       }} disabled={!selectedLane() || !selectedAgent()?.tmux_window}>Stop agent</button>
                     </div>
                   </section>
@@ -329,14 +328,16 @@ export default function ControlCenter(props: ControlCenterProps) {
                       <button onClick={() => {
                         const lane = selectedLane();
                         if (!lane) return;
-                        confirmAction({ title: "Merge lane?", message: `Merge ${lane.worktree.branch ?? lane.worktree.name} into the repository base branch.`, confirmLabel: "Merge", onConfirm: async () => { await daemonCall("lane.merge", { lane_id: lane.id }); await props.fleet.refresh(); } });
+                        props.actions.mergeLane(lane);
+                        closeControl(false);
                       }} disabled={!selectedLane() || selectedLane()?.worktree.is_main}>Merge lane</button>
                       <button onClick={() => addRepo()}>Add repository</button>
                       <button onClick={() => void browse(browser()?.path)}>Browse filesystem</button>
                       <button class="is-danger" onClick={() => {
                         const lane = selectedLane();
                         if (!lane || lane.worktree.is_main) return;
-                        confirmAction({ title: "Delete lane?", message: `Delete the worktree lane ${lane.worktree.branch ?? lane.worktree.name}. The branch is kept.`, confirmLabel: "Delete", danger: true, onConfirm: async () => { await daemonCall("lane.delete", { lane_id: lane.id, also_delete_branch: false }); await props.fleet.refresh(); } });
+                        props.actions.deleteLane(lane);
+                        closeControl(false);
                       }} disabled={!selectedLane() || selectedLane()?.worktree.is_main}>Delete lane</button>
                       <button class="is-danger" onClick={() => {
                         const repo = selectedLane()?.repo;
