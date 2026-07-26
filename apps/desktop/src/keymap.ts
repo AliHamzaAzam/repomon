@@ -59,8 +59,12 @@ function isMac(platform?: string): boolean {
 /// null for unmodified keys is what keeps ordinary typing (and a focused terminal) untouched.
 export function chordOf(event: KeyboardEvent): string | null {
   if (!event.metaKey && !event.ctrlKey) return null;
+  // Digits come from `code`, not `key`: shift turns "1" into "!" (and non-US layouts move the
+  // number row entirely), so keying off `event.key` would make every shifted digit chord
+  // unreachable while still rendering as available in the help reference.
+  const digit = event.code.startsWith("Digit") ? event.code.slice(5) : null;
   // "?" already implies shift on most layouts, so do not double-encode it.
-  const key = event.key === "?" ? "?" : event.key.toLowerCase();
+  const key = digit ?? (event.key === "?" ? "?" : event.key.toLowerCase());
   const shift = event.shiftKey && key !== "?" ? "shift+" : "";
   return `mod+${shift}${key}`;
 }

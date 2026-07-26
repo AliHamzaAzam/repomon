@@ -26,6 +26,7 @@ describe("matchChord", () => {
     expect(matchChord(key({ key: "e" }))).toBeNull();
     expect(matchChord(key({ key: "6" }))).toBeNull();
     expect(matchChord(key({ key: "/" }))).toBeNull();
+    expect(matchChord(key({ key: "?", shiftKey: true }))).toBeNull();
   });
 
   it("matches a modifier chord on either platform modifier", () => {
@@ -40,6 +41,17 @@ describe("matchChord", () => {
 
   it("returns null for an unbound chord", () => {
     expect(matchChord(key({ key: "z", metaKey: true }))).toBeNull();
+  });
+
+  it("matches shifted digit chords, which report a symbol in event.key", () => {
+    // Cmd+Shift+1 on a US layout delivers key "!" — only event.code still says Digit1.
+    expect(matchChord(key({ key: "!", code: "Digit1", metaKey: true, shiftKey: true }))?.id).toBe("layout.focused");
+    expect(matchChord(key({ key: "@", code: "Digit2", metaKey: true, shiftKey: true }))?.id).toBe("layout.split");
+    expect(matchChord(key({ key: "#", code: "Digit3", metaKey: true, shiftKey: true }))?.id).toBe("layout.grid");
+  });
+
+  it("still matches unshifted digit chords", () => {
+    expect(matchChord(key({ key: "4", code: "Digit4", metaKey: true }))?.id).toBe("panel.extensions");
   });
 });
 
