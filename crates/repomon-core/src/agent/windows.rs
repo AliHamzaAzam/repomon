@@ -400,6 +400,13 @@ mod host_backend {
         });
     }
 
+    /// The last registry scan with the instant it was taken, shared across overlay passes.
+    type ScanCache = Arc<Mutex<Option<(Instant, Vec<LiveHost>)>>>;
+
+    /// One pooled control connection slot per window. The outer lock guards the map, the inner
+    /// one serializes requests to a single window without blocking the others.
+    type ControlPool = Arc<Mutex<HashMap<String, Arc<Mutex<Option<ControlConn>>>>>>;
+
     /// The Windows [`SessionBackend`]: drives per-window `repomon-agent-host.exe` processes
     /// over their control pipes. Cheap to construct; all state is on disk (registry) or in the
     /// hosts themselves, so a new daemon re-adopts everything by scanning.
@@ -416,11 +423,11 @@ mod host_backend {
         /// times (`list_windows` + `live_agent_cwds`), and the GUI's fleet refresh adds
         /// `terminal.list_all` — without this, each call re-reads the registry dir and does a
         /// fresh pipe connect + hello roundtrip to EVERY live host, several times per 2s.
-        scan_cache: Arc<Mutex<Option<(Instant, Vec<LiveHost>)>>>,
+        scan_cache: ScanCache,
         /// Pooled control connections, one slot per window. Requests to one window serialize
         /// on the slot (roundtrips are sub-ms on a local pipe); different windows don't block
         /// each other.
-        control: Arc<Mutex<HashMap<String, Arc<Mutex<Option<ControlConn>>>>>>,
+        control: ControlPool,
     }
 
     /// How long a cached registry scan stays valid. Long enough to collapse the calls within
