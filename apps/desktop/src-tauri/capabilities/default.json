@@ -8,6 +8,7 @@
     "dialog:default",
     "notification:default",
     "opener:allow-open-url",
+    "opener:allow-default-urls",
     "process:allow-restart",
     "updater:default"
   ]
