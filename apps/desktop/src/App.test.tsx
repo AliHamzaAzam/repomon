@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 
 import App from "./App";
@@ -77,5 +77,30 @@ describe("Repomon desktop shell", () => {
     })} fleetSource={fleetSource} />);
 
     expect(await screen.findByText("fleet sync failed")).toBeInTheDocument();
+  });
+
+  it("drives the Extensions panel from the keymap table, not a bare digit", async () => {
+    // Scoped to this render's container: earlier tests in this file leave their DOM mounted
+    // (no cleanup wired up), so an unscoped query would see every prior "Extensions" button too.
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const extensions = within(container).getByRole("button", { name: "Extensions" });
+    expect(extensions).toHaveAttribute("aria-pressed", "false");
+
+    // The old ad-hoc listener toggled Extensions on a bare "6"; that would steal a keystroke
+    // meant for a focused agent terminal. The keymap-driven handler ignores unmodified keys.
+    fireEvent.keyDown(window, { key: "6", code: "Digit6" });
+    expect(extensions).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.keyDown(window, { key: "4", code: "Digit4", metaKey: true });
+    await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "true"));
+
+    fireEvent.keyDown(window, { key: "4", code: "Digit4", metaKey: true });
+    await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "false"));
   });
 });
