@@ -10,6 +10,7 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
+  isTerminalReleaseChord,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
@@ -218,7 +219,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         }
         // Shift+Escape hands focus back to the app shell so the fleet list can be driven by
         // keyboard. Plain Escape still goes to the agent: Claude Code uses it to interrupt.
-        if (event.key === "Escape" && event.shiftKey) {
+        if (isTerminalReleaseChord(event)) {
           event.preventDefault();
           terminal?.blur();
           document.querySelector<HTMLElement>('nav[aria-label="Fleet"]')?.focus();

@@ -51,6 +51,13 @@ export function translateKeyboardKey(event: KeyboardEvent): TranslatedKey | null
   return { key: `${control ? "C-" : alt ? "M-" : ""}${base}`, literal: false };
 }
 
+/// True when a key event should release focus from the terminal back to the app shell.
+/// Shift is required: plain Escape must keep reaching the agent, since Claude Code uses it to
+/// interrupt its own work.
+export function isTerminalReleaseChord(event: KeyboardEvent): boolean {
+  return event.key === "Escape" && event.shiftKey;
+}
+
 /// Convert one wheel event's delta into a SIGNED, fractional number of terminal lines (positive =
 /// scroll down). The caller accumulates this across events and only emits whole lines, so a
 /// trackpad gesture (many tiny pixel deltas) scrolls proportionally instead of one line per event
