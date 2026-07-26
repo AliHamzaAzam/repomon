@@ -216,6 +216,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
           openFind();
           return false;
         }
+        // Shift+Escape hands focus back to the app shell so the fleet list can be driven by
+        // keyboard. Plain Escape still goes to the agent: Claude Code uses it to interrupt.
+        if (event.key === "Escape" && event.shiftKey) {
+          event.preventDefault();
+          terminal?.blur();
+          document.querySelector<HTMLElement>('nav[aria-label="Fleet"]')?.focus();
+          return false;
+        }
         const translated = translateKeyboardKey(event);
         if (!translated) return true;
         event.preventDefault();
