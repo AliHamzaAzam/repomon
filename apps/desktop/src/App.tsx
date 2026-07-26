@@ -106,6 +106,7 @@ function App(props: AppProps) {
 
     event.preventDefault();
     switch (binding.id) {
+      case "panel.settings": actions.openSettings(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
       case "panel.repomind": setRepomindOpen((open) => !open); break;
       case "panel.theme": cycleTheme(); break;
@@ -241,7 +242,7 @@ function App(props: AppProps) {
             class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${extensionsOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
             onClick={() => setExtensionsOpen(!extensionsOpen())}
             aria-pressed={extensionsOpen()}
-            title="Extensions (6)"
+            title="Extensions (⌘4)"
           >Extensions</button>
           <button
             type="button"

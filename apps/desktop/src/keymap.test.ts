@@ -43,6 +43,10 @@ describe("matchChord", () => {
     expect(matchChord(key({ key: "z", metaKey: true }))).toBeNull();
   });
 
+  it("matches the settings chord, whose ad-hoc listener was removed", () => {
+    expect(matchChord(key({ key: ",", metaKey: true }))?.id).toBe("panel.settings");
+  });
+
   it("matches shifted digit chords, which report a symbol in event.key", () => {
     // Cmd+Shift+1 on a US layout delivers key "!" — only event.code still says Digit1.
     expect(matchChord(key({ key: "!", code: "Digit1", metaKey: true, shiftKey: true }))?.id).toBe("layout.focused");
