@@ -2,7 +2,7 @@ export type Theme = "light" | "dark" | "system";
 
 const storageKey = "repomon-theme";
 const themes: Theme[] = ["system", "dark", "light"];
-const accents: Record<string, string> = {
+export const ACCENTS: Record<string, string> = {
   cyan: "hsl(169 61% 49%)",
   green: "hsl(145 56% 45%)",
   magenta: "hsl(300 55% 52%)",
@@ -45,6 +45,6 @@ export function applyAccent(accent?: string | null): void {
     ? value
     : value === "mono" || value === "none" || value === "off"
       ? "var(--muted)"
-      : accents[value ?? "cyan"] ?? accents.cyan;
+      : ACCENTS[value ?? "cyan"] ?? ACCENTS.cyan;
   document.documentElement.style.setProperty("--signal", color);
 }

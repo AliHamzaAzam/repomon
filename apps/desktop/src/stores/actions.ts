@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ConfirmOptions } from "../components/ConfirmDialog";
+import type { SettingsTab } from "../components/SettingsModal";
 import { pickDirectory } from "../ipc/dialog";
 import { daemonCall } from "../ipc/rpc";
 import type { FleetStore } from "./fleet";
@@ -15,6 +16,7 @@ export interface RenameTarget {
 /// header) can open one without threading callbacks. The matching <ActionModals> renders them.
 export function createActionsStore(fleet: FleetStore) {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general");
   const [spawnLane, setSpawnLane] = createSignal<Lane | null>(null);
   const [newLaneOpen, setNewLaneOpen] = createSignal(false);
   const [newLaneRepoId, setNewLaneRepoId] = createSignal<number | null>(null);
@@ -111,7 +113,15 @@ export function createActionsStore(fleet: FleetStore) {
     error,
     dismissError: () => setError(null),
     settingsOpen,
-    openSettings: () => setSettingsOpen(true),
+    settingsTab,
+    openSettings: () => {
+      setSettingsTab("general");
+      setSettingsOpen(true);
+    },
+    openSettingsTab: (tab: SettingsTab) => {
+      setSettingsTab(tab);
+      setSettingsOpen(true);
+    },
     closeSettings: () => setSettingsOpen(false),
     spawnLane,
     spawn: (lane: Lane) => setSpawnLane(lane),

@@ -127,9 +127,7 @@ function App(props: AppProps) {
       case "lane.stop": if (lane) actions.stopAgent(lane, agent); break;
       case "agents.prev": workspace.cycleTab(-1, workspace.laneTargets()); break;
       case "agents.next": workspace.cycleTab(1, workspace.laneTargets()); break;
-      // TODO(task 5): once actions.openSettingsTab(tab) exists, switch this to
-      // actions.openSettingsTab("keyboard") so Cmd+? opens Settings on the Keyboard tab.
-      case "help.open": actions.openSettings(); break;
+      case "help.open": actions.openSettingsTab("keyboard"); break;
     }
   };
 

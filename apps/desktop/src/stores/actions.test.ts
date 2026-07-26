@@ -79,3 +79,31 @@ describe("lane operations", () => {
     });
   });
 });
+
+describe("settings modal tab", () => {
+  it("openSettingsTab opens the modal on the requested tab", () => {
+    createRoot((dispose) => {
+      const actions = createActionsStore(fleetStub());
+      expect(actions.settingsOpen()).toBe(false);
+
+      actions.openSettingsTab("keyboard");
+      expect(actions.settingsOpen()).toBe(true);
+      expect(actions.settingsTab()).toBe("keyboard");
+      dispose();
+    });
+  });
+
+  it("openSettings resets to the general tab even after a prior keyboard-tab open", () => {
+    createRoot((dispose) => {
+      const actions = createActionsStore(fleetStub());
+      actions.openSettingsTab("keyboard");
+      actions.closeSettings();
+      expect(actions.settingsTab()).toBe("keyboard");
+
+      actions.openSettings();
+      expect(actions.settingsOpen()).toBe(true);
+      expect(actions.settingsTab()).toBe("general");
+      dispose();
+    });
+  });
+});

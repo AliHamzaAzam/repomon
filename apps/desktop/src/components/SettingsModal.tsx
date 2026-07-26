@@ -4,11 +4,24 @@ import type { AgentChoice } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
 import { applyAccent } from "../theme";
+import ColorField from "./controls/ColorField";
+import Select from "./controls/Select";
+import Switch from "./controls/Switch";
 import Modal from "./Modal";
+
+export type SettingsTab = "general" | "notifications" | "appearance" | "keyboard";
 
 interface SettingsModalProps {
   onClose: () => void;
+  initialTab?: SettingsTab;
 }
+
+const TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: "general", label: "General" },
+  { id: "notifications", label: "Notifications" },
+  { id: "appearance", label: "Appearance" },
+  { id: "keyboard", label: "Keyboard" },
+];
 
 const NOTIFY_TOGGLES: Array<[keyof ConfigView, string]> = [
   ["notify_needs_you", "Needs you"],
@@ -30,19 +43,16 @@ const GENERAL_TOGGLES: Array<[keyof ConfigView, string]> = [
   ["embedded_pty", "Embedded terminal renderer"],
 ];
 
-function Toggle(props: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
-  return (
-    <label class="flex items-center justify-between rounded border border-line px-3 py-2 text-xs" classList={{ "opacity-50": props.disabled }}>
-      <span>{props.label}</span>
-      <input
-        type="checkbox"
-        class="accent-signal"
-        checked={props.checked}
-        disabled={props.disabled}
-        onChange={(event) => props.onChange(event.currentTarget.checked)}
-      />
-    </label>
-  );
+/// Builds Select options from the detected agents, plus a "Default" empty option and, if the
+/// currently configured value is not among the detected agents (a custom name entered before
+/// this control existed, or one no longer on PATH), a fallback option that preserves it.
+function agentSelectOptions(agents: AgentChoice[], current: string | null | undefined): Array<{ value: string; label: string }> {
+  const options = [{ value: "", label: "Default" }, ...agents.map((choice) => ({ value: choice.name, label: choice.name }))];
+  const value = current ?? "";
+  if (value && !options.some((option) => option.value === value)) {
+    options.push({ value, label: value });
+  }
+  return options;
 }
 
 function TextField(props: {
@@ -50,7 +60,6 @@ function TextField(props: {
   value: string;
   onInput: (value: string) => void;
   placeholder?: string;
-  list?: string;
 }) {
   return (
     <label class="block">
@@ -59,7 +68,6 @@ function TextField(props: {
         class="settings-input"
         value={props.value}
         placeholder={props.placeholder}
-        list={props.list}
         onInput={(event) => props.onInput(event.currentTarget.value)}
       />
     </label>
@@ -67,6 +75,7 @@ function TextField(props: {
 }
 
 export default function SettingsModal(props: SettingsModalProps) {
+  const [tab, setTab] = createSignal<SettingsTab>(props.initialTab ?? "general");
   const [config, setConfig] = createSignal<ConfigView | null>(null);
   const [agents, setAgents] = createSignal<AgentChoice[]>([]);
   const [error, setError] = createSignal<string | null>(null);
@@ -163,67 +172,103 @@ export default function SettingsModal(props: SettingsModalProps) {
 
   return (
     <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width="min(44rem, 95vw)" onClose={props.onClose} footer={footer()}>
+      {/* The Modal body scrolls (overflow-y-auto with px-5 py-4 padding); this strip cancels that
+          padding and sticks to the top of the scrollport so the tabs stay reachable while the
+          section below scrolls, without changing Modal.tsx's shared layout. */}
+      <div class="sticky -top-4 z-10 -mx-5 -mt-4 mb-4 border-b border-line bg-surface px-5 pt-4 pb-2">
+        <div class="flex items-center gap-1" role="tablist" aria-label="Settings sections">
+          <For each={TABS}>
+            {(item) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab() === item.id}
+                class={`focus-ring rounded px-2 py-1 font-mono text-[0.52rem] uppercase ${tab() === item.id ? "bg-signal/10 text-signal" : "text-muted"}`}
+                onClick={() => setTab(item.id)}
+              >
+                {item.label}
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+
       <Show when={error()}>
         <p class="mb-4 rounded-md border border-fault/40 bg-fault/8 p-2 text-xs text-fault">{error()}</p>
       </Show>
       <Show when={config()} fallback={<p class="text-sm text-muted">Loading settings…</p>}>
         {(settings) => (
           <div class="space-y-6">
-            <datalist id="agent-choices">
-              <For each={agents()}>{(choice) => <option value={choice.name} />}</For>
-            </datalist>
+            <Show when={tab() === "general"}>
+              <section class="space-y-3">
+                <p class="section-label text-signal">General</p>
+                <Select
+                  label="Default agent"
+                  value={String(settings().default_agent ?? "")}
+                  options={agentSelectOptions(agents(), settings().default_agent)}
+                  onChange={(value) => patch({ default_agent: value || null })}
+                />
+                <TextField label="Worktree template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value })} />
+                <TextField label="Auto-continue message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value })} />
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <For each={GENERAL_TOGGLES}>
+                    {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
+                  </For>
+                </div>
+              </section>
 
-            <section class="space-y-3">
-              <p class="section-label text-signal">General</p>
-              <div class="grid gap-3 sm:grid-cols-2">
-                <TextField label="Accent" value={String(settings().accent ?? "")} placeholder="cyan or #rrggbb or mono" onInput={(value) => patch({ accent: value })} />
-                <TextField label="Default agent" value={String(settings().default_agent ?? "")} list="agent-choices" placeholder="claude-code" onInput={(value) => patch({ default_agent: value || null })} />
-              </div>
-              <TextField label="Worktree template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value })} />
-              <TextField label="Auto-continue message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value })} />
-              <div class="grid gap-2 sm:grid-cols-2">
-                <For each={GENERAL_TOGGLES}>
-                  {([key, label]) => <Toggle label={label} checked={Boolean(settings()[key])} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
-                </For>
-              </div>
-            </section>
+              <section class="space-y-3 border-t border-line pt-4">
+                <p class="section-label text-signal">Updates</p>
+                <div class="flex items-center gap-3">
+                  <button type="button" class="focus-ring rounded border border-line px-3 py-2 font-mono text-[0.58rem] uppercase text-muted disabled:opacity-50" disabled={checking()} onClick={() => void checkForUpdates()}>
+                    {checking() ? "Checking…" : "Check for updates"}
+                  </button>
+                  <Show when={availableUpdate()}>
+                    {(update) => (
+                      <button type="button" class="focus-ring rounded bg-signal px-3 py-2 font-mono text-[0.58rem] font-semibold uppercase text-background disabled:opacity-50" disabled={checking()} onClick={() => void installUpdate()}>
+                        Install {update().version} and restart
+                      </button>
+                    )}
+                  </Show>
+                  <Show when={progress()?.total}>
+                    <progress class="h-1.5 flex-1 accent-signal" max={progress()!.total} value={progress()!.downloaded} />
+                  </Show>
+                </div>
+              </section>
+            </Show>
 
-            <section class="space-y-3">
-              <p class="section-label text-signal">Notifications</p>
-              <Toggle label="Enable notifications" checked={settings().notify_enabled} onChange={(value) => patch({ notify_enabled: value })} />
-              <div class="grid gap-2 sm:grid-cols-2">
-                <For each={NOTIFY_TOGGLES}>
-                  {([key, label]) => <Toggle label={label} checked={Boolean(settings()[key])} disabled={!settings().notify_enabled} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
-                </For>
-              </div>
-            </section>
+            <Show when={tab() === "notifications"}>
+              <section class="space-y-3">
+                <p class="section-label text-signal">Notifications</p>
+                <Switch label="Enable notifications" checked={settings().notify_enabled} onChange={(value) => patch({ notify_enabled: value })} />
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <For each={NOTIFY_TOGGLES}>
+                    {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} disabled={!settings().notify_enabled} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
+                  </For>
+                </div>
+              </section>
+            </Show>
 
-            <section class="space-y-3">
-              <p class="section-label text-signal">Orchestrator</p>
-              <div class="grid gap-3 sm:grid-cols-2">
-                <TextField label="Repomind agent" value={String(settings().orchestrator_agent ?? "")} list="agent-choices" placeholder="claude" onInput={(value) => patch({ orchestrator_agent: value || null })} />
+            <Show when={tab() === "appearance"}>
+              <section class="space-y-3">
+                <p class="section-label text-signal">Appearance</p>
+                <ColorField label="Accent" value={String(settings().accent ?? "")} onChange={(value) => patch({ accent: value })} />
+                <Select
+                  label="Repomind agent"
+                  value={String(settings().orchestrator_agent ?? "")}
+                  options={agentSelectOptions(agents(), settings().orchestrator_agent)}
+                  onChange={(value) => patch({ orchestrator_agent: value || null })}
+                />
                 <TextField label="Repomind model" value={String(settings().orchestrator_model ?? "")} placeholder="opus / sonnet" onInput={(value) => patch({ orchestrator_model: value || null })} />
-              </div>
-            </section>
+              </section>
+            </Show>
 
-            <section class="space-y-3 border-t border-line pt-4">
-              <p class="section-label text-signal">Updates</p>
-              <div class="flex items-center gap-3">
-                <button type="button" class="focus-ring rounded border border-line px-3 py-2 font-mono text-[0.58rem] uppercase text-muted disabled:opacity-50" disabled={checking()} onClick={() => void checkForUpdates()}>
-                  {checking() ? "Checking…" : "Check for updates"}
-                </button>
-                <Show when={availableUpdate()}>
-                  {(update) => (
-                    <button type="button" class="focus-ring rounded bg-signal px-3 py-2 font-mono text-[0.58rem] font-semibold uppercase text-background disabled:opacity-50" disabled={checking()} onClick={() => void installUpdate()}>
-                      Install {update().version} and restart
-                    </button>
-                  )}
-                </Show>
-                <Show when={progress()?.total}>
-                  <progress class="h-1.5 flex-1 accent-signal" max={progress()!.total} value={progress()!.downloaded} />
-                </Show>
-              </div>
-            </section>
+            <Show when={tab() === "keyboard"}>
+              <section class="space-y-3">
+                <p class="section-label text-signal">Keyboard</p>
+                <p class="text-xs text-muted">Keyboard reference arrives with the help component.</p>
+              </section>
+            </Show>
           </div>
         )}
       </Show>
