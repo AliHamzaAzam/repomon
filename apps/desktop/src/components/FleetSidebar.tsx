@@ -225,6 +225,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             x={menu.x}
             y={menu.y}
             onOpenExtensions={() => props.onOpenExtensions?.(menu.repoId)}
+            onOpenNotes={() => {
+              const repo = props.fleet.repos().find((r) => r.id === menu.repoId);
+              if (repo) props.actions.openRepoNotes(repo);
+            }}
             onClose={() => setExtMenu(null)}
           />
         )}

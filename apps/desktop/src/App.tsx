@@ -127,6 +127,7 @@ function App(props: AppProps) {
       case "fleet.addRepo": void actions.addRepo(); break;
       case "fleet.jumpUrgent": fleet.moveSelection(1, true); break;
       case "fleet.hideRepo": if (lane) void actions.setRepoHidden(lane.repo, true); break;
+      case "fleet.repoNotes": if (lane) actions.openRepoNotes(lane.repo); break;
       case "lane.spawn": if (lane) actions.spawn(lane); break;
       case "lane.terminal": void workspace.openShell(actions.reportError); break;
       case "lane.pin": if (lane) void actions.pinLane(lane); break;

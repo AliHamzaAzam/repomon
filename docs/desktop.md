@@ -90,6 +90,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+shift+n` | Add repository |
 | `mod+g` | Jump to a lane needing attention |
 | `mod+shift+h` | Hide the selected lane's project |
+| `mod+shift+b` | Edit the selected lane's project notes |
 
 ### Lane
 
@@ -152,6 +153,19 @@ running totals, and a **Hidden (N)** list at the bottom of the sidebar brings an
 
 The flag lives in the daemon, so the TUI honors it too and it survives a restart. The TUI has no
 unhide view of its own, so a project hidden there stays hidden until you restore it here.
+
+## Repo notes
+
+Every registered project has a notes file: conventions, build and test commands, merge
+preferences, gotchas, anything worth telling a worker every time. repomind reads them when it
+plans and folds them into the prompts of agents it spawns there, so this is where you write
+something the orchestrator will still know next week.
+
+Open them from `mod+shift+b`, or right-click a project header in the sidebar and choose **Repo
+notes**. They are plain markdown on disk under the daemon's data directory and stay editable
+outside the app, so the editor loads fresh each time rather than caching. The 8 KB cap is enforced
+by the daemon; the editor counts bytes (not characters) against it so a doomed save is refused
+before it is sent.
 
 ## Extensions
 

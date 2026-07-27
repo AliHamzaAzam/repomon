@@ -21,6 +21,7 @@ export function createActionsStore(fleet: FleetStore) {
   const [newLaneOpen, setNewLaneOpen] = createSignal(false);
   const [newLaneRepoId, setNewLaneRepoId] = createSignal<number | null>(null);
   const [renameTarget, setRenameTarget] = createSignal<RenameTarget | null>(null);
+  const [notesRepo, setNotesRepo] = createSignal<Repo | null>(null);
   const [confirmOptions, setConfirmOptions] = createSignal<ConfirmOptions | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -47,6 +48,16 @@ export function createActionsStore(fleet: FleetStore) {
         await fleet.refresh();
       },
     });
+  }
+
+  /// Open the per-repo notes editor. repomind reads these when planning and folds them into the
+  /// prompts of workers it spawns in this repo.
+  function openRepoNotes(repo: Repo) {
+    setNotesRepo(repo);
+  }
+
+  function closeRepoNotes() {
+    setNotesRepo(null);
   }
 
   /// Hide or reveal a repo. No confirmation: unlike removeRepo this keeps the registration and
@@ -162,6 +173,9 @@ export function createActionsStore(fleet: FleetStore) {
     addRepo,
     removeRepo,
     setRepoHidden,
+    notesRepo,
+    openRepoNotes,
+    closeRepoNotes,
     pinLane,
     mergeLane,
     deleteLane,
