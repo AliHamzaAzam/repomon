@@ -152,9 +152,12 @@ pub struct Commit {
 /// marker), what it targeted, and how it went. Params/detail are pre-truncated digests, never
 /// full payloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct JournalEntry {
     /// Rowid; 0 on insert (assigned by the store).
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: i64,
     pub at: DateTime<Utc>,
     /// Opaque per-orchestrator-process marker; `session_start` rows carrying it delimit recaps.
@@ -162,6 +165,7 @@ pub struct JournalEntry {
     /// Tool/action name, e.g. `spawn_agent`, `merge_lane`, `session_start`.
     pub action: String,
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub lane_id: Option<i64>,
     #[serde(default)]
     pub repo: Option<String>,

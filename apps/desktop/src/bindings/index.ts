@@ -9,6 +9,7 @@ export type { CreateLaneParams } from "./CreateLaneParams";
 export type { EnabledSource } from "./EnabledSource";
 export type { ExtSnapshot } from "./ExtSnapshot";
 export type { FanoutSummary } from "./FanoutSummary";
+export type { JournalEntry } from "./JournalEntry";
 export type { Lane } from "./Lane";
 export type { MarketplaceInfo } from "./MarketplaceInfo";
 export type { PendingDialog } from "./PendingDialog";
