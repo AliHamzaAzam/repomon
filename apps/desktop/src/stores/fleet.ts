@@ -318,6 +318,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     visibleRepos,
     hiddenRepos,
     lanes,
+    unhiddenLanes,
     usage,
     focusedUsage,
     terminals,

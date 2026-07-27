@@ -280,7 +280,7 @@ function App(props: AppProps) {
           <div class="flex items-center justify-between border-b border-line px-4 py-3">
             <span class="section-label">Fleet</span>
               <span class="font-mono text-[0.62rem] text-muted">
-                {fleet.repos().length} / {fleet.lanes().length}
+                {fleet.visibleRepos().length} / {fleet.unhiddenLanes().length}
               </span>
           </div>
           <FleetSidebar
