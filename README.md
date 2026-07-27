@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
-    <img alt="repomon" src="docs/logo-light.png" width="104">
-  </picture>
+  <img alt="repomon" src="docs/logo.png" width="104">
 </p>
 
 # repomon

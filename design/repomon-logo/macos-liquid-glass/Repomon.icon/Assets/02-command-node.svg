@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Repomon command node layer</title>
+  <desc>The locked central command node, separated for independent Liquid Glass annotation.</desc>
+  <rect
+    x="572"
+    y="571"
+    width="110"
+    height="110"
+    fill="#FFB84D"
+    shape-rendering="geometricPrecision"
+    transform="matrix(1.046511628 0 0 1.046511628 -144.1627907 -143.1162791)"
+  />
+</svg>

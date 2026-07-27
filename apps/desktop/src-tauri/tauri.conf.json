@@ -37,7 +37,10 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "files": {
+        "Resources/Assets.car": "macos/Assets.car"
+      }
     },
     "windows": {
       "nsis": {

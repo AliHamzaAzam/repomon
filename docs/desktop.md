@@ -24,6 +24,33 @@ need `tmux` on macOS and Linux (`brew install tmux`, `sudo apt install tmux`). I
 app from the Dock or Finder rather than a terminal, it resolves your login shell's `PATH` at
 startup, so tools installed in `~/.local/bin` or `/opt/homebrew/bin` are found.
 
+## The app icon
+
+The icon is authored as an Icon Composer bundle at
+`design/repomon-logo/macos-liquid-glass/Repomon.icon`: layered SVGs plus a manifest describing the
+glass, refraction, and lighting. On macOS 26 and later the system renders those layers live, so the
+icon picks up appearance tinting and specular response instead of being a flat picture of them.
+
+Regenerate the shipped assets from it with `actool`:
+
+```bash
+xcrun actool --compile <out> --app-icon Repomon \
+  --output-partial-info-plist <out>/partial.plist \
+  --platform macosx --minimum-deployment-target 11.0 --include-all-app-icons \
+  design/repomon-logo/macos-liquid-glass/Repomon.icon <empty>.xcassets
+```
+
+That emits `Assets.car` (copied to `src-tauri/macos/`, placed in the bundle by
+`bundle.macOS.files`, and selected by the `CFBundleIconName` in `src-tauri/Info.plist`) and a
+static `Repomon.icns` used as `icons/icon.icns`. The remaining PNG sizes and `icon.ico` are scaled
+from actool's 256px render, which is the largest it emits and is also the ceiling for every entry
+in the bundle's icon list. Older macOS, Windows, and Linux ignore the catalog and get that static
+render.
+
+The in-app mark (`src/components/BrandMark.tsx`) is the same glyph drawn from theme tokens rather
+than the icon's fixed gradient, so it follows the light/dark setting and your chosen accent. Only
+the OS-level icon is the glass artwork.
+
 ## Keyboard control
 
 Everything the app does can be driven from the keyboard. Press `⌘?` (Ctrl+? elsewhere) to open the
