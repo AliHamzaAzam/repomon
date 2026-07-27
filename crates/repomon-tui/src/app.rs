@@ -736,7 +736,9 @@ impl App {
                 // across the attention re-sort below.
                 let keep = self.selected_lane().map(|l| l.id);
                 let keep_ref = self.selected_session_ref();
-                self.lanes = l;
+                // Dropped here, ahead of the cursor restore and notification edge detection, so
+                // the whole TUI stays consistent with what it shows.
+                self.lanes = visible_lanes(l);
                 // Forget remembered agent selections for lanes that no longer exist.
                 self.session_memory
                     .retain(|id, _| self.lanes.iter().any(|l| l.id == *id));
@@ -4894,6 +4896,13 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     Ok(app.cd_target)
 }
 
+/// The lanes a client should show. `lane.list` deliberately returns lanes belonging to hidden
+/// repos — flagged rather than filtered — so a client can offer a way back; the TUI has no unhide
+/// view, so it simply drops them. Hiding is set and cleared in Mission Control (`docs/desktop.md`).
+fn visible_lanes(lanes: Vec<Lane>) -> Vec<Lane> {
+    lanes.into_iter().filter(|lane| !lane.repo.hidden).collect()
+}
+
 /// How urgently a lane's sessions need the user (the most urgent session wins). Inferred
 /// file-activity placeholders never rank — they can't be acted on. `lane_needs_attention`'s
 /// threshold and [`session_rank`]'s scale move together.
@@ -6244,6 +6253,21 @@ mod tests {
             "last_activity_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn hidden_repos_drop_out_of_the_lane_list() {
+        let visible = test_lane(1);
+        // `test_lane`'s JSON omits `hidden` entirely — an older daemon's payload — and still
+        // deserializes, so the serde default keeps this client working against one.
+        assert!(!visible.repo.hidden);
+
+        let mut hidden = test_lane(2);
+        hidden.repo.hidden = true;
+
+        let kept = visible_lanes(vec![visible, hidden]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 1);
     }
 
     /// An app looking at one lane whose first agent runs in `lane-7` — the state right before
