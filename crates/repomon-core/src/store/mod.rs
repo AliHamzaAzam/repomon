@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0004_session_labels.sql"),
     include_str!("../../migrations/0005_lanes_autoincrement.sql"),
     include_str!("../../migrations/0006_remote_devices.sql"),
+    include_str!("../../migrations/0007_repo_hidden.sql"),
 ];
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
@@ -130,6 +131,7 @@ impl Store {
                 name,
                 added_at: now,
                 worktree_root_template: template,
+                hidden: false,
             })
         })
         .await
@@ -138,7 +140,7 @@ impl Store {
     pub async fn list_repos(&self) -> Result<Vec<Repo>> {
         self.call(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, path, name, added_at, worktree_root_template FROM repos ORDER BY name",
+                "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos ORDER BY name",
             )?;
             let rows = stmt.query_map([], repo_from_row)?;
             collect(rows)
@@ -149,7 +151,7 @@ impl Store {
     pub async fn get_repo(&self, id: RepoId) -> Result<Repo> {
         self.call(move |c| {
             c.query_row(
-                "SELECT id, path, name, added_at, worktree_root_template FROM repos WHERE id = ?1",
+                "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos WHERE id = ?1",
                 params![id],
                 repo_from_row,
             )
@@ -165,7 +167,7 @@ impl Store {
         self.call(move |c| {
             let r = c
                 .query_row(
-                    "SELECT id, path, name, added_at, worktree_root_template FROM repos WHERE path = ?1",
+                    "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos WHERE path = ?1",
                     params![path.to_string_lossy()],
                     repo_from_row,
                 )
@@ -175,6 +177,22 @@ impl Store {
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(e.into()),
             }
+        })
+        .await
+    }
+
+    /// Hide or reveal a repo. Deliberately separate from `remove_repo`: hiding keeps the
+    /// registration, the watches, and every lane the repo owns, so it is fully reversible.
+    pub async fn set_repo_hidden(&self, id: RepoId, hidden: bool) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute(
+                "UPDATE repos SET hidden = ?2 WHERE id = ?1",
+                params![id, hidden],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("repo {id}")));
+            }
+            Ok(())
         })
         .await
     }
@@ -751,6 +769,7 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
         name: r.get(2)?,
         added_at: dt_col(r, 3)?,
         worktree_root_template: r.get(4)?,
+        hidden: r.get(5)?,
     })
 }
 
@@ -1000,6 +1019,32 @@ mod tests {
         s.remove_repo(r.id).await.unwrap();
         assert_eq!(s.list_repos().await.unwrap().len(), 1);
         assert!(matches!(s.get_repo(r.id).await, Err(Error::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn hiding_a_repo_keeps_it_listed() {
+        let s = store().await;
+        let r = s
+            .add_repo(PathBuf::from("/code/a"), "a".into(), None)
+            .await
+            .unwrap();
+        assert!(!r.hidden, "a fresh repo is visible");
+
+        s.set_repo_hidden(r.id, true).await.unwrap();
+        // Listings still carry the repo, flagged — clients filter, so they can also offer a way
+        // back. Removing it from the query would strand a hidden repo with no route to unhide.
+        let all = s.list_repos().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].hidden);
+        assert!(s.get_repo(r.id).await.unwrap().hidden);
+
+        s.set_repo_hidden(r.id, false).await.unwrap();
+        assert!(!s.get_repo(r.id).await.unwrap().hidden);
+
+        assert!(matches!(
+            s.set_repo_hidden(9999, true).await,
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[tokio::test]

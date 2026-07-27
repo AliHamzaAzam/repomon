@@ -17,7 +17,7 @@ vi.mock("../ipc/rpc", () => ({
 function lane(overrides: Partial<Lane> = {}): Lane {
   return {
     id: 7,
-    repo: { id: 2, path: "/code/r", name: "r", added_at: "2026-07-26T00:00:00Z", worktree_root_template: null },
+    repo: { id: 2, path: "/code/r", name: "r", added_at: "2026-07-26T00:00:00Z", worktree_root_template: null, hidden: false },
     worktree: { id: 3, repo_id: 2, path: "/code/r-wt", branch: "feat/x", head: "abc", is_main: false, name: "x" },
     state: { worktree_id: 3, head: "abc", branch: "feat/x", upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
     agent_sessions: [],

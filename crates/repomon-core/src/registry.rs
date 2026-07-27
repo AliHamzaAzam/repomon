@@ -44,6 +44,11 @@ impl Registry {
         self.store.remove_repo(id).await
     }
 
+    /// Hide or reveal a repo. The repo stays registered and watched; only client sidebars change.
+    pub async fn set_hidden(&self, id: RepoId, hidden: bool) -> Result<()> {
+        self.store.set_repo_hidden(id, hidden).await
+    }
+
     pub async fn list(&self) -> Result<Vec<Repo>> {
         self.store.list_repos().await
     }

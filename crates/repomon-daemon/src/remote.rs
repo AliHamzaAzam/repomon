@@ -618,6 +618,7 @@ mod tests {
             "agent.set_default",
             "repo.add",
             "repo.remove",
+            "repo.set_hidden",
             "repo.discover",
             "config.get",
             "config.set",

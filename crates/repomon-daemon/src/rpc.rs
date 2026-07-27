@@ -158,6 +158,11 @@ struct RepoRemove {
     repo_id: RepoId,
 }
 #[derive(Deserialize)]
+struct RepoSetHidden {
+    repo_id: RepoId,
+    hidden: bool,
+}
+#[derive(Deserialize)]
 struct Discover {
     root: String,
     #[serde(default = "default_depth")]
@@ -782,6 +787,20 @@ pub async fn dispatch(
                 let _ = indexer.sync(&repo_for_index).await;
             });
             to_value(repo)
+        }
+        // Hiding leaves the repo registered, watched, and lane-bearing — only clients stop
+        // showing it. Deliberately not `repo.remove`, which drops the registration outright.
+        "repo.set_hidden" => {
+            let p: RepoSetHidden = parse(params)?;
+            ctx.registry
+                .set_hidden(p.repo_id, p.hidden)
+                .await
+                .map_err(internal)?;
+            ctx.broadcast(
+                crate::pubsub::topic::REPO_CHANGED,
+                json!({ "repo_id": p.repo_id, "hidden": p.hidden }),
+            );
+            Ok(Value::Null)
         }
         "repo.remove" => {
             let p: RepoRemove = parse(params)?;
