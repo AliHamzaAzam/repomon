@@ -43,7 +43,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         12,
         include_str!("../../migrations/0012_orchestration_log.sql"),
     ),
+    (13, include_str!("../../migrations/0013_playbooks.sql")),
+    (14, include_str!("../../migrations/0014_schedules.sql")),
+    (15, include_str!("../../migrations/0015_approvals.sql")),
 ];
+
+/// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
+/// an unapproved draft is a proposal, not knowledge, and stale proposals shouldn't pile up.
+const PLAYBOOK_DRAFT_TTL_DAYS: i64 = 30;
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
 /// oldest are evicted, so a misbehaving/abusive client can't grow the table (or per-alert APNs
@@ -687,6 +694,290 @@ impl Store {
         .await
     }
 
+    // ---- playbooks -----------------------------------------------------------
+
+    /// Save a playbook. A new name inserts a draft; an existing draft is replaced; saving over
+    /// an approved playbook stashes the text as a pending revision (`draft_content`) so the
+    /// approved content stays live until a human re-approves. Returns the row as stored.
+    pub async fn save_playbook(&self, name: String, content: String) -> Result<Playbook> {
+        self.call(move |c| {
+            sweep_expired_playbook_drafts(c)?;
+            let now = to_iso(&Utc::now());
+            let status: Option<String> = match c.query_row(
+                "SELECT status FROM playbooks WHERE name = ?1",
+                params![&name],
+                |r| r.get(0),
+            ) {
+                Ok(s) => Some(s),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e.into()),
+            };
+            match status.as_deref() {
+                None => {
+                    c.execute(
+                        "INSERT INTO playbooks(name, content, status, created_at, updated_at)
+                         VALUES(?1, ?2, 'draft', ?3, ?3)",
+                        params![&name, &content, &now],
+                    )?;
+                }
+                Some("approved") => {
+                    c.execute(
+                        "UPDATE playbooks SET draft_content = ?2, updated_at = ?3 WHERE name = ?1",
+                        params![&name, &content, &now],
+                    )?;
+                }
+                _ => {
+                    c.execute(
+                        "UPDATE playbooks SET content = ?2, updated_at = ?3 WHERE name = ?1",
+                        params![&name, &content, &now],
+                    )?;
+                }
+            }
+            get_playbook(c, &name)
+        })
+        .await
+    }
+
+    /// Search APPROVED playbooks only (case-insensitive substring over name + approved
+    /// content), most recently approved first. Drafts and pending revisions never surface here
+    /// — approval is the self-poisoning-prompt gate.
+    pub async fn search_playbooks(&self, query: String, limit: usize) -> Result<Vec<Playbook>> {
+        self.call(move |c| {
+            let pattern = format!("%{query}%");
+            let mut stmt = c.prepare(&format!(
+                "SELECT {PLAYBOOK_COLS} FROM playbooks
+                 WHERE status = 'approved' AND (name LIKE ?1 OR content LIKE ?1)
+                 ORDER BY approved_at DESC LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(params![pattern, limit as i64], playbook_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Every playbook (after sweeping expired drafts), name order — the approval surface's view.
+    pub async fn list_playbooks(&self) -> Result<Vec<Playbook>> {
+        self.call(|c| {
+            sweep_expired_playbook_drafts(c)?;
+            let mut stmt = c.prepare(&format!(
+                "SELECT {PLAYBOOK_COLS} FROM playbooks ORDER BY name"
+            ))?;
+            let rows = stmt.query_map([], playbook_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Approve a draft (or promote an approved playbook's pending revision).
+    pub async fn approve_playbook(&self, name: String) -> Result<Playbook> {
+        self.call(move |c| {
+            let now = to_iso(&Utc::now());
+            let n = c.execute(
+                "UPDATE playbooks SET
+                     content     = COALESCE(draft_content, content),
+                     draft_content = NULL,
+                     status      = 'approved',
+                     approved_at = ?2,
+                     updated_at  = ?2
+                 WHERE name = ?1",
+                params![&name, &now],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("playbook {name}")));
+            }
+            get_playbook(c, &name)
+        })
+        .await
+    }
+
+    /// Delete a playbook outright (draft or approved).
+    pub async fn delete_playbook(&self, name: String) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute("DELETE FROM playbooks WHERE name = ?1", params![&name])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("playbook {name}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Test-only: age a playbook's `updated_at` back `days` days to exercise draft expiry.
+    #[cfg(test)]
+    pub async fn backdate_playbook(&self, name: String, days: i64) -> Result<()> {
+        self.call(move |c| {
+            let then = to_iso(&(Utc::now() - chrono::Duration::days(days)));
+            c.execute(
+                "UPDATE playbooks SET updated_at = ?2 WHERE name = ?1",
+                params![&name, &then],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    // ---- standing-orchestration schedules ------------------------------------
+
+    /// Add a schedule. The spec is validated by the caller (`schedule::parse_spec`).
+    pub async fn add_schedule(
+        &self,
+        spec: String,
+        prompt: String,
+        max_actions: u32,
+    ) -> Result<Schedule> {
+        self.call(move |c| {
+            let now = Utc::now();
+            c.execute(
+                "INSERT INTO schedules(spec, prompt, max_actions, created_at)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![&spec, &prompt, max_actions, to_iso(&now)],
+            )?;
+            Ok(Schedule {
+                id: c.last_insert_rowid(),
+                spec,
+                prompt,
+                max_actions,
+                created_at: now,
+                last_run_at: None,
+            })
+        })
+        .await
+    }
+
+    pub async fn list_schedules(&self) -> Result<Vec<Schedule>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, spec, prompt, max_actions, created_at, last_run_at
+                 FROM schedules ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], schedule_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    pub async fn remove_schedule(&self, id: i64) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("schedule {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Stamp a schedule's last firing time. Called BEFORE the run so a slow run can't double-fire.
+    pub async fn mark_schedule_run(&self, id: i64, at: DateTime<Utc>) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE schedules SET last_run_at = ?2 WHERE id = ?1",
+                params![id, to_iso(&at)],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    // ---- approval policy -----------------------------------------------------
+
+    /// Record one permission verdict and return how many CONSECUTIVE trailing approvals the
+    /// (repo, pattern) now has — a deny resets the streak (denies never generalize).
+    pub async fn record_approval_event(
+        &self,
+        repo: String,
+        pattern: String,
+        verdict: String,
+    ) -> Result<u32> {
+        self.call(move |c| {
+            c.execute(
+                "INSERT INTO approval_events(repo, pattern, verdict, at) VALUES(?1, ?2, ?3, ?4)",
+                params![&repo, &pattern, &verdict, to_iso(&Utc::now())],
+            )?;
+            let mut stmt = c.prepare(
+                "SELECT verdict FROM approval_events WHERE repo = ?1 AND pattern = ?2
+                 ORDER BY id DESC",
+            )?;
+            let rows = stmt.query_map(params![&repo, &pattern], |r| r.get::<_, String>(0))?;
+            let mut streak = 0u32;
+            for v in rows {
+                if v?.as_str() == "approve" {
+                    streak += 1;
+                } else {
+                    break;
+                }
+            }
+            Ok(streak)
+        })
+        .await
+    }
+
+    pub async fn add_approval_rule(&self, repo: String, pattern: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "INSERT OR IGNORE INTO approval_rules(repo, pattern, created_at)
+                 VALUES(?1, ?2, ?3)",
+                params![&repo, &pattern, to_iso(&Utc::now())],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn remove_approval_rule(&self, repo: String, pattern: String) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute(
+                "DELETE FROM approval_rules WHERE repo = ?1 AND pattern = ?2",
+                params![&repo, &pattern],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("approval rule {repo}:{pattern}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn list_approval_rules(&self) -> Result<Vec<ApprovalRule>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT repo, pattern, created_at FROM approval_rules ORDER BY repo, pattern",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (repo, pattern, created) = r?;
+                out.push(ApprovalRule {
+                    repo,
+                    pattern,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created)
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    pub async fn has_approval_rule(&self, repo: String, pattern: String) -> Result<bool> {
+        self.call(move |c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM approval_rules WHERE repo = ?1 AND pattern = ?2",
+                params![&repo, &pattern],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     // ---- agent sessions ------------------------------------------------------
 
     /// Insert or update a session keyed by its manifest path. Returns its id.
@@ -817,6 +1108,56 @@ fn opt_dt_col(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> 
                 )
             }),
     }
+}
+
+fn schedule_from_row(row: &Row) -> rusqlite::Result<Schedule> {
+    Ok(Schedule {
+        id: row.get(0)?,
+        spec: row.get(1)?,
+        prompt: row.get(2)?,
+        max_actions: row.get(3)?,
+        created_at: dt_col(row, 4)?,
+        last_run_at: opt_dt_col(row, 5)?,
+    })
+}
+
+/// Column list shared by every playbook SELECT so `playbook_from_row` indexes stay in sync.
+const PLAYBOOK_COLS: &str =
+    "name, content, status, draft_content, created_at, updated_at, approved_at";
+
+fn playbook_from_row(row: &Row) -> rusqlite::Result<Playbook> {
+    Ok(Playbook {
+        name: row.get(0)?,
+        content: row.get(1)?,
+        status: row.get(2)?,
+        draft_content: row.get(3)?,
+        created_at: dt_col(row, 4)?,
+        updated_at: dt_col(row, 5)?,
+        approved_at: opt_dt_col(row, 6)?,
+    })
+}
+
+fn get_playbook(c: &Connection, name: &str) -> Result<Playbook> {
+    c.query_row(
+        &format!("SELECT {PLAYBOOK_COLS} FROM playbooks WHERE name = ?1"),
+        params![name],
+        playbook_from_row,
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("playbook {name}")),
+        other => other.into(),
+    })
+}
+
+/// Drop unreviewed drafts older than [`PLAYBOOK_DRAFT_TTL_DAYS`]. Approved playbooks (including
+/// ones carrying a pending revision) never expire.
+fn sweep_expired_playbook_drafts(c: &Connection) -> Result<()> {
+    let cutoff = to_iso(&(Utc::now() - chrono::Duration::days(PLAYBOOK_DRAFT_TTL_DAYS)));
+    c.execute(
+        "DELETE FROM playbooks WHERE status = 'draft' AND updated_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(())
 }
 
 /// Column list shared by every journal SELECT so `journal_from_row` indexes stay in sync.
@@ -1184,6 +1525,193 @@ mod tests {
             .await
             .unwrap();
         assert!(s.journal_since_prev_session(50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn playbook_save_creates_a_draft_hidden_from_search() {
+        let s = store().await;
+        let p = s
+            .save_playbook("release-all".into(), "step 1: ...".into())
+            .await
+            .unwrap();
+        assert_eq!(p.status, "draft");
+        assert!(p.approved_at.is_none());
+        // Drafts never surface in search: approval is the poisoning gate.
+        assert!(
+            s.search_playbooks("release".into(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // But they are listable for the approval surface.
+        assert_eq!(s.list_playbooks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn playbook_approve_makes_it_searchable() {
+        let s = store().await;
+        s.save_playbook("release-all".into(), "step 1: ...".into())
+            .await
+            .unwrap();
+        let p = s.approve_playbook("release-all".into()).await.unwrap();
+        assert_eq!(p.status, "approved");
+        assert!(p.approved_at.is_some());
+        let hits = s.search_playbooks("step 1".into(), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "release-all");
+    }
+
+    #[tokio::test]
+    async fn playbook_save_over_approved_stashes_a_revision() {
+        let s = store().await;
+        s.save_playbook("release-all".into(), "v1".into())
+            .await
+            .unwrap();
+        s.approve_playbook("release-all".into()).await.unwrap();
+        let p = s
+            .save_playbook("release-all".into(), "v2".into())
+            .await
+            .unwrap();
+        // Still approved with the OLD content live; the new text waits as a revision.
+        assert_eq!(p.status, "approved");
+        assert_eq!(p.content, "v1");
+        assert_eq!(p.draft_content.as_deref(), Some("v2"));
+        let hits = s.search_playbooks("release".into(), 10).await.unwrap();
+        assert_eq!(hits[0].content, "v1");
+        // Approving promotes the revision.
+        let p = s.approve_playbook("release-all".into()).await.unwrap();
+        assert_eq!(p.content, "v2");
+        assert!(p.draft_content.is_none());
+        let hits = s.search_playbooks("release".into(), 10).await.unwrap();
+        assert_eq!(hits[0].content, "v2");
+    }
+
+    #[tokio::test]
+    async fn playbook_expired_drafts_are_swept() {
+        let s = store().await;
+        s.save_playbook("stale".into(), "old draft".into())
+            .await
+            .unwrap();
+        s.save_playbook("fresh".into(), "new draft".into())
+            .await
+            .unwrap();
+        s.backdate_playbook("stale".into(), 31).await.unwrap();
+        let names: Vec<String> = s
+            .list_playbooks()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["fresh"], "31-day-old draft must be swept");
+    }
+
+    #[tokio::test]
+    async fn playbook_approved_never_expires() {
+        let s = store().await;
+        s.save_playbook("keeper".into(), "v1".into()).await.unwrap();
+        s.approve_playbook("keeper".into()).await.unwrap();
+        s.backdate_playbook("keeper".into(), 90).await.unwrap();
+        assert_eq!(s.list_playbooks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn playbook_delete_removes_it() {
+        let s = store().await;
+        s.save_playbook("gone".into(), "x".into()).await.unwrap();
+        s.delete_playbook("gone".into()).await.unwrap();
+        assert!(s.list_playbooks().await.unwrap().is_empty());
+        assert!(s.delete_playbook("gone".into()).await.is_err());
+        assert!(s.approve_playbook("gone".into()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn schedule_add_list_remove_round_trip() {
+        let s = store().await;
+        let sched = s
+            .add_schedule("daily 09:00".into(), "morning briefing".into(), 10)
+            .await
+            .unwrap();
+        assert!(sched.id > 0);
+        assert!(sched.last_run_at.is_none());
+        let all = s.list_schedules().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].spec, "daily 09:00");
+        assert_eq!(all[0].max_actions, 10);
+        let at = Utc::now();
+        s.mark_schedule_run(sched.id, at).await.unwrap();
+        let all = s.list_schedules().await.unwrap();
+        assert_eq!(
+            all[0].last_run_at.map(|d| d.timestamp()),
+            Some(at.timestamp())
+        );
+        s.remove_schedule(sched.id).await.unwrap();
+        assert!(s.list_schedules().await.unwrap().is_empty());
+        assert!(s.remove_schedule(sched.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn approval_streak_counts_consecutive_approves_and_denies_reset() {
+        let s = store().await;
+        for expected in [1, 2, 3] {
+            let n = s
+                .record_approval_event("api".into(), "cargo test".into(), "approve".into())
+                .await
+                .unwrap();
+            assert_eq!(n, expected);
+        }
+        // A deny resets the streak; the next approve starts over at 1.
+        assert_eq!(
+            s.record_approval_event("api".into(), "cargo test".into(), "deny".into())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.record_approval_event("api".into(), "cargo test".into(), "approve".into())
+                .await
+                .unwrap(),
+            1
+        );
+        // Streaks are per repo+pattern.
+        assert_eq!(
+            s.record_approval_event("web".into(), "cargo test".into(), "approve".into())
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_rules_crud() {
+        let s = store().await;
+        assert!(
+            !s.has_approval_rule("api".into(), "cargo test".into())
+                .await
+                .unwrap()
+        );
+        s.add_approval_rule("api".into(), "cargo test".into())
+            .await
+            .unwrap();
+        s.add_approval_rule("api".into(), "cargo test".into())
+            .await
+            .unwrap(); // idempotent
+        assert!(
+            s.has_approval_rule("api".into(), "cargo test".into())
+                .await
+                .unwrap()
+        );
+        let rules = s.list_approval_rules().await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].repo, "api");
+        s.remove_approval_rule("api".into(), "cargo test".into())
+            .await
+            .unwrap();
+        assert!(
+            s.remove_approval_rule("api".into(), "cargo test".into())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

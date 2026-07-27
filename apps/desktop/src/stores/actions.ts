@@ -72,6 +72,18 @@ export function createActionsStore(fleet: FleetStore) {
     }
   }
 
+  /// Deleting a playbook throws away procedural memory that took real work to earn, so it asks
+  /// first. Approving does not: reading the content and clicking Approve is itself the review.
+  function confirmPlaybookDelete(name: string, onConfirm: () => Promise<void>) {
+    setConfirmOptions({
+      title: `Delete playbook ${name}?`,
+      message: "repomind loses this procedure and will re-derive it from scratch next time.",
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm,
+    });
+  }
+
   /// Pin or unpin the lane. Pinning is not destructive, so it applies immediately.
   async function pinLane(lane: Lane) {
     setError(null);
@@ -173,6 +185,7 @@ export function createActionsStore(fleet: FleetStore) {
     addRepo,
     removeRepo,
     setRepoHidden,
+    confirmPlaybookDelete,
     notesRepo,
     openRepoNotes,
     closeRepoNotes,

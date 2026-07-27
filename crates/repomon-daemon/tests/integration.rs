@@ -1416,3 +1416,361 @@ async fn journal_append_and_query() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+#[tokio::test]
+async fn playbook_lifecycle_over_rpc() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-pb-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    // Save a draft.
+    let r = call(
+        &mut stream,
+        1,
+        "playbook.save",
+        Some(json!({ "name": "release-all", "content": "1. lane per repo\n2. pnpm test" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "save errored: {:?}", r.error);
+    assert_eq!(r.result.unwrap()["status"], json!("draft"));
+
+    // Drafts are invisible to search.
+    let r = call(
+        &mut stream,
+        2,
+        "playbook.search",
+        Some(json!({ "query": "release" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["playbooks"], json!([]));
+
+    // Approve, then search hits.
+    let r = call(
+        &mut stream,
+        3,
+        "playbook.approve",
+        Some(json!({ "name": "release-all" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "approve errored: {:?}", r.error);
+    let r = call(
+        &mut stream,
+        4,
+        "playbook.search",
+        Some(json!({ "query": "pnpm" })),
+    )
+    .await;
+    let books = r.result.unwrap()["playbooks"].as_array().unwrap().clone();
+    assert_eq!(books.len(), 1);
+    assert_eq!(books[0]["name"], json!("release-all"));
+
+    // Saving over an approved playbook keeps the approved text live.
+    let r = call(
+        &mut stream,
+        5,
+        "playbook.save",
+        Some(json!({ "name": "release-all", "content": "v2 steps" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["status"], json!("approved"));
+    let r = call(
+        &mut stream,
+        6,
+        "playbook.search",
+        Some(json!({ "query": "release" })),
+    )
+    .await;
+    let books = r.result.unwrap()["playbooks"].as_array().unwrap().clone();
+    assert!(
+        books[0]["content"].as_str().unwrap().contains("pnpm test"),
+        "approved content must stay live until re-approval: {books:?}"
+    );
+
+    // list shows the pending revision for the approval surface.
+    let r = call(&mut stream, 7, "playbook.list", None).await;
+    let books = r.result.unwrap()["playbooks"].as_array().unwrap().clone();
+    assert_eq!(books[0]["draft_content"], json!("v2 steps"));
+
+    // Validation: hostile name and oversized content are rejected with the limits named.
+    let r = call(
+        &mut stream,
+        8,
+        "playbook.save",
+        Some(json!({ "name": "bad name!", "content": "x" })),
+    )
+    .await;
+    let err = r.error.expect("bad name must error");
+    assert!(err.message.contains("64"), "unhelpful: {}", err.message);
+    let r = call(
+        &mut stream,
+        9,
+        "playbook.save",
+        Some(json!({ "name": "big", "content": "x".repeat(16385) })),
+    )
+    .await;
+    let err = r.error.expect("oversized must error");
+    assert!(err.message.contains("16384"), "unhelpful: {}", err.message);
+
+    // Unknown-name approve/delete error.
+    let r = call(
+        &mut stream,
+        10,
+        "playbook.delete",
+        Some(json!({ "name": "nope" })),
+    )
+    .await;
+    assert!(r.error.is_some());
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn schedule_add_list_remove() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-sch-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    // Valid add returns the row plus its computed next firing.
+    let r = call(
+        &mut stream,
+        1,
+        "schedule.add",
+        Some(json!({ "spec": "daily 09:00", "prompt": "morning fleet briefing" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "add errored: {:?}", r.error);
+    let sched = r.result.unwrap();
+    let id = sched["id"].as_i64().unwrap();
+    assert_eq!(sched["max_actions"], json!(10), "default cap should be 10");
+    assert!(sched["next_run"].is_string(), "missing next_run: {sched}");
+
+    // Bad spec teaches the grammar.
+    let r = call(
+        &mut stream,
+        2,
+        "schedule.add",
+        Some(json!({ "spec": "tuesdays 09:00", "prompt": "x" })),
+    )
+    .await;
+    let err = r.error.expect("bad spec must error");
+    assert!(err.message.contains("daily"), "unhelpful: {}", err.message);
+
+    // Empty prompt rejected; oversized max_actions clamped to 50.
+    let r = call(
+        &mut stream,
+        3,
+        "schedule.add",
+        Some(json!({ "spec": "every 30m", "prompt": "" })),
+    )
+    .await;
+    assert!(r.error.is_some(), "empty prompt must error");
+    let r = call(
+        &mut stream,
+        4,
+        "schedule.add",
+        Some(json!({ "spec": "every 30m", "prompt": "sweep", "max_actions": 500 })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["max_actions"], json!(50));
+
+    // List shows both with next_run.
+    let r = call(&mut stream, 5, "schedule.list", None).await;
+    let scheds = r.result.unwrap()["schedules"].as_array().unwrap().clone();
+    assert_eq!(scheds.len(), 2);
+    assert!(scheds.iter().all(|s| s["next_run"].is_string()));
+
+    // Remove; second remove errors.
+    let r = call(&mut stream, 6, "schedule.remove", Some(json!({ "id": id }))).await;
+    assert!(r.error.is_none(), "remove errored: {:?}", r.error);
+    let r = call(&mut stream, 7, "schedule.remove", Some(json!({ "id": id }))).await;
+    assert!(r.error.is_some(), "double remove must error");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn approval_record_and_rules_lifecycle() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ap-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    // Three consistent approvals: third one proposes an allowlist entry.
+    for (i, expect_propose) in [(1u64, false), (2, false), (3, true)] {
+        let r = call(
+            &mut stream,
+            i,
+            "approval.record",
+            Some(json!({ "repo": "api", "command": "cargo test -p foo", "verdict": "approve" })),
+        )
+        .await;
+        assert!(r.error.is_none(), "record errored: {:?}", r.error);
+        let v = r.result.unwrap();
+        assert_eq!(v["pattern"], json!("cargo test"));
+        assert_eq!(v["approvals"], json!(i));
+        assert_eq!(v["propose"], json!(expect_propose), "at approval {i}: {v}");
+    }
+
+    // Confirmed rule: listed, and further records say rule_exists instead of proposing.
+    let r = call(
+        &mut stream,
+        4,
+        "approval.allow",
+        Some(json!({ "repo": "api", "pattern": "cargo test" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "allow errored: {:?}", r.error);
+    let r = call(&mut stream, 5, "approval.list", None).await;
+    let rules = r.result.unwrap()["rules"].as_array().unwrap().clone();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["pattern"], json!("cargo test"));
+    let r = call(
+        &mut stream,
+        6,
+        "approval.record",
+        Some(json!({ "repo": "api", "command": "cargo test --lib", "verdict": "approve" })),
+    )
+    .await;
+    let v = r.result.unwrap();
+    assert_eq!(v["rule_exists"], json!(true));
+    assert_eq!(v["propose"], json!(false));
+
+    // Always-escalate commands never propose, no matter the streak.
+    for i in 10..14u64 {
+        let r = call(
+            &mut stream,
+            i,
+            "approval.record",
+            Some(json!({ "repo": "api", "command": "git push --force", "verdict": "approve" })),
+        )
+        .await;
+        let v = r.result.unwrap();
+        assert_eq!(v["propose"], json!(false), "always-escalate proposed: {v}");
+    }
+
+    // A deny resets the streak.
+    let r = call(
+        &mut stream,
+        20,
+        "approval.record",
+        Some(json!({ "repo": "api", "command": "npm run build", "verdict": "approve" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["approvals"], json!(1));
+    let r = call(
+        &mut stream,
+        21,
+        "approval.record",
+        Some(json!({ "repo": "api", "command": "npm run build", "verdict": "deny" })),
+    )
+    .await;
+    assert_eq!(r.result.unwrap()["approvals"], json!(0));
+
+    // Remove; second remove errors.
+    let r = call(
+        &mut stream,
+        22,
+        "approval.remove",
+        Some(json!({ "repo": "api", "pattern": "cargo test" })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    let r = call(
+        &mut stream,
+        23,
+        "approval.remove",
+        Some(json!({ "repo": "api", "pattern": "cargo test" })),
+    )
+    .await;
+    assert!(r.error.is_some());
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn orchestrator_watch_is_per_connection() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-ow-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut a = connect_retry(&sock).await;
+    let mut b = connect_retry(&sock).await;
+
+    assert!(!ctx.has_orchestrator_watcher().await);
+
+    // A watches; B saying "off" must not clobber A's watch (per-connection state, like
+    // viewports — a phone leaving its view must not stop the TUI's stream).
+    let r = call(&mut a, 1, "orchestrator.watch", Some(json!({ "on": true }))).await;
+    assert!(r.error.is_none(), "watch errored: {:?}", r.error);
+    assert!(ctx.has_orchestrator_watcher().await);
+    let r = call(
+        &mut b,
+        1,
+        "orchestrator.watch",
+        Some(json!({ "on": false })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    assert!(
+        ctx.has_orchestrator_watcher().await,
+        "another connection's off must not clobber A's watch"
+    );
+
+    // A turning itself off unwatches.
+    let r = call(
+        &mut a,
+        2,
+        "orchestrator.watch",
+        Some(json!({ "on": false })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    assert!(!ctx.has_orchestrator_watcher().await);
+
+    // A watching then DISCONNECTING unwatches via session cleanup.
+    let r = call(&mut a, 3, "orchestrator.watch", Some(json!({ "on": true }))).await;
+    assert!(r.error.is_none());
+    assert!(ctx.has_orchestrator_watcher().await);
+    drop(a);
+    for _ in 0..100 {
+        if !ctx.has_orchestrator_watcher().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !ctx.has_orchestrator_watcher().await,
+        "disconnect must release the watch"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
