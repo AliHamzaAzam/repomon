@@ -19,6 +19,7 @@ pub mod input;
 pub mod lane;
 pub mod launch;
 pub mod model;
+pub mod notes;
 pub mod notify;
 pub mod process;
 pub mod protocol;

@@ -3,6 +3,7 @@ import { Show } from "solid-js";
 import type { ActionsStore } from "../stores/actions";
 import ConfirmDialog from "./ConfirmDialog";
 import NewLaneModal from "./NewLaneModal";
+import RepoNotesModal from "./RepoNotesModal";
 import RenameModal from "./RenameModal";
 import SettingsModal from "./SettingsModal";
 import SpawnModal from "./SpawnModal";
@@ -17,6 +18,9 @@ export default function ActionModals(props: { actions: ActionsStore }) {
       </Show>
       <Show when={actions.spawnLane()}>
         {(lane) => <SpawnModal lane={lane()} onClose={actions.closeSpawn} onDone={() => actions.fleet.refresh()} />}
+      </Show>
+      <Show keyed when={actions.notesRepo()}>
+        {(repo) => <RepoNotesModal repo={repo} onClose={actions.closeRepoNotes} />}
       </Show>
       <Show when={actions.newLaneOpen()}>
         <NewLaneModal
