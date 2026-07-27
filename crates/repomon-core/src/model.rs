@@ -179,6 +179,42 @@ pub struct JournalEntry {
     pub detail: Option<String>,
 }
 
+/// A playbook: procedural memory drafted by the orchestrator, inert until a human approves it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct Playbook {
+    pub name: String,
+    /// The live text: draft text before approval, approved text after.
+    pub content: String,
+    /// `"draft"` or `"approved"`.
+    pub status: String,
+    /// A pending revision saved over an approved playbook, awaiting re-approval.
+    #[serde(default)]
+    pub draft_content: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub approved_at: Option<DateTime<Utc>>,
+}
+
+/// A standing-orchestration schedule: a bounded headless repomind run the daemon fires on a
+/// spec ("daily 09:00", "every 30m", ...).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schedule {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub id: i64,
+    pub spec: String,
+    pub prompt: String,
+    /// The run's action cap — deliberately lower than an attended session's.
+    pub max_actions: u32,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Utc>>,
+}
+
 /// The kind of coding agent backing a session. An open enum from day one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {

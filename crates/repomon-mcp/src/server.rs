@@ -64,6 +64,7 @@ fn journaled_tool(name: &str) -> bool {
             | "delete_lane"
             | "merge_lane"
             | "repo_notes_write"
+            | "playbook_save"
     )
 }
 
@@ -94,6 +95,8 @@ impl ToolHandler for Server {
             "repo_notes" => self.repo_notes(args).await,
             "repo_notes_write" => self.repo_notes_write(args).await,
             "fleet_history" => self.fleet_history(args).await,
+            "playbook_save" => self.playbook_save(args).await,
+            "playbook_search" => self.playbook_search(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
         if let Some(jargs) = journal_args {
@@ -462,6 +465,15 @@ impl Server {
     /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
     async fn delete_lane(&self, args: Value) -> Result<Value, String> {
         let a: DeleteLaneArgs = parse(args)?;
+        // Unattended runs never destroy work, regardless of autonomy (locked design decision:
+        // an unattended orchestrator must be MORE conservative than an attended one).
+        if self.policy.unattended {
+            return Err(
+                "this is an unattended standing run: deleting a lane is never allowed here. \
+                 Report the lane's state and recommend the delete to the human instead."
+                    .into(),
+            );
+        }
         // Defense-in-depth on top of the two-phase confirm below: gate on the same
         // structural-autonomy check create_lane/merge_lane use, checked before either phase so
         // supervised/read-only mode refuses early — before a token is ever minted.
@@ -532,6 +544,15 @@ impl Server {
 
     async fn merge_lane(&self, args: Value) -> Result<Value, String> {
         let a: MergeLaneArgs = parse(args)?;
+        // Unattended runs never land work, regardless of autonomy (locked design decision).
+        if self.policy.unattended {
+            return Err(
+                "this is an unattended standing run: merging is never allowed here. Verify \
+                 with lane_diff, then report the lane as merge-ready and recommend the merge \
+                 to the human instead."
+                    .into(),
+            );
+        }
         self.policy.record_mutation()?;
         if !self.policy.autonomy.allows_structural() {
             return Err(
@@ -729,6 +750,64 @@ impl Server {
             .map(|v| v.iter().map(compact_journal_entry).collect())
             .unwrap_or_default();
         Ok(json!({ "entries": entries }))
+    }
+
+    async fn playbook_save(&self, args: Value) -> Result<Value, String> {
+        let a: PlaybookSaveArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        let book: Value = self
+            .client
+            .call(
+                "playbook.save",
+                Some(json!({ "name": a.name, "content": a.content })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        let status = book["status"].as_str().unwrap_or("draft").to_string();
+        let name = book["name"].as_str().unwrap_or_default().to_string();
+        let hint = if status == "approved" {
+            format!(
+                "saved as a pending revision of the approved playbook; the human must \
+                 re-approve it (repomon playbooks approve {name}) before it goes live"
+            )
+        } else {
+            format!(
+                "saved as a DRAFT; it is inert until the human runs: repomon playbooks \
+                 approve {name}"
+            )
+        };
+        Ok(json!({ "ok": true, "name": name, "status": status, "hint": hint }))
+    }
+
+    async fn playbook_search(&self, args: Value) -> Result<Value, String> {
+        let a: PlaybookSearchArgs = parse(args)?;
+        let res: Value = self
+            .client
+            .call("playbook.search", Some(json!({ "query": a.query })))
+            .await
+            .map_err(rpc_err)?;
+        let books: Vec<Value> = res["playbooks"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .map(|b| {
+                        json!({
+                            "name": b["name"],
+                            "content": b["content"],
+                            "approved_at": b["approved_at"],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut out = json!({ "playbooks": books });
+        if out["playbooks"].as_array().is_some_and(Vec::is_empty) {
+            out["hint"] = json!(
+                "no approved playbook matches. Plan from scratch; when the goal completes, \
+                 draft what worked with playbook_save so next time starts here."
+            );
+        }
+        Ok(out)
     }
 
     /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
@@ -929,6 +1008,15 @@ struct FleetHistoryArgs {
     since_last_session: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct PlaybookSaveArgs {
+    name: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct PlaybookSearchArgs {
+    query: String,
 }
 #[derive(Deserialize)]
 struct RepoNotesArgs {
@@ -1430,6 +1518,34 @@ fn tool_catalog() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "playbook_save",
+            description: "Draft a playbook after a goal completes: the goal pattern, per-repo \
+                steps, worker prompts that worked, verification steps, and failure modes hit. \
+                Saved as a DRAFT that is inert until the human approves it (repomon playbooks \
+                approve <name>); saving over an approved playbook stashes a pending revision \
+                and the approved text stays live. Max 16 KB; kebab-case names.",
+            input_schema: obj(
+                json!({
+                    "name": { "type": "string", "description": "Stable kebab-case name, e.g. release-all-changed-repos (1-64 chars of [A-Za-z0-9._-])." },
+                    "content": { "type": "string", "description": "The playbook markdown: pattern, steps, prompts, verification, failure modes." }
+                }),
+                &["name", "content"],
+            ),
+        },
+        ToolDef {
+            name: "playbook_search",
+            description: "Search APPROVED playbooks (drafts never appear). Call before planning \
+                any multi-lane or multi-step goal; when one matches, follow it and tell the \
+                human which playbook you're using. If reality deviates, save a revised draft \
+                with playbook_save rather than silently diverging.",
+            input_schema: obj(
+                json!({
+                    "query": { "type": "string", "description": "Substring over names and content, e.g. 'release' or 'fix CI'." }
+                }),
+                &["query"],
+            ),
+        },
+        ToolDef {
             name: "wait_for_change",
             description: "Block until the fleet meaningfully changes (a status/attention edge) or \
                 the timeout elapses, then return the deltas. This is how you watch agents without \
@@ -1466,6 +1582,29 @@ mod tests {
             crate::PERSONA.contains("since_you_last_looked"),
             "persona never mentions the recap block"
         );
+    }
+
+    /// The persona must teach the playbook cycle: search before multi-lane goals, draft after
+    /// completed ones, human approval gates everything.
+    #[test]
+    fn persona_documents_playbooks() {
+        assert!(
+            crate::PERSONA.contains("playbook_search"),
+            "persona never mentions playbook_search"
+        );
+        assert!(
+            crate::PERSONA.contains("playbook_save"),
+            "persona never mentions playbook_save"
+        );
+    }
+
+    /// The unattended addendum must set the report-and-recommend posture and name the
+    /// refused tools, since the server hard-refuses them.
+    #[test]
+    fn unattended_addendum_documents_the_bounds() {
+        assert!(crate::UNATTENDED_ADDENDUM.contains("merge_lane"));
+        assert!(crate::UNATTENDED_ADDENDUM.contains("RECOMMEND"));
+        assert!(crate::UNATTENDED_ADDENDUM.contains("briefing"));
     }
 
     #[test]

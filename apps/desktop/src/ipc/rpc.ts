@@ -9,6 +9,8 @@ import type {
   FanoutSummary,
   JournalEntry,
   Lane,
+  Playbook,
+  Schedule,
   PendingDialog,
   Repo,
   TimelineData,
@@ -85,6 +87,12 @@ interface RpcMap {
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
   "repo.set_hidden": { params: { repo_id: number; hidden: boolean }; result: null };
+  "schedule.list": { params: undefined; result: { schedules: Schedule[] } };
+  "schedule.add": { params: { spec: string; prompt: string; max_actions?: number }; result: unknown };
+  "schedule.remove": { params: { id: number }; result: unknown };
+  "playbook.list": { params: undefined; result: { playbooks: Playbook[] } };
+  "playbook.approve": { params: { name: string }; result: unknown };
+  "playbook.delete": { params: { name: string }; result: unknown };
   "journal.query": {
     params: { query?: string; since_last_session?: boolean; limit?: number };
     result: { entries: JournalEntry[] };
