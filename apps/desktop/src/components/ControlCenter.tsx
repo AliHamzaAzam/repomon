@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { AgentSession, BrowseResult, Commit, JournalEntry, PendingDialog, Playbook, TimelineData, WorkSession } from "../bindings";
+import type { AgentSession, BrowseResult, Commit, JournalEntry, PendingDialog, Playbook, Schedule, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
 import { agentLabel } from "./agentLabel";
@@ -10,7 +10,7 @@ import type { ActionsStore } from "../stores/actions";
 
 const JOURNAL_LIMIT = 200;
 
-type ControlTab = "actions" | "triage" | "history" | "journal" | "playbooks" | "feed";
+type ControlTab = "actions" | "triage" | "history" | "journal" | "playbooks" | "schedules" | "feed";
 
 /// Params for a journal fetch. A blank box is not a search for the empty string: it asks for the
 /// recent tail, which is what the tab shows on open. Sending `query: ""` instead would run a
@@ -29,6 +29,19 @@ export function playbookState(book: Playbook): { label: string; awaitingApproval
   if (book.status !== "approved") return { label: "draft", awaitingApproval: true };
   if (book.draft_content !== null) return { label: "approved · revision pending", awaitingApproval: true };
   return { label: "approved", awaitingApproval: false };
+}
+
+/// Params for `schedule.add`. A blank cap is omitted rather than sent as 0: the daemon picks a
+/// deliberately conservative default for unattended runs, and 0 would pin the run to no actions
+/// at all, which looks like a schedule that silently does nothing.
+export function scheduleAddParams(
+  spec: string,
+  prompt: string,
+  cap: string,
+): { spec: string; prompt: string; max_actions?: number } {
+  const parsed = Number.parseInt(cap.trim(), 10);
+  const base = { spec: spec.trim(), prompt: prompt.trim() };
+  return Number.isFinite(parsed) && parsed > 0 ? { ...base, max_actions: parsed } : base;
 }
 
 interface ControlCenterProps {
@@ -66,6 +79,10 @@ export default function ControlCenter(props: ControlCenterProps) {
   const [journalSearch, setJournalSearch] = createSignal("");
   const [playbooks, setPlaybooks] = createSignal<Playbook[]>([]);
   const [openPlaybook, setOpenPlaybook] = createSignal<string | null>(null);
+  const [schedules, setSchedules] = createSignal<Schedule[]>([]);
+  const [specDraft, setSpecDraft] = createSignal("");
+  const [promptDraft, setPromptDraft] = createSignal("");
+  const [capDraft, setCapDraft] = createSignal("");
   const [browser, setBrowser] = createSignal<BrowseResult | null>(null);
   const [selectedAgentKey, setSelectedAgentKey] = createSignal<string | null>(null);
   let trigger!: HTMLButtonElement;
@@ -266,11 +283,48 @@ export default function ControlCenter(props: ControlCenterProps) {
     }
   }
 
+  async function loadSchedules() {
+    try {
+      const result = await daemonCall("schedule.list");
+      setSchedules(result.schedules);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function addSchedule() {
+    setBusy("schedule-add");
+    try {
+      await daemonCall("schedule.add", scheduleAddParams(specDraft(), promptDraft(), capDraft()));
+      setSpecDraft("");
+      setPromptDraft("");
+      setCapDraft("");
+      setError(null);
+      await loadSchedules();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function removeSchedule(id: number) {
+    try {
+      await daemonCall("schedule.remove", { id });
+      setError(null);
+      await loadSchedules();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function chooseTab(next: ControlTab) {
     setTab(next);
     if (next === "history") await loadHistory();
     if (next === "journal") await loadJournal();
     if (next === "playbooks") await loadPlaybooks();
+    if (next === "schedules") await loadSchedules();
     if (next === "feed") props.notifications.markAllRead();
   }
 
@@ -300,7 +354,7 @@ export default function ControlCenter(props: ControlCenterProps) {
           <section ref={dialogElement} role="dialog" aria-modal="true" aria-label="Control center" tabIndex={-1} class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
             <nav aria-label="Control sections" class="border-r border-line bg-raised/50 p-2">
               <p class="section-label px-2 pb-3 pt-2">Control center</p>
-              <For each={["actions", "triage", "history", "journal", "playbooks", "feed"] as ControlTab[]}>
+              <For each={["actions", "triage", "history", "journal", "playbooks", "schedules", "feed"] as ControlTab[]}>
                 {(item) => (
                   <button type="button" class={`focus-ring mb-1 flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs capitalize ${tab() === item ? "bg-signal/10 text-signal" : "text-muted hover:bg-raised hover:text-foreground"}`} onClick={() => void chooseTab(item)}>
                     <span>{item}</span>
@@ -547,6 +601,71 @@ export default function ControlCenter(props: ControlCenterProps) {
                       </div>
                     );
                   }}
+                </For>
+              </Show>
+
+              <Show when={tab() === "schedules"}>
+                <p class="mb-3 text-xs leading-relaxed text-muted">
+                  Standing orchestrations: repomind runs headless on a timer under a lower action
+                  cap, and never merges or deletes a lane unattended. Results arrive as
+                  notifications and land in the journal.
+                </p>
+                <form
+                  class="mb-4 grid gap-2 rounded-lg border border-line p-2.5"
+                  onSubmit={(event) => { event.preventDefault(); void addSchedule(); }}
+                >
+                  <div class="flex gap-2">
+                    <input
+                      class="focus-ring h-8 flex-1 rounded border border-line bg-background px-2 text-xs outline-none"
+                      placeholder="weekdays 09:00"
+                      value={specDraft()}
+                      onInput={(event) => setSpecDraft(event.currentTarget.value)}
+                      aria-label="Schedule"
+                    />
+                    <input
+                      class="focus-ring h-8 w-24 rounded border border-line bg-background px-2 text-xs outline-none"
+                      placeholder="cap"
+                      inputMode="numeric"
+                      value={capDraft()}
+                      onInput={(event) => setCapDraft(event.currentTarget.value)}
+                      aria-label="Action cap"
+                    />
+                  </div>
+                  <input
+                    class="focus-ring h-8 rounded border border-line bg-background px-2 text-xs outline-none"
+                    placeholder="morning fleet briefing"
+                    value={promptDraft()}
+                    onInput={(event) => setPromptDraft(event.currentTarget.value)}
+                    aria-label="Goal"
+                  />
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-mono text-[0.55rem] text-muted/70">
+                      daily HH:MM · weekdays HH:MM · weekends HH:MM · every Nm · every Nh
+                    </span>
+                    <button
+                      class="focus-ring rounded bg-signal px-3 py-1 font-mono text-[0.58rem] uppercase text-background disabled:opacity-40"
+                      type="submit"
+                      disabled={busy() === "schedule-add" || !specDraft().trim() || !promptDraft().trim()}
+                    >Add</button>
+                  </div>
+                </form>
+                <For each={schedules()} fallback={<p class="text-xs text-muted">Nothing scheduled.</p>}>
+                  {(entry) => (
+                    <div class="mb-2 flex items-start justify-between gap-2 rounded-lg border border-line p-2.5">
+                      <span class="min-w-0">
+                        <b class="block truncate font-mono text-[0.66rem]">{entry.spec}</b>
+                        <span class="mt-0.5 block truncate text-xs text-muted">{entry.prompt}</span>
+                        <span class="mt-1 block font-mono text-[0.55rem] text-muted/70">
+                          cap {entry.max_actions} · {entry.last_run_at ? `last run ${formatTime(entry.last_run_at)}` : "never run"}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        class="focus-ring shrink-0 rounded border border-line px-2 py-1 font-mono text-[0.55rem] uppercase text-muted hover:text-fault"
+                        onClick={() => void removeSchedule(entry.id)}
+                      >Remove</button>
+                    </div>
+                  )}
                 </For>
               </Show>
 

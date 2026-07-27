@@ -17,6 +17,7 @@ export type { PluginInfo } from "./PluginInfo";
 export type { PluginProvides } from "./PluginProvides";
 export type { Playbook } from "./Playbook";
 export type { Repo } from "./Repo";
+export type { Schedule } from "./Schedule";
 export type { SkillInfo } from "./SkillInfo";
 export type { SkillSource } from "./SkillSource";
 export type { SkippedLane } from "./SkippedLane";

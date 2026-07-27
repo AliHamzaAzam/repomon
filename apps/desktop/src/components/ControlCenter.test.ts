@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { DaemonRpcError } from "../ipc/rpc";
 import type { Playbook } from "../bindings";
-import { journalQueryParams, playbookState, replacementDialog } from "./ControlCenter";
+import { journalQueryParams, playbookState, replacementDialog, scheduleAddParams } from "./ControlCenter";
 
 describe("safe dialog answers", () => {
   it("extracts the replacement after DIALOG_CHANGED", () => {
@@ -51,6 +51,32 @@ describe("playbook approval state", () => {
     expect(playbookState(revised)).toEqual({
       label: "approved · revision pending",
       awaitingApproval: true,
+    });
+  });
+});
+
+describe("schedule add params", () => {
+  it("trims the spec and goal", () => {
+    expect(scheduleAddParams("  weekdays 09:00 ", " briefing ", "")).toEqual({
+      spec: "weekdays 09:00",
+      prompt: "briefing",
+    });
+  });
+
+  // Sending 0 would cap an unattended run at no actions: a schedule that fires and does nothing,
+  // which reads as a broken scheduler rather than a bad cap. Omit instead and let the daemon
+  // apply its own conservative default.
+  it("omits a blank or nonsense cap instead of sending zero", () => {
+    for (const cap of ["", "   ", "abc", "0", "-4"]) {
+      expect(scheduleAddParams("daily 09:00", "g", cap)).toEqual({ spec: "daily 09:00", prompt: "g" });
+    }
+  });
+
+  it("passes a real cap through", () => {
+    expect(scheduleAddParams("every 30m", "g", " 20 ")).toEqual({
+      spec: "every 30m",
+      prompt: "g",
+      max_actions: 20,
     });
   });
 });

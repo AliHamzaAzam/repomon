@@ -192,6 +192,22 @@ approved text is still what repomind follows, and the revision waits for you. De
 since the procedure took real work to earn; approving does not, because reading it and clicking
 Approve is the review.
 
+## Standing orchestrations
+
+**Control center > Schedules** runs repomind on a timer without you starting it. Add one with a
+spec, a goal, and optionally an action cap; results arrive as notifications and land in the
+journal.
+
+The spec grammar is `daily HH:MM`, `weekdays HH:MM`, `weekends HH:MM`, `every Nm`, or `every Nh`.
+The app deliberately does not re-implement that grammar to pre-validate your input, because a
+second copy would drift from the daemon's; a bad spec comes back with an error that names the
+accepted forms.
+
+Unattended runs are bounded harder than attended ones: a lower action cap, and repomind refuses to
+merge or delete a lane when nobody is watching. It reports and recommends instead. Leaving the cap
+blank uses the daemon's conservative default rather than sending zero, which would produce a
+schedule that fires and does nothing.
+
 ## Extensions
 
 The Extensions view manages Claude Code marketplaces, plugins, and skills, either globally or

@@ -200,8 +200,11 @@ pub struct Playbook {
 
 /// A standing-orchestration schedule: a bounded headless repomind run the daemon fires on a
 /// spec ("daily 09:00", "every 30m", ...).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: i64,
     pub spec: String,
     pub prompt: String,
