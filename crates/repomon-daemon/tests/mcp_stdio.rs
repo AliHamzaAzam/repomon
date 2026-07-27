@@ -223,11 +223,11 @@ async fn mcp_stdio_end_to_end() {
 
     mcp_notify(&mut stdin, "notifications/initialized").await;
 
-    // 2. tools/list -> exactly the 16 tools (13 v1 + repo-notes pair + fleet_history).
+    // 2. tools/list -> exactly the 20 tools (repo-notes, history, playbooks, approvals).
     mcp_request(&mut stdin, 2, "tools/list", json!({})).await;
     let resp = mcp_read(&mut lines).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 16, "tools/list returned: {tools:?}");
+    assert_eq!(tools.len(), 20, "tools/list returned: {tools:?}");
     let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: BTreeSet<&str> = [
         "fleet_status",
@@ -246,6 +246,10 @@ async fn mcp_stdio_end_to_end() {
         "repo_notes",
         "repo_notes_write",
         "fleet_history",
+        "playbook_save",
+        "playbook_search",
+        "approval_allow",
+        "approval_rules",
     ]
     .into_iter()
     .collect();
@@ -794,6 +798,329 @@ async fn mcp_stdio_read_only_allows_fleet_history() {
     assert!(
         !is_error,
         "fleet_history (read) must work under read-only autonomy, got: {text}"
+    );
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_playbook_draft_approval_flow() {
+    let (sock, mut control, _state_dir) = boot_daemon("playbook").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
+
+    // Draft a playbook; the result must say it is a draft awaiting human approval.
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({
+            "name": "playbook_save",
+            "arguments": { "name": "release-all", "content": "1. lane per repo\n2. verify\n3. merge" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "playbook_save errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["status"], json!("draft"));
+    assert!(
+        parsed["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("approve"),
+        "save result must explain the approval step: {parsed}"
+    );
+
+    // Unapproved: search returns nothing, with a hint.
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "playbook_search", "arguments": { "query": "release" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "playbook_search errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["playbooks"], json!([]));
+    assert!(
+        parsed["hint"].is_string(),
+        "empty search should hint: {parsed}"
+    );
+
+    // Human approves out-of-band (the CLI path drives this same RPC).
+    let r = daemon_call(
+        &mut control,
+        50,
+        "playbook.approve",
+        Some(json!({ "name": "release-all" })),
+    )
+    .await;
+    assert!(r.error.is_none(), "approve errored: {:?}", r.error);
+
+    // Now the playbook is followable.
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "playbook_search", "arguments": { "query": "release" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, _) = tool_result(&resp);
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let books = parsed["playbooks"].as_array().unwrap();
+    assert_eq!(books.len(), 1);
+    assert!(
+        books[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("lane per repo")
+    );
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_read_only_playbooks() {
+    let (sock, mut control, _state_dir) = boot_daemon("playbook-ro").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) =
+        init_mcp_child(&sock, &[("REPOMON_MCP_AUTONOMY", "read-only")]).await;
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "playbook_save", "arguments": { "name": "x", "content": "y" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("read-only"),
+        "playbook_save should be refused under read-only autonomy, got: {text}"
+    );
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "playbook_search", "arguments": { "query": "x" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        !is_error,
+        "playbook_search (read) must work under read-only autonomy, got: {text}"
+    );
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_unattended_refuses_merge_and_delete() {
+    let (sock, mut control, _state_dir) = boot_daemon("unattended").await;
+    let (_repo_dir, lane_id) = seed_repo_lane(&mut control).await;
+
+    // Unattended + fully autonomous: structural autonomy is NOT the gate here.
+    let (child, mut stdin, mut lines) = init_mcp_child(
+        &sock,
+        &[
+            ("REPOMON_MCP_UNATTENDED", "1"),
+            ("REPOMON_MCP_AUTONOMY", "autonomous"),
+        ],
+    )
+    .await;
+
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "merge_lane", "arguments": { "lane_id": lane_id } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("unattended"),
+        "merge_lane must be refused in unattended mode, got: {text}"
+    );
+
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "delete_lane", "arguments": { "lane_id": lane_id } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("unattended"),
+        "delete_lane must be refused in unattended mode, got: {text}"
+    );
+
+    // Reads and non-structural mutations stay available (only caps bound them).
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "fleet_status", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "fleet_status must work unattended: {text}");
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_approval_allow_two_phase() {
+    let (sock, mut control, _state_dir) = boot_daemon("approval").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
+
+    // No rules yet.
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "approval_rules", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "approval_rules errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["rules"], json!([]));
+
+    // Phase 1: no confirm mints a token and stores nothing.
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({
+            "name": "approval_allow",
+            "arguments": { "repo": "api", "pattern": "cargo test" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "phase 1 errored: {text}");
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let token = parsed["confirm_token"].as_str().expect("token").to_string();
+    assert!(
+        parsed["impact"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("auto-approve"),
+        "impact must explain the consequence: {parsed}"
+    );
+    mcp_request(
+        &mut stdin,
+        4,
+        "tools/call",
+        json!({ "name": "approval_rules", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, _) = tool_result(&resp);
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        parsed["rules"],
+        json!([]),
+        "phase 1 must not store the rule"
+    );
+
+    // A fabricated token is rejected.
+    mcp_request(
+        &mut stdin,
+        5,
+        "tools/call",
+        json!({
+            "name": "approval_allow",
+            "arguments": { "repo": "api", "pattern": "cargo test", "confirm": "deadbeef" },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(is_error, "bogus token must fail: {text}");
+
+    // Phase 2 with the real token stores the rule.
+    mcp_request(
+        &mut stdin,
+        6,
+        "tools/call",
+        json!({
+            "name": "approval_allow",
+            "arguments": { "repo": "api", "pattern": "cargo test", "confirm": token },
+        }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(!is_error, "phase 2 errored: {text}");
+    mcp_request(
+        &mut stdin,
+        7,
+        "tools/call",
+        json!({ "name": "approval_rules", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, _) = tool_result(&resp);
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    let rules = parsed["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["pattern"], json!("cargo test"));
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_stdio_read_only_approvals() {
+    let (sock, mut control, _state_dir) = boot_daemon("approval-ro").await;
+    let (_repo_dir, _lane_id) = seed_repo_lane(&mut control).await;
+
+    let (child, mut stdin, mut lines) =
+        init_mcp_child(&sock, &[("REPOMON_MCP_AUTONOMY", "read-only")]).await;
+    mcp_request(
+        &mut stdin,
+        2,
+        "tools/call",
+        json!({ "name": "approval_allow", "arguments": { "repo": "a", "pattern": "x y" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        is_error && text.contains("read-only"),
+        "approval_allow must be refused read-only, got: {text}"
+    );
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({ "name": "approval_rules", "arguments": {} }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&resp);
+    assert!(
+        !is_error,
+        "approval_rules (read) must work read-only: {text}"
     );
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);

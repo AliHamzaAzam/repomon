@@ -62,6 +62,10 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut orch_scan_tick = false;
     let mut orch_transcript: Option<(AgentStatus, Option<String>)> = None;
     let mut orch_popup_fired: Option<Instant> = None;
+    // Needs-you edges awaiting a triage orchestration (config-gated on `triage_after_mins`).
+    // An entry is consumed when its triage fires or when the session stops needing attention;
+    // the notify latch above prevents re-adds until the agent does real work again.
+    let mut pending_triage: HashMap<(LaneId, SessKey), Instant> = HashMap::new();
 
     loop {
         tick.tick().await;
@@ -160,8 +164,59 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                     latch.insert(dkey, (a, Instant::now()));
                 }
             }
+            if kind == NotifKind::NeedsYou && cfg.triage_after_mins.is_some() {
+                pending_triage.insert((key.0, key.1.clone()), Instant::now());
+            }
             fires.push((key, kind));
         }
+        // Needs-you triage: after `triage_after_mins` with the agent still stuck and still no
+        // UI attached (no TUI heartbeat, no live connections), fire one bounded triage
+        // orchestration for the lane. The entry is consumed either way.
+        if let Some(after_mins) = cfg.triage_after_mins {
+            let ui_attached = tui_active || !ctx.sessions.lock().await.is_empty();
+            let mut due: Vec<(LaneId, SessKey)> = Vec::new();
+            pending_triage.retain(|(lane_id, sess), fired| {
+                if !now.contains_key(&(*lane_id, sess.clone())) {
+                    return false; // agent moved on; triage moot
+                }
+                if crate::standing::triage_due(fired.elapsed(), after_mins, ui_attached) {
+                    due.push((*lane_id, sess.clone()));
+                    return false;
+                }
+                true
+            });
+            for (lane_id, _sess) in due {
+                let repo = lanes
+                    .iter()
+                    .find(|l| l.id == lane_id)
+                    .map(|l| l.repo.name.clone())
+                    .unwrap_or_default();
+                let prompt = format!(
+                    "Triage lane {lane_id} (repo {repo}): an agent there has needed attention \
+                     for over {after_mins} minutes with nobody watching. Use read_agent to see \
+                     its state, classify the situation, and recommend exactly ONE next action \
+                     for the human. Do not approve, merge, or delete anything. End with a 2-3 \
+                     sentence briefing."
+                );
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    tracing::info!(lane = lane_id, "needs-you triage firing");
+                    crate::standing::run_standing(
+                        &ctx,
+                        "triage_run",
+                        &format!("triage-{lane_id}"),
+                        &prompt,
+                        5,
+                        json!({ "lane_id": lane_id, "repo": repo }),
+                        Some(lane_id),
+                    )
+                    .await;
+                });
+            }
+        } else {
+            pending_triage.clear();
+        }
+
         prev = now;
         let snapshot = &prev;
         debounce.retain(|(lane, sess, _), t| {
@@ -178,6 +233,66 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 continue;
             };
             let sess = session_by_key(lane, &key, subagents);
+            // Approval-policy auto-approve: a routine Bash permission matching a confirmed
+            // per-repo rule is answered by the daemon itself (the default-approve key, same
+            // assumption as approve_agent's choice=None) and the alert is suppressed — the
+            // acceptance is precisely "the fourth cargo test never reaches your phone". The
+            // hardcoded always-escalate sniffer wins over any learned rule.
+            if kind == NotifKind::NeedsYou {
+                use repomon_core::agent::approval;
+                let auto = match sess {
+                    Some(s) => match (s.pending_dialog.as_ref(), s.tmux_window.clone()) {
+                        (Some(dialog), Some(window)) => approval::dialog_command(dialog)
+                            .map(|cmd| (approval::command_pattern(&cmd), cmd, window)),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if let Some((pattern, cmd, window)) = auto {
+                    let allowed = !approval::is_always_escalate(&cmd)
+                        && ctx
+                            .store
+                            .has_approval_rule(lane.repo.name.clone(), pattern.clone())
+                            .await
+                            .unwrap_or(false);
+                    if allowed {
+                        tracing::info!(
+                            lane = lane_id,
+                            pattern = %pattern,
+                            "auto-approving allowlisted permission"
+                        );
+                        let tmux = ctx.backend.clone();
+                        let win = window.clone();
+                        let sent =
+                            tokio::task::spawn_blocking(move || tmux.send_key_named(&win, "Enter"))
+                                .await;
+                        if matches!(sent, Ok(Ok(_))) {
+                            rpc::mark_input(&ctx, lane_id, &window).await;
+                            let _ = ctx
+                                .store
+                                .append_journal(repomon_core::model::JournalEntry {
+                                    id: 0,
+                                    at: chrono::Utc::now(),
+                                    session: format!("auto-approve-{lane_id}"),
+                                    action: "auto_approve".into(),
+                                    lane_id: Some(lane_id),
+                                    repo: Some(lane.repo.name.clone()),
+                                    params: Some(
+                                        json!({ "pattern": pattern, "command": cmd }).to_string(),
+                                    ),
+                                    outcome: "ok".into(),
+                                    detail: None,
+                                })
+                                .await;
+                            continue;
+                        }
+                        tracing::warn!(
+                            lane = lane_id,
+                            "auto-approve key send failed; escalating normally"
+                        );
+                    }
+                }
+            }
             let (title, body) = compose(
                 kind,
                 lane,

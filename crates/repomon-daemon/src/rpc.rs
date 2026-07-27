@@ -105,7 +105,7 @@ const DIALOG_CHANGED: i64 = -32010;
 /// Record that input reached a lane window: stamp `input_seen` (quiets the notification
 /// engine) and drop the window's sniff-cache entry, so an answered dialog can't be
 /// re-advertised by `lane.list` for the rest of its TTL.
-async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
+pub(crate) async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
     ctx.input_seen
         .lock()
         .await
@@ -195,6 +195,43 @@ struct JournalQuery {
     since_last_session: bool,
     #[serde(default)]
     limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct ApprovalRecord {
+    repo: String,
+    command: String,
+    verdict: String,
+}
+#[derive(Deserialize)]
+struct ApprovalRuleRef {
+    repo: String,
+    pattern: String,
+}
+#[derive(Deserialize)]
+struct ScheduleAdd {
+    spec: String,
+    prompt: String,
+    #[serde(default)]
+    max_actions: Option<u32>,
+}
+#[derive(Deserialize)]
+struct ScheduleRemove {
+    id: i64,
+}
+#[derive(Deserialize)]
+struct PlaybookSave {
+    name: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct PlaybookSearch {
+    query: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct PlaybookName {
+    name: String,
 }
 #[derive(Deserialize)]
 struct Discover {
@@ -969,6 +1006,194 @@ pub async fn dispatch(
             }
             .map_err(internal)?;
             to_value(json!({ "entries": entries }))
+        }
+
+        // ---- approval policy ----
+        "approval.record" => {
+            use repomon_core::agent::approval;
+            let p: ApprovalRecord = parse(params)?;
+            if !matches!(p.verdict.as_str(), "approve" | "deny") {
+                return Err(RpcError::invalid_params(
+                    "verdict must be \"approve\" or \"deny\"",
+                ));
+            }
+            let pattern = approval::command_pattern(&p.command);
+            if pattern.is_empty() {
+                return to_value(json!({
+                    "pattern": Value::Null,
+                    "approvals": 0,
+                    "rule_exists": false,
+                    "propose": false,
+                }));
+            }
+            let approvals = ctx
+                .store
+                .record_approval_event(p.repo.clone(), pattern.clone(), p.verdict.clone())
+                .await
+                .map_err(internal)?;
+            let rule_exists = ctx
+                .store
+                .has_approval_rule(p.repo.clone(), pattern.clone())
+                .await
+                .map_err(internal)?;
+            let propose =
+                approvals >= 3 && !rule_exists && !approval::is_always_escalate(&p.command);
+            tracing::info!(
+                repo = %p.repo,
+                pattern = %pattern,
+                verdict = %p.verdict,
+                approvals,
+                "approval verdict recorded"
+            );
+            to_value(json!({
+                "pattern": pattern,
+                "approvals": approvals,
+                "rule_exists": rule_exists,
+                "propose": propose,
+            }))
+        }
+        "approval.allow" => {
+            let p: ApprovalRuleRef = parse(params)?;
+            ctx.store
+                .add_approval_rule(p.repo.clone(), p.pattern.clone())
+                .await
+                .map_err(internal)?;
+            tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule confirmed");
+            Ok(Value::Null)
+        }
+        "approval.remove" => {
+            let p: ApprovalRuleRef = parse(params)?;
+            ctx.store
+                .remove_approval_rule(p.repo.clone(), p.pattern.clone())
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule removed");
+            Ok(Value::Null)
+        }
+        "approval.list" => {
+            let rules = ctx.store.list_approval_rules().await.map_err(internal)?;
+            to_value(json!({ "rules": rules }))
+        }
+
+        // ---- standing-orchestration schedules ----
+        "schedule.add" => {
+            let p: ScheduleAdd = parse(params)?;
+            let spec = repomon_core::schedule::parse_spec(&p.spec)
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            let prompt = p.prompt.trim().to_string();
+            if prompt.is_empty() || prompt.len() > 2000 {
+                return Err(RpcError::invalid_params(
+                    "schedule prompt must be 1-2000 bytes",
+                ));
+            }
+            // Headless standing runs drive `claude -p`; a codex orchestrator can't run them.
+            {
+                let cfg = ctx.config.read().await;
+                if matches!(
+                    resolve_orchestrator_backend(&cfg.orchestrator_agent, &cfg.agents),
+                    Ok(crate::OrchestratorBackend::Codex)
+                ) {
+                    return Err(RpcError::invalid_params(
+                        "headless standing runs support the claude backend only; \
+                         orchestrator_agent is set to codex",
+                    ));
+                }
+            }
+            let max_actions = p.max_actions.unwrap_or(10).min(50);
+            let sched = ctx
+                .store
+                .add_schedule(p.spec.clone(), prompt, max_actions)
+                .await
+                .map_err(internal)?;
+            tracing::info!(id = sched.id, spec = %sched.spec, "schedule added");
+            let mut v = serde_json::to_value(&sched).map_err(internal)?;
+            v["next_run"] = json!(spec.next_after(chrono::Local::now()).to_rfc3339());
+            Ok(v)
+        }
+        "schedule.list" => {
+            let scheds = ctx.store.list_schedules().await.map_err(internal)?;
+            let now = chrono::Local::now();
+            let rows: Vec<Value> = scheds
+                .iter()
+                .map(|s| {
+                    let mut v = serde_json::to_value(s).unwrap_or_default();
+                    if let Ok(spec) = repomon_core::schedule::parse_spec(&s.spec) {
+                        v["next_run"] = json!(spec.next_after(now).to_rfc3339());
+                    }
+                    v
+                })
+                .collect();
+            to_value(json!({ "schedules": rows }))
+        }
+        "schedule.remove" => {
+            let p: ScheduleRemove = parse(params)?;
+            ctx.store
+                .remove_schedule(p.id)
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(id = p.id, "schedule removed");
+            Ok(Value::Null)
+        }
+
+        // ---- playbooks ----
+        "playbook.save" => {
+            let p: PlaybookSave = parse(params)?;
+            let name = p.name.trim();
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                return Err(RpcError::invalid_params(
+                    "playbook name must be 1-64 chars of [A-Za-z0-9._-] (kebab-case works well)",
+                ));
+            }
+            if p.content.len() > 16384 {
+                return Err(RpcError::invalid_params(format!(
+                    "playbook is {} bytes; the cap is 16384 bytes",
+                    p.content.len()
+                )));
+            }
+            let book = ctx
+                .store
+                .save_playbook(name.to_string(), p.content)
+                .await
+                .map_err(internal)?;
+            tracing::info!(playbook = %book.name, status = %book.status, "playbook saved");
+            to_value(book)
+        }
+        "playbook.search" => {
+            let p: PlaybookSearch = parse(params)?;
+            let books = ctx
+                .store
+                .search_playbooks(p.query, p.limit.unwrap_or(10).min(50))
+                .await
+                .map_err(internal)?;
+            to_value(json!({ "playbooks": books }))
+        }
+        "playbook.list" => {
+            let books = ctx.store.list_playbooks().await.map_err(internal)?;
+            to_value(json!({ "playbooks": books }))
+        }
+        "playbook.approve" => {
+            let p: PlaybookName = parse(params)?;
+            let book = ctx
+                .store
+                .approve_playbook(p.name)
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %book.name, "playbook approved");
+            to_value(book)
+        }
+        "playbook.delete" => {
+            let p: PlaybookName = parse(params)?;
+            ctx.store
+                .delete_playbook(p.name.clone())
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %p.name, "playbook deleted");
+            Ok(Value::Null)
         }
 
         // ---- lanes ----
@@ -4298,7 +4523,7 @@ pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
 /// and `cursor-agent` can't speak MCP, and an unknown name has no command — instead of what this
 /// path used to do: silently spawn e.g. `aider --mcp-config …`, a broken window the user had to
 /// diagnose by hand.
-fn resolve_orchestrator_backend(
+pub(crate) fn resolve_orchestrator_backend(
     agent: &Option<String>,
     customs: &HashMap<String, String>,
 ) -> Result<crate::OrchestratorBackend, RpcError> {
@@ -4328,7 +4553,10 @@ fn resolve_orchestrator_backend(
 /// `CLAUDE_CONFIG_DIR=… claude`), else the kind's default binary (`codex` — anything else was
 /// already rejected by [`resolve_orchestrator_backend`]). `None` (no agent chosen) is bare
 /// `claude`.
-fn orchestrator_base_command(agent: &Option<String>, customs: &HashMap<String, String>) -> String {
+pub(crate) fn orchestrator_base_command(
+    agent: &Option<String>,
+    customs: &HashMap<String, String>,
+) -> String {
     match agent {
         Some(name) => {
             if let Some(c) = customs.get(name) {
@@ -4496,12 +4724,28 @@ fn write_orchestrator_mcp_config(
     autonomy: &str,
     max_agents: Option<usize>,
 ) -> std::io::Result<PathBuf> {
+    write_orchestrator_mcp_config_named(socket, autonomy, max_agents, &[], "repomind-mcp.json")
+}
+
+/// Like [`write_orchestrator_mcp_config`] but with extra env pairs and a caller-chosen file
+/// name — standing runs write `repomind-standing-mcp.json` with the unattended guardrail env so
+/// they never clobber (or inherit) the interactive session's config.
+pub(crate) fn write_orchestrator_mcp_config_named(
+    socket: &Path,
+    autonomy: &str,
+    max_agents: Option<usize>,
+    extra_env: &[(&str, String)],
+    filename: &str,
+) -> std::io::Result<PathBuf> {
     let repomond = repomon_core::service::repomond_path();
     let mut env = serde_json::Map::new();
     env.insert("REPOMON_MCP_SOCKET".into(), json!(socket.to_string_lossy()));
     env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
     if let Some(n) = max_agents {
         env.insert("REPOMON_MCP_MAX_AGENTS".into(), json!(n.to_string()));
+    }
+    for (k, v) in extra_env {
+        env.insert((*k).into(), json!(v));
     }
     let mcp_config = json!({
         "mcpServers": {
@@ -4514,7 +4758,7 @@ fn write_orchestrator_mcp_config(
     });
     let cfg_dir = repomon_core::config::config_dir();
     std::fs::create_dir_all(&cfg_dir)?;
-    let path = cfg_dir.join("repomind-mcp.json");
+    let path = cfg_dir.join(filename);
     std::fs::write(
         &path,
         serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),

@@ -632,6 +632,25 @@ mod tests {
             // full action history — neither belongs on the bridge without a deliberate decision.
             "journal.append",
             "journal.query",
+            // playbooks stay local-only: save is a write channel into future orchestrator
+            // prompts (post-approval), and approve is the human gate itself — neither belongs
+            // on the bridge.
+            // standing-run schedules mint unattended orchestrator processes — strictly
+            // local-only.
+            // approval policy shapes what the daemon auto-approves — the definition of a
+            // permission bypass. Strictly local-only.
+            "approval.record",
+            "approval.allow",
+            "approval.remove",
+            "approval.list",
+            "schedule.add",
+            "schedule.list",
+            "schedule.remove",
+            "playbook.save",
+            "playbook.search",
+            "playbook.list",
+            "playbook.approve",
+            "playbook.delete",
             "terminal.open",
             "terminal.close",
             "terminal.target",

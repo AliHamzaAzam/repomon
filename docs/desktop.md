@@ -176,6 +176,49 @@ first, with a search box over the history.
 An entry that names a lane is clickable and jumps you to that lane. Opening the tab shows the
 recent tail rather than a search, so it doubles as "what happened while I was away".
 
+## Playbooks
+
+When repomind finishes a multi-lane goal it drafts a playbook: the pattern, the per-repo steps,
+the worker prompts that worked, the failure modes it hit. **Control center > Playbooks** lists
+them.
+
+A draft is inert. repomind is only offered a playbook back once you approve it, which is
+deliberate: instructions the orchestrator wrote feeding into its own future prompts unreviewed is a
+self-poisoning path. Approve is only reachable once you have opened a playbook and its text is on
+screen, so nothing can be waved through from the list.
+
+A playbook that was approved and then re-drafted reads **approved · revision pending**: the old
+approved text is still what repomind follows, and the revision waits for you. Deleting asks first,
+since the procedure took real work to earn; approving does not, because reading it and clicking
+Approve is the review.
+
+## Standing orchestrations
+
+**Control center > Schedules** runs repomind on a timer without you starting it. Add one with a
+spec, a goal, and optionally an action cap; results arrive as notifications and land in the
+journal.
+
+The spec grammar is `daily HH:MM`, `weekdays HH:MM`, `weekends HH:MM`, `every Nm`, or `every Nh`.
+The app deliberately does not re-implement that grammar to pre-validate your input, because a
+second copy would drift from the daemon's; a bad spec comes back with an error that names the
+accepted forms.
+
+Unattended runs are bounded harder than attended ones: a lower action cap, and repomind refuses to
+merge or delete a lane when nobody is watching. It reports and recommends instead. Leaving the cap
+blank uses the daemon's conservative default rather than sending zero, which would produce a
+schedule that fires and does nothing.
+
+## Approval policy
+
+**Control center > Approvals** lists the command patterns repomind may approve on your behalf,
+grouped by project. These are learned: after you approve the same pattern in the same repo enough
+times, repomind proposes a rule and you confirm it. Revoke any of them here.
+
+Two limits are structural, not settings. Destructive commands always reach you no matter what is
+listed here, and a denial is never generalised into an auto-deny, it just keeps escalating. Rules
+are per-repo, so `cargo test` approved in two projects is two rules and revoking one leaves the
+other standing.
+
 ## Extensions
 
 The Extensions view manages Claude Code marketplaces, plugins, and skills, either globally or
