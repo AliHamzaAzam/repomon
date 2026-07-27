@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img alt="repomon" src="docs/logo-light.png" width="104">
+  </picture>
+</p>
+
 # repomon
 
 **Run a fleet of AI coding agents across all your repos, from one terminal.**

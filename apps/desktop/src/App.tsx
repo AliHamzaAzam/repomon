@@ -18,6 +18,7 @@ import {
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
 import { matchChord } from "./keymap";
+import BrandMark from "./components/BrandMark";
 import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
@@ -221,11 +222,7 @@ function App(props: AppProps) {
     <div class="grid h-screen min-h-[38rem] grid-rows-[3.5rem_minmax(0,1fr)_2.75rem] overflow-hidden bg-background text-foreground">
       <header class="flex items-center justify-between border-b border-line bg-surface px-4">
         <div class="flex items-center gap-3">
-          <div class="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </div>
+          <BrandMark />
           <div class="flex items-baseline gap-3">
             <h1 class="text-[0.95rem] font-semibold tracking-[-0.02em]">Repomon</h1>
             <span class="font-mono text-[0.64rem] uppercase tracking-[0.18em] text-muted">
