@@ -206,6 +206,7 @@ mod tests {
                 name: "r".into(),
                 added_at: Utc::now(),
                 worktree_root_template: None,
+                hidden: false,
             },
             worktree: crate::model::Worktree {
                 id: 1,

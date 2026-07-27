@@ -5,6 +5,7 @@ import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
+import { agentLabel } from "./agentLabel";
 import {
   warmTargetWindows,
   type PaneTarget,
@@ -37,9 +38,9 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const labelByWindow = createMemo(() => {
     const map = new Map<string, string>();
     for (const lane of props.fleet.lanes()) {
-      lane.agent_sessions.forEach((agent, index) => {
+      lane.agent_sessions.forEach((agent) => {
         if (agent.tmux_window) {
-          map.set(agent.tmux_window, agent.custom_label ?? agent.title ?? `${agent.agent} ${index + 1}`);
+          map.set(agent.tmux_window, agentLabel(agent));
         }
       });
     }

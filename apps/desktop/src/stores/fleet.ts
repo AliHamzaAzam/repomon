@@ -1,7 +1,7 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
-import type { AccountUsage, Lane, Repo } from "../bindings";
+import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import { daemonCall, subscribeDaemon, type DaemonEvent } from "../ipc/rpc";
 
 export interface FleetSnapshot {
@@ -9,6 +9,10 @@ export interface FleetSnapshot {
   lanes: Lane[];
   usage: AccountUsage[];
   terminals: Array<{ lane_id: number; id: string }>;
+  /// Sidebar-affecting settings, read from the daemon rather than cached locally so a change made
+  /// in the TUI shows up here without a restart. Null when the call failed; the store keeps the
+  /// last good value in that case.
+  sortReposByActivity: boolean | null;
 }
 
 export interface FleetSource {
@@ -18,13 +22,20 @@ export interface FleetSource {
 
 export const daemonFleetSource: FleetSource = {
   async load() {
-    const [repos, lanes, usage, terminals] = await Promise.all([
+    const [repos, lanes, usage, terminals, config] = await Promise.all([
       daemonCall("repo.list"),
       daemonCall("lane.list"),
       daemonCall("usage.get").catch(() => []),
       daemonCall("terminal.list_all").catch(() => []),
+      daemonCall("config.get").catch(() => null),
     ]);
-    return { repos, lanes, usage, terminals };
+    return {
+      repos,
+      lanes,
+      usage,
+      terminals,
+      sortReposByActivity: config ? Boolean(config.sort_repos_by_activity) : null,
+    };
   },
   subscribe: subscribeDaemon,
 };
@@ -69,19 +80,63 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   return { label: agents.length ? "idle" : "open", tone: "muted", urgent: false };
 }
 
-/// The usage report for the focused lane's Claude account, matched by account key. Each agent
-/// carries the config dir it runs under (`config_dir: null` = the default `~/.claude`), and each
-/// usage report carries the same key (`account_key`: `"default"` for the default account, else the
-/// dir path). So the pill follows whichever account the focused lane actually uses instead of always
-/// showing the first probed account (which is how a `claude-work` probe leaked onto default-account
-/// lanes). Returns `null` when the focused account has not been probed, rather than another
-/// account's numbers; falls back to the first report only when there is no agent to attribute to.
-export function pickFocusedUsage(reports: AccountUsage[], lane: Lane | null): AccountUsage | null {
+/// The usage-probe key for the account a session runs under, matching how the daemon keys its
+/// reports. Codex has one account and is probed under `"codex"`; Claude is keyed by config dir
+/// (`config_dir: null` = the default `~/.claude`, else the dir path). Branching on the agent
+/// matters: a codex session also has `config_dir: null`, so keying on it alone resolved codex
+/// lanes to `"default"` and showed them Claude's numbers.
+export function accountKeyOf(session: AgentSession): string {
+  if (session.agent === "codex") return "codex";
+  return session.config_dir ?? "default";
+}
+
+/// The usage report for the focused agent's account, matched by account key, so the pill follows
+/// whichever account you are actually looking at instead of always showing the first probed one.
+///
+/// `focusedWindow` is the tmux window of the pane in view: a lane can run several agents on
+/// different accounts at once, and the visible tab is the one the numbers should describe. With no
+/// pane focused (or its session gone), fall back to the lane's first non-inferred session.
+/// Returns `null` when the resolved account has not been probed, rather than another account's
+/// numbers; falls back to the first report only when there is no agent to attribute to.
+export function pickFocusedUsage(
+  reports: AccountUsage[],
+  lane: Lane | null,
+  focusedWindow: string | null = null,
+): AccountUsage | null {
   if (!reports.length) return null;
-  const agent = lane?.agent_sessions.find((session) => !session.inferred) ?? lane?.agent_sessions[0];
+  const agent = (focusedWindow
+    ? lane?.agent_sessions.find((session) => session.tmux_window === focusedWindow)
+    : undefined)
+    ?? lane?.agent_sessions.find((session) => !session.inferred)
+    ?? lane?.agent_sessions[0];
   if (!agent) return reports[0];
-  const key = agent.config_dir ?? "default";
+  const key = accountKeyOf(agent);
   return reports.find((report) => report.key === key) ?? null;
+}
+
+/// Order repo groups by their most recent lane activity, newest first, when the setting is on.
+///
+/// Only the groups move. Ordering *lanes* by activity is what the TUI removed on purpose: it made
+/// rows bubble around on every agent output. A repo's activity changes far less often, so the
+/// groups stay put while you work in one.
+///
+/// Repos with no lanes have no activity to sort by and sink to the bottom. Ties keep the incoming
+/// (daemon) order, so the result is stable across polls.
+export function sortReposByActivity(repos: Repo[], lanes: Lane[], enabled: boolean): Repo[] {
+  if (!enabled) return repos;
+  const newest = new Map<number, number>();
+  for (const lane of lanes) {
+    const at = Date.parse(lane.last_activity_at);
+    if (Number.isNaN(at)) continue;
+    const seen = newest.get(lane.repo.id);
+    if (seen === undefined || at > seen) newest.set(lane.repo.id, at);
+  }
+  return repos
+    .map((repo, index) => ({ repo, index, at: newest.get(repo.id) ?? -Infinity }))
+    // Compared for equality first: two lane-less repos are both -Infinity, and subtracting those
+    // yields NaN, which sorts unpredictably.
+    .sort((a, b) => (a.at === b.at ? a.index - b.index : b.at - a.at))
+    .map((entry) => entry.repo);
 }
 
 export function matchesLane(lane: Lane, query: string): boolean {
@@ -146,6 +201,9 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [usage, setUsage] = createSignal<AccountUsage[]>([]);
   const [terminals, setTerminals] = createSignal<Array<{ lane_id: number; id: string }>>([]);
   const [selectedLaneId, setSelectedLaneId] = createSignal<number | null>(null);
+  // The tmux window of the pane in view. Owned by the workspace store (which holds the layout and
+  // tab state) and mirrored here, because the usage memo lives on this side of the wiring.
+  const [focusedWindow, setFocusedWindow] = createSignal<string | null>(null);
   const [query, setQuery] = createSignal("");
   const [urgentOnly, setUrgentOnly] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
@@ -156,8 +214,21 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   let unsubscribe: (() => void) | undefined;
   let refreshQueued = false;
 
+  // Mirrors the daemon's `sort_repos_by_activity` setting, refreshed with every poll so a change
+  // made in the TUI lands here too.
+  const [sortByActivity, setSortByActivity] = createSignal(false);
+  // The daemon keeps returning hidden repos (flagged) so we can offer a way back; everything that
+  // renders the fleet works from `visibleRepos` / `visibleLanes` / `unhiddenLanes` instead.
+  const visibleRepos = createMemo(() =>
+    sortReposByActivity(repos().filter((repo) => !repo.hidden), lanes(), sortByActivity()),
+  );
+  const hiddenRepos = createMemo(() => repos().filter((repo) => repo.hidden));
+  // Everything a hidden repo owns goes with it, including its share of the urgent/running counts:
+  // a badge you cannot click through to is just noise.
+  const unhiddenLanes = createMemo(() => lanes().filter((lane) => !lane.repo.hidden));
+
   const visibleLanes = createMemo(() =>
-    lanes()
+    unhiddenLanes()
       .filter((lane) => matchesLane(lane, query()))
       .filter((lane) => !urgentOnly() || laneIndicator(lane).urgent)
       .sort(byPriority),
@@ -167,12 +238,12 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     lanes().find((lane) => lane.id === selectedLaneId()) ?? null,
   );
 
-  // The usage pill follows the focused lane's Claude account rather than always the first probe.
-  const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane()));
+  // The usage pill follows the focused agent's account rather than always the first probe.
+  const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane(), focusedWindow()));
 
   const counts = createMemo(() => ({
-    urgent: lanes().filter((lane) => laneIndicator(lane).urgent).length,
-    running: lanes().filter((lane) => lane.agent_sessions.some((agent) => agent.status === "running")).length,
+    urgent: unhiddenLanes().filter((lane) => laneIndicator(lane).urgent).length,
+    running: unhiddenLanes().filter((lane) => lane.agent_sessions.some((agent) => agent.status === "running")).length,
   }));
 
   async function refresh() {
@@ -185,10 +256,14 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setLaneStore(reconcile(withSessionKeys(snapshot.lanes), { key: "id" }));
       setUsage(snapshot.usage);
       setTerminals(snapshot.terminals);
+      if (snapshot.sortReposByActivity !== null) setSortByActivity(snapshot.sortReposByActivity);
       setError(null);
       const current = selectedLaneId();
-      if (current === null || !snapshot.lanes.some((lane) => lane.id === current)) {
-        setSelectedLaneId(snapshot.lanes.sort(byPriority)[0]?.id ?? null);
+      // Never auto-select into a repo the user hid, and drop the selection if the repo it lives
+      // in was just hidden.
+      const selectable = snapshot.lanes.filter((lane) => !lane.repo.hidden);
+      if (current === null || !selectable.some((lane) => lane.id === current)) {
+        setSelectedLaneId([...selectable].sort(byPriority)[0]?.id ?? null);
       }
     } catch (cause) {
       if (active) setError(cause instanceof Error ? cause.message : String(cause));
@@ -242,13 +317,18 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   return {
     repos,
+    visibleRepos,
+    hiddenRepos,
     lanes,
+    unhiddenLanes,
     usage,
     focusedUsage,
     terminals,
     selectedLane,
     selectedLaneId,
     setSelectedLaneId,
+    focusedWindow,
+    setFocusedWindow,
     query,
     setQuery,
     urgentOnly,

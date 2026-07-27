@@ -41,6 +41,11 @@ pub struct Repo {
     pub name: String,
     pub added_at: DateTime<Utc>,
     pub worktree_root_template: Option<String>,
+    /// Hidden from client sidebars, but still registered and still watched. Listings return
+    /// hidden repos (carrying this flag) rather than filtering them out, so a client can offer a
+    /// way back; each client decides what to do with them.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// A paired remote-access device: one named, individually-revocable bearer token minted at

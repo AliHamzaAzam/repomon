@@ -143,6 +143,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_subagents": cfg.notify_subagents,
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
+        "sort_repos_by_activity": cfg.sort_repos_by_activity,
         "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
@@ -156,6 +157,11 @@ struct RepoAdd {
 #[derive(Deserialize)]
 struct RepoRemove {
     repo_id: RepoId,
+}
+#[derive(Deserialize)]
+struct RepoSetHidden {
+    repo_id: RepoId,
+    hidden: bool,
 }
 #[derive(Deserialize)]
 struct Discover {
@@ -542,6 +548,8 @@ struct ConfigSet {
     #[serde(default)]
     expand_agents: Option<bool>,
     #[serde(default)]
+    sort_repos_by_activity: Option<bool>,
+    #[serde(default)]
     embedded_pty: Option<bool>,
     #[serde(default)]
     orchestrator_agent: Option<String>,
@@ -782,6 +790,20 @@ pub async fn dispatch(
                 let _ = indexer.sync(&repo_for_index).await;
             });
             to_value(repo)
+        }
+        // Hiding leaves the repo registered, watched, and lane-bearing; only clients stop
+        // showing it. Deliberately not `repo.remove`, which drops the registration outright.
+        "repo.set_hidden" => {
+            let p: RepoSetHidden = parse(params)?;
+            ctx.registry
+                .set_hidden(p.repo_id, p.hidden)
+                .await
+                .map_err(internal)?;
+            ctx.broadcast(
+                crate::pubsub::topic::REPO_CHANGED,
+                json!({ "repo_id": p.repo_id, "hidden": p.hidden }),
+            );
+            Ok(Value::Null)
         }
         "repo.remove" => {
             let p: RepoRemove = parse(params)?;
@@ -1503,6 +1525,9 @@ pub async fn dispatch(
                 }
                 if let Some(b) = p.expand_agents {
                     cfg.expand_agents = b;
+                }
+                if let Some(b) = p.sort_repos_by_activity {
+                    cfg.sort_repos_by_activity = b;
                 }
                 if let Some(b) = p.embedded_pty {
                     cfg.embedded_pty = b;

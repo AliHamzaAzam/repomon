@@ -261,6 +261,11 @@ export default function SettingsModal(props: SettingsModalProps) {
             <Show when={tab() === "appearance"}>
               <section class="space-y-3">
                 <p class="section-label text-signal">Appearance</p>
+                <Switch
+                  label="Sort projects by activity"
+                  checked={Boolean(settings().sort_repos_by_activity)}
+                  onChange={(value) => patch({ sort_repos_by_activity: value })}
+                />
                 <ColorField label="Accent" value={String(settings().accent ?? "")} onChange={(value) => patch({ accent: value })} />
                 <Select
                   label="Repomind agent"

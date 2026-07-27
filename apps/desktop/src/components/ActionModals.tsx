@@ -20,7 +20,7 @@ export default function ActionModals(props: { actions: ActionsStore }) {
       </Show>
       <Show when={actions.newLaneOpen()}>
         <NewLaneModal
-          repos={actions.fleet.repos()}
+          repos={actions.fleet.visibleRepos()}
           initialRepoId={actions.newLaneRepoId() ?? undefined}
           onClose={actions.closeNewLane}
           onDone={async (laneId) => {

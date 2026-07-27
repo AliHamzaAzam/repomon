@@ -112,7 +112,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             class={`focus-ring rounded-md border px-2.5 py-1 font-mono text-[0.62rem] uppercase tracking-[0.1em] ${props.store.scope().scope === "global" ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
             onClick={() => props.store.setScope({ scope: "global" })}
           >Global</button>
-          <For each={props.fleet.repos()}>
+          <For each={props.fleet.visibleRepos()}>
             {(repo) => (
               <button
                 type="button"

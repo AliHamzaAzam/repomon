@@ -3,6 +3,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import type { AgentSession, BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
+import { agentLabel } from "./agentLabel";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import type { ActionsStore } from "../stores/actions";
@@ -139,7 +140,7 @@ export default function ControlCenter(props: ControlCenterProps) {
   }
 
   function createLane() {
-    const repoId = selectedLane()?.repo.id ?? props.fleet.repos()[0]?.id;
+    const repoId = selectedLane()?.repo.id ?? props.fleet.visibleRepos()[0]?.id;
     if (repoId === undefined) return;
     props.actions.newLane(repoId);
     closeControl(false);
@@ -299,7 +300,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                               aria-pressed={selectedAgent() === agent}
                               onClick={() => setSelectedAgentKey(agentKey(agent, index()))}
                             >
-                              {agent.custom_label ?? agent.title ?? `${agent.agent} ${index() + 1}`}
+                              {agentLabel(agent)}
                             </button>
                           )}
                         </For>
@@ -323,7 +324,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                   <section>
                     <p class="section-label mb-2">Lane and repository</p>
                     <div class="action-grid">
-                      <button onClick={() => createLane()} disabled={!props.fleet.repos().length}>New lane</button>
+                      <button onClick={() => createLane()} disabled={!props.fleet.visibleRepos().length}>New lane</button>
                       <button onClick={() => void run("diff", () => daemonCall("lane.diff", { lane_id: selectedLane()!.id, include_patch: true }))} disabled={!selectedLane()}>Review diff</button>
                       <button onClick={() => {
                         const lane = selectedLane();

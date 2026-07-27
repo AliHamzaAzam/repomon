@@ -49,6 +49,18 @@ export function createActionsStore(fleet: FleetStore) {
     });
   }
 
+  /// Hide or reveal a repo. No confirmation: unlike removeRepo this keeps the registration and
+  /// every lane, so it is fully reversible from the sidebar's hidden list.
+  async function setRepoHidden(repo: Repo, hidden: boolean) {
+    setError(null);
+    try {
+      await daemonCall("repo.set_hidden", { repo_id: repo.id, hidden });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   /// Pin or unpin the lane. Pinning is not destructive, so it applies immediately.
   async function pinLane(lane: Lane) {
     setError(null);
@@ -149,6 +161,7 @@ export function createActionsStore(fleet: FleetStore) {
     closeConfirm: () => setConfirmOptions(null),
     addRepo,
     removeRepo,
+    setRepoHidden,
     pinLane,
     mergeLane,
     deleteLane,

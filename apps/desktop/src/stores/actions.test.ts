@@ -17,7 +17,7 @@ vi.mock("../ipc/rpc", () => ({
 function lane(overrides: Partial<Lane> = {}): Lane {
   return {
     id: 7,
-    repo: { id: 2, path: "/code/r", name: "r", added_at: "2026-07-26T00:00:00Z", worktree_root_template: null },
+    repo: { id: 2, path: "/code/r", name: "r", added_at: "2026-07-26T00:00:00Z", worktree_root_template: null, hidden: false },
     worktree: { id: 3, repo_id: 2, path: "/code/r-wt", branch: "feat/x", head: "abc", is_main: false, name: "x" },
     state: { worktree_id: 3, head: "abc", branch: "feat/x", upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
     agent_sessions: [],
@@ -43,6 +43,24 @@ describe("lane operations", () => {
       await actions.pinLane(lane({ pinned: false }));
       expect(calls.list[0]).toEqual({ method: "agent.pin", params: { lane_id: 7, pinned: true } });
       expect(fleet.refresh).toHaveBeenCalled();
+      dispose();
+    });
+  });
+
+  it("hides a repo immediately, without the confirm removal needs", async () => {
+    await createRoot(async (dispose) => {
+      const fleet = fleetStub();
+      const actions = createActionsStore(fleet);
+      const repo = lane().repo;
+
+      await actions.setRepoHidden(repo, true);
+      expect(calls.list[0]).toEqual({ method: "repo.set_hidden", params: { repo_id: 2, hidden: true } });
+      // Hiding is reversible, so unlike removeRepo it never opens a confirm dialog.
+      expect(actions.confirmOptions()).toBeNull();
+      expect(fleet.refresh).toHaveBeenCalled();
+
+      await actions.setRepoHidden(repo, false);
+      expect(calls.list[1]).toEqual({ method: "repo.set_hidden", params: { repo_id: 2, hidden: false } });
       dispose();
     });
   });

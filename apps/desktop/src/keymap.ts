@@ -36,6 +36,8 @@ export const BINDINGS: Binding[] = [
   { id: "fleet.newLane", chord: "mod+n", label: "New lane", section: "Fleet" },
   { id: "fleet.addRepo", chord: "mod+shift+n", label: "Add repository", section: "Fleet" },
   { id: "fleet.jumpUrgent", chord: "mod+g", label: "Jump to a lane needing attention", section: "Fleet" },
+  // Not mod+h: Cmd+H hides the application on macOS and never reaches the app.
+  { id: "fleet.hideRepo", chord: "mod+shift+h", label: "Hide the selected lane's project", section: "Fleet", when: "lane" },
 
   { id: "lane.spawn", chord: "mod+e", label: "Spawn agent", section: "Lane", when: "lane" },
   { id: "lane.terminal", chord: "mod+t", label: "Open terminal", section: "Lane", when: "lane" },

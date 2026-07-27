@@ -1,0 +1,36 @@
+<svg viewBox="0 0 1254 1254" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    The Repomon mark. Same geometry as the app icon, but shaded from prefers-color-scheme rather
+    than the app's theme tokens: a favicon renders outside the document, so it cannot see the
+    class the theme toggle sets on <html>. It follows the OS instead, which matches the app's
+    default "system" theme. The in-app mark (components/BrandMark.tsx) tracks the real setting.
+  -->
+  <style>
+    .bg { fill: #f5f7f9 }
+    .fg { fill: #2b8f7d }
+    .pip { fill: #e39a25 }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #11151c }
+      .fg { fill: #63d6c2 }
+      .pip { fill: #f2b85c }
+    }
+  </style>
+  <rect class="bg" x="0" y="0" width="1254" height="1254" />
+  <g class="fg">
+    <rect x="300" y="280" width="304" height="97" />
+    <rect x="650" y="280" width="305" height="97" />
+    <rect x="300" y="280" width="95" height="393" />
+    <rect x="650" y="280" width="94" height="253" />
+    <rect x="860" y="280" width="95" height="688" />
+    <rect x="458" y="437" width="286" height="96" />
+    <rect x="300" y="578" width="217" height="95" />
+    <rect x="738" y="578" width="217" height="95" />
+    <rect x="300" y="722" width="94" height="246" />
+    <rect x="428" y="578" width="89" height="240" />
+    <rect x="571" y="722" width="234" height="96" />
+    <rect x="571" y="722" width="94" height="246" />
+    <rect x="300" y="873" width="365" height="95" />
+    <rect x="721" y="873" width="234" height="95" />
+  </g>
+  <rect class="pip" x="572" y="571" width="110" height="110" />
+</svg>

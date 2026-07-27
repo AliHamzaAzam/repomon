@@ -3,4 +3,10 @@
 /**
  * A registered repository. `path` points at the main worktree, canonical and absolute.
  */
-export type Repo = { id: number, path: string, name: string, added_at: string, worktree_root_template: string | null, };
+export type Repo = { id: number, path: string, name: string, added_at: string, worktree_root_template: string | null, 
+/**
+ * Hidden from client sidebars, but still registered and still watched. Listings return
+ * hidden repos (carrying this flag) rather than filtering them out, so a client can offer a
+ * way back; each client decides what to do with them.
+ */
+hidden: boolean, };

@@ -16,14 +16,29 @@ use rusqlite::{Connection, Row, params};
 use crate::error::{Error, Result};
 use crate::model::*;
 
-/// Embedded migrations, applied in order. The index + 1 is the target `user_version`.
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../migrations/0001_init.sql"),
-    include_str!("../../migrations/0002_agent_kind.sql"),
-    include_str!("../../migrations/0003_devices.sql"),
-    include_str!("../../migrations/0004_session_labels.sql"),
-    include_str!("../../migrations/0005_lanes_autoincrement.sql"),
-    include_str!("../../migrations/0006_remote_devices.sql"),
+/// Embedded migrations as `(target user_version, sql)`, applied in ascending order to any database
+/// sitting below the target.
+///
+/// The target is spelled out rather than derived from the array index because migration numbers
+/// have diverged across branches here: a database built from a feature branch can sit at a
+/// `user_version` higher than the number of migrations this build ships, and an index-derived
+/// target is then never greater than `user_version`, so the migration is skipped **silently and
+/// permanently**. `repos.hidden` landed on exactly that rake. Numbering also collided: two branches
+/// both claimed 7.
+///
+/// So: never renumber a shipped entry, and give a new migration a version above every number any
+/// branch has used (7 through 10 are spoken for by unmerged work).
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/0001_init.sql")),
+    (2, include_str!("../../migrations/0002_agent_kind.sql")),
+    (3, include_str!("../../migrations/0003_devices.sql")),
+    (4, include_str!("../../migrations/0004_session_labels.sql")),
+    (
+        5,
+        include_str!("../../migrations/0005_lanes_autoincrement.sql"),
+    ),
+    (6, include_str!("../../migrations/0006_remote_devices.sql")),
+    (11, include_str!("../../migrations/0011_repo_hidden.sql")),
 ];
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
@@ -130,6 +145,7 @@ impl Store {
                 name,
                 added_at: now,
                 worktree_root_template: template,
+                hidden: false,
             })
         })
         .await
@@ -138,7 +154,7 @@ impl Store {
     pub async fn list_repos(&self) -> Result<Vec<Repo>> {
         self.call(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, path, name, added_at, worktree_root_template FROM repos ORDER BY name",
+                "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos ORDER BY name",
             )?;
             let rows = stmt.query_map([], repo_from_row)?;
             collect(rows)
@@ -149,7 +165,7 @@ impl Store {
     pub async fn get_repo(&self, id: RepoId) -> Result<Repo> {
         self.call(move |c| {
             c.query_row(
-                "SELECT id, path, name, added_at, worktree_root_template FROM repos WHERE id = ?1",
+                "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos WHERE id = ?1",
                 params![id],
                 repo_from_row,
             )
@@ -165,7 +181,7 @@ impl Store {
         self.call(move |c| {
             let r = c
                 .query_row(
-                    "SELECT id, path, name, added_at, worktree_root_template FROM repos WHERE path = ?1",
+                    "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos WHERE path = ?1",
                     params![path.to_string_lossy()],
                     repo_from_row,
                 )
@@ -175,6 +191,22 @@ impl Store {
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(e.into()),
             }
+        })
+        .await
+    }
+
+    /// Hide or reveal a repo. Deliberately separate from `remove_repo`: hiding keeps the
+    /// registration, the watches, and every lane the repo owns, so it is fully reversible.
+    pub async fn set_repo_hidden(&self, id: RepoId, hidden: bool) -> Result<()> {
+        self.call(move |c| {
+            let n = c.execute(
+                "UPDATE repos SET hidden = ?2 WHERE id = ?1",
+                params![id, hidden],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("repo {id}")));
+            }
+            Ok(())
         })
         .await
     }
@@ -641,9 +673,8 @@ fn init(conn: &mut Connection) -> Result<()> {
 
 fn run_migrations(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    for (i, sql) in MIGRATIONS.iter().enumerate() {
-        let target = (i + 1) as i64;
-        if current < target {
+    for (target, sql) in MIGRATIONS {
+        if current < *target {
             let tx = conn.transaction()?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", target)?;
@@ -751,6 +782,7 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
         name: r.get(2)?,
         added_at: dt_col(r, 3)?,
         worktree_root_template: r.get(4)?,
+        hidden: r.get(5)?,
     })
 }
 
@@ -1000,6 +1032,84 @@ mod tests {
         s.remove_repo(r.id).await.unwrap();
         assert_eq!(s.list_repos().await.unwrap().len(), 1);
         assert!(matches!(s.get_repo(r.id).await, Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn migrations_reach_a_database_numbered_past_them() {
+        // A database built from a feature branch: main's schema, but a `user_version` above every
+        // migration main ships (unmerged work numbered its migrations 7 through 10). Deriving each
+        // target from the array index made `current < target` false here, so later migrations were
+        // skipped silently and forever. That is how `repos.hidden` went missing and `repo.list`
+        // started erroring with "no such column".
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE repos (
+                 id                     INTEGER PRIMARY KEY,
+                 path                   TEXT NOT NULL UNIQUE,
+                 name                   TEXT NOT NULL,
+                 added_at               TEXT NOT NULL,
+                 worktree_root_template TEXT
+             );
+             PRAGMA user_version = 10;",
+        )
+        .unwrap();
+
+        run_migrations(&mut c).unwrap();
+
+        let hidden: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('repos') WHERE name = 'hidden'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hidden, 1,
+            "a migration above the database's version must run"
+        );
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+    }
+
+    #[test]
+    fn migration_targets_ascend_and_never_collide() {
+        // Renumbering or reusing a target silently skips a migration on somebody's machine.
+        let targets: Vec<i64> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let mut sorted = targets.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            targets, sorted,
+            "migration targets must be unique and ascending"
+        );
+    }
+
+    #[tokio::test]
+    async fn hiding_a_repo_keeps_it_listed() {
+        let s = store().await;
+        let r = s
+            .add_repo(PathBuf::from("/code/a"), "a".into(), None)
+            .await
+            .unwrap();
+        assert!(!r.hidden, "a fresh repo is visible");
+
+        s.set_repo_hidden(r.id, true).await.unwrap();
+        // Listings still carry the repo, flagged, so clients filter and can also offer a way
+        // back. Removing it from the query would strand a hidden repo with no route to unhide.
+        let all = s.list_repos().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].hidden);
+        assert!(s.get_repo(r.id).await.unwrap().hidden);
+
+        s.set_repo_hidden(r.id, false).await.unwrap();
+        assert!(!s.get_repo(r.id).await.unwrap().hidden);
+
+        assert!(matches!(
+            s.set_repo_hidden(9999, true).await,
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[tokio::test]
