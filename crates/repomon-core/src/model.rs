@@ -181,6 +181,8 @@ pub struct JournalEntry {
 
 /// A playbook: procedural memory drafted by the orchestrator, inert until a human approves it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct Playbook {
     pub name: String,
     /// The live text: draft text before approval, approved text after.
