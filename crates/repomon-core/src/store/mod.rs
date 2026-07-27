@@ -16,15 +16,29 @@ use rusqlite::{Connection, Row, params};
 use crate::error::{Error, Result};
 use crate::model::*;
 
-/// Embedded migrations, applied in order. The index + 1 is the target `user_version`.
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../migrations/0001_init.sql"),
-    include_str!("../../migrations/0002_agent_kind.sql"),
-    include_str!("../../migrations/0003_devices.sql"),
-    include_str!("../../migrations/0004_session_labels.sql"),
-    include_str!("../../migrations/0005_lanes_autoincrement.sql"),
-    include_str!("../../migrations/0006_remote_devices.sql"),
-    include_str!("../../migrations/0007_repo_hidden.sql"),
+/// Embedded migrations as `(target user_version, sql)`, applied in ascending order to any database
+/// sitting below the target.
+///
+/// The target is spelled out rather than derived from the array index because migration numbers
+/// have diverged across branches here: a database built from a feature branch can sit at a
+/// `user_version` higher than the number of migrations this build ships, and an index-derived
+/// target is then never greater than `user_version`, so the migration is skipped **silently and
+/// permanently**. `repos.hidden` landed on exactly that rake. Numbering also collided: two branches
+/// both claimed 7.
+///
+/// So: never renumber a shipped entry, and give a new migration a version above every number any
+/// branch has used (7 through 10 are spoken for by unmerged work).
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/0001_init.sql")),
+    (2, include_str!("../../migrations/0002_agent_kind.sql")),
+    (3, include_str!("../../migrations/0003_devices.sql")),
+    (4, include_str!("../../migrations/0004_session_labels.sql")),
+    (
+        5,
+        include_str!("../../migrations/0005_lanes_autoincrement.sql"),
+    ),
+    (6, include_str!("../../migrations/0006_remote_devices.sql")),
+    (11, include_str!("../../migrations/0011_repo_hidden.sql")),
 ];
 
 /// Cap on registered push devices. Re-registration refreshes a token's timestamp; beyond this the
@@ -659,9 +673,8 @@ fn init(conn: &mut Connection) -> Result<()> {
 
 fn run_migrations(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    for (i, sql) in MIGRATIONS.iter().enumerate() {
-        let target = (i + 1) as i64;
-        if current < target {
+    for (target, sql) in MIGRATIONS {
+        if current < *target {
             let tx = conn.transaction()?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", target)?;
@@ -1019,6 +1032,58 @@ mod tests {
         s.remove_repo(r.id).await.unwrap();
         assert_eq!(s.list_repos().await.unwrap().len(), 1);
         assert!(matches!(s.get_repo(r.id).await, Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn migrations_reach_a_database_numbered_past_them() {
+        // A database built from a feature branch: main's schema, but a `user_version` above every
+        // migration main ships (unmerged work numbered its migrations 7 through 10). Deriving each
+        // target from the array index made `current < target` false here, so later migrations were
+        // skipped silently and forever. That is how `repos.hidden` went missing and `repo.list`
+        // started erroring with "no such column".
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE repos (
+                 id                     INTEGER PRIMARY KEY,
+                 path                   TEXT NOT NULL UNIQUE,
+                 name                   TEXT NOT NULL,
+                 added_at               TEXT NOT NULL,
+                 worktree_root_template TEXT
+             );
+             PRAGMA user_version = 10;",
+        )
+        .unwrap();
+
+        run_migrations(&mut c).unwrap();
+
+        let hidden: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('repos') WHERE name = 'hidden'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hidden, 1,
+            "a migration above the database's version must run"
+        );
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+    }
+
+    #[test]
+    fn migration_targets_ascend_and_never_collide() {
+        // Renumbering or reusing a target silently skips a migration on somebody's machine.
+        let targets: Vec<i64> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let mut sorted = targets.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            targets, sorted,
+            "migration targets must be unique and ascending"
+        );
     }
 
     #[tokio::test]
