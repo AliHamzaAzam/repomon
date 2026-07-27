@@ -176,6 +176,22 @@ first, with a search box over the history.
 An entry that names a lane is clickable and jumps you to that lane. Opening the tab shows the
 recent tail rather than a search, so it doubles as "what happened while I was away".
 
+## Playbooks
+
+When repomind finishes a multi-lane goal it drafts a playbook: the pattern, the per-repo steps,
+the worker prompts that worked, the failure modes it hit. **Control center > Playbooks** lists
+them.
+
+A draft is inert. repomind is only offered a playbook back once you approve it, which is
+deliberate: instructions the orchestrator wrote feeding into its own future prompts unreviewed is a
+self-poisoning path. Approve is only reachable once you have opened a playbook and its text is on
+screen, so nothing can be waved through from the list.
+
+A playbook that was approved and then re-drafted reads **approved · revision pending**: the old
+approved text is still what repomind follows, and the revision waits for you. Deleting asks first,
+since the procedure took real work to earn; approving does not, because reading it and clicking
+Approve is the review.
+
 ## Extensions
 
 The Extensions view manages Claude Code marketplaces, plugins, and skills, either globally or
