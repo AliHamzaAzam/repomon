@@ -60,6 +60,7 @@ export interface ConfigView {
   notify_show_why: boolean;
   notify_coalesce: boolean;
   notify_click_focus: boolean;
+  notify_desktop_fallback: boolean;
   notify_subagents: boolean;
   usage_probe: boolean;
   expand_agents: boolean;

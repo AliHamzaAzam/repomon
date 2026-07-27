@@ -140,6 +140,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_show_why": cfg.notify_show_why,
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
+        "notify_desktop_fallback": cfg.notify_desktop_fallback,
         "notify_subagents": cfg.notify_subagents,
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
@@ -574,6 +575,8 @@ struct ConfigSet {
     notify_coalesce: Option<bool>,
     #[serde(default)]
     notify_click_focus: Option<bool>,
+    #[serde(default)]
+    notify_desktop_fallback: Option<bool>,
     #[serde(default)]
     notify_subagents: Option<bool>,
     #[serde(default)]
@@ -1652,6 +1655,9 @@ pub async fn dispatch(
                 }
                 if let Some(b) = p.notify_click_focus {
                     cfg.notify_click_focus = b;
+                }
+                if let Some(b) = p.notify_desktop_fallback {
+                    cfg.notify_desktop_fallback = b;
                 }
                 if let Some(b) = p.notify_subagents {
                     cfg.notify_subagents = b;

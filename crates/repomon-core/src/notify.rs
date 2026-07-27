@@ -403,6 +403,19 @@ pub fn play_chime() {
 /// Fire a native desktop notification, best-effort and without blocking the caller (the actual
 /// `osascript`/`notify-send`/WinRT-toast delivery runs on a detached thread). `click_focus` makes
 /// the popup click-to-focus the terminal when `terminal-notifier` is installed (macOS only — on
+/// Whether the daemon may post its own OS-level popup for an alert right now.
+///
+/// Two conditions, and both matter. `tui_active` means a TUI is on screen firing its own popups,
+/// so the daemon staying quiet is what stops double-notifying. `desktop_fallback` is the user's
+/// switch: on macOS the daemon's popup goes out through `osascript`, so it is delivered by Script
+/// Editor and wears its icon, and someone running only Mission Control (which posts its own,
+/// under the app's identity) wants that second popup gone.
+///
+/// Shared by every daemon popup site so the switch cannot half-apply.
+pub fn daemon_popup_allowed(tui_active: bool, desktop_fallback: bool) -> bool {
+    !tui_active && desktop_fallback
+}
+
 /// Linux there is no portable way to focus a terminal from a background process, and on Windows
 /// toast activation would need a registered AUMID/COM handler, so it's ignored on both).
 pub fn send_native(title: &str, body: &str, sound: bool, click_focus: bool) {
@@ -1162,5 +1175,17 @@ mod tests {
     #[test]
     fn escape_neutralizes_applescript_quotes() {
         assert_eq!(escape(r#"say "hi" \ now"#), r#"say \"hi\" \\ now"#);
+    }
+
+    #[test]
+    fn daemon_popup_defers_to_a_live_tui_and_to_the_switch() {
+        // A TUI on screen fires its own popup; the daemon staying quiet is what prevents doubles.
+        assert!(!daemon_popup_allowed(true, true));
+        assert!(!daemon_popup_allowed(true, false));
+        // No TUI: the daemon covers it, unless the user switched the fallback off. That switch is
+        // how someone running only Mission Control drops the osascript (Script Editor) popup and
+        // keeps just the app's own.
+        assert!(daemon_popup_allowed(false, true));
+        assert!(!daemon_popup_allowed(false, false));
     }
 }
