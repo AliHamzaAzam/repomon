@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AccountUsage,
+  ApprovalRule,
   AgentChoice,
   BrowseResult,
   Commit,
@@ -87,6 +88,8 @@ interface RpcMap {
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
   "repo.set_hidden": { params: { repo_id: number; hidden: boolean }; result: null };
+  "approval.list": { params: undefined; result: { rules: ApprovalRule[] } };
+  "approval.remove": { params: { repo: string; pattern: string }; result: null };
   "schedule.list": { params: undefined; result: { schedules: Schedule[] } };
   "schedule.add": { params: { spec: string; prompt: string; max_actions?: number }; result: unknown };
   "schedule.remove": { params: { id: number }; result: unknown };

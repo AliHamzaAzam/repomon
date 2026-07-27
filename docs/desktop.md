@@ -208,6 +208,17 @@ merge or delete a lane when nobody is watching. It reports and recommends instea
 blank uses the daemon's conservative default rather than sending zero, which would produce a
 schedule that fires and does nothing.
 
+## Approval policy
+
+**Control center > Approvals** lists the command patterns repomind may approve on your behalf,
+grouped by project. These are learned: after you approve the same pattern in the same repo enough
+times, repomind proposes a rule and you confirm it. Revoke any of them here.
+
+Two limits are structural, not settings. Destructive commands always reach you no matter what is
+listed here, and a denial is never generalised into an auto-deny, it just keeps escalating. Rules
+are per-repo, so `cargo test` approved in two projects is two rules and revoking one leaves the
+other standing.
+
 ## Extensions
 
 The Extensions view manages Claude Code marketplaces, plugins, and skills, either globally or

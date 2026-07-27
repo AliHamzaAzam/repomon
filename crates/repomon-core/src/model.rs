@@ -217,6 +217,8 @@ pub struct Schedule {
 
 /// A human-confirmed approval rule: routine Bash permission dialogs matching `pattern` in
 /// `repo` are auto-approved by the daemon (the always-escalate sniffer still wins).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRule {
     pub repo: String,

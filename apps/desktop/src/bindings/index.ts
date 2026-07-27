@@ -2,6 +2,7 @@ export type { AccountUsage } from "./AccountUsage";
 export type { AgentChoice } from "./AgentChoice";
 export type { AgentSession } from "./AgentSession";
 export type { AgentStatus } from "./AgentStatus";
+export type { ApprovalRule } from "./ApprovalRule";
 export type { BrowseEntry } from "./BrowseEntry";
 export type { BrowseResult } from "./BrowseResult";
 export type { Commit } from "./Commit";

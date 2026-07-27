@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { DaemonRpcError } from "../ipc/rpc";
-import type { Playbook } from "../bindings";
-import { journalQueryParams, playbookState, replacementDialog, scheduleAddParams } from "./ControlCenter";
+import type { ApprovalRule, Playbook } from "../bindings";
+import { groupApprovalRules, journalQueryParams, playbookState, replacementDialog, scheduleAddParams } from "./ControlCenter";
 
 describe("safe dialog answers", () => {
   it("extracts the replacement after DIALOG_CHANGED", () => {
@@ -78,5 +78,32 @@ describe("schedule add params", () => {
       prompt: "g",
       max_actions: 20,
     });
+  });
+});
+
+describe("approval rules grouping", () => {
+  const rule = (repo: string, pattern: string): ApprovalRule =>
+    ({ repo, pattern, created_at: "2026-07-27T00:00:00Z" });
+
+  it("groups by repo and sorts both levels", () => {
+    const grouped = groupApprovalRules([
+      rule("zeta", "cargo test"),
+      rule("alpha", "pnpm test"),
+      rule("alpha", "cargo build"),
+    ]);
+    expect(grouped.map((g) => g.repo)).toEqual(["alpha", "zeta"]);
+    expect(grouped[0].rules.map((r) => r.pattern)).toEqual(["cargo build", "pnpm test"]);
+  });
+
+  // A rule is scoped to one repo, so the same pattern approved in two repos is two independent
+  // rules. Collapsing them would imply revoking one revokes both.
+  it("keeps the same pattern in two repos as two rules", () => {
+    const grouped = groupApprovalRules([rule("a", "cargo test"), rule("b", "cargo test")]);
+    expect(grouped).toHaveLength(2);
+    expect(grouped.every((g) => g.rules.length === 1)).toBe(true);
+  });
+
+  it("returns nothing for no rules", () => {
+    expect(groupApprovalRules([])).toEqual([]);
   });
 });

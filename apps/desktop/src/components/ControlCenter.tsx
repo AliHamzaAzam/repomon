@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { AgentSession, BrowseResult, Commit, JournalEntry, PendingDialog, Playbook, Schedule, TimelineData, WorkSession } from "../bindings";
+import type { AgentSession, ApprovalRule, BrowseResult, Commit, JournalEntry, PendingDialog, Playbook, Schedule, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
 import { agentLabel } from "./agentLabel";
@@ -10,7 +10,7 @@ import type { ActionsStore } from "../stores/actions";
 
 const JOURNAL_LIMIT = 200;
 
-type ControlTab = "actions" | "triage" | "history" | "journal" | "playbooks" | "schedules" | "feed";
+type ControlTab = "actions" | "triage" | "history" | "journal" | "playbooks" | "schedules" | "approvals" | "feed";
 
 /// Params for a journal fetch. A blank box is not a search for the empty string: it asks for the
 /// recent tail, which is what the tab shows on open. Sending `query: ""` instead would run a
@@ -42,6 +42,23 @@ export function scheduleAddParams(
   const parsed = Number.parseInt(cap.trim(), 10);
   const base = { spec: spec.trim(), prompt: prompt.trim() };
   return Number.isFinite(parsed) && parsed > 0 ? { ...base, max_actions: parsed } : base;
+}
+
+/// Approval rules grouped by repo, repos alphabetical and patterns alphabetical within each.
+///
+/// Grouped because the question a person asks here is "what can run unattended in *this* repo",
+/// and a rule is scoped to one repo: the same `cargo test` approved in two repos is two rules, and
+/// a flat list makes that look like a duplicate.
+export function groupApprovalRules(rules: ApprovalRule[]): Array<{ repo: string; rules: ApprovalRule[] }> {
+  const byRepo = new Map<string, ApprovalRule[]>();
+  for (const rule of rules) {
+    const bucket = byRepo.get(rule.repo);
+    if (bucket) bucket.push(rule);
+    else byRepo.set(rule.repo, [rule]);
+  }
+  return [...byRepo.entries()]
+    .map(([repo, group]) => ({ repo, rules: [...group].sort((a, b) => a.pattern.localeCompare(b.pattern)) }))
+    .sort((a, b) => a.repo.localeCompare(b.repo));
 }
 
 interface ControlCenterProps {
@@ -83,6 +100,7 @@ export default function ControlCenter(props: ControlCenterProps) {
   const [specDraft, setSpecDraft] = createSignal("");
   const [promptDraft, setPromptDraft] = createSignal("");
   const [capDraft, setCapDraft] = createSignal("");
+  const [approvals, setApprovals] = createSignal<ApprovalRule[]>([]);
   const [browser, setBrowser] = createSignal<BrowseResult | null>(null);
   const [selectedAgentKey, setSelectedAgentKey] = createSignal<string | null>(null);
   let trigger!: HTMLButtonElement;
@@ -319,12 +337,33 @@ export default function ControlCenter(props: ControlCenterProps) {
     }
   }
 
+  async function loadApprovals() {
+    try {
+      const result = await daemonCall("approval.list");
+      setApprovals(result.rules);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function revokeApproval(rule: ApprovalRule) {
+    try {
+      await daemonCall("approval.remove", { repo: rule.repo, pattern: rule.pattern });
+      setError(null);
+      await loadApprovals();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function chooseTab(next: ControlTab) {
     setTab(next);
     if (next === "history") await loadHistory();
     if (next === "journal") await loadJournal();
     if (next === "playbooks") await loadPlaybooks();
     if (next === "schedules") await loadSchedules();
+    if (next === "approvals") await loadApprovals();
     if (next === "feed") props.notifications.markAllRead();
   }
 
@@ -354,7 +393,7 @@ export default function ControlCenter(props: ControlCenterProps) {
           <section ref={dialogElement} role="dialog" aria-modal="true" aria-label="Control center" tabIndex={-1} class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
             <nav aria-label="Control sections" class="border-r border-line bg-raised/50 p-2">
               <p class="section-label px-2 pb-3 pt-2">Control center</p>
-              <For each={["actions", "triage", "history", "journal", "playbooks", "schedules", "feed"] as ControlTab[]}>
+              <For each={["actions", "triage", "history", "journal", "playbooks", "schedules", "approvals", "feed"] as ControlTab[]}>
                 {(item) => (
                   <button type="button" class={`focus-ring mb-1 flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs capitalize ${tab() === item ? "bg-signal/10 text-signal" : "text-muted hover:bg-raised hover:text-foreground"}`} onClick={() => void chooseTab(item)}>
                     <span>{item}</span>
@@ -665,6 +704,34 @@ export default function ControlCenter(props: ControlCenterProps) {
                         onClick={() => void removeSchedule(entry.id)}
                       >Remove</button>
                     </div>
+                  )}
+                </For>
+              </Show>
+
+              <Show when={tab() === "approvals"}>
+                <p class="mb-3 text-xs leading-relaxed text-muted">
+                  Command patterns repomind may approve for you, learned from verdicts you gave it
+                  and confirmed by you. Destructive commands (force-push, <code>rm -rf</code>,
+                  <code>reset --hard</code>) always reach you regardless of any rule here, and a
+                  denial is never generalised into an auto-deny.
+                </p>
+                <For each={groupApprovalRules(approvals())} fallback={<p class="text-xs text-muted">Nothing is auto-approved.</p>}>
+                  {(group) => (
+                    <section class="mb-3">
+                      <p class="section-label mb-1.5">{group.repo}</p>
+                      <For each={group.rules}>
+                        {(rule) => (
+                          <div class="mb-1 flex items-center justify-between gap-2 rounded border border-line px-2.5 py-1.5">
+                            <code class="truncate font-mono text-[0.64rem]">{rule.pattern}</code>
+                            <button
+                              type="button"
+                              class="focus-ring shrink-0 rounded border border-line px-2 py-0.5 font-mono text-[0.55rem] uppercase text-muted hover:text-fault"
+                              onClick={() => void revokeApproval(rule)}
+                            >Revoke</button>
+                          </div>
+                        )}
+                      </For>
+                    </section>
                   )}
                 </For>
               </Show>
