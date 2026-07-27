@@ -178,8 +178,16 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   let unsubscribe: (() => void) | undefined;
   let refreshQueued = false;
 
+  // Repos the user hid. The daemon keeps returning them (flagged) so we can offer a way back;
+  // everything that renders the fleet works from `visibleRepos` / `visibleLanes` instead.
+  const visibleRepos = createMemo(() => repos().filter((repo) => !repo.hidden));
+  const hiddenRepos = createMemo(() => repos().filter((repo) => repo.hidden));
+  // Everything a hidden repo owns goes with it, including its share of the urgent/running counts:
+  // a badge you cannot click through to is just noise.
+  const unhiddenLanes = createMemo(() => lanes().filter((lane) => !lane.repo.hidden));
+
   const visibleLanes = createMemo(() =>
-    lanes()
+    unhiddenLanes()
       .filter((lane) => matchesLane(lane, query()))
       .filter((lane) => !urgentOnly() || laneIndicator(lane).urgent)
       .sort(byPriority),
@@ -193,8 +201,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane(), focusedWindow()));
 
   const counts = createMemo(() => ({
-    urgent: lanes().filter((lane) => laneIndicator(lane).urgent).length,
-    running: lanes().filter((lane) => lane.agent_sessions.some((agent) => agent.status === "running")).length,
+    urgent: unhiddenLanes().filter((lane) => laneIndicator(lane).urgent).length,
+    running: unhiddenLanes().filter((lane) => lane.agent_sessions.some((agent) => agent.status === "running")).length,
   }));
 
   async function refresh() {
@@ -209,8 +217,11 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setTerminals(snapshot.terminals);
       setError(null);
       const current = selectedLaneId();
-      if (current === null || !snapshot.lanes.some((lane) => lane.id === current)) {
-        setSelectedLaneId(snapshot.lanes.sort(byPriority)[0]?.id ?? null);
+      // Never auto-select into a repo the user hid, and drop the selection if the repo it lives
+      // in was just hidden.
+      const selectable = snapshot.lanes.filter((lane) => !lane.repo.hidden);
+      if (current === null || !selectable.some((lane) => lane.id === current)) {
+        setSelectedLaneId([...selectable].sort(byPriority)[0]?.id ?? null);
       }
     } catch (cause) {
       if (active) setError(cause instanceof Error ? cause.message : String(cause));
@@ -264,6 +275,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   return {
     repos,
+    visibleRepos,
+    hiddenRepos,
     lanes,
     usage,
     focusedUsage,

@@ -1,7 +1,15 @@
+import { createRoot } from "solid-js";
 import { describe, expect, it } from "vitest";
 
-import type { AccountUsage, AgentSession, Lane } from "../bindings";
-import { laneIndicator, matchesLane, pickFocusedUsage, withSessionKeys } from "./fleet";
+import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
+import {
+  createFleetStore,
+  laneIndicator,
+  matchesLane,
+  pickFocusedUsage,
+  withSessionKeys,
+  type FleetSource,
+} from "./fleet";
 
 function lane(overrides: Partial<Lane> = {}): Lane {
   return {
@@ -45,6 +53,50 @@ function agent(overrides: Partial<AgentSession> = {}): AgentSession {
     ...overrides,
   };
 }
+
+function repo(id: number, name: string, hidden = false): Repo {
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden };
+}
+
+/// A store fed one fixed snapshot, started and refreshed once. `subscribe` never fires, and the
+/// 2s heartbeat is stopped before the test asserts, so nothing races the assertions.
+async function startedStore(repos: Repo[], lanes: Lane[]) {
+  const source: FleetSource = {
+    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [] }),
+    subscribe: () => Promise.resolve(() => undefined),
+  };
+  return createRoot((dispose) => {
+    const fleet = createFleetStore(source);
+    fleet.start();
+    return { fleet, teardown: () => { fleet.stop(); dispose(); } };
+  });
+}
+
+describe("hidden repos", () => {
+  it("partitions repos and takes their lanes, counts, and selection with them", async () => {
+    const shown = repo(1, "visible");
+    const gone = repo(2, "hidden", true);
+    const lanes = [
+      lane({ id: 10, repo: shown, agent_sessions: [agent({ status: "running" })] }),
+      lane({ id: 20, repo: gone, agent_sessions: [agent({ status: "running" })] }),
+    ];
+    const { fleet, teardown } = await startedStore([shown, gone], lanes);
+    await fleet.refresh();
+
+    expect(fleet.visibleRepos().map((r) => r.id)).toEqual([1]);
+    expect(fleet.hiddenRepos().map((r) => r.id)).toEqual([2]);
+    expect(fleet.visibleLanes().map((l) => l.id)).toEqual([10]);
+    // A running count you cannot click through to is just noise.
+    expect(fleet.counts().running).toBe(1);
+    // Auto-selection never lands inside a hidden repo.
+    expect(fleet.selectedLaneId()).toBe(10);
+
+    // The daemon still hands us the hidden repo and its lanes, so unhiding stays possible.
+    expect(fleet.repos()).toHaveLength(2);
+    expect(fleet.lanes()).toHaveLength(2);
+    teardown();
+  });
+});
 
 describe("fleet presentation", () => {
   it("prioritizes live dialogs as urgent decisions", () => {

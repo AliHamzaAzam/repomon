@@ -82,6 +82,7 @@ interface RpcMap {
   "repo.list": { params: undefined; result: Repo[] };
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
+  "repo.set_hidden": { params: { repo_id: number; hidden: boolean }; result: null };
   "repo.discover": { params: { root: string; max_depth?: number }; result: string[] };
   "lane.list": { params: undefined; result: Lane[] };
   "lane.create": {

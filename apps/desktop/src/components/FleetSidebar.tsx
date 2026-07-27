@@ -107,7 +107,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         <Show when={!props.fleet.loading() || props.fleet.lanes().length} fallback={<p class="p-3 text-xs text-muted">Syncing fleet…</p>}>
-          <For each={props.fleet.repos()}>
+          <For each={props.fleet.visibleRepos()}>
             {(repo) => {
               // Per-repo lane slice, recomputed reactively but reusing the store's stable lane
               // rows — so the section and its rows persist across polls and hover holds.
@@ -137,6 +137,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                         >+</button>
                         <button
                           type="button"
+                          class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
+                          onClick={() => void props.actions.setRepoHidden(repo, true)}
+                          title={`Hide ${repo.name} (stays registered)`}
+                          aria-label={`Hide ${repo.name}`}
+                        >⊘</button>
+                        <button
+                          type="button"
                           class="focus-ring rounded px-1 font-mono text-[0.7rem] leading-none text-muted opacity-0 transition-opacity hover:text-fault focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
                           onClick={() => props.actions.removeRepo(repo)}
                           title={`Remove ${repo.name}`}
@@ -161,19 +168,47 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               );
             }}
           </For>
+          {/* The only route back from hiding: the TUI has no unhide view, so this list is it. */}
+          <Show when={props.fleet.hiddenRepos().length}>
+            <section class="mt-2 border-t border-line pt-2" aria-label="Hidden projects">
+              <p class="px-2 py-1 font-mono text-[0.55rem] uppercase tracking-[0.08em] text-muted/70">
+                Hidden ({props.fleet.hiddenRepos().length})
+              </p>
+              <For each={props.fleet.hiddenRepos()}>
+                {(repo) => (
+                  <button
+                    type="button"
+                    class="focus-ring flex w-full items-center justify-between rounded px-2 py-1 text-left hover:bg-raised"
+                    onClick={() => void props.actions.setRepoHidden(repo, false)}
+                    title={`Show ${repo.name} again`}
+                  >
+                    <span class="truncate font-mono text-[0.61rem] uppercase tracking-[0.08em] text-muted/70">
+                      {repo.name}
+                    </span>
+                    <span class="ml-2 shrink-0 font-mono text-[0.55rem] text-muted/70">show</span>
+                  </button>
+                )}
+              </For>
+            </section>
+          </Show>
           <Show when={!props.fleet.visibleLanes().length}>
             <div class="m-2 rounded-lg border border-dashed border-line p-3 text-xs leading-relaxed text-muted">
               <Show
                 when={props.fleet.query() || props.fleet.urgentOnly()}
                 fallback={
-                  <div class="space-y-2">
-                    <p>No repositories yet.</p>
-                    <button
-                      type="button"
-                      class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-signal"
-                      onClick={() => void props.actions.addRepo()}
-                    >Add a repository</button>
-                  </div>
+                  <Show
+                    when={!props.fleet.hiddenRepos().length}
+                    fallback={<p>Every project is hidden. Use the list above to bring one back.</p>}
+                  >
+                    <div class="space-y-2">
+                      <p>No repositories yet.</p>
+                      <button
+                        type="button"
+                        class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-signal"
+                        onClick={() => void props.actions.addRepo()}
+                      >Add a repository</button>
+                    </div>
+                  </Show>
                 }
               >
                 No lanes match this view.

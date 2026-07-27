@@ -47,6 +47,24 @@ describe("lane operations", () => {
     });
   });
 
+  it("hides a repo immediately, without the confirm removal needs", async () => {
+    await createRoot(async (dispose) => {
+      const fleet = fleetStub();
+      const actions = createActionsStore(fleet);
+      const repo = lane().repo;
+
+      await actions.setRepoHidden(repo, true);
+      expect(calls.list[0]).toEqual({ method: "repo.set_hidden", params: { repo_id: 2, hidden: true } });
+      // Hiding is reversible, so unlike removeRepo it never opens a confirm dialog.
+      expect(actions.confirmOptions()).toBeNull();
+      expect(fleet.refresh).toHaveBeenCalled();
+
+      await actions.setRepoHidden(repo, false);
+      expect(calls.list[1]).toEqual({ method: "repo.set_hidden", params: { repo_id: 2, hidden: false } });
+      dispose();
+    });
+  });
+
   it("delete and merge go through confirm rather than firing immediately", async () => {
     await createRoot(async (dispose) => {
       const actions = createActionsStore(fleetStub());
