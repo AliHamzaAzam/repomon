@@ -4897,7 +4897,7 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
 }
 
 /// The lanes a client should show. `lane.list` deliberately returns lanes belonging to hidden
-/// repos — flagged rather than filtered — so a client can offer a way back; the TUI has no unhide
+/// repos, flagged rather than filtered, so a client can offer a way back. The TUI has no unhide
 /// view, so it simply drops them. Hiding is set and cleared in Mission Control (`docs/desktop.md`).
 fn visible_lanes(lanes: Vec<Lane>) -> Vec<Lane> {
     lanes.into_iter().filter(|lane| !lane.repo.hidden).collect()
@@ -6258,7 +6258,7 @@ mod tests {
     #[test]
     fn hidden_repos_drop_out_of_the_lane_list() {
         let visible = test_lane(1);
-        // `test_lane`'s JSON omits `hidden` entirely — an older daemon's payload — and still
+        // `test_lane`'s JSON omits `hidden` entirely (an older daemon's payload) and still
         // deserializes, so the serde default keeps this client working against one.
         assert!(!visible.repo.hidden);
 

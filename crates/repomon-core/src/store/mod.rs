@@ -1031,7 +1031,7 @@ mod tests {
         assert!(!r.hidden, "a fresh repo is visible");
 
         s.set_repo_hidden(r.id, true).await.unwrap();
-        // Listings still carry the repo, flagged — clients filter, so they can also offer a way
+        // Listings still carry the repo, flagged, so clients filter and can also offer a way
         // back. Removing it from the query would strand a hidden repo with no route to unhide.
         let all = s.list_repos().await.unwrap();
         assert_eq!(all.len(), 1);

@@ -2,7 +2,7 @@ import type { AgentSession } from "../bindings";
 
 /// The tmux window a managed agent runs in encodes its spawn-order slot: `lane-7` is the lane's
 /// first slot, `lane-7-3` its third (see `TmuxRuntime::window_name` / `lane_id_of`). Returns
-/// `null` for anything that is not a lane window — GUI-opened shells use their own id scheme.
+/// `null` for anything that is not a lane window: GUI-opened shells use their own id scheme.
 export function slotOf(window: string | null | undefined): number | null {
   if (!window) return null;
   const match = /^lane-\d+(?:-(\d+))?$/.exec(window);

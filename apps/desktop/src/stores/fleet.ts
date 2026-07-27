@@ -214,9 +214,11 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   let unsubscribe: (() => void) | undefined;
   let refreshQueued = false;
 
-  // Repos the user hid. The daemon keeps returning them (flagged) so we can offer a way back;
-  // everything that renders the fleet works from `visibleRepos` / `visibleLanes` instead.
+  // Mirrors the daemon's `sort_repos_by_activity` setting, refreshed with every poll so a change
+  // made in the TUI lands here too.
   const [sortByActivity, setSortByActivity] = createSignal(false);
+  // The daemon keeps returning hidden repos (flagged) so we can offer a way back; everything that
+  // renders the fleet works from `visibleRepos` / `visibleLanes` / `unhiddenLanes` instead.
   const visibleRepos = createMemo(() =>
     sortReposByActivity(repos().filter((repo) => !repo.hidden), lanes(), sortByActivity()),
   );

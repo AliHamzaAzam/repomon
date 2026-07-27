@@ -791,7 +791,7 @@ pub async fn dispatch(
             });
             to_value(repo)
         }
-        // Hiding leaves the repo registered, watched, and lane-bearing — only clients stop
+        // Hiding leaves the repo registered, watched, and lane-bearing; only clients stop
         // showing it. Deliberately not `repo.remove`, which drops the registration outright.
         "repo.set_hidden" => {
             let p: RepoSetHidden = parse(params)?;
