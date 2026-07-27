@@ -3,6 +3,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import type { AgentSession, BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
+import { agentLabel } from "./agentLabel";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import type { ActionsStore } from "../stores/actions";
@@ -299,7 +300,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                               aria-pressed={selectedAgent() === agent}
                               onClick={() => setSelectedAgentKey(agentKey(agent, index()))}
                             >
-                              {agent.custom_label ?? agent.title ?? `${agent.agent} ${index() + 1}`}
+                              {agentLabel(agent)}
                             </button>
                           )}
                         </For>

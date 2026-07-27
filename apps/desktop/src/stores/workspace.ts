@@ -2,6 +2,7 @@ import { createMemo, createSignal } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
+import { agentLabel } from "../components/agentLabel";
 import {
   dedupe,
   stabilizeTargets,
@@ -44,10 +45,10 @@ export function createWorkspaceStore(fleet: FleetStore) {
   const lanes = () => fleet.lanes();
   const terminals = () => fleet.terminals();
   const targets = createMemo(() => stabilizeTargets(targetCache, dedupe(lanes().flatMap((lane) => [
-    ...lane.agent_sessions.flatMap((agent, index): PaneTarget[] => agent.tmux_window ? [{
+    ...lane.agent_sessions.flatMap((agent): PaneTarget[] => agent.tmux_window ? [{
       laneId: lane.id,
       window: agent.tmux_window,
-      label: agent.custom_label ?? agent.title ?? `${agent.agent} ${index + 1}`,
+      label: agentLabel(agent),
       shell: false,
       sessionId: agent.session_id,
     }] : []),

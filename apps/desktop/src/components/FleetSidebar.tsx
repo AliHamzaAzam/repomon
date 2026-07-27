@@ -3,6 +3,7 @@ import { For, Show, createMemo, createSignal } from "solid-js";
 import type { Lane } from "../bindings";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
+import { primarySession } from "./agentLabel";
 import RepoExtMenu from "./RepoExtMenu";
 
 interface FleetSidebarProps {
@@ -19,8 +20,12 @@ function dirtyCount(lane: Lane): number {
 
 function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
   const indicator = () => laneIndicator(props.lane);
-  const title = () => props.lane.agent_sessions[0]?.custom_label
-    ?? props.lane.agent_sessions[0]?.title
+  // Named after the lane's first-spawned agent, not `agent_sessions[0]`: the daemon orders that
+  // array newest-transcript-first, so reading position 0 renamed the row every time the lane's
+  // agents took turns.
+  const primary = () => primarySession(props.lane.agent_sessions);
+  const title = () => primary()?.custom_label
+    ?? primary()?.title
     ?? props.lane.worktree.name;
 
   return (
