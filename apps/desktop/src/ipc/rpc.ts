@@ -7,6 +7,7 @@ import type {
   Commit,
   ExtSnapshot,
   FanoutSummary,
+  JournalEntry,
   Lane,
   PendingDialog,
   Repo,
@@ -84,6 +85,10 @@ interface RpcMap {
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
   "repo.set_hidden": { params: { repo_id: number; hidden: boolean }; result: null };
+  "journal.query": {
+    params: { query?: string; since_last_session?: boolean; limit?: number };
+    result: { entries: JournalEntry[] };
+  };
   "repo.notes.get": {
     params: { repo_id: number };
     result: { repo_id: number; name: string; exists: boolean; content: string; path: string };

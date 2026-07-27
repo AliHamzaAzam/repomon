@@ -167,6 +167,15 @@ outside the app, so the editor loads fresh each time rather than caching. The 8 
 by the daemon; the editor counts bytes (not characters) against it so a doomed save is refused
 before it is sent.
 
+## The orchestration journal
+
+repomind writes every action it takes to a journal the daemon owns: what it did, which lane and
+repo it touched, and whether it worked. **Control center > Journal** (`mod+k`) shows it newest
+first, with a search box over the history.
+
+An entry that names a lane is clickable and jumps you to that lane. Opening the tab shows the
+recent tail rather than a search, so it doubles as "what happened while I was away".
+
 ## Extensions
 
 The Extensions view manages Claude Code marketplaces, plugins, and skills, either globally or

@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { AgentSession, BrowseResult, Commit, PendingDialog, TimelineData, WorkSession } from "../bindings";
+import type { AgentSession, BrowseResult, Commit, JournalEntry, PendingDialog, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
 import { agentLabel } from "./agentLabel";
@@ -8,7 +8,17 @@ import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import type { ActionsStore } from "../stores/actions";
 
-type ControlTab = "actions" | "triage" | "history" | "feed";
+const JOURNAL_LIMIT = 200;
+
+type ControlTab = "actions" | "triage" | "history" | "journal" | "feed";
+
+/// Params for a journal fetch. A blank box is not a search for the empty string: it asks for the
+/// recent tail, which is what the tab shows on open. Sending `query: ""` instead would run a
+/// substring search that matches everything, ordered by relevance rather than recency.
+export function journalQueryParams(query: string): { query?: string; limit: number } {
+  const trimmed = query.trim();
+  return trimmed ? { query: trimmed, limit: JOURNAL_LIMIT } : { limit: JOURNAL_LIMIT };
+}
 
 interface ControlCenterProps {
   fleet: FleetStore;
@@ -41,6 +51,8 @@ export default function ControlCenter(props: ControlCenterProps) {
   const [sessions, setSessions] = createSignal<WorkSession[]>([]);
   const [timeline, setTimeline] = createSignal<TimelineData | null>(null);
   const [search, setSearch] = createSignal("");
+  const [journal, setJournal] = createSignal<JournalEntry[]>([]);
+  const [journalSearch, setJournalSearch] = createSignal("");
   const [browser, setBrowser] = createSignal<BrowseResult | null>(null);
   const [selectedAgentKey, setSelectedAgentKey] = createSignal<string | null>(null);
   let trigger!: HTMLButtonElement;
@@ -208,9 +220,20 @@ export default function ControlCenter(props: ControlCenterProps) {
     }
   }
 
+  async function loadJournal(query = "") {
+    try {
+      const result = await daemonCall("journal.query", journalQueryParams(query));
+      setJournal(result.entries);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function chooseTab(next: ControlTab) {
     setTab(next);
     if (next === "history") await loadHistory();
+    if (next === "journal") await loadJournal();
     if (next === "feed") props.notifications.markAllRead();
   }
 
@@ -240,7 +263,7 @@ export default function ControlCenter(props: ControlCenterProps) {
           <section ref={dialogElement} role="dialog" aria-modal="true" aria-label="Control center" tabIndex={-1} class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
             <nav aria-label="Control sections" class="border-r border-line bg-raised/50 p-2">
               <p class="section-label px-2 pb-3 pt-2">Control center</p>
-              <For each={["actions", "triage", "history", "feed"] as ControlTab[]}>
+              <For each={["actions", "triage", "history", "journal", "feed"] as ControlTab[]}>
                 {(item) => (
                   <button type="button" class={`focus-ring mb-1 flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs capitalize ${tab() === item ? "bg-signal/10 text-signal" : "text-muted hover:bg-raised hover:text-foreground"}`} onClick={() => void chooseTab(item)}>
                     <span>{item}</span>
@@ -391,6 +414,53 @@ export default function ControlCenter(props: ControlCenterProps) {
                 <Show when={timeline()?.rows.length}>
                   <section class="mt-5"><p class="section-label mb-2">Activity timeline</p><For each={timeline()!.rows}>{(row) => <div class="mb-2 grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2"><span class="truncate text-xs text-muted">{row.repo_name}</span><div class="flex h-5 items-end gap-px">{row.density.map((level) => <i class="flex-1 bg-signal" style={{ height: `${Math.max(8, level * 18)}%`, opacity: `${0.18 + level * 0.14}` }} />)}</div></div>}</For></section>
                 </Show>
+              </Show>
+
+              <Show when={tab() === "journal"}>
+                <form
+                  class="mb-4 flex gap-2"
+                  onSubmit={(event) => { event.preventDefault(); void loadJournal(journalSearch()); }}
+                >
+                  <input
+                    class="focus-ring h-8 flex-1 rounded border border-line bg-background px-2 text-xs outline-none"
+                    placeholder="Search what repomind did"
+                    value={journalSearch()}
+                    onInput={(event) => setJournalSearch(event.currentTarget.value)}
+                    aria-label="Search the orchestration journal"
+                  />
+                  <button class="focus-ring rounded bg-signal px-3 font-mono text-[0.58rem] uppercase text-background" type="submit">Search</button>
+                </form>
+                <For
+                  each={journal()}
+                  fallback={<p class="text-xs text-muted">Nothing journalled yet. repomind writes here as it works.</p>}
+                >
+                  {(entry) => (
+                    <button
+                      type="button"
+                      class="focus-ring mb-1.5 block w-full rounded-lg border border-line p-2.5 text-left disabled:cursor-default"
+                      disabled={entry.lane_id === null}
+                      onClick={() => {
+                        if (entry.lane_id === null) return;
+                        props.fleet.setSelectedLaneId(entry.lane_id);
+                        setTab("actions");
+                      }}
+                    >
+                      <span class="flex items-center justify-between gap-2">
+                        <b class="truncate font-mono text-[0.66rem]">{entry.action}</b>
+                        <span class={`shrink-0 font-mono text-[0.5rem] uppercase ${entry.outcome === "ok" ? "text-signal" : "text-fault"}`}>
+                          {entry.outcome}
+                        </span>
+                      </span>
+                      <span class="mt-1 flex items-center gap-1.5 font-mono text-[0.55rem] text-muted">
+                        <span>{formatTime(entry.at)}</span>
+                        <Show when={entry.repo}>{(repo) => <span class="truncate">· {repo()}</span>}</Show>
+                      </span>
+                      <Show when={entry.detail ?? entry.params}>
+                        {(text) => <span class="mt-1 block truncate font-mono text-[0.55rem] text-muted/70">{text()}</span>}
+                      </Show>
+                    </button>
+                  )}
+                </For>
               </Show>
 
               <Show when={tab() === "feed"}>
