@@ -102,6 +102,11 @@ pub struct Config {
     /// In the sidebars, expand a lane running several agents into one row per agent (a tree under
     /// the lane) instead of a single row with an `×N` badge. Off by default.
     pub expand_agents: bool,
+    /// Order sidebar repo groups by their most recent lane activity, so the project you are
+    /// working in floats to the top. Off by default (groups keep the daemon's order). Only the
+    /// groups move: lane order inside a group is untouched, since sorting *lanes* by activity made
+    /// them bubble around on every agent output.
+    pub sort_repos_by_activity: bool,
     /// Which agent powers the repomind orchestrator session — a built-in Claude variant (e.g.
     /// `claude-work`), a custom agent name, or `codex` (the one non-Claude CLI with the MCP
     /// client repomind needs; it runs with pane-only monitoring — no transcript chat view or
@@ -147,6 +152,7 @@ impl Default for Config {
             push: PushConfig::default(),
             usage_probe: false,
             expand_agents: false,
+            sort_repos_by_activity: false,
             orchestrator_agent: None,
             orchestrator_model: None,
             embedded_pty: true,

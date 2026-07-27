@@ -62,6 +62,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+n` | New lane |
 | `mod+shift+n` | Add repository |
 | `mod+g` | Jump to a lane needing attention |
+| `mod+shift+h` | Hide the selected lane's project |
 
 ### Lane
 
@@ -104,13 +105,26 @@ bottom.
 **Notifications** has a master switch plus one toggle per event: needs-you, rate-limited, resumed,
 idle, sound, show-why, coalescing, click-to-focus, and whether subagents count.
 
-**Appearance** sets the accent from a swatch or a custom hex value, and picks the repomind agent
-and model.
+**Appearance** sets the accent from a swatch or a custom hex value, picks the repomind agent and
+model, and holds **Sort projects by activity**: with it on, sidebar project groups order by their
+most recent lane activity so whatever you are working in floats to the top. Only the groups move.
+Lane order inside a group is deliberately left alone, because sorting lanes by activity makes them
+bubble around on every line an agent prints.
 
 **Keyboard** is the shortcut reference, with search.
 
 Settings are stored by the daemon and shared with the TUI, so a change here shows up there too.
 Nothing saves until you press **Save**.
+
+## Hiding projects
+
+A project you are not working in can be hidden from the sidebar with the `⊘` button on its header
+or `mod+shift+h`. Hiding is not removing: the repo stays registered, stays watched, and keeps every
+lane and worktree it owns. Its lanes leave the sidebar and stop counting toward the needs-you and
+running totals, and a **Hidden (N)** list at the bottom of the sidebar brings any of them back.
+
+The flag lives in the daemon, so the TUI honors it too and it survives a restart. The TUI has no
+unhide view of its own, so a project hidden there stays hidden until you restore it here.
 
 ## Extensions
 
@@ -127,4 +141,6 @@ empty state rather than pretending to have Claude-style plugins.
 - On Windows and Linux, `mod` is Ctrl, which is also the terminal's own control modifier. A bound
   Ctrl chord pressed while a terminal is focused currently fires the GUI action **and** reaches the
   agent. macOS is unaffected, since Cmd is not a terminal control key.
+- Hiding a project can only be undone from Mission Control. The TUI honors the flag but has no
+  reveal list, so it cannot unhide.
 - The iOS companion app is built but unreleased.

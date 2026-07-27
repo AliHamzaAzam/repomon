@@ -143,6 +143,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_subagents": cfg.notify_subagents,
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
+        "sort_repos_by_activity": cfg.sort_repos_by_activity,
         "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
@@ -546,6 +547,8 @@ struct ConfigSet {
     usage_probe: Option<bool>,
     #[serde(default)]
     expand_agents: Option<bool>,
+    #[serde(default)]
+    sort_repos_by_activity: Option<bool>,
     #[serde(default)]
     embedded_pty: Option<bool>,
     #[serde(default)]
@@ -1522,6 +1525,9 @@ pub async fn dispatch(
                 }
                 if let Some(b) = p.expand_agents {
                     cfg.expand_agents = b;
+                }
+                if let Some(b) = p.sort_repos_by_activity {
+                    cfg.sort_repos_by_activity = b;
                 }
                 if let Some(b) = p.embedded_pty {
                     cfg.embedded_pty = b;

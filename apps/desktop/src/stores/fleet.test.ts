@@ -7,6 +7,7 @@ import {
   laneIndicator,
   matchesLane,
   pickFocusedUsage,
+  sortReposByActivity,
   withSessionKeys,
   type FleetSource,
 } from "./fleet";
@@ -60,9 +61,9 @@ function repo(id: number, name: string, hidden = false): Repo {
 
 /// A store fed one fixed snapshot, started and refreshed once. `subscribe` never fires, and the
 /// 2s heartbeat is stopped before the test asserts, so nothing races the assertions.
-async function startedStore(repos: Repo[], lanes: Lane[]) {
+async function startedStore(repos: Repo[], lanes: Lane[], sortReposByActivity: boolean | null = false) {
   const source: FleetSource = {
-    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [] }),
+    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [], sortReposByActivity }),
     subscribe: () => Promise.resolve(() => undefined),
   };
   return createRoot((dispose) => {
@@ -95,6 +96,40 @@ describe("hidden repos", () => {
     expect(fleet.repos()).toHaveLength(2);
     expect(fleet.lanes()).toHaveLength(2);
     teardown();
+  });
+});
+
+describe("sortReposByActivity", () => {
+  const alpha = repo(1, "alpha");
+  const beta = repo(2, "beta");
+  const gamma = repo(3, "gamma");
+  const at = (id: number, target: Repo, when: string) => lane({ id, repo: target, last_activity_at: when });
+
+  it("leaves the daemon order alone when the setting is off", () => {
+    const lanes = [at(10, alpha, "2026-07-20T00:00:00Z"), at(20, beta, "2026-07-27T00:00:00Z")];
+    expect(sortReposByActivity([alpha, beta], lanes, false)).toEqual([alpha, beta]);
+  });
+
+  it("floats the project with the newest lane activity to the top", () => {
+    const lanes = [
+      at(10, alpha, "2026-07-20T00:00:00Z"),
+      at(20, beta, "2026-07-27T00:00:00Z"),
+      // A repo's newest lane is what counts, not its oldest.
+      at(21, beta, "2026-07-01T00:00:00Z"),
+    ];
+    expect(sortReposByActivity([alpha, beta], lanes, true).map((r) => r.id)).toEqual([2, 1]);
+  });
+
+  it("sinks projects with no lanes and keeps ties in daemon order", () => {
+    const lanes = [at(10, alpha, "2026-07-20T00:00:00Z"), at(20, beta, "2026-07-20T00:00:00Z")];
+    // gamma has no lanes at all; alpha and beta tie, so they hold their incoming order.
+    expect(sortReposByActivity([alpha, gamma, beta], lanes, true).map((r) => r.id)).toEqual([1, 2, 3]);
+  });
+
+  it("does not mutate the array it was given", () => {
+    const input = [alpha, beta];
+    sortReposByActivity(input, [at(20, beta, "2026-07-27T00:00:00Z")], true);
+    expect(input).toEqual([alpha, beta]);
   });
 });
 

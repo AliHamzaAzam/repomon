@@ -62,6 +62,7 @@ export interface ConfigView {
   notify_subagents: boolean;
   usage_probe: boolean;
   expand_agents: boolean;
+  sort_repos_by_activity: boolean;
   embedded_pty: boolean;
   orchestrator_agent?: string | null;
   orchestrator_model?: string | null;

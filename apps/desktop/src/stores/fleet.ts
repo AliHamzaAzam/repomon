@@ -9,6 +9,10 @@ export interface FleetSnapshot {
   lanes: Lane[];
   usage: AccountUsage[];
   terminals: Array<{ lane_id: number; id: string }>;
+  /// Sidebar-affecting settings, read from the daemon rather than cached locally so a change made
+  /// in the TUI shows up here without a restart. Null when the call failed; the store keeps the
+  /// last good value in that case.
+  sortReposByActivity: boolean | null;
 }
 
 export interface FleetSource {
@@ -18,13 +22,20 @@ export interface FleetSource {
 
 export const daemonFleetSource: FleetSource = {
   async load() {
-    const [repos, lanes, usage, terminals] = await Promise.all([
+    const [repos, lanes, usage, terminals, config] = await Promise.all([
       daemonCall("repo.list"),
       daemonCall("lane.list"),
       daemonCall("usage.get").catch(() => []),
       daemonCall("terminal.list_all").catch(() => []),
+      daemonCall("config.get").catch(() => null),
     ]);
-    return { repos, lanes, usage, terminals };
+    return {
+      repos,
+      lanes,
+      usage,
+      terminals,
+      sortReposByActivity: config ? Boolean(config.sort_repos_by_activity) : null,
+    };
   },
   subscribe: subscribeDaemon,
 };
@@ -101,6 +112,31 @@ export function pickFocusedUsage(
   if (!agent) return reports[0];
   const key = accountKeyOf(agent);
   return reports.find((report) => report.key === key) ?? null;
+}
+
+/// Order repo groups by their most recent lane activity, newest first, when the setting is on.
+///
+/// Only the groups move. Ordering *lanes* by activity is what the TUI removed on purpose: it made
+/// rows bubble around on every agent output. A repo's activity changes far less often, so the
+/// groups stay put while you work in one.
+///
+/// Repos with no lanes have no activity to sort by and sink to the bottom. Ties keep the incoming
+/// (daemon) order, so the result is stable across polls.
+export function sortReposByActivity(repos: Repo[], lanes: Lane[], enabled: boolean): Repo[] {
+  if (!enabled) return repos;
+  const newest = new Map<number, number>();
+  for (const lane of lanes) {
+    const at = Date.parse(lane.last_activity_at);
+    if (Number.isNaN(at)) continue;
+    const seen = newest.get(lane.repo.id);
+    if (seen === undefined || at > seen) newest.set(lane.repo.id, at);
+  }
+  return repos
+    .map((repo, index) => ({ repo, index, at: newest.get(repo.id) ?? -Infinity }))
+    // Compared for equality first: two lane-less repos are both -Infinity, and subtracting those
+    // yields NaN, which sorts unpredictably.
+    .sort((a, b) => (a.at === b.at ? a.index - b.index : b.at - a.at))
+    .map((entry) => entry.repo);
 }
 
 export function matchesLane(lane: Lane, query: string): boolean {
@@ -180,7 +216,10 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   // Repos the user hid. The daemon keeps returning them (flagged) so we can offer a way back;
   // everything that renders the fleet works from `visibleRepos` / `visibleLanes` instead.
-  const visibleRepos = createMemo(() => repos().filter((repo) => !repo.hidden));
+  const [sortByActivity, setSortByActivity] = createSignal(false);
+  const visibleRepos = createMemo(() =>
+    sortReposByActivity(repos().filter((repo) => !repo.hidden), lanes(), sortByActivity()),
+  );
   const hiddenRepos = createMemo(() => repos().filter((repo) => repo.hidden));
   // Everything a hidden repo owns goes with it, including its share of the urgent/running counts:
   // a badge you cannot click through to is just noise.
@@ -215,6 +254,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setLaneStore(reconcile(withSessionKeys(snapshot.lanes), { key: "id" }));
       setUsage(snapshot.usage);
       setTerminals(snapshot.terminals);
+      if (snapshot.sortReposByActivity !== null) setSortByActivity(snapshot.sortReposByActivity);
       setError(null);
       const current = selectedLaneId();
       // Never auto-select into a repo the user hid, and drop the selection if the repo it lives
