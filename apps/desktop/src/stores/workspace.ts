@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js";
+import { createMemo, createRenderEffect, createSignal } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
@@ -31,6 +31,12 @@ export function createWorkspaceStore(fleet: FleetStore) {
   const [layout, setLayout] = createSignal<WorkspaceLayout>(readLayout());
   const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
   const [activeWindow, setActiveWindow] = createSignal<string | null>(null);
+
+  // The fleet store attributes account usage to the agent in view, so it needs to know which pane
+  // that is. This store owns the tab state, so mirror it across rather than duplicating the state.
+  // A render effect, not `createEffect`: this is a plain signal copy with no DOM to wait for, and
+  // running it in the same update cycle keeps the usage pill from lagging a tab switch by a tick.
+  createRenderEffect(() => fleet.setFocusedWindow(activeWindow()));
 
   // Fleet polls every second and hands us a brand-new lanes array each time. Reconcile the
   // rebuilt targets against this cache so each window keeps a stable object reference, and the

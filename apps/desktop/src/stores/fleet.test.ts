@@ -111,6 +111,50 @@ describe("fleet presentation", () => {
     expect(pickFocusedUsage([], onDefault)).toBeNull();
   });
 
+  it("keys codex on its own probe rather than the default Claude account", () => {
+    const usage = (key: string): AccountUsage => ({
+      key,
+      label: key,
+      report: { windows: [{ label: "5h", pct_used: 20, reset_at: null }] },
+      age_secs: 10,
+    });
+    const reports = [usage("default"), usage("codex")];
+
+    // A codex session also has `config_dir: null`. Keying on that alone resolved it to "default"
+    // and showed Claude's numbers on a codex lane.
+    const onCodex = lane({ agent_sessions: [agent({ agent: "codex", config_dir: null })] });
+    expect(pickFocusedUsage(reports, onCodex)?.key).toBe("codex");
+
+    // Claude sessions are unaffected.
+    const onClaude = lane({ agent_sessions: [agent({ config_dir: null })] });
+    expect(pickFocusedUsage(reports, onClaude)?.key).toBe("default");
+
+    // Codex probed but never run here: blank, not Claude's numbers.
+    expect(pickFocusedUsage([usage("default")], onCodex)).toBeNull();
+  });
+
+  it("prefers the agent in the focused pane over the lane's first session", () => {
+    const usage = (key: string): AccountUsage => ({
+      key,
+      label: key,
+      report: { windows: [{ label: "5h", pct_used: 20, reset_at: null }] },
+      age_secs: 10,
+    });
+    const reports = [usage("default"), usage("codex")];
+    const mixed = lane({
+      agent_sessions: [
+        agent({ session_id: "a", tmux_window: "lane-7", config_dir: null }),
+        agent({ session_id: "b", agent: "codex", tmux_window: "lane-7-2", config_dir: null }),
+      ],
+    });
+
+    expect(pickFocusedUsage(reports, mixed, "lane-7-2")?.key).toBe("codex");
+    expect(pickFocusedUsage(reports, mixed, "lane-7")?.key).toBe("default");
+
+    // A window that is no longer in this lane falls back to the first non-inferred session.
+    expect(pickFocusedUsage(reports, mixed, "lane-9")?.key).toBe("default");
+  });
+
   it("gives overlay sessions distinct stable reconcile keys", () => {
     // Overlay sessions all arrive with id 0; duplicate keys would make reconcile collapse
     // the lane's sessions to one (the missing-second-agent-tab bug).

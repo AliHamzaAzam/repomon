@@ -11,12 +11,14 @@ function target(window: string): PaneTarget {
   return { laneId: 7, window, label: window, shell: false, sessionId: null };
 }
 
-function fleetStub(): FleetStore {
+function fleetStub(overrides: Partial<FleetStore> = {}): FleetStore {
   return {
     refresh: vi.fn().mockResolvedValue(undefined),
     selectedLaneId: () => 7,
     lanes: () => [],
     terminals: () => [],
+    setFocusedWindow: vi.fn(),
+    ...overrides,
   } as unknown as FleetStore;
 }
 
@@ -62,5 +64,22 @@ describe("workspace store", () => {
       expect(localStorage.getItem("repomon.workspace.layout")).toBe("grid");
       dispose();
     });
+  });
+
+  // The fleet store attributes usage to the agent in view, and this store owns the tab state.
+  // Asserted outside the `createRoot` callback on purpose: that callback runs inside one Solid
+  // update, so writes made in it stay batched and no effect re-runs until it returns.
+  it("mirrors the active window into the fleet store", () => {
+    const setFocusedWindow = vi.fn();
+    const [ws, dispose] = createRoot((dispose) =>
+      [createWorkspaceStore(fleetStub({ setFocusedWindow })), dispose] as const,
+    );
+
+    ws.setActiveWindow("lane-7-2");
+    expect(setFocusedWindow).toHaveBeenLastCalledWith("lane-7-2");
+
+    ws.setActiveWindow(null);
+    expect(setFocusedWindow).toHaveBeenLastCalledWith(null);
+    dispose();
   });
 });
