@@ -56,7 +56,16 @@ export function createNotificationStore(onActivate?: (laneId: number) => void) {
   async function start() {
     if (active) return;
     active = true;
-    setNativeEnabled(await isPermissionGranted().catch(() => false));
+    // Ask on first run rather than hiding the request behind a button in the feed tab. Until
+    // permission exists this store never calls showNativeNotification at all, so the app posts
+    // nothing and the only OS popup is the daemon's osascript fallback — which is delivered by
+    // Script Editor and wears its icon. Requesting here is what registers the app with
+    // Notification Center so its own alerts carry the repomon icon.
+    let granted = await isPermissionGranted().catch(() => false);
+    if (!granted) {
+      granted = await requestPermission().then((p) => p === "granted").catch(() => false);
+    }
+    setNativeEnabled(granted);
     try {
       unsubscribe = await subscribeDaemon((event) => {
         if (event.method !== "event.notification" || !isFleetNotification(event.params)) return;

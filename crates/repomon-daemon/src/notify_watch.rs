@@ -347,9 +347,11 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 push::send_all(&ctx, &title, &body, category, &payload).await;
             }
 
-            // Local desktop popup — fired by the daemon only when the TUI isn't already covering it
-            // (it's parked in an attach or closed), so we never double-notify with the TUI's own.
-            if !tui_active {
+            // Local desktop popup, fired by the daemon only when no local UI is already covering
+            // it (the TUI is parked in an attach, or nothing is open), so we never double-notify
+            // with the TUI's own. `notify_desktop_fallback` turns it off entirely: on macOS this
+            // goes out via `osascript`, which delivers as Script Editor and wears its icon.
+            if repomon_core::notify::daemon_popup_allowed(tui_active, cfg.notify_desktop_fallback) {
                 repomon_core::notify::send_native(
                     &title,
                     &body,
@@ -481,8 +483,9 @@ async fn check_orchestrator_attention(
                 ctx.broadcast("event.notification", payload.clone());
                 push::send_all(ctx, &title, &body, push::CATEGORY_ALERT, &payload).await;
             }
-            // Local desktop popup only when the TUI isn't already covering it.
-            if !tui_active {
+            // Local desktop popup only when the TUI isn't already covering it, and only if the
+            // user left the daemon's own popup switched on.
+            if repomon_core::notify::daemon_popup_allowed(tui_active, cfg.notify_desktop_fallback) {
                 repomon_core::notify::send_native(
                     "repomind needs you",
                     headline.as_deref().unwrap_or(""),

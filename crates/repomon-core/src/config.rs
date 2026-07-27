@@ -82,6 +82,14 @@ pub struct Config {
     /// Make desktop popups click-to-focus the terminal (uses `terminal-notifier` when
     /// installed; falls back to plain popups otherwise).
     pub notify_click_focus: bool,
+    /// Let the daemon post its own OS notification when no UI is covering one.
+    ///
+    /// On macOS that popup goes out through `osascript`, so it is delivered by Script Editor and
+    /// wears Script Editor's icon. Turning this off silences it: the TUI still pops its own while
+    /// it is on screen, and Mission Control still posts its own under the app's identity, but a
+    /// fleet with neither open stops notifying at the OS level. On by default, so alerts are not
+    /// lost on a machine that runs neither UI.
+    pub notify_desktop_fallback: bool,
     /// Notify when a worktree-isolated *subagent* finishes (an inferred file-activity session,
     /// e.g. a Claude Code subagent that leaves no transcript or process of its own). Off by
     /// default: you're alerted only when the *main* agent finishes, not each subagent it spawns.
@@ -152,6 +160,7 @@ impl Default for Config {
             notify_show_why: true,
             notify_coalesce: true,
             notify_click_focus: true,
+            notify_desktop_fallback: true,
             notify_subagents: false,
             repos: HashMap::new(),
             remote: RemoteConfig::default(),

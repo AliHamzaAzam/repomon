@@ -179,6 +179,7 @@ pub struct Settings {
     pub notify_show_why: bool,
     pub notify_coalesce: bool,
     pub notify_click_focus: bool,
+    pub notify_desktop_fallback: bool,
     pub notify_subagents: bool,
     pub usage_probe: bool,
     pub expand_agents: bool,
@@ -539,6 +540,7 @@ impl App {
                 notify_show_why: true,
                 notify_coalesce: true,
                 notify_click_focus: true,
+                notify_desktop_fallback: true,
                 embedded_pty: true,
                 ..Settings::default()
             },
@@ -2677,6 +2679,9 @@ impl App {
         if let Some(x) = b("notify_coalesce") {
             self.settings.notify_coalesce = x;
         }
+        if let Some(x) = b("notify_desktop_fallback") {
+            self.settings.notify_desktop_fallback = x;
+        }
         if let Some(x) = b("notify_click_focus") {
             self.settings.notify_click_focus = x;
         }
@@ -2724,6 +2729,7 @@ impl App {
             "notify_show_why": self.settings.notify_show_why,
             "notify_coalesce": self.settings.notify_coalesce,
             "notify_click_focus": self.settings.notify_click_focus,
+            "notify_desktop_fallback": self.settings.notify_desktop_fallback,
             "notify_subagents": self.settings.notify_subagents,
             "usage_probe": self.settings.usage_probe,
             "expand_agents": self.settings.expand_agents,

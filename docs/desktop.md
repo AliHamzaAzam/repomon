@@ -133,6 +133,17 @@ bottom.
 **Notifications** has a master switch plus one toggle per event: needs-you, rate-limited, resumed,
 idle, sound, show-why, coalescing, click-to-focus, and whether subagents count.
 
+Mission Control asks for notification permission on first launch. That request is what registers
+it with Notification Center, and it is why its alerts carry the repomon icon; decline it and the
+app posts nothing, leaving only the daemon's fallback below.
+
+It also holds **System popup when no window is open**. The daemon posts its own OS notification
+when no UI is covering one, which on macOS goes out through `osascript` and so arrives from Script
+Editor, wearing Script Editor's icon. Turn it off and that popup stops: Mission Control still
+notifies under its own identity while it is running, and the TUI still pops its own while it is on
+screen. The trade is that a machine running neither UI stops notifying at the OS level, which is
+why it ships on.
+
 **Appearance** sets the accent from a swatch or a custom hex value, picks the repomind agent and
 model, and holds **Sort projects by activity**: with it on, sidebar project groups order by their
 most recent lane activity so whatever you are working in floats to the top. Only the groups move.

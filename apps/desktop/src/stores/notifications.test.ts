@@ -10,9 +10,14 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
+const perms = vi.hoisted(() => ({ granted: true, requested: 0 }));
+
 vi.mock("@tauri-apps/plugin-notification", () => ({
-  isPermissionGranted: () => Promise.resolve(true),
-  requestPermission: () => Promise.resolve("granted"),
+  isPermissionGranted: () => Promise.resolve(perms.granted),
+  requestPermission: () => {
+    perms.requested += 1;
+    return Promise.resolve("granted");
+  },
   sendNotification: vi.fn(),
 }));
 
@@ -32,6 +37,8 @@ vi.mock("../ipc/rpc", () => ({
 afterEach(() => {
   vi.unstubAllGlobals();
   rpc.daemonCb = undefined;
+  perms.granted = true;
+  perms.requested = 0;
 });
 
 describe("notification feed shape", () => {
@@ -111,6 +118,27 @@ describe("notification feed shape", () => {
     expect(store.items()).toHaveLength(1);
     expect(constructions).toBe(1);
 
+    store.stop();
+  });
+});
+
+describe("notification permission", () => {
+  it("asks once on first run so the app can post under its own identity", async () => {
+    // Without permission the store never posts, so the only OS popup is the daemon's osascript
+    // fallback (Script Editor's icon). Asking at startup is what fixes that.
+    perms.granted = false;
+    const store = createNotificationStore();
+    await store.start();
+    expect(perms.requested).toBe(1);
+    expect(store.nativeEnabled()).toBe(true);
+    store.stop();
+  });
+
+  it("does not re-prompt when permission already exists", async () => {
+    const store = createNotificationStore();
+    await store.start();
+    expect(perms.requested).toBe(0);
+    expect(store.nativeEnabled()).toBe(true);
     store.stop();
   });
 });
