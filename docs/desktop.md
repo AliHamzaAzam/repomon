@@ -68,6 +68,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+,` | Open settings |
 | `mod+4` | Toggle extensions |
 | `mod+5` | Toggle repomind |
+| `mod+shift+5` | Repomind full screen |
 | `mod+6` | Cycle theme (system, dark, light) |
 | `mod+k` | Open the control center |
 
@@ -229,6 +230,27 @@ Two limits are structural, not settings. Destructive commands always reach you n
 listed here, and a denial is never generalised into an auto-deny, it just keeps escalating. Rules
 are per-repo, so `cargo test` approved in two projects is two rules and revoking one leaves the
 other standing.
+
+## Repomind
+
+The repomind panel lives in the right sidebar and opens with `mod+5`. `mod+shift+5` blows it up to
+full screen, and Escape or **Exit** brings it back; going full screen opens the panel if it was
+closed, so it has somewhere to shrink back to.
+
+**Answering prompts.** Repomind's agent sometimes stops on something only you can answer, like
+Claude Code's "Do you trust this folder?" trust prompt. The message box types text and presses
+Enter, which cannot express "just press Enter" or "press Escape", so a prompt like that used to be
+unanswerable from the app: the question was visible and there was no way through it. The key row
+above the pane sends those directly. `1` `2` `3` pick a numbered option, **Enter** confirms the
+highlighted one, and **Esc** cancels. The row's label turns amber and reads **Answer** while the
+daemon reports the pane is waiting on a permission or a decision.
+
+Note that the panel's **Esc** button sends Escape to repomind, while pressing Escape on the
+keyboard leaves full screen. They are deliberately different: one is aimed at the agent, the other
+at the window.
+
+The live pane is a raw terminal capture, so it is stripped of escape sequences before display.
+Colour is lost, but the text is readable; the alternative was the literal bytes.
 
 ## Extensions
 

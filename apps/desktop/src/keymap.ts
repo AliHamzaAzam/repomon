@@ -23,6 +23,7 @@ export const BINDINGS: Binding[] = [
   { id: "panel.settings", chord: "mod+,", label: "Open settings", section: "Panels" },
   { id: "panel.extensions", chord: "mod+4", label: "Toggle extensions", section: "Panels" },
   { id: "panel.repomind", chord: "mod+5", label: "Toggle repomind", section: "Panels" },
+  { id: "panel.repomindFull", chord: "mod+shift+5", label: "Repomind full screen", section: "Panels" },
   { id: "panel.theme", chord: "mod+6", label: "Cycle theme", section: "Panels" },
 
   { id: "layout.focused", chord: "mod+shift+1", label: "Focused layout", section: "Layout" },
