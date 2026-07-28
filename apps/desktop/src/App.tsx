@@ -253,9 +253,6 @@ function App(props: AppProps) {
         </div>
 
         <div class="flex items-center gap-2">
-          <span class="rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.14em] text-muted">
-            Local
-          </span>
           <ControlCenter fleet={fleet} notifications={notifications} actions={actions} />
           <button
             type="button"
