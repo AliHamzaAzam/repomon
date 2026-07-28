@@ -38,3 +38,17 @@ export function stripAnsi(input: string): string {
   }
   return out;
 }
+
+/// Drop blank lines from the top and bottom of a pane capture.
+///
+/// A capture is the whole tmux pane, so a short message sits in a tall field of empty rows and the
+/// panel renders mostly nothing. Only the edges are touched: blank lines *inside* the output are
+/// the agent's own spacing and removing them would reflow its layout.
+export function trimBlankEdges(text: string): string {
+  const lines = text.split("\n");
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start].trim() === "") start += 1;
+  while (end > start && lines[end - 1].trim() === "") end -= 1;
+  return lines.slice(start, end).join("\n");
+}

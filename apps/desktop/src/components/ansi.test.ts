@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { stripAnsi } from "./ansi";
+import { stripAnsi, trimBlankEdges } from "./ansi";
 
 describe("stripAnsi", () => {
   it("drops colour and style sequences", () => {
@@ -33,5 +33,20 @@ describe("stripAnsi", () => {
     expect(stripAnsi("text\x1b[")).toBe("text");
     expect(stripAnsi("text\x1b")).toBe("text");
     expect(stripAnsi("text\x1b]8;id=x")).toBe("text");
+  });
+});
+
+describe("trimBlankEdges", () => {
+  it("drops the empty rows a full-pane capture pads with", () => {
+    expect(trimBlankEdges("\n\n  hello\n\n\n")).toBe("  hello");
+  });
+
+  // Interior spacing is the agent's own formatting; reflowing it would change what it drew.
+  it("keeps blank lines inside the output", () => {
+    expect(trimBlankEdges("\na\n\n\nb\n")).toBe("a\n\n\nb");
+  });
+
+  it("handles an all-blank capture without inventing content", () => {
+    expect(trimBlankEdges("\n   \n\n")).toBe("");
   });
 });

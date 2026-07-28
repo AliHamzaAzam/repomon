@@ -1,7 +1,7 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { TranscriptItem } from "../bindings";
-import { stripAnsi } from "./ansi";
+import { stripAnsi, trimBlankEdges } from "./ansi";
 import { daemonCall, subscribeDaemon, type OrchestratorStatus } from "../ipc/rpc";
 
 type RepomindView = "live" | "transcript";
@@ -28,6 +28,7 @@ export default function RepomindPanel(props: RepomindPanelProps) {
   let timer: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: (() => void) | undefined;
 
+  const pane = () => trimBlankEdges(stripAnsi(liveOutput()));
   const awaitingAnswer = () => AWAITING_ANSWER.includes(status().attention ?? "");
 
   function errorMessage(cause: unknown) {
@@ -126,14 +127,12 @@ export default function RepomindPanel(props: RepomindPanelProps) {
 
   return (
     <div class="flex min-h-0 flex-1 flex-col">
-      <div class="flex items-center justify-between border-b border-line px-3 py-2">
-        <div class="min-w-0">
-          <p class="truncate text-xs font-medium">{status().running ? status().headline ?? "Orchestrating fleet" : "Orchestrator offline"}</p>
-          <p class="mt-0.5 truncate font-mono text-[0.52rem] uppercase tracking-[0.08em] text-muted">
+      <div class="border-b border-line px-3 py-2">
+        <p class="text-xs leading-snug font-medium">{status().running ? status().headline ?? "Orchestrating fleet" : "Orchestrator offline"}</p>
+        <div class="mt-1.5 flex items-center gap-1">
+          <span class="mr-auto truncate font-mono text-[0.52rem] uppercase tracking-[0.08em] text-muted">
             {status().running ? `${status().agent ?? "agent"} ${status().model ?? ""}` : "local daemon session"}
-          </p>
-        </div>
-        <div class="flex items-center gap-1">
+          </span>
           <Show when={props.onToggleFullscreen}>
             <button
               type="button"
@@ -174,11 +173,9 @@ export default function RepomindPanel(props: RepomindPanelProps) {
         </Show>
       </div>
 
-      <Show when={status().running}>
+      <Show when={status().running && awaitingAnswer()}>
         <div class="flex items-center gap-1 border-b border-line px-3 py-2">
-          <span
-            class={`mr-1 font-mono text-[0.5rem] uppercase tracking-[0.08em] ${awaitingAnswer() ? "text-attention" : "text-muted/70"}`}
-          >{awaitingAnswer() ? "Answer" : "Keys"}</span>
+          <span class="mr-1 font-mono text-[0.5rem] uppercase tracking-[0.08em] text-attention">Answer</span>
           <For each={["1", "2", "3"]}>
             {(digit) => (
               <button
@@ -192,7 +189,7 @@ export default function RepomindPanel(props: RepomindPanelProps) {
           </For>
           <button
             type="button"
-            class={`focus-ring rounded border px-2 py-0.5 font-mono text-[0.55rem] uppercase ${awaitingAnswer() ? "border-signal/40 bg-signal/10 text-signal" : "border-line text-muted hover:text-foreground"}`}
+            class="focus-ring rounded border border-signal/40 bg-signal/10 px-2 py-0.5 font-mono text-[0.55rem] uppercase text-signal"
             disabled={Boolean(busy())}
             onClick={() => void sendKey("Enter")}
             title="Confirm the highlighted option"
@@ -225,7 +222,13 @@ export default function RepomindPanel(props: RepomindPanelProps) {
             </Show>
           </div>
         }>
-          <pre aria-label="Repomind live pane" class="min-h-full whitespace-pre-wrap break-words font-mono text-[0.62rem] leading-relaxed text-muted">{stripAnsi(liveOutput()) || (status().running ? "Attaching to the live repomind pane…" : "Start repomind to attach to its live pane.")}</pre>
+          {/* Wrap in the sidebar, where a terminal line is far wider than the column and wrapping
+              is the only readable option; keep true terminal layout in full screen, where there is
+              room for it and reflowed box drawing would be the uglier choice. */}
+          <pre
+            aria-label="Repomind live pane"
+            class={`font-mono text-[0.62rem] leading-relaxed text-muted ${props.fullscreen ? "overflow-x-auto whitespace-pre" : "whitespace-pre-wrap break-words"}`}
+          >{pane() || (status().running ? "Attaching to the live repomind pane…" : "Start repomind to attach to its live pane.")}</pre>
         </Show>
       </div>
 

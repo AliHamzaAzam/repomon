@@ -249,8 +249,15 @@ Note that the panel's **Esc** button sends Escape to repomind, while pressing Es
 keyboard leaves full screen. They are deliberately different: one is aimed at the agent, the other
 at the window.
 
-The live pane is a raw terminal capture, so it is stripped of escape sequences before display.
-Colour is lost, but the text is readable; the alternative was the literal bytes.
+The live pane is a raw terminal capture, so it is stripped of escape sequences and trimmed of the
+blank rows a full-pane grab pads with. Colour is lost, but the text is readable; the alternative
+was the literal bytes.
+
+Wrapping depends on width. In the sidebar a terminal line is far wider than the column, so it
+wraps, which is the only readable option there. Full screen keeps the true terminal layout and
+scrolls sideways instead, because there is room for it and reflowed box drawing looks worse than a
+scrollbar. The key row appears only while something is actually waiting on you; the message box is
+the input the rest of the time.
 
 ## Extensions
 
