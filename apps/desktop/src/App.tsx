@@ -23,6 +23,7 @@ import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./the
 import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
+import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 
 interface AppProps {
@@ -64,9 +65,16 @@ function App(props: AppProps) {
   const workspace = createWorkspaceStore(fleet);
   const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
+  const messages = createMessageStore((laneId, slot) => {
+    fleet.setSelectedLaneId(laneId);
+    const lane = fleet.lanes().find((item) => item.id === laneId);
+    const window = lane?.agent_sessions[(slot ?? 1) - 1]?.tmux_window;
+    if (window) fleet.setFocusedWindow(window);
+  });
   let stopListening: (() => void) | undefined;
   let fleetStarted = false;
   let notificationsStarted = false;
+  let messagesStarted = false;
   let searchInput: HTMLInputElement | undefined;
   let active = true;
 
@@ -78,6 +86,16 @@ function App(props: AppProps) {
     } else if (connection().phase !== "connected" && fleetStarted) {
       fleetStarted = false;
       fleet.stop();
+    }
+  });
+
+  createEffect(() => {
+    if (connection().phase === "connected" && !messagesStarted) {
+      messagesStarted = true;
+      void messages.start();
+    } else if (connection().phase !== "connected" && messagesStarted) {
+      messagesStarted = false;
+      messages.stop();
     }
   });
 
@@ -201,6 +219,7 @@ function App(props: AppProps) {
     stopListening?.();
     fleet.stop();
     notifications.stop();
+    messages.stop();
   });
 
   const cycleTheme = () => {
@@ -262,7 +281,7 @@ function App(props: AppProps) {
         </div>
 
         <div class="flex items-center gap-2">
-          <ControlCenter fleet={fleet} notifications={notifications} actions={actions} />
+          <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
           <button
             type="button"
             class="focus-ring rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"

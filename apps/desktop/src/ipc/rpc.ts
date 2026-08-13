@@ -10,6 +10,8 @@ import type {
   FanoutSummary,
   JournalEntry,
   Lane,
+  FleetMessage,
+  MessagePage,
   Playbook,
   Schedule,
   PendingDialog,
@@ -68,6 +70,8 @@ export interface ConfigView {
   notify_sound_error_or_stall: boolean;
   notify_sound_incoming_message: boolean;
   notify_sound_update_ready: boolean;
+  message_inject_agents?: boolean;
+  message_inject_operator?: boolean;
   notify_show_why: boolean;
   notify_coalesce: boolean;
   notify_click_focus: boolean;
@@ -133,6 +137,10 @@ interface RpcMap {
   "lane.focus": { params: { lane_id: number }; result: { path: string } };
   "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
   "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: unknown };
+  "message.send": { params: { to: string; body: string; reply_to?: string }; result: FleetMessage };
+  "message.inbox": { params: { unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
+  "message.mark_read": { params: { id: string }; result: FleetMessage };
+  "message.list": { params: { lane_id?: number; unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
   "agent.detect": { params: undefined; result: AgentChoice[] };
   "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string } };
   "agent.adopt": { params: { lane_id: number; session_id?: string }; result: { lane_id: number; window: string } };

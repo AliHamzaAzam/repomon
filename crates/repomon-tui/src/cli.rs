@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clap::Subcommand;
-use repomon_core::model::{AgentChoice, Lane, LaneId, Repo, TranscriptItem};
+use repomon_core::model::{
+    AgentChoice, FleetMessage, Lane, LaneId, MessagePage, Repo, TranscriptItem,
+};
 use repomon_core::{Config, config, service};
 use repomon_mcp::fleet::{self, Attention};
 use repomon_mcp::server::{approve_key, target_window};
@@ -40,6 +42,11 @@ pub enum Command {
     Lane {
         #[command(subcommand)]
         cmd: LaneCmd,
+    },
+    /// Durable fleet mail.
+    Msg {
+        #[command(subcommand)]
+        cmd: MsgCmd,
     },
     /// Daemon service management.
     Daemon {
@@ -209,6 +216,32 @@ pub enum LaneCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum MsgCmd {
+    /// Send durable mail as the human operator.
+    Send {
+        /// Canonical recipient such as lane-7/2, @reviewer, or repomind.
+        address: String,
+        /// Full message body, capped at 8 KiB by the daemon.
+        body: String,
+        /// Reply to an existing message and inherit its thread budget.
+        #[arg(long)]
+        reply_to: Option<String>,
+    },
+    /// List durable fleet mail newest first.
+    List {
+        /// Show only unread messages.
+        #[arg(long)]
+        unread: bool,
+        /// Filter by recipient lane.
+        #[arg(long)]
+        lane: Option<LaneId>,
+        /// Maximum rows, capped by the daemon.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+}
+
 /// `lane spawn --mode`: a constrained launch mode so clap rejects bad values at parse time. The
 /// daemon translates it per agent kind; `Default` is sent as `"default"` and emits no flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -326,6 +359,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
             }
         }
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
+        Command::Msg { cmd } => handle_msg(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
         Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
@@ -921,6 +955,74 @@ async fn handle_playbooks(
                 .call("playbook.delete", Some(json!({ "name": name })))
                 .await?;
             println!("deleted playbook {name}");
+        }
+    }
+    Ok(())
+}
+
+async fn handle_msg(cmd: MsgCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        MsgCmd::Send {
+            address,
+            body,
+            reply_to,
+        } => {
+            let message: FleetMessage = client
+                .call_typed(
+                    "message.send",
+                    Some(json!({ "to": address, "body": body, "reply_to": reply_to })),
+                )
+                .await?;
+            println!(
+                "sent {}  {} -> {}  thread={} hops={}",
+                message.id,
+                message.sender.address,
+                message.recipient.address,
+                message.thread_id,
+                message.remaining_hops
+            );
+        }
+        MsgCmd::List {
+            unread,
+            lane,
+            limit,
+        } => {
+            let page: MessagePage = client
+                .call_typed(
+                    "message.list",
+                    Some(json!({
+                        "lane_id": lane,
+                        "unread_only": unread,
+                        "limit": limit,
+                    })),
+                )
+                .await?;
+            if page.messages.is_empty() {
+                println!("no fleet messages");
+                return Ok(());
+            }
+            for message in page.messages {
+                let body = message
+                    .body
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let body: String = body.chars().take(160).collect();
+                println!(
+                    "{}\t{}\t{} -> {}\t{:?}/{:?}\t{}",
+                    message.created_at.to_rfc3339(),
+                    message.id,
+                    message.sender.address,
+                    message.recipient.address,
+                    message.delivery_state,
+                    message.read_state,
+                    body
+                );
+            }
+            if let Some(cursor) = page.next_before {
+                eprintln!("more messages available before {cursor}");
+            }
         }
     }
     Ok(())
@@ -1734,5 +1836,54 @@ mod tests {
             PathBuf::from("/tmp/from-config.sock"),
             "without the flag, the config path applies as before"
         );
+    }
+
+    #[test]
+    fn msg_send_and_list_bind_the_public_cli() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "msg",
+            "send",
+            "lane-7/2",
+            "please review",
+            "--reply-to",
+            "mail-1",
+        ])
+        .expect("msg send should parse");
+        match cli.command {
+            Some(super::Command::Msg {
+                cmd:
+                    super::MsgCmd::Send {
+                        address,
+                        body,
+                        reply_to,
+                    },
+            }) => {
+                assert_eq!(address, "lane-7/2");
+                assert_eq!(body, "please review");
+                assert_eq!(reply_to.as_deref(), Some("mail-1"));
+            }
+            _ => panic!("expected `msg send`"),
+        }
+        let cli = crate::Cli::try_parse_from([
+            "repomon", "msg", "list", "--unread", "--lane", "7", "--limit", "20",
+        ])
+        .expect("msg list should parse");
+        match cli.command {
+            Some(super::Command::Msg {
+                cmd:
+                    super::MsgCmd::List {
+                        unread,
+                        lane,
+                        limit,
+                    },
+            }) => {
+                assert!(unread);
+                assert_eq!(lane, Some(7));
+                assert_eq!(limit, 20);
+            }
+            _ => panic!("expected `msg list`"),
+        }
     }
 }

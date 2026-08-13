@@ -205,6 +205,9 @@ async fn run() {
     // live (config.set) starts/stops it without a restart.
     tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));
 
+    // Deliver queued fleet mail only when the resolved managed recipient is safe to interrupt.
+    tokio::spawn(repomon_daemon::mail::delivery_worker(ctx.clone()));
+
     // Standing orchestrations: fire due schedules as bounded headless repomind runs. Costs
     // nothing until a schedule exists.
     tokio::spawn(repomon_daemon::standing::standing_watch(ctx.clone()));

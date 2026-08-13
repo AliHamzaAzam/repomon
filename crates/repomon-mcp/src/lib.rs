@@ -8,6 +8,7 @@
 //!
 //! Entry point: [`serve_stdio`], invoked by the `repomond mcp` subcommand.
 
+pub mod agent;
 pub mod fleet;
 pub mod mcp;
 pub mod policy;
@@ -51,6 +52,12 @@ pub async fn serve_stdio(opts: Options) -> Result<()> {
         .await
         .with_context(|| format!("connecting to repomon daemon at {}", opts.socket.display()))?;
     let fleet = fleet::Fleet::start(client.clone(), opts.socket.clone()).await;
+    if std::env::var("REPOMON_MCP_MODE").as_deref() == Ok("agent") {
+        let token = std::env::var("REPOMON_MCP_IDENTITY_TOKEN").unwrap_or_default();
+        tracing::info!("managed-agent mcp server ready");
+        let server = Arc::new(agent::AgentServer::new(client, fleet, token));
+        return mcp::run_stdio(server, "repomon", env!("CARGO_PKG_VERSION")).await;
+    }
     let policy = policy::Policy::from_env();
     tracing::info!(
         autonomy = policy.autonomy.as_str(),

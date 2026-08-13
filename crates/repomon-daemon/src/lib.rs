@@ -8,6 +8,7 @@ pub mod auto_continue;
 pub mod bytes_stream;
 pub mod conn;
 pub mod ext;
+pub mod mail;
 pub mod notify_watch;
 pub mod path_env;
 pub mod pubsub;
@@ -177,6 +178,8 @@ pub struct Ctx {
     /// Where [`Config::save`] writes — `config::config_path()` in prod, a tempdir in tests.
     pub config_path: PathBuf,
     pub backend: Arc<dyn SessionBackend>,
+    /// Serializes slot allocation, MCP identity creation, and agent launch.
+    pub spawn_lock: Mutex<()>,
     /// Where per-repo notes files live: `data_dir()/repo-notes` in prod, a tempdir in tests
     /// (injected, not env-based: in-process daemon tests can't share process-global env safely).
     pub notes_dir: PathBuf,
@@ -366,6 +369,7 @@ impl Ctx {
             config: RwLock::new(config),
             config_path,
             backend,
+            spawn_lock: Mutex::new(()),
             notes_dir,
             started: Instant::now(),
             db_path,

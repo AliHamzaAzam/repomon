@@ -197,6 +197,61 @@ async fn shutdown_mcp_child(mut child: Child, stdin: ChildStdin) {
 }
 
 #[tokio::test]
+async fn mcp_stdio_agent_mode_is_restricted_and_requires_identity_for_mail() {
+    let (sock, _control, _state_dir) = boot_daemon("am").await;
+    let mut child = spawn_mcp_child(
+        &sock,
+        &[
+            ("REPOMON_MCP_MODE", "agent"),
+            ("REPOMON_MCP_IDENTITY_TOKEN", "not-a-valid-token"),
+        ],
+    );
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
+    mcp_request(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18" }),
+    )
+    .await;
+    let _ = mcp_read(&mut lines).await;
+    mcp_request(&mut stdin, 2, "tools/list", json!({})).await;
+    let response = mcp_read(&mut lines).await;
+    let names: Vec<&str> = response["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "fleet_status",
+            "message_send",
+            "message_inbox",
+            "message_mark_read"
+        ]
+    );
+    assert!(!names.contains(&"spawn_agent"));
+    mcp_request(
+        &mut stdin,
+        3,
+        "tools/call",
+        json!({
+            "name": "message_inbox",
+            "arguments": { "unread_only": true }
+        }),
+    )
+    .await;
+    let response = mcp_read(&mut lines).await;
+    let (text, is_error) = tool_result(&response);
+    assert!(is_error);
+    assert!(text.contains("invalid or revoked MCP identity"), "{text}");
+    shutdown_mcp_child(child, stdin).await;
+}
+
+#[tokio::test]
 async fn mcp_stdio_end_to_end() {
     let (sock, mut control, _state_dir) = boot_daemon("e2e").await;
     let (repo_dir, lane_id) = seed_repo_lane(&mut control).await;
@@ -223,14 +278,17 @@ async fn mcp_stdio_end_to_end() {
 
     mcp_notify(&mut stdin, "notifications/initialized").await;
 
-    // 2. tools/list -> exactly the 20 tools (repo-notes, history, playbooks, approvals).
+    // 2. tools/list -> the orchestrator catalog, including durable fleet mail.
     mcp_request(&mut stdin, 2, "tools/list", json!({})).await;
     let resp = mcp_read(&mut lines).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 20, "tools/list returned: {tools:?}");
+    assert_eq!(tools.len(), 23, "tools/list returned: {tools:?}");
     let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: BTreeSet<&str> = [
         "fleet_status",
+        "message_send",
+        "message_inbox",
+        "message_mark_read",
         "read_agent",
         "spawn_agent",
         "send_to_agent",

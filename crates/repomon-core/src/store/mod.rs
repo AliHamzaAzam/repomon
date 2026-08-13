@@ -12,6 +12,7 @@ use std::thread;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::types::Type;
 use rusqlite::{Connection, Row, params};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::model::*;
@@ -46,6 +47,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (13, include_str!("../../migrations/0013_playbooks.sql")),
     (14, include_str!("../../migrations/0014_schedules.sql")),
     (15, include_str!("../../migrations/0015_approvals.sql")),
+    (16, include_str!("../../migrations/0016_messages.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -61,6 +63,10 @@ const MAX_DEVICES: usize = 32;
 /// credentials, so pairing a new distinct device past the cap errors rather than silently evicting
 /// one — dropping a credential out from under an in-use device would lock it out without warning.
 const MAX_REMOTE_DEVICES: usize = 16;
+
+const MESSAGE_MAX_BYTES: usize = 8 * 1024;
+const MESSAGE_THREAD_HOPS: u8 = 6;
+const MESSAGE_PAGE_MAX: usize = 200;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -533,6 +539,315 @@ impl Store {
                 out.insert(k, v);
             }
             Ok(out)
+        })
+        .await
+    }
+
+    // ---- fleet messages -----------------------------------------------------
+
+    /// Create a restricted MCP identity and return its one-time plaintext token.
+    pub async fn create_mcp_identity(&self, identity: ResolvedAgentAddress) -> Result<String> {
+        let token = random_hex(32);
+        let token_hash = hash_identity_token(&token);
+        let stored = identity.clone();
+        self.call(move |c| {
+            if let Some(window) = &stored.window {
+                c.execute(
+                    "UPDATE mcp_identities SET revoked_at = ?2
+                     WHERE window = ?1 AND revoked_at IS NULL",
+                    params![window, to_iso(&Utc::now())],
+                )?;
+            }
+            c.execute(
+                "INSERT INTO mcp_identities(
+                    token_hash, address, lane_id, slot, window, session_id, agent_kind, created_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    token_hash,
+                    stored.address.as_str(),
+                    stored.lane_id,
+                    stored.slot.map(i64::from),
+                    stored.window,
+                    stored.session_id,
+                    stored.agent_kind,
+                    to_iso(&Utc::now()),
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+        Ok(token)
+    }
+
+    /// Resolve a plaintext MCP identity token without exposing its stored hash.
+    pub async fn resolve_mcp_identity(
+        &self,
+        token: String,
+    ) -> Result<Option<ResolvedAgentAddress>> {
+        let token_hash = hash_identity_token(&token);
+        self.call(move |c| {
+            let result = c.query_row(
+                "SELECT address, lane_id, slot, window, session_id, agent_kind
+                 FROM mcp_identities WHERE token_hash = ?1 AND revoked_at IS NULL",
+                params![token_hash],
+                resolved_address_from_row,
+            );
+            match result {
+                Ok(identity) => Ok(Some(identity)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await
+    }
+
+    pub async fn revoke_mcp_identity_for_window(&self, window: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE mcp_identities SET revoked_at = ?2
+                 WHERE window = ?1 AND revoked_at IS NULL",
+                params![window, to_iso(&Utc::now())],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Validate, thread, rate-limit, and atomically store one message.
+    pub async fn send_message(
+        &self,
+        requested_to: AgentAddress,
+        sender: ResolvedAgentAddress,
+        recipient: ResolvedAgentAddress,
+        body: String,
+        reply_to: Option<String>,
+    ) -> Result<FleetMessage> {
+        validate_message_body(&body)?;
+        self.call(move |c| {
+            let now = Utc::now();
+            let one_minute_ago = to_iso(&(now - chrono::Duration::minutes(1)));
+            let one_second_ago = to_iso(&(now - chrono::Duration::seconds(1)));
+            let sender_address = sender.address.as_str();
+            let minute_count: i64 = c.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE sender_address = ?1 AND created_at >= ?2",
+                params![sender_address, one_minute_ago],
+                |r| r.get(0),
+            )?;
+            if minute_count >= 10 {
+                return Err(Error::Other(
+                    "message rate limit exceeded: ten per rolling minute".into(),
+                ));
+            }
+            let burst_count: i64 = c.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE sender_address = ?1 AND created_at >= ?2",
+                params![sender_address, one_second_ago],
+                |r| r.get(0),
+            )?;
+            if burst_count >= 3 {
+                return Err(Error::Other(
+                    "message rate limit exceeded: burst of three".into(),
+                ));
+            }
+
+            let explicit_parent = match reply_to.as_deref() {
+                Some(id) => Some(get_message(c, id)?),
+                None => None,
+            };
+            if let Some(parent) = &explicit_parent {
+                if parent.sender.address != recipient.address
+                    || parent.recipient.address != sender.address
+                {
+                    return Err(Error::Other(
+                        "reply sender and recipient must reverse the parent message".into(),
+                    ));
+                }
+            }
+            let auto_parent = if explicit_parent.is_none() {
+                recent_inbound(c, &sender.address, &recipient.address, &now)?
+            } else {
+                None
+            };
+            let parent = explicit_parent.or(auto_parent);
+            let id = random_hex(16);
+            let (thread_id, linked_reply, remaining_hops) = match parent {
+                Some(parent) => {
+                    if parent.remaining_hops == 0 {
+                        return Err(Error::Other("message thread hop limit exhausted".into()));
+                    }
+                    (parent.thread_id, Some(parent.id), parent.remaining_hops - 1)
+                }
+                None => (id.clone(), None, MESSAGE_THREAD_HOPS),
+            };
+            let message = FleetMessage {
+                id,
+                requested_to,
+                sender,
+                recipient,
+                body,
+                thread_id,
+                reply_to: linked_reply,
+                remaining_hops,
+                created_at: now,
+                delivered_at: None,
+                read_at: None,
+                delivery_error: None,
+                delivery_state: MessageDeliveryState::Queued,
+                read_state: MessageReadState::Unread,
+            };
+            insert_message(c, &message)?;
+            Ok(message)
+        })
+        .await
+    }
+
+    /// List messages newest first. Inbox polling marks the returned rows delivered.
+    pub async fn list_messages(
+        &self,
+        recipient: Option<AgentAddress>,
+        lane_id: Option<LaneId>,
+        unread_only: bool,
+        limit: usize,
+        before: Option<String>,
+        mark_delivered: bool,
+    ) -> Result<MessagePage> {
+        let limit = limit.clamp(1, MESSAGE_PAGE_MAX);
+        self.call(move |c| {
+            let before_key = match before.as_deref() {
+                Some(id) => Some(
+                    c.query_row(
+                        "SELECT created_at, id FROM messages WHERE id = ?1",
+                        params![id],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .map_err(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => {
+                            Error::NotFound(format!("message {id}"))
+                        }
+                        other => other.into(),
+                    })?,
+                ),
+                None => None,
+            };
+            let recipient_value = recipient.as_ref().map(AgentAddress::as_str);
+            let mut stmt = c.prepare(
+                "SELECT id, requested_to,
+                    sender_address, sender_lane_id, sender_slot, sender_window,
+                    sender_session_id, sender_agent_kind,
+                    recipient_address, recipient_lane_id, recipient_slot, recipient_window,
+                    recipient_session_id, recipient_agent_kind,
+                    body, thread_id, reply_to, remaining_hops, created_at,
+                    delivered_at, read_at, delivery_error
+                 FROM messages
+                 WHERE (?1 IS NULL OR recipient_address = ?1)
+                   AND (?2 IS NULL OR recipient_lane_id = ?2)
+                   AND (?3 = 0 OR read_at IS NULL)
+                   AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id < ?5))
+                 ORDER BY created_at DESC, id DESC LIMIT ?6",
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    recipient_value,
+                    lane_id,
+                    i64::from(unread_only),
+                    before_key.as_ref().map(|v| v.0.as_str()),
+                    before_key.as_ref().map(|v| v.1.as_str()),
+                    (limit + 1) as i64,
+                ],
+                message_from_row,
+            )?;
+            let mut messages = collect(rows)?;
+            let next_before = if messages.len() > limit {
+                messages.truncate(limit);
+                messages.last().map(|m| m.id.clone())
+            } else {
+                None
+            };
+            if mark_delivered && !messages.is_empty() {
+                let delivered_at = to_iso(&Utc::now());
+                for message in &mut messages {
+                    if message.delivered_at.is_none() {
+                        c.execute(
+                            "UPDATE messages SET delivered_at = ?2, delivery_error = NULL
+                             WHERE id = ?1 AND delivered_at IS NULL",
+                            params![&message.id, &delivered_at],
+                        )?;
+                        message.delivered_at = Some(parse_iso(&delivered_at, 0)?);
+                        message.delivery_error = None;
+                        message.delivery_state = MessageDeliveryState::Delivered;
+                    }
+                }
+            }
+            Ok(MessagePage {
+                messages,
+                next_before,
+            })
+        })
+        .await
+    }
+
+    pub async fn mark_message_read(&self, id: String) -> Result<FleetMessage> {
+        self.call(move |c| {
+            let now = to_iso(&Utc::now());
+            let changed = c.execute(
+                "UPDATE messages SET read_at = COALESCE(read_at, ?2),
+                    delivered_at = COALESCE(delivered_at, ?2), delivery_error = NULL
+                 WHERE id = ?1",
+                params![&id, now],
+            )?;
+            if changed == 0 {
+                return Err(Error::NotFound(format!("message {id}")));
+            }
+            get_message(c, &id)
+        })
+        .await
+    }
+
+    pub async fn get_message(&self, id: String) -> Result<FleetMessage> {
+        self.call(move |c| get_message(c, &id)).await
+    }
+
+    pub async fn queued_messages(&self, limit: usize) -> Result<Vec<FleetMessage>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {MESSAGE_COLS} FROM messages
+                 WHERE delivered_at IS NULL ORDER BY created_at, id LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(
+                params![limit.clamp(1, MESSAGE_PAGE_MAX) as i64],
+                message_from_row,
+            )?;
+            collect(rows)
+        })
+        .await
+    }
+
+    pub async fn mark_message_delivered(&self, id: String) -> Result<FleetMessage> {
+        self.call(move |c| {
+            let changed = c.execute(
+                "UPDATE messages SET delivered_at = COALESCE(delivered_at, ?2),
+                    delivery_error = NULL WHERE id = ?1",
+                params![&id, to_iso(&Utc::now())],
+            )?;
+            if changed == 0 {
+                return Err(Error::NotFound(format!("message {id}")));
+            }
+            get_message(c, &id)
+        })
+        .await
+    }
+
+    pub async fn set_message_delivery_error(&self, id: String, error: String) -> Result<()> {
+        self.call(move |c| {
+            let changed = c.execute(
+                "UPDATE messages SET delivery_error = ?2 WHERE id = ?1",
+                params![id, error],
+            )?;
+            if changed == 0 {
+                return Err(Error::NotFound(format!("message {id}")));
+            }
+            Ok(())
         })
         .await
     }
@@ -1108,6 +1423,178 @@ fn opt_dt_col(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> 
                 )
             }),
     }
+}
+
+fn parse_iso(value: &str, idx: usize) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                idx,
+                Type::Text,
+                format!("bad datetime {value:?}: {e}").into(),
+            )
+        })
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut value = vec![0u8; bytes];
+    getrandom::fill(&mut value).expect("OS entropy source");
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hash_identity_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn validate_message_body(body: &str) -> Result<()> {
+    if body.trim().is_empty() {
+        return Err(Error::Other("message body must not be empty".into()));
+    }
+    if body.len() > MESSAGE_MAX_BYTES {
+        return Err(Error::Other("message body exceeds 8 KiB".into()));
+    }
+    Ok(())
+}
+
+const MESSAGE_COLS: &str = "id, requested_to,
+    sender_address, sender_lane_id, sender_slot, sender_window, sender_session_id,
+    sender_agent_kind, recipient_address, recipient_lane_id, recipient_slot, recipient_window,
+    recipient_session_id, recipient_agent_kind, body, thread_id, reply_to, remaining_hops,
+    created_at, delivered_at, read_at, delivery_error";
+
+fn resolved_address_from_row(row: &Row) -> rusqlite::Result<ResolvedAgentAddress> {
+    Ok(ResolvedAgentAddress {
+        address: AgentAddress::new(row.get::<_, String>(0)?),
+        lane_id: row.get(1)?,
+        slot: row.get::<_, Option<i64>>(2)?.map(|value| value as u32),
+        window: row.get(3)?,
+        session_id: row.get(4)?,
+        agent_kind: row.get(5)?,
+    })
+}
+
+fn message_from_row(row: &Row) -> rusqlite::Result<FleetMessage> {
+    let delivered_at = opt_dt_col(row, 19)?;
+    let read_at = opt_dt_col(row, 20)?;
+    let delivery_error: Option<String> = row.get(21)?;
+    let delivery_state = if delivered_at.is_some() {
+        MessageDeliveryState::Delivered
+    } else if delivery_error.is_some() {
+        MessageDeliveryState::Failed
+    } else {
+        MessageDeliveryState::Queued
+    };
+    Ok(FleetMessage {
+        id: row.get(0)?,
+        requested_to: AgentAddress::new(row.get::<_, String>(1)?),
+        sender: ResolvedAgentAddress {
+            address: AgentAddress::new(row.get::<_, String>(2)?),
+            lane_id: row.get(3)?,
+            slot: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
+            window: row.get(5)?,
+            session_id: row.get(6)?,
+            agent_kind: row.get(7)?,
+        },
+        recipient: ResolvedAgentAddress {
+            address: AgentAddress::new(row.get::<_, String>(8)?),
+            lane_id: row.get(9)?,
+            slot: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
+            window: row.get(11)?,
+            session_id: row.get(12)?,
+            agent_kind: row.get(13)?,
+        },
+        body: row.get(14)?,
+        thread_id: row.get(15)?,
+        reply_to: row.get(16)?,
+        remaining_hops: row.get::<_, i64>(17)? as u8,
+        created_at: dt_col(row, 18)?,
+        delivered_at,
+        read_at,
+        delivery_error,
+        delivery_state,
+        read_state: if read_at.is_some() {
+            MessageReadState::Read
+        } else {
+            MessageReadState::Unread
+        },
+    })
+}
+
+fn get_message(c: &Connection, id: &str) -> Result<FleetMessage> {
+    c.query_row(
+        &format!("SELECT {MESSAGE_COLS} FROM messages WHERE id = ?1"),
+        params![id],
+        message_from_row,
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("message {id}")),
+        other => other.into(),
+    })
+}
+
+fn recent_inbound(
+    c: &Connection,
+    sender: &AgentAddress,
+    recipient: &AgentAddress,
+    now: &DateTime<Utc>,
+) -> Result<Option<FleetMessage>> {
+    let cutoff = to_iso(&(*now - chrono::Duration::hours(24)));
+    let result = c.query_row(
+        &format!(
+            "SELECT {MESSAGE_COLS} FROM messages
+             WHERE sender_address = ?1 AND recipient_address = ?2 AND created_at >= ?3
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        ),
+        params![recipient.as_str(), sender.as_str(), cutoff],
+        message_from_row,
+    );
+    match result {
+        Ok(message) => Ok(Some(message)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn insert_message(c: &Connection, message: &FleetMessage) -> Result<()> {
+    c.execute(
+        "INSERT INTO messages(
+            id, requested_to, sender_address, sender_lane_id, sender_slot, sender_window,
+            sender_session_id, sender_agent_kind, recipient_address, recipient_lane_id,
+            recipient_slot, recipient_window, recipient_session_id, recipient_agent_kind,
+            body, thread_id, reply_to, remaining_hops, created_at, delivered_at, read_at,
+            delivery_error
+         ) VALUES(
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20, ?21, ?22
+         )",
+        params![
+            message.id,
+            message.requested_to.as_str(),
+            message.sender.address.as_str(),
+            message.sender.lane_id,
+            message.sender.slot.map(i64::from),
+            message.sender.window,
+            message.sender.session_id,
+            message.sender.agent_kind,
+            message.recipient.address.as_str(),
+            message.recipient.lane_id,
+            message.recipient.slot.map(i64::from),
+            message.recipient.window,
+            message.recipient.session_id,
+            message.recipient.agent_kind,
+            message.body,
+            message.thread_id,
+            message.reply_to,
+            i64::from(message.remaining_hops),
+            to_iso(&message.created_at),
+            message.delivered_at.map(|value| to_iso(&value)),
+            message.read_at.map(|value| to_iso(&value)),
+            message.delivery_error,
+        ],
+    )?;
+    Ok(())
 }
 
 fn schedule_from_row(row: &Row) -> rusqlite::Result<Schedule> {
@@ -2068,5 +2555,235 @@ mod tests {
 
         s.end_session(id, Utc::now()).await.unwrap();
         assert!(s.list_active_sessions().await.unwrap().is_empty());
+    }
+
+    fn address(value: &str) -> ResolvedAgentAddress {
+        ResolvedAgentAddress {
+            address: AgentAddress::new(value),
+            lane_id: value
+                .strip_prefix("lane-")
+                .and_then(|rest| rest.split('/').next())
+                .and_then(|id| id.parse().ok()),
+            slot: value
+                .split_once('/')
+                .and_then(|(_, slot)| slot.parse().ok()),
+            window: value.starts_with("lane-").then(|| value.replace('/', "-")),
+            session_id: Some(format!("session-{value}")),
+            agent_kind: Some("claude-code".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_identity_stores_only_hash_and_revokes_replaced_window() {
+        let s = store().await;
+        let token = s.create_mcp_identity(address("lane-2/1")).await.unwrap();
+        assert_eq!(
+            s.resolve_mcp_identity(token.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .address
+                .as_str(),
+            "lane-2/1"
+        );
+        let token_for_query = token.clone();
+        let stored: (String, i64) = s
+            .call(move |c| {
+                c.query_row(
+                    "SELECT token_hash, COUNT(*) FROM mcp_identities WHERE token_hash = ?1",
+                    params![hash_identity_token(&token_for_query)],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.1, 1);
+        assert_eq!(stored.0.len(), 64);
+
+        let second = s.create_mcp_identity(address("lane-2/1")).await.unwrap();
+        assert!(s.resolve_mcp_identity(second).await.unwrap().is_some());
+        assert!(s.resolve_mcp_identity(token).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn message_store_transitions_and_inbox_delivery() {
+        let s = store().await;
+        let message = s
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                address("operator"),
+                address("lane-2/1"),
+                "keep the full body\nwith spacing".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(message.delivery_state, MessageDeliveryState::Queued);
+        assert_eq!(message.read_state, MessageReadState::Unread);
+        assert_eq!(message.remaining_hops, MESSAGE_THREAD_HOPS);
+
+        let page = s
+            .list_messages(
+                Some(AgentAddress::new("lane-2/1")),
+                None,
+                true,
+                20,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].body, "keep the full body\nwith spacing");
+        assert_eq!(
+            page.messages[0].delivery_state,
+            MessageDeliveryState::Delivered
+        );
+        let read = s.mark_message_read(message.id).await.unwrap();
+        assert_eq!(read.read_state, MessageReadState::Read);
+        assert!(read.read_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn messages_validate_body_burst_and_thread_budget() {
+        let s = store().await;
+        assert!(
+            s.send_message(
+                AgentAddress::new("lane-1/1"),
+                address("operator"),
+                address("lane-1/1"),
+                " \n ".into(),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty")
+        );
+        assert!(
+            s.send_message(
+                AgentAddress::new("lane-1/1"),
+                address("operator"),
+                address("lane-1/1"),
+                "x".repeat(MESSAGE_MAX_BYTES + 1),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("8 KiB")
+        );
+
+        for n in 0..3 {
+            s.send_message(
+                AgentAddress::new("lane-1/1"),
+                address("operator"),
+                address("lane-1/1"),
+                format!("burst {n}"),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            s.send_message(
+                AgentAddress::new("lane-1/1"),
+                address("operator"),
+                address("lane-1/1"),
+                "burst four".into(),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("burst of three")
+        );
+
+        let s = store().await;
+        let root = s
+            .send_message(
+                AgentAddress::new("lane-3/1"),
+                address("operator"),
+                address("lane-3/1"),
+                "root".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut parent = root;
+        for hop in 0..MESSAGE_THREAD_HOPS {
+            let old = to_iso(&(Utc::now() - chrono::Duration::seconds(2)));
+            s.call(move |c| {
+                c.execute("UPDATE messages SET created_at = ?1", params![old])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let (sender, recipient) = if hop % 2 == 0 {
+                (address("lane-3/1"), address("operator"))
+            } else {
+                (address("operator"), address("lane-3/1"))
+            };
+            parent = s
+                .send_message(
+                    recipient.address.clone(),
+                    sender,
+                    recipient,
+                    format!("reply {hop}"),
+                    Some(parent.id),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(parent.remaining_hops, 0);
+        let old = to_iso(&(Utc::now() - chrono::Duration::seconds(2)));
+        s.call(move |c| {
+            c.execute("UPDATE messages SET created_at = ?1", params![old])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            s.send_message(
+                AgentAddress::new("operator"),
+                address("lane-3/1"),
+                address("operator"),
+                "one too far".into(),
+                Some(parent.id),
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("hop limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn message_send_to_recent_inbound_peer_auto_links_thread() {
+        let s = store().await;
+        let inbound = s
+            .send_message(
+                AgentAddress::new("operator"),
+                address("lane-4/1"),
+                address("operator"),
+                "question".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let reply = s
+            .send_message(
+                AgentAddress::new("lane-4/1"),
+                address("operator"),
+                address("lane-4/1"),
+                "answer without reply_to".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.reply_to.as_deref(), Some(inbound.id.as_str()));
+        assert_eq!(reply.thread_id, inbound.thread_id);
+        assert_eq!(reply.remaining_hops, inbound.remaining_hops - 1);
     }
 }

@@ -56,7 +56,8 @@ impl Server {
 fn journaled_tool(name: &str) -> bool {
     matches!(
         name,
-        "spawn_agent"
+        "message_send"
+            | "spawn_agent"
             | "send_to_agent"
             | "approve_agent"
             | "interrupt_agent"
@@ -82,6 +83,9 @@ impl ToolHandler for Server {
         let journal_args = journaled_tool(name).then(|| args.clone());
         let out = match name {
             "fleet_status" => self.fleet_status(args).await,
+            "message_send" => self.message_send(args).await,
+            "message_inbox" => self.message_inbox(args).await,
+            "message_mark_read" => self.message_mark_read(args).await,
             "read_agent" => self.read_agent(args).await,
             "spawn_agent" => self.spawn_agent(args).await,
             "send_to_agent" => self.send_to_agent(args).await,
@@ -159,6 +163,58 @@ impl Server {
             }
         }
         Ok(out)
+    }
+
+    async fn message_send(&self, args: Value) -> Result<Value, String> {
+        let to = args
+            .get("to")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing to".to_string())?;
+        let body = args
+            .get("body")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing body".to_string())?;
+        self.client
+            .call(
+                "message.send",
+                Some(json!({
+                    "to": to,
+                    "body": body,
+                    "reply_to": args.get("reply_to"),
+                    "source": "repomind",
+                })),
+            )
+            .await
+            .map_err(rpc_err)
+    }
+
+    async fn message_inbox(&self, args: Value) -> Result<Value, String> {
+        self.client
+            .call(
+                "message.inbox",
+                Some(json!({
+                    "unread_only": args.get("unread_only").and_then(Value::as_bool).unwrap_or(false),
+                    "limit": args.get("limit"),
+                    "before": args.get("before"),
+                    "source": "repomind",
+                })),
+            )
+            .await
+            .map_err(rpc_err)
+    }
+
+    async fn message_mark_read(&self, args: Value) -> Result<Value, String> {
+        let id = args
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing id".to_string())?;
+        self.client
+            .call(
+                "message.mark_read",
+                Some(json!({ "id": id, "source": "repomind" })),
+            )
+            .await
+            .map_err(rpc_err)
     }
 
     async fn read_agent(&self, args: Value) -> Result<Value, String> {
@@ -1473,6 +1529,35 @@ fn tool_catalog() -> Vec<ToolDef> {
                 }),
                 &[],
             ),
+        },
+        ToolDef {
+            name: "message_send",
+            description: "Send durable fleet mail to an agent, repomind, or the human operator.",
+            input_schema: obj(
+                json!({
+                    "to": { "type": "string" },
+                    "body": { "type": "string", "maxLength": 8192 },
+                    "reply_to": { "type": "string" }
+                }),
+                &["to", "body"],
+            ),
+        },
+        ToolDef {
+            name: "message_inbox",
+            description: "Read repomind's durable inbox. Polling marks returned mail delivered.",
+            input_schema: obj(
+                json!({
+                    "unread_only": { "type": "boolean" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "before": { "type": "string" }
+                }),
+                &[],
+            ),
+        },
+        ToolDef {
+            name: "message_mark_read",
+            description: "Mark one message in repomind's inbox read.",
+            input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]),
         },
         ToolDef {
             name: "read_agent",

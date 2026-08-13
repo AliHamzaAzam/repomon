@@ -104,6 +104,10 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `lane.focus` | `{ lane_id }` | `{ path }` |
 | `lane.merge` | `{ lane_id, into? }` | `{ message }` |
 | `lane.diff` | `{ lane_id, include_patch=false, max_patch_chars=8000 }` | `LaneDiff` — commits ahead of the repo's base branch (with diffstat) plus uncommitted state; see below |
+| `message.send` | `{ to, body, reply_to? }` | `FleetMessage` (local socket only) |
+| `message.inbox` | `{ unread_only=false, limit=50, before? }` | `MessagePage`; returned queued rows become delivered (local socket only) |
+| `message.mark_read` | `{ id }` | `FleetMessage` (local socket only) |
+| `message.list` | `{ lane_id?, unread_only=false, limit=50, before? }` | `MessagePage`, newest first (local socket only) |
 | `commit.today` | — | `[Commit]` (live, all repos) |
 | `commit.range` | `{ from_iso, to_iso, repo_ids? }` | `[Commit]` |
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
@@ -230,6 +234,7 @@ when readable (a partial parse still returns what it could).
 | `event.agent.bytes` | `{ lane_id, window, data, generation, sequence }` - raw PTY bytes (base64) from the byte-watched pane. Chunks are arbitrary byte boundaries, so feed them to a terminal emulator rather than parsing them as individual UTF-8 strings. Sequence values are contiguous within one generation. |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt?, attention, dialog? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`, `stalled`; `prompt` is the agent's pending question verbatim). `attention` refines `needs_you`: `permission` (routine tool-call ask) / `decision` (a real question) / `done_candidate` (turn finished on a clean lane with a this-turn commit — ready to review) / `end_of_turn` (turn finished, no dialog) / `none`; `dialog` is the full `PendingDialog` when one is on screen, so an actionable client can offer its real options. `stalled` fires once when a managed agent's pane and transcript both freeze mid-work for ~5 min while its process lives (see `AgentSession.stale`/`stalled_since` on `lane.list` — additive overlay fields, with `stalled_since` marking the pane's last change). Emitted to every subscribed client. When `[remote]` is enabled, the same alert also goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
+| `event.message.stored` | `{ id, lane_id?, from, body, message }` for one newly accepted durable fleet message. Clients deduplicate only by `id`. |
 | `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
 | `event.orchestrator.status` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` — broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
 

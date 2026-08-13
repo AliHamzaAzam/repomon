@@ -17,8 +17,8 @@ use repomon_core::TmuxRuntime;
 use repomon_core::agent::attention::primary_agent;
 use repomon_core::agent::prompt::PendingDialog;
 use repomon_core::model::{
-    AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, Lane, LaneId, Repo,
-    RepoId, TimelineData, WorkSession,
+    AgentChoice, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit, FleetMessage, Lane,
+    LaneId, MessagePage, MessageReadState, Repo, RepoId, TimelineData, WorkSession,
 };
 use repomon_core::notify::{
     SessKey, SessState, activity_allows_refire, diff_session_transitions, session_by_key,
@@ -336,6 +336,8 @@ pub struct App {
     notif_latch: HashMap<(LaneId, SessKey, NotifKind), (DateTime<Utc>, Instant)>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
+    /// Durable fleet mail, newest first, loaded from SQLite through `message.list`.
+    pub mail: Vec<FleetMessage>,
     /// Cursor in the Notifications view: offset into the feed, newest-first (0 = newest).
     /// The render derives its scroll window from this so the cursor stays visible.
     pub notif_sel: usize,
@@ -572,6 +574,7 @@ impl App {
             notif_debounce: HashMap::new(),
             notif_latch: HashMap::new(),
             notifications: VecDeque::new(),
+            mail: Vec::new(),
             notif_sel: 0,
             notif_banner: None,
             spawn_pick_idx: 0,
@@ -651,6 +654,7 @@ impl App {
     /// startup and on git/repo notifications.
     pub async fn refresh(&mut self) {
         self.refresh_lanes().await;
+        self.refresh_mail().await;
         match self
             .client
             .call_typed::<Vec<Commit>>("commit.today", None)
@@ -663,6 +667,22 @@ impl App {
             self.repos = r;
         }
         self.refresh_orchestrator().await;
+    }
+
+    async fn refresh_mail(&mut self) {
+        if let Ok(page) = self
+            .client
+            .call_typed::<MessagePage>("message.list", Some(json!({ "limit": NOTIF_HISTORY_CAP })))
+            .await
+        {
+            self.mail = page.messages;
+            let max = self
+                .mail
+                .len()
+                .saturating_add(self.notifications.len())
+                .saturating_sub(1);
+            self.notif_sel = self.notif_sel.min(max);
+        }
     }
 
     /// Pull the orchestrator's running state for the pinned "repomind" row. Cheap; the live
@@ -1339,6 +1359,11 @@ impl App {
     /// Notifications not yet seen (the feed hasn't been opened since they fired) — the ⚑ badge.
     pub fn unread_notifs(&self) -> usize {
         self.notifications.iter().filter(|e| !e.read).count()
+            + self
+                .mail
+                .iter()
+                .filter(|message| message.read_state == MessageReadState::Unread)
+                .count()
     }
 
     pub fn visible_lanes(&self) -> Vec<&Lane> {
@@ -2295,7 +2320,7 @@ impl App {
             View::AddRepo => self.addrepo_key(key).await,
             View::Agents => self.agents_key(key).await,
             View::Settings => self.settings_key(key).await,
-            View::Notifications => self.notifications_key(key),
+            View::Notifications => self.notifications_key(key).await,
             View::SpawnPick => self.spawn_pick_key(key).await,
             View::LaneJump => self.lane_jump_key(key),
             View::Orchestrator => self.orchestrator_key(key).await,
@@ -3007,43 +3032,82 @@ impl App {
 
     /// Key handling for the Notifications history view: move the cursor, open or attach to
     /// the event's agent, dismiss one, clear all, or leave.
-    fn notifications_key(&mut self, key: KeyEvent) {
+    async fn notifications_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.notif_sel = self.notif_sel.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 // Clamp to the last event so the cursor can't run off the feed.
-                let max = self.notifications.len().saturating_sub(1);
+                let max = self
+                    .mail
+                    .len()
+                    .saturating_add(self.notifications.len())
+                    .saturating_sub(1);
                 self.notif_sel = (self.notif_sel + 1).min(max);
             }
-            // Dismiss the selected event (the feed is newest-first; the deque is newest-last).
-            KeyCode::Char('d') if !self.notifications.is_empty() => {
-                let idx = self.notifications.len() - 1 - self.notif_sel;
-                self.notifications.remove(idx);
-                let max = self.notifications.len().saturating_sub(1);
+            // Durable mail cannot be dismissed here. Transient events can be removed.
+            KeyCode::Char('d') if self.notif_sel >= self.mail.len() => {
+                let selected = self.notif_sel - self.mail.len();
+                if selected < self.notifications.len() {
+                    let idx = self.notifications.len() - 1 - selected;
+                    self.notifications.remove(idx);
+                }
+                let max = self
+                    .mail
+                    .len()
+                    .saturating_add(self.notifications.len())
+                    .saturating_sub(1);
                 self.notif_sel = self.notif_sel.min(max);
             }
             KeyCode::Char('c') => {
                 self.notifications.clear();
-                self.notif_sel = 0;
+                self.notif_sel = self.notif_sel.min(self.mail.len().saturating_sub(1));
             }
-            KeyCode::Enter | KeyCode::Right => self.open_selected_notif(false),
-            KeyCode::Char('t') => self.open_selected_notif(true),
+            KeyCode::Enter | KeyCode::Right => self.open_selected_feed(false).await,
+            KeyCode::Char('t') => self.open_selected_feed(true).await,
             KeyCode::Esc | KeyCode::Left => self.view = View::Fleet,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
     }
 
+    async fn open_selected_feed(&mut self, attach: bool) {
+        if self.notif_sel >= self.mail.len() {
+            let selected = self.notif_sel - self.mail.len();
+            self.open_selected_notif_at(selected, attach);
+            return;
+        }
+        let message = self.mail[self.notif_sel].clone();
+        match self
+            .client
+            .call_typed::<FleetMessage>("message.mark_read", Some(json!({ "id": message.id })))
+            .await
+        {
+            Ok(updated) => self.mail[self.notif_sel] = updated,
+            Err(error) => self.status = format!("message.mark_read failed: {error}"),
+        }
+        let Some(lane_id) = message.recipient.lane_id else {
+            return;
+        };
+        self.jump_to_lane(lane_id);
+        if self.selected_lane().map(|lane| lane.id) != Some(lane_id) {
+            return;
+        }
+        self.select_session(lane_id, message.recipient.session_id.as_deref());
+        if attach {
+            self.attach_request = Some(lane_id);
+        }
+    }
+
     /// Open the lane behind the cursor's event in Focus, pointed at the exact session that
     /// fired (when the event recorded one). `attach` goes all the way into its tmux pane.
-    fn open_selected_notif(&mut self, attach: bool) {
+    fn open_selected_notif_at(&mut self, selected: usize, attach: bool) {
         let Some((lane_id, sid)) = self
             .notifications
             .iter()
             .rev()
-            .nth(self.notif_sel)
+            .nth(selected)
             .map(|e| (e.lane_id, e.session_id.clone()))
         else {
             return;
