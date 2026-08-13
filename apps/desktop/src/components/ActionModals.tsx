@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
 
 import type { ActionsStore } from "../stores/actions";
+import type { NotificationStore } from "../stores/notifications";
 import ConfirmDialog from "./ConfirmDialog";
 import NewLaneModal from "./NewLaneModal";
 import RepoNotesModal from "./RepoNotesModal";
@@ -9,12 +10,18 @@ import SettingsModal from "./SettingsModal";
 import SpawnModal from "./SpawnModal";
 
 /// Mounts whichever action modal the actions store currently has open.
-export default function ActionModals(props: { actions: ActionsStore }) {
+export default function ActionModals(props: { actions: ActionsStore; notifications: NotificationStore }) {
   const actions = props.actions;
   return (
     <>
       <Show when={actions.settingsOpen()}>
-        <SettingsModal onClose={actions.closeSettings} initialTab={actions.settingsTab()} />
+        <SettingsModal
+          onClose={actions.closeSettings}
+          initialTab={actions.settingsTab()}
+          onConfigSaved={props.notifications.setConfig}
+          onPreviewSound={props.notifications.preview}
+          onUpdateAvailable={(version) => void props.notifications.notifyUpdateReady(version)}
+        />
       </Show>
       <Show when={actions.spawnLane()}>
         {(lane) => <SpawnModal lane={lane()} onClose={actions.closeSpawn} onDone={() => actions.fleet.refresh()} />}

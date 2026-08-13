@@ -91,6 +91,13 @@ function App(props: AppProps) {
     }
   });
 
+  createEffect(() => {
+    const available = update();
+    if (connection().phase === "connected" && available) {
+      void notifications.notifyUpdateReady(available.version);
+    }
+  });
+
   /// One listener for every shortcut. Registered in bubble phase so an open Modal (which listens
   /// in capture phase and stops propagation on Escape) still closes first.
   const onShortcut = (event: KeyboardEvent) => {
@@ -158,7 +165,9 @@ function App(props: AppProps) {
     // Check for a newer build once on launch; silent if current or if not a Tauri build.
     void checkForUpdate()
       .then((available) => {
-        if (active && available) setUpdate(available);
+        if (active && available) {
+          setUpdate(available);
+        }
       })
       .catch(() => undefined);
 
@@ -366,7 +375,7 @@ function App(props: AppProps) {
         <span>Uptime {formatUptime(connection().daemon?.uptime_secs)}</span>
       </footer>
 
-      <ActionModals actions={actions} />
+      <ActionModals actions={actions} notifications={notifications} />
       <Show when={actions.error() ?? fleet.error()}>
         {(message) => (
           <div role="alert" class="fixed right-4 top-16 z-[70] flex max-w-md items-start gap-3 rounded-md border border-fault/40 bg-surface p-3 text-xs text-fault shadow-lg">

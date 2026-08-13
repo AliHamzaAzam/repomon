@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onMount, type JSX } from "solid-js";
 
 import type { AgentChoice } from "../bindings";
+import type { SoundCue } from "../audio/sound";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
 import { applyAccent } from "../theme";
@@ -15,6 +16,9 @@ export type SettingsTab = "general" | "notifications" | "appearance" | "keyboard
 interface SettingsModalProps {
   onClose: () => void;
   initialTab?: SettingsTab;
+  onConfigSaved?: (config: ConfigView) => void;
+  onPreviewSound?: (cue: SoundCue, volume: number) => boolean;
+  onUpdateAvailable?: (version: string) => void;
 }
 
 const TABS: Array<{ id: SettingsTab; label: string }> = [
@@ -29,12 +33,24 @@ const NOTIFY_TOGGLES: Array<[keyof ConfigView, string]> = [
   ["notify_rate_limited", "Rate limited"],
   ["notify_resumed", "Resumed"],
   ["notify_idle", "Idle / ended"],
-  ["notify_sound", "Play sound"],
   ["notify_show_why", "Show why (last message)"],
   ["notify_coalesce", "Coalesce bursts"],
   ["notify_click_focus", "Click to focus"],
   ["notify_desktop_fallback", "System popup when no window is open"],
   ["notify_subagents", "Include subagents"],
+];
+
+const SOUND_CUE_CONTROLS: Array<{
+  key: keyof ConfigView;
+  cue: SoundCue;
+  label: string;
+}> = [
+  { key: "notify_sound_agent_needs_you", cue: "agent-needs-you", label: "Agent needs you" },
+  { key: "notify_sound_agent_finished", cue: "agent-finished", label: "Agent finished" },
+  { key: "notify_sound_repomind_needs_you", cue: "repomind-needs-you", label: "Repomind needs you" },
+  { key: "notify_sound_error_or_stall", cue: "error-or-stall", label: "Error or stall" },
+  { key: "notify_sound_incoming_message", cue: "incoming-message", label: "Incoming message" },
+  { key: "notify_sound_update_ready", cue: "update-ready", label: "Update ready" },
 ];
 
 const GENERAL_TOGGLES: Array<[keyof ConfigView, string]> = [
@@ -116,6 +132,7 @@ export default function SettingsModal(props: SettingsModalProps) {
     try {
       const saved = await daemonCall("config.set", current);
       setConfig(saved);
+      props.onConfigSaved?.(saved);
       applyAccent(saved.accent);
       setStatus("Settings saved.");
     } catch (cause) {
@@ -134,6 +151,7 @@ export default function SettingsModal(props: SettingsModalProps) {
     try {
       const update = await checkForUpdate();
       setAvailableUpdate(update);
+      if (update) props.onUpdateAvailable?.(update.version);
       setStatus(update ? `Repomon ${update.version} is available.` : "Repomon is up to date.");
     } catch (cause) {
       setStatus(null);
@@ -248,13 +266,67 @@ export default function SettingsModal(props: SettingsModalProps) {
             </Show>
 
             <Show when={tab() === "notifications"}>
-              <section class="space-y-3">
+              <section class="space-y-4">
                 <p class="section-label text-signal">Notifications</p>
                 <Switch label="Enable notifications" checked={settings().notify_enabled} onChange={(value) => patch({ notify_enabled: value })} />
                 <div class="grid gap-2 sm:grid-cols-2">
                   <For each={NOTIFY_TOGGLES}>
                     {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} disabled={!settings().notify_enabled} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
                   </For>
+                </div>
+                <div class="space-y-3 border-t border-line pt-4">
+                  <p class="section-label text-signal">Sound cues</p>
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <Switch
+                      label="Play sound"
+                      checked={settings().notify_sound}
+                      disabled={!settings().notify_enabled}
+                      onChange={(value) => patch({ notify_sound: value })}
+                    />
+                    <Switch
+                      label="Only while unfocused"
+                      checked={settings().notify_sound_unfocused_only}
+                      disabled={!settings().notify_enabled || !settings().notify_sound}
+                      onChange={(value) => patch({ notify_sound_unfocused_only: value })}
+                    />
+                  </div>
+                  <label class="block">
+                    <span class="section-label">Volume {Math.round(settings().notify_sound_volume * 100)}%</span>
+                    <input
+                      class="mt-2 w-full accent-signal"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={settings().notify_sound_volume}
+                      disabled={!settings().notify_enabled || !settings().notify_sound}
+                      onInput={(event) => patch({ notify_sound_volume: Number(event.currentTarget.value) })}
+                    />
+                  </label>
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <For each={SOUND_CUE_CONTROLS}>
+                      {(item) => (
+                        <div class="flex items-center gap-2 rounded-md border border-line bg-raised p-2">
+                          <div class="min-w-0 flex-1">
+                            <Switch
+                              label={item.label}
+                              checked={Boolean(settings()[item.key])}
+                              disabled={!settings().notify_enabled || !settings().notify_sound}
+                              onChange={(value) => patch({ [item.key]: value } as Partial<ConfigView>)}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            class="focus-ring rounded border border-line px-2 py-1 font-mono text-[0.52rem] uppercase text-muted hover:text-foreground"
+                            aria-label={`Preview ${item.label}`}
+                            onClick={() => props.onPreviewSound?.(item.cue, settings().notify_sound_volume)}
+                          >
+                            Preview
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                  </div>
                 </div>
               </section>
             </Show>

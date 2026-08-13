@@ -71,8 +71,25 @@ pub struct Config {
     pub notify_resumed: bool,
     /// Notify when an agent goes idle / its session ends (off by default — can be noisy).
     pub notify_idle: bool,
-    /// Play the system notification sound with each desktop notification.
+    /// Master sound switch. The desktop uses it for custom cues and the daemon uses it for its
+    /// native fallback when no GUI covers an event.
     pub notify_sound: bool,
+    /// Desktop cue volume in the inclusive 0.0 to 1.0 range.
+    pub notify_sound_volume: f32,
+    /// Play desktop cues only while the Mission Control window is unfocused.
+    pub notify_sound_unfocused_only: bool,
+    /// Play the desktop cue for an agent permission or decision request.
+    pub notify_sound_agent_needs_you: bool,
+    /// Play the desktop cue when an agent finishes a turn or becomes idle.
+    pub notify_sound_agent_finished: bool,
+    /// Play the desktop cue when repomind changes from no attention to needing attention.
+    pub notify_sound_repomind_needs_you: bool,
+    /// Play the desktop cue when an agent stalls or reaches a rate limit.
+    pub notify_sound_error_or_stall: bool,
+    /// Play the desktop cue for newly stored fleet mail.
+    pub notify_sound_incoming_message: bool,
+    /// Play the desktop cue when a newly discovered update version is ready.
+    pub notify_sound_update_ready: bool,
     /// Include the agent's actual last message (what it said/asked) in notification bodies,
     /// instead of just the original task title.
     pub notify_show_why: bool,
@@ -157,6 +174,14 @@ impl Default for Config {
             notify_resumed: true,
             notify_idle: false,
             notify_sound: true,
+            notify_sound_volume: 0.25,
+            notify_sound_unfocused_only: true,
+            notify_sound_agent_needs_you: true,
+            notify_sound_agent_finished: true,
+            notify_sound_repomind_needs_you: true,
+            notify_sound_error_or_stall: true,
+            notify_sound_incoming_message: true,
+            notify_sound_update_ready: true,
             notify_show_why: true,
             notify_coalesce: true,
             notify_click_focus: true,
@@ -420,6 +445,15 @@ mod tests {
         assert_eq!(c.worktree_template, DEFAULT_WORKTREE_TEMPLATE);
         assert_eq!(c.tmux_session, "repomon");
         assert!(c.socket_path.is_none());
+        assert!(c.notify_sound);
+        assert_eq!(c.notify_sound_volume, 0.25);
+        assert!(c.notify_sound_unfocused_only);
+        assert!(c.notify_sound_agent_needs_you);
+        assert!(c.notify_sound_agent_finished);
+        assert!(c.notify_sound_repomind_needs_you);
+        assert!(c.notify_sound_error_or_stall);
+        assert!(c.notify_sound_incoming_message);
+        assert!(c.notify_sound_update_ready);
     }
 
     #[test]
@@ -441,6 +475,8 @@ mod tests {
         assert_eq!(c.tmux_session, "work");
         // Unspecified fields fall back to defaults.
         assert_eq!(c.worktree_template, DEFAULT_WORKTREE_TEMPLATE);
+        assert_eq!(c.notify_sound_volume, 0.25);
+        assert!(c.notify_sound_unfocused_only);
     }
 
     #[test]
