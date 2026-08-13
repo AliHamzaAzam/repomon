@@ -55,10 +55,13 @@ pub fn lane_diff(worktree_path: &Path, base: &str) -> Result<LaneDiff> {
 
     let committed_stat = run(worktree_path, &["diff", "--stat", &range])?;
     let uncommitted_stat = run(worktree_path, &["diff", "HEAD", "--stat"])?;
-    let untracked = run(worktree_path, &["ls-files", "--others", "--exclude-standard"])?
-        .lines()
-        .filter(|l| !l.is_empty())
-        .count();
+    let untracked = run(
+        worktree_path,
+        &["ls-files", "--others", "--exclude-standard"],
+    )?
+    .lines()
+    .filter(|l| !l.is_empty())
+    .count();
 
     Ok(LaneDiff {
         base: base.to_string(),
