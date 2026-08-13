@@ -820,6 +820,18 @@ impl SessionBackend for TmuxRuntime {
         TmuxRuntime::list_windows(self)
     }
 
+    fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
+        TmuxRuntime::list_windows_meta(self)
+    }
+
+    fn set_window_session(&self, window: &str, session_id: &str) -> Result<()> {
+        TmuxRuntime::set_window_session(self, window, session_id)
+    }
+
+    fn set_window_session_by_id(&self, wid: u64, session_id: &str) -> Result<()> {
+        TmuxRuntime::set_window_session_by_id(self, wid, session_id)
+    }
+
     fn list_windows_with_activity(&self) -> Result<Vec<WindowActivity>> {
         Ok(TmuxRuntime::list_windows_with_activity(self)?
             .into_iter()

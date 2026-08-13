@@ -2013,7 +2013,7 @@ pub async fn dispatch(
             // exchange, so the binder could otherwise pair a newer external transcript onto
             // the adopted window and the stamp would wedge it there.
             if let Some(sid) = p.session_id.clone() {
-                let tmux = ctx.tmux.clone();
+                let tmux = ctx.backend.clone();
                 let w = window.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = tmux.set_window_session(&w, &sid) {
@@ -3440,7 +3440,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // forks don't touch steady-state ticks. Skipped when the window probe failed
     // (`probe_ok`): a last-good snapshot lags the stamps by a generation.
     if probe_ok && !stamp_batches.is_empty() {
-        let tmux = ctx.tmux.clone();
+        let tmux = ctx.backend.clone();
         let _ = tokio::task::spawn_blocking(move || {
             for (cands, probe) in stamp_batches {
                 if cands.iter().all(|c| c.needle.is_none()) {
@@ -3449,7 +3449,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 let panes: Vec<(u64, String, String)> = probe
                     .into_iter()
                     .map(|(wid, name)| {
-                        let text = tmux.capture_named(&name, Some(60)).unwrap_or_default();
+                        let text = tmux
+                            .capture_named(&name, CaptureOpts::last(60))
+                            .unwrap_or_default();
                         (wid, name, normalize_fingerprint(&text))
                     })
                     .collect();
