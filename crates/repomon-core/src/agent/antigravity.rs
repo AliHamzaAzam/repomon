@@ -46,11 +46,11 @@ mod tests {
     fn reads_documented_conversation_mapping() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("last_conversations.json");
-        std::fs::write(
-            &cache,
-            format!(r#"{{"{}":"conversation-1"}}"#, temp.path().display()),
-        )
-        .unwrap();
+        let mapping = HashMap::from([(
+            temp.path().to_string_lossy().into_owned(),
+            "conversation-1".to_string(),
+        )]);
+        std::fs::write(&cache, serde_json::to_vec(&mapping).unwrap()).unwrap();
         unsafe { std::env::set_var("REPOMON_ANTIGRAVITY_CACHE", &cache) };
         let summary = summary_for(temp.path()).unwrap();
         unsafe { std::env::remove_var("REPOMON_ANTIGRAVITY_CACHE") };
