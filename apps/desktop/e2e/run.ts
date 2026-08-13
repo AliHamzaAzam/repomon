@@ -29,6 +29,10 @@ try {
   await browser.$(".fleet-row").waitForDisplayed({ timeout: 15_000 });
 
   await browser.execute(() => localStorage.setItem("repomon.terminal.renderer", "dom"));
+  await browser.refresh();
+  await browser.$("h1").waitForDisplayed({ timeout: 15_000 });
+  await browser.$(".status-light.is-connected").waitForExist({ timeout: 15_000 });
+  await browser.$(".fleet-row").waitForDisplayed({ timeout: 15_000 });
   const shellButton = await browser.$("button=+ shell");
   await shellButton.waitForEnabled({ timeout: 10_000 });
   await shellButton.click();
