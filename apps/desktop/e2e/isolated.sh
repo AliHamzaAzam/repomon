@@ -61,4 +61,7 @@ if ! curl --silent --fail http://127.0.0.1:4444/status >/dev/null 2>&1; then
   exit 1
 fi
 
-bun "$desktop_dir/e2e/run.ts"
+if ! bun "$desktop_dir/e2e/run.ts"; then
+  cat "$run_root/driver.log"
+  exit 1
+fi

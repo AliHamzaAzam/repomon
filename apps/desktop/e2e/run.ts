@@ -8,7 +8,6 @@ const browser = await remote({
   port: 4444,
   logLevel: "error",
   capabilities: {
-    browserName: "wry",
     "tauri:options": { application },
   },
 });
