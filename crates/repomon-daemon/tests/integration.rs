@@ -72,6 +72,62 @@ async fn call(
 }
 
 #[tokio::test]
+async fn config_set_persists_every_sound_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new_with_config_path(store, Config::default(), None, config_path.clone());
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-sound-config-it-{}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let response = call(
+        &mut stream,
+        1,
+        "config.set",
+        Some(json!({
+            "notify_sound": false,
+            "notify_sound_volume": 0.6,
+            "notify_sound_unfocused_only": false,
+            "notify_sound_agent_needs_you": false,
+            "notify_sound_agent_finished": false,
+            "notify_sound_repomind_needs_you": false,
+            "notify_sound_error_or_stall": false,
+            "notify_sound_incoming_message": false,
+            "notify_sound_update_ready": false
+        })),
+    )
+    .await;
+    assert!(
+        response.error.is_none(),
+        "config.set failed: {:?}",
+        response.error
+    );
+
+    let saved = Config::load_from(&config_path).unwrap();
+    assert!(!saved.notify_sound);
+    assert_eq!(saved.notify_sound_volume, 0.6);
+    assert!(!saved.notify_sound_unfocused_only);
+    assert!(!saved.notify_sound_agent_needs_you);
+    assert!(!saved.notify_sound_agent_finished);
+    assert!(!saved.notify_sound_repomind_needs_you);
+    assert!(!saved.notify_sound_error_or_stall);
+    assert!(!saved.notify_sound_incoming_message);
+    assert!(!saved.notify_sound_update_ready);
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
 async fn daemon_serves_repo_and_lane_methods() {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);

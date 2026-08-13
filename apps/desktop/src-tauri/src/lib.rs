@@ -2,6 +2,7 @@ mod connection;
 mod ipc;
 mod state;
 mod terminal;
+mod update;
 
 use std::path::PathBuf;
 
@@ -39,6 +40,11 @@ pub fn run() {
             let config = config.clone();
             let socket_override = socket_override.clone();
             tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    update::apply_pending_daemon_update(&config, socket_override.clone()).await
+                {
+                    eprintln!("could not update bundled daemon: {error}");
+                }
                 connection::supervise(handle, config, socket_override).await;
             });
             Ok(())
@@ -48,7 +54,9 @@ pub fn run() {
             ipc::daemon_call,
             ipc::daemon_subscribe,
             terminal::term_watch,
-            terminal::term_unwatch
+            terminal::term_unwatch,
+            update::mark_daemon_update,
+            update::clear_daemon_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

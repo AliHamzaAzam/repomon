@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 
@@ -12,6 +13,31 @@ export interface AvailableUpdate {
   install: (onProgress: (progress: UpdateProgress) => void) => Promise<void>;
 }
 
+interface InstallableUpdate {
+  version: string;
+  downloadAndInstall: (onEvent: (event: DownloadEvent) => void) => Promise<void>;
+}
+
+async function applyUpdate(
+  update: InstallableUpdate,
+  onProgress: (progress: UpdateProgress) => void,
+): Promise<void> {
+  await invoke("mark_daemon_update");
+  let downloaded = 0;
+  let total: number | undefined;
+  try {
+    await update.downloadAndInstall((event: DownloadEvent) => {
+      if (event.event === "Started") total = event.data.contentLength;
+      if (event.event === "Progress") downloaded += event.data.chunkLength;
+      onProgress({ version: update.version, downloaded, total });
+    });
+  } catch (error) {
+    await invoke("clear_daemon_update").catch(() => undefined);
+    throw error;
+  }
+  await relaunch();
+}
+
 /// Check for an update without installing it. Returns a handle to install later (used by the
 /// launch-time banner), or null when the app is current. Throws outside a Tauri build.
 export async function checkForUpdate(): Promise<AvailableUpdate | null> {
@@ -19,16 +45,7 @@ export async function checkForUpdate(): Promise<AvailableUpdate | null> {
   if (!update) return null;
   return {
     version: update.version,
-    install: async (onProgress) => {
-      let downloaded = 0;
-      let total: number | undefined;
-      await update.downloadAndInstall((event: DownloadEvent) => {
-        if (event.event === "Started") total = event.data.contentLength;
-        if (event.event === "Progress") downloaded += event.data.chunkLength;
-        onProgress({ version: update.version, downloaded, total });
-      });
-      await relaunch();
-    },
+    install: (onProgress) => applyUpdate(update, onProgress),
   };
 }
 
@@ -37,13 +54,6 @@ export async function installAvailableUpdate(
 ): Promise<"current" | "relaunching"> {
   const update = await check({ timeout: 15_000 });
   if (!update) return "current";
-  let downloaded = 0;
-  let total: number | undefined;
-  await update.downloadAndInstall((event: DownloadEvent) => {
-    if (event.event === "Started") total = event.data.contentLength;
-    if (event.event === "Progress") downloaded += event.data.chunkLength;
-    onProgress({ version: update.version, downloaded, total });
-  });
-  await relaunch();
+  await applyUpdate(update, onProgress);
   return "relaunching";
 }
