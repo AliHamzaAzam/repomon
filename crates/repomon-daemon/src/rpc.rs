@@ -137,6 +137,14 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_resumed": cfg.notify_resumed,
         "notify_idle": cfg.notify_idle,
         "notify_sound": cfg.notify_sound,
+        "notify_sound_volume": cfg.notify_sound_volume,
+        "notify_sound_unfocused_only": cfg.notify_sound_unfocused_only,
+        "notify_sound_agent_needs_you": cfg.notify_sound_agent_needs_you,
+        "notify_sound_agent_finished": cfg.notify_sound_agent_finished,
+        "notify_sound_repomind_needs_you": cfg.notify_sound_repomind_needs_you,
+        "notify_sound_error_or_stall": cfg.notify_sound_error_or_stall,
+        "notify_sound_incoming_message": cfg.notify_sound_incoming_message,
+        "notify_sound_update_ready": cfg.notify_sound_update_ready,
         "notify_show_why": cfg.notify_show_why,
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
@@ -616,6 +624,22 @@ struct ConfigSet {
     notify_idle: Option<bool>,
     #[serde(default)]
     notify_sound: Option<bool>,
+    #[serde(default)]
+    notify_sound_volume: Option<f32>,
+    #[serde(default)]
+    notify_sound_unfocused_only: Option<bool>,
+    #[serde(default)]
+    notify_sound_agent_needs_you: Option<bool>,
+    #[serde(default)]
+    notify_sound_agent_finished: Option<bool>,
+    #[serde(default)]
+    notify_sound_repomind_needs_you: Option<bool>,
+    #[serde(default)]
+    notify_sound_error_or_stall: Option<bool>,
+    #[serde(default)]
+    notify_sound_incoming_message: Option<bool>,
+    #[serde(default)]
+    notify_sound_update_ready: Option<bool>,
     #[serde(default)]
     notify_show_why: Option<bool>,
     #[serde(default)]
@@ -1884,6 +1908,30 @@ pub async fn dispatch(
                 if let Some(b) = p.notify_sound {
                     cfg.notify_sound = b;
                 }
+                if let Some(volume) = p.notify_sound_volume {
+                    cfg.notify_sound_volume = volume.clamp(0.0, 1.0);
+                }
+                if let Some(b) = p.notify_sound_unfocused_only {
+                    cfg.notify_sound_unfocused_only = b;
+                }
+                if let Some(b) = p.notify_sound_agent_needs_you {
+                    cfg.notify_sound_agent_needs_you = b;
+                }
+                if let Some(b) = p.notify_sound_agent_finished {
+                    cfg.notify_sound_agent_finished = b;
+                }
+                if let Some(b) = p.notify_sound_repomind_needs_you {
+                    cfg.notify_sound_repomind_needs_you = b;
+                }
+                if let Some(b) = p.notify_sound_error_or_stall {
+                    cfg.notify_sound_error_or_stall = b;
+                }
+                if let Some(b) = p.notify_sound_incoming_message {
+                    cfg.notify_sound_incoming_message = b;
+                }
+                if let Some(b) = p.notify_sound_update_ready {
+                    cfg.notify_sound_update_ready = b;
+                }
                 if let Some(b) = p.notify_show_why {
                     cfg.notify_show_why = b;
                 }
@@ -1925,7 +1973,9 @@ pub async fn dispatch(
                 }
             }
             let cfg = ctx.config.read().await;
-            Ok(config_json(&cfg))
+            let value = config_json(&cfg);
+            ctx.broadcast("event.config.changed", value.clone());
+            Ok(value)
         }
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;

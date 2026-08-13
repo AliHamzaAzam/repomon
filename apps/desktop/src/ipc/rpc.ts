@@ -60,6 +60,14 @@ export interface ConfigView {
   notify_resumed: boolean;
   notify_idle: boolean;
   notify_sound: boolean;
+  notify_sound_volume: number;
+  notify_sound_unfocused_only: boolean;
+  notify_sound_agent_needs_you: boolean;
+  notify_sound_agent_finished: boolean;
+  notify_sound_repomind_needs_you: boolean;
+  notify_sound_error_or_stall: boolean;
+  notify_sound_incoming_message: boolean;
+  notify_sound_update_ready: boolean;
   notify_show_why: boolean;
   notify_coalesce: boolean;
   notify_click_focus: boolean;
