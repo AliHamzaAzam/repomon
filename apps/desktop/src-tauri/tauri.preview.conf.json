@@ -1,6 +1,7 @@
 {
   "bundle": {
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/repomond"]
+    "externalBin": ["binaries/repomond"],
+    "targets": ["app"]
   }
 }
