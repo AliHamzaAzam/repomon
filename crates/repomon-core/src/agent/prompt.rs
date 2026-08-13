@@ -682,4 +682,22 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(serde_json::from_str::<PendingDialog>(&json).unwrap(), d);
     }
+
+    #[test]
+    fn detects_antigravity_permission_menu() {
+        let pane = r#"
+Requesting permission for:
+   ps aux | grep -i repomon
+
+Do you want to proceed?
+> 1. Yes
+  2. Yes, and always allow in this conversation
+  3. Yes, and always allow in settings
+  4. No
+"#;
+        let dialog = detect_dialog(pane).expect("Antigravity dialog");
+        assert_eq!(dialog.question, "Do you want to proceed?");
+        assert_eq!(dialog.selected, Some(0));
+        assert_eq!(dialog.options.len(), 4);
+    }
 }

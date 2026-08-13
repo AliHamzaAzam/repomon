@@ -30,7 +30,8 @@ route to the cursored one.
 
 ## Choosing an agent
 
-New Lane lists the **auto-detected** built-ins (claude-code / codex / aider, marked ✓ if on
+New Lane lists the **auto-detected** built-ins (claude-code / codex / opencode / antigravity /
+aider, marked ✓ if on
 PATH) plus any **custom agents** you define — cycle them with Tab (Shift+Tab to go back). The
 **default** agent (marked ★) is preselected.
 
@@ -136,6 +137,8 @@ the real terminal with `↵`.
 |---------------|----------------|
 | `claude-code` | `claude`       |
 | `codex`       | `codex`        |
+| `opencode`    | `opencode`     |
+| `antigravity` | `agy`          |
 | `aider`       | `aider`        |
 | `cursor`      | `cursor-agent` |
 | other         | the kind string itself |
@@ -205,11 +208,18 @@ renamed until their transcript appears.) See `session.rename` in `docs/protocol.
 
 ## Fleet mail for managed agents
 
-Managed Claude and Codex sessions receive a restricted local `repomon` MCP server at spawn or
-adopt time. It exposes `fleet_status`, `message_send`, `message_inbox`, and
+Managed Claude, Codex, OpenCode, and Antigravity sessions receive a restricted local `repomon`
+MCP server at spawn or adopt time. It exposes `fleet_status`, `message_send`, `message_inbox`, and
 `message_mark_read`. It does not expose repomind's mutating fleet tools. The agent process
 inherits a one-time identity token; only its SHA-256 hash is stored, and the generated MCP config
 contains no token.
+
+OpenCode receives the registration through the runtime-only `OPENCODE_CONFIG_CONTENT` merge, so
+managed settings with higher precedence remain authoritative. Antigravity requires its global
+`~/.gemini/config/mcp_config.json` registration. repomon merges only
+`mcpServers.repomon`, never writes `.agents/mcp_config.json` in a repository, and keeps identity
+in the managed process environment. Antigravity may still show its normal workspace trust and
+tool permission prompts.
 
 Messages are durable in the daemon database. Terminal injection is only attempted when the
 recipient has a live managed window and is waiting, idle, or at an ended turn with no dialog,
@@ -229,8 +239,9 @@ move the cursor (`‣`) between them.
 
 repomon can't type into a plain terminal process, so to drive an external session press
 **`o` to adopt** the highlighted one (Fleet/Split/Focus): repomon resumes *that exact* session
-with `claude --resume <id>` (or `--continue` for the most recent) in a managed tmux lane,
-after which it's fully interactive here. The original terminal window is left as-is — close it
+with the backend's exact resume flag in a managed tmux lane. Claude uses `--resume <id>`, OpenCode
+uses `--session <id>`, and Antigravity uses `--conversation <id>`. Without an ID, each backend's
+continue flag is used. The original terminal window is left as-is, so close it
 once you've adopted. repomon can manage several agents in the same worktree, each in its own
 tmux window (`lane-<id>`, `lane-<id>-2`, …), so adopting an external session adds a managed
 agent alongside any already running — and you can observe every external session in the lane
@@ -266,6 +277,31 @@ no reliable "needs you" signal yet.)
 Codex's on-disk session format isn't stable enough to parse reliably, so `CodexMonitor`
 returns nothing and repomon relies on the tmux-alive fallback for Codex agents it spawned.
 When the format stabilizes, implement `CodexMonitor::summary_for` like the others.
+
+### OpenCode
+
+OpenCode 1.15.5 stores sessions, messages, and parts in its SQLite data store. repomon opens that
+store read-only, validates every required table and column before querying, and returns no summary
+when the schema is incompatible. The latest assistant finish state and any running tool part
+produce Running, Waiting, or error attention. Exact adoption uses `opencode --session <id>`.
+
+OpenCode local token and cost statistics do not satisfy repomon's quota UI contract. Usage is
+therefore degraded and no percentage or reset window is displayed.
+
+### Antigravity
+
+Antigravity 1.1.12 documents and maintains
+`~/.gemini/antigravity-cli/cache/last_conversations.json`, a cwd-to-conversation map. repomon uses
+that stable cache for external identity and exact `agy --conversation <id>` adoption. Transcript
+databases contain protobuf payloads without a stable status contract, so managed windows and pane
+dialog detection supply live state. Antigravity's `>` selection cursor is recognized for trust and
+permission attention.
+
+The live `/usage` panel was not stable enough to fixture-test percentage and reset fields, so usage
+is degraded. Antigravity is not offered as a repomind backend because the isolated qualification
+run required workspace trust and tool approval, and could not load the temporary repomon MCP
+registration without changing the user's global registry. OpenCode is also omitted from repomind
+until its SQLite session can be pinned to the orchestrator window for unambiguous attention.
 
 ## Adding a new agent
 

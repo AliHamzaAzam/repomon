@@ -254,7 +254,7 @@ pub trait SessionBackend: Send + Sync {
     /// whole server — is already gone.
     fn close_byte_stream(&self, window: &str) -> Result<()>;
 
-    /// How many live Claude CLI processes have each working directory, when the backend has
+    /// How many live supported agent CLI processes have each working directory, when the backend has
     /// an authoritative view of its agent processes (the Windows hosts *own* their children).
     /// `None` means "no view here — use the platform process probe instead", which is what
     /// tmux answers: on unix the daemon scans ps/lsof//proc itself, catching external

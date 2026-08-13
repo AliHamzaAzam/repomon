@@ -757,9 +757,12 @@ struct AgentTranscriptPage {
 #[derive(Deserialize)]
 struct AgentAdopt {
     lane_id: repomon_core::model::LaneId,
-    /// Resume this exact session (`claude --resume <id>`); `None` resumes the most recent.
+    /// Resume this exact backend session; `None` resumes the most recent Claude session.
     #[serde(default)]
     session_id: Option<String>,
+    /// Additive backend identity. Omitted retains the original Claude behavior.
+    #[serde(default)]
+    agent: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentPin {
@@ -914,9 +917,22 @@ fn resolved_lane(lane: &Lane, slot: usize) -> Result<ResolvedAgentAddress, RpcEr
     if slot == 0 {
         return Err(RpcError::invalid_params("agent slot is 1-based"));
     }
-    let session = lane.agent_sessions.get(slot - 1).ok_or_else(|| {
-        RpcError::invalid_params(format!("lane-{} has no agent slot {slot}", lane.id))
-    })?;
+    // Transcript summaries are activity-sorted, not slot-sorted. A managed address must follow
+    // the durable window name or a recently stopped external summary can steal the slot.
+    let session = lane
+        .agent_sessions
+        .iter()
+        .find(|session| {
+            session
+                .tmux_window
+                .as_deref()
+                .and_then(TmuxRuntime::slot_of_window)
+                == Some(slot)
+        })
+        .or_else(|| lane.agent_sessions.get(slot - 1))
+        .ok_or_else(|| {
+            RpcError::invalid_params(format!("lane-{} has no agent slot {slot}", lane.id))
+        })?;
     Ok(ResolvedAgentAddress {
         address: AgentAddress::new(format!("lane-{}/{}", lane.id, slot)),
         lane_id: Some(lane.id),
@@ -2006,7 +2022,12 @@ pub async fn dispatch(
                     custom: false,
                 });
             }
-            for kind in [AgentKind::Codex, AgentKind::Aider] {
+            for kind in [
+                AgentKind::Codex,
+                AgentKind::OpenCode,
+                AgentKind::Antigravity,
+                AgentKind::Aider,
+            ] {
                 let command = kind.command().to_string();
                 let name = kind.as_str().into_owned();
                 choices.push(AgentChoice {
@@ -2314,11 +2335,16 @@ pub async fn dispatch(
                 ("REPOMON_MCP_MODE".into(), "agent".into()),
                 ("REPOMON_MCP_IDENTITY_TOKEN".into(), identity_token),
             ]);
+            configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
             let inject = plan.effort_inject;
             let inject_task = if inject.is_some() { task.clone() } else { None };
             if inject.is_none() {
                 if let Some(task) = task {
-                    spec = spec.arg(task);
+                    spec = match kind {
+                        AgentKind::OpenCode => spec.arg("--prompt").arg(task),
+                        AgentKind::Antigravity => spec.arg("--prompt-interactive").arg(task),
+                        _ => spec.arg(task),
+                    };
                 }
             }
             let tmux = ctx.backend.clone();
@@ -2374,11 +2400,8 @@ pub async fn dispatch(
             Ok(json!({ "lane_id": p.lane_id, "window": window, "agent": p.agent }))
         }
         "agent.adopt" => {
-            // Take over an agent running in another terminal: resume its conversation in a
-            // managed tmux lane. With a session id we resume that exact session
-            // (`claude --resume <id>`); otherwise the most recent one (`--continue`). Either
-            // way we resolve which Claude account (config dir) it belongs to so a work-account
-            // session resumes against ~/.claude-work.
+            // Take over an agent running in another terminal and resume its exact backend session.
+            // Omitting `agent` preserves the original Claude-only RPC behavior.
             let p: AgentAdopt = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             let (default_agent, customs) = {
@@ -2392,30 +2415,60 @@ pub async fn dispatch(
                     return Err(RpcError::invalid_params("invalid session_id"));
                 }
             }
+            let kind = p
+                .agent
+                .as_deref()
+                .map(AgentKind::from_kind_str)
+                .unwrap_or(AgentKind::ClaudeCode);
             let session_id = p.session_id.clone();
-            let mut spec = tokio::task::spawn_blocking(move || {
-                // Which account (config dir) the session belongs to, and how to resume it.
-                let (config_dir, resume) = match &session_id {
-                    Some(sid) => (
-                        agent::claude::config_base_for_session(&path, sid).flatten(),
-                        // Validated above; the backend quotes args as defense-in-depth anyway.
-                        vec!["--resume".to_string(), sid.clone()],
-                    ),
-                    None => (
-                        agent::claude::summary_for(&path).and_then(|s| s.config_dir),
-                        vec!["--continue".to_string()],
-                    ),
-                };
-                let base = adopt_base_command(&default_agent, &customs, &config_dir);
-                SpawnSpec {
-                    program: base,
-                    args: resume,
+            let adopt_kind = kind.clone();
+            let mut spec = tokio::task::spawn_blocking(move || match adopt_kind {
+                AgentKind::ClaudeCode => {
+                    let (config_dir, resume) = match &session_id {
+                        Some(sid) => (
+                            agent::claude::config_base_for_session(&path, sid).flatten(),
+                            vec!["--resume".to_string(), sid.clone()],
+                        ),
+                        None => (
+                            agent::claude::summary_for(&path).and_then(|s| s.config_dir),
+                            vec!["--continue".to_string()],
+                        ),
+                    };
+                    SpawnSpec {
+                        program: adopt_base_command(&default_agent, &customs, &config_dir),
+                        args: resume,
+                        cwd: path,
+                        env: Vec::new(),
+                    }
+                }
+                AgentKind::OpenCode => SpawnSpec {
+                    program: "opencode".into(),
+                    args: session_id
+                        .map(|sid| vec!["--session".into(), sid])
+                        .unwrap_or_else(|| vec!["--continue".into()]),
                     cwd: path,
                     env: Vec::new(),
-                }
+                },
+                AgentKind::Antigravity => SpawnSpec {
+                    program: "agy".into(),
+                    args: session_id
+                        .map(|sid| vec!["--conversation".into(), sid])
+                        .unwrap_or_else(|| vec!["--continue".into()]),
+                    cwd: path,
+                    env: Vec::new(),
+                },
+                _ => SpawnSpec {
+                    program: String::new(),
+                    args: Vec::new(),
+                    cwd: path,
+                    env: Vec::new(),
+                },
             })
             .await
             .map_err(internal)?;
+            if spec.program.is_empty() {
+                return Err(RpcError::invalid_params("agent backend cannot be adopted"));
+            }
             let _spawn_guard = ctx.spawn_lock.lock().await;
             let backend = ctx.backend.clone();
             let lane_for_allocation = p.lane_id;
@@ -2430,7 +2483,7 @@ pub async fn dispatch(
                 slot: Some(slot),
                 window: Some(expected_window.clone()),
                 session_id: p.session_id.clone(),
-                agent_kind: Some("claude-code".into()),
+                agent_kind: Some(kind.as_str().into_owned()),
             };
             let token = ctx
                 .store
@@ -2441,8 +2494,10 @@ pub async fn dispatch(
                 let config = ctx.config.read().await;
                 repomon_core::config::socket_path(&config)
             };
-            let mcp_config = write_agent_mcp_config(&expected_window).map_err(internal)?;
-            spec.program = attach_agent_mcp(spec.program, &AgentKind::ClaudeCode, &mcp_config);
+            if matches!(kind, AgentKind::ClaudeCode | AgentKind::Codex) {
+                let mcp_config = write_agent_mcp_config(&expected_window).map_err(internal)?;
+                spec.program = attach_agent_mcp(spec.program, &kind, &mcp_config);
+            }
             spec.env.extend([
                 (
                     "REPOMON_MCP_SOCKET".into(),
@@ -2451,6 +2506,7 @@ pub async fn dispatch(
                 ("REPOMON_MCP_MODE".into(), "agent".into()),
                 ("REPOMON_MCP_IDENTITY_TOKEN".into(), token),
             ]);
+            configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
             let spawned = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
@@ -2496,7 +2552,7 @@ pub async fn dispatch(
                 .await;
             let _ = ctx
                 .store
-                .set_lane_agent_kind(p.lane_id, Some("claude-code".to_string()))
+                .set_lane_agent_kind(p.lane_id, Some(kind.as_str().into_owned()))
                 .await;
             ctx.broadcast(
                 crate::pubsub::topic::AGENT_STATUS,
@@ -3662,7 +3718,19 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 // Catch a panic in one lane's transcript parse so it can't empty the whole batch
                 // (the outer join would otherwise return `Err` and drop every lane's sessions).
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let recent = agent::claude::summaries_for(p, within, MAX_SESSIONS_PER_LANE);
+                    let mut recent = agent::claude::summaries_for(p, within, MAX_SESSIONS_PER_LANE);
+                    recent.extend(agent::opencode::summaries_for(
+                        p,
+                        within,
+                        MAX_SESSIONS_PER_LANE,
+                    ));
+                    if let Some(summary) = agent::antigravity::summary_for(p)
+                        && chrono::Utc::now() - summary.last_activity <= within
+                    {
+                        recent.push(summary);
+                    }
+                    recent.sort_by_key(|summary| std::cmp::Reverse(summary.last_activity));
+                    recent.truncate(MAX_SESSIONS_PER_LANE);
                     if recent.is_empty() {
                         agent::summary_for(p).into_iter().collect()
                     } else {
@@ -4657,7 +4725,7 @@ fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>
 
 /// Built-in agent kinds with a fixed binary name. Claude is handled separately (one variant
 /// per detected config dir). These names can't be used for a custom agent.
-const BUILTIN_AGENTS: [&str; 2] = ["codex", "aider"];
+const BUILTIN_AGENTS: [&str; 4] = ["codex", "opencode", "antigravity", "aider"];
 
 /// A name is reserved (can't be added/removed as a custom) if it's a fixed built-in or one of
 /// the autodetected Claude variants (claude-code, claude-work, …).
@@ -4928,10 +4996,8 @@ fn reuse_per_path_on_failure<T: Clone>(
     }
 }
 
-/// How many live `claude` CLI processes have each working directory. claude doesn't hold its
-/// transcript open, but its cwd is the worktree it runs in — so the count per worktree bounds
-/// how many of that worktree's sessions are actually running. `None` if the probe couldn't
-/// run (then we don't filter); `Some({})` means no claude is running.
+/// How many supported agent CLI processes have each working directory. The count bounds how many
+/// session records remain live after a CLI exits but leaves durable state behind.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     use std::process::Command;
@@ -4950,7 +5016,7 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
         .filter_map(|line| {
             let (pid, comm) = line.trim_start().split_once(char::is_whitespace)?;
             let base = comm.trim().rsplit('/').next().unwrap_or("");
-            (base == "claude").then(|| pid.to_string())
+            matches!(base, "claude" | "opencode" | "agy").then(|| pid.to_string())
         })
         .collect();
     let mut counts: HashMap<PathBuf, usize> = HashMap::new();
@@ -4977,7 +5043,13 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
 /// cheaper than either.
 #[cfg(target_os = "linux")]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
-    live_cwds_by_name("claude")
+    let mut combined = HashMap::new();
+    for name in ["claude", "opencode", "agy"] {
+        for (path, count) in live_cwds_by_name(name)? {
+            *combined.entry(path).or_insert(0) += count;
+        }
+    }
+    Some(combined)
 }
 
 /// Count processes named `name` per working directory by walking `/proc`. A process matches
@@ -5041,7 +5113,7 @@ mod live_cwds_tests {
     }
 }
 
-/// Cached [`live_claude_cwds`] with a 10s TTL (plus a 30s sticky-high grace against undercounts),
+/// Cached supported-agent process accounting with a 10s TTL (plus a 30s sticky-high grace),
 /// so frequent `lane.list` calls don't hammer `lsof`.
 async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
     {
@@ -5076,7 +5148,7 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
             // The probe couldn't run (ps/lsof spawn failed under load, /proc unreadable).
             // Returning None means "don't filter" — callers keep all recent sessions rather than
             // truncating to a bogus low count — but it was silent; log it so a flap is visible.
-            tracing::warn!("live claude-process probe failed; not truncating sessions");
+            tracing::warn!("live agent-process probe failed; not truncating sessions");
             return None;
         }
     };
@@ -5464,6 +5536,35 @@ fn apply_launch_options(
                 }
             }
         }
+        AgentKind::OpenCode => {
+            if let Some(model) = model {
+                suffix.push_str(&format!(" --model {}", shell_quote(model)));
+            }
+            if mode.is_some() || effort.is_some() {
+                tracing::warn!(
+                    "spawn: OpenCode mode and effort overrides are unavailable; ignoring"
+                );
+            }
+        }
+        AgentKind::Antigravity => {
+            if let Some(model) = model {
+                suffix.push_str(&format!(" --model {}", shell_quote(model)));
+            }
+            match mode {
+                Some("auto") => suffix.push_str(" --mode accept-edits"),
+                Some("plan") => suffix.push_str(" --mode plan"),
+                Some(other) => tracing::warn!("spawn: unknown --mode '{other}' for agy; ignoring"),
+                None => {}
+            }
+            if let Some(effort) = effort {
+                match effort {
+                    "low" | "medium" | "high" => {
+                        suffix.push_str(&format!(" --effort {}", shell_quote(effort)))
+                    }
+                    _ => tracing::warn!("spawn: unknown --effort '{effort}' for agy; ignoring"),
+                }
+            }
+        }
         other => tracing::warn!(
             "spawn: launch options (--mode/--model/--effort) aren't supported for agent kind \
              '{}'; ignoring",
@@ -5528,6 +5629,8 @@ fn kind_from_command(command: &str) -> AgentKind {
     match program_of(command).map(program_basename) {
         Some("claude") => AgentKind::ClaudeCode,
         Some("codex") => AgentKind::Codex,
+        Some("opencode") => AgentKind::OpenCode,
+        Some("agy") => AgentKind::Antigravity,
         Some("aider") => AgentKind::Aider,
         Some("cursor") | Some("cursor-agent") => AgentKind::Cursor,
         Some(other) => AgentKind::Other(other.to_string()),
@@ -5601,6 +5704,87 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
         }
         _ => command,
     }
+}
+
+/// Attach backend-specific MCP configuration without placing identity values in persistent files.
+/// OpenCode receives a runtime-only inline merge. Antigravity needs a global registration, but the
+/// entry contains only the executable and arguments; the managed child inherits its identity env.
+fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), String> {
+    match kind {
+        AgentKind::OpenCode => {
+            let mut root = match std::env::var("OPENCODE_CONFIG_CONTENT") {
+                Ok(raw) if !raw.trim().is_empty() => {
+                    serde_json::from_str::<serde_json::Value>(&raw)
+                        .map_err(|error| format!("invalid OPENCODE_CONFIG_CONTENT: {error}"))?
+                }
+                _ => json!({}),
+            };
+            let root_object = root
+                .as_object_mut()
+                .ok_or_else(|| "OPENCODE_CONFIG_CONTENT must be a JSON object".to_string())?;
+            let mcp = root_object.entry("mcp").or_insert_with(|| json!({}));
+            let mcp_object = mcp
+                .as_object_mut()
+                .ok_or_else(|| "OPENCODE_CONFIG_CONTENT.mcp must be an object".to_string())?;
+            let repomond = repomon_core::service::repomond_path();
+            mcp_object.insert(
+                "repomon".into(),
+                json!({
+                    "type": "local",
+                    "command": [repomond.to_string_lossy(), "mcp"],
+                    "environment": {
+                        "REPOMON_MCP_SOCKET": "{env:REPOMON_MCP_SOCKET}",
+                        "REPOMON_MCP_MODE": "{env:REPOMON_MCP_MODE}",
+                        "REPOMON_MCP_IDENTITY_TOKEN": "{env:REPOMON_MCP_IDENTITY_TOKEN}"
+                    }
+                }),
+            );
+            spec.env.push((
+                "OPENCODE_CONFIG_CONTENT".into(),
+                serde_json::to_string(&root).map_err(|error| error.to_string())?,
+            ));
+        }
+        AgentKind::Antigravity => ensure_antigravity_mcp_registration()?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_antigravity_mcp_registration() -> Result<(), String> {
+    let path = std::env::var("REPOMON_ANTIGRAVITY_MCP_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| config::home().join(".gemini/config/mcp_config.json"));
+    let mut root = match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice::<serde_json::Value>(&raw)
+            .map_err(|error| format!("invalid Antigravity MCP config: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let root_object = root
+        .as_object_mut()
+        .ok_or_else(|| "Antigravity MCP config must be a JSON object".to_string())?;
+    let servers = root_object.entry("mcpServers").or_insert_with(|| json!({}));
+    let servers_object = servers
+        .as_object_mut()
+        .ok_or_else(|| "Antigravity mcpServers must be an object".to_string())?;
+    let repomond = repomon_core::service::repomond_path();
+    let wanted = json!({
+        "command": repomond.to_string_lossy(),
+        "args": ["mcp"]
+    });
+    if servers_object.get("repomon") == Some(&wanted) {
+        return Ok(());
+    }
+    servers_object.insert("repomon".into(), wanted);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Antigravity MCP config has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.repomon-tmp");
+    let encoded = serde_json::to_vec_pretty(&root).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, encoded).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Build the full `claude` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
@@ -5885,6 +6069,15 @@ mod tests {
         let label = resolve_agent_message_address(&lanes, "@reviewer").unwrap();
         assert_eq!(label.address.as_str(), "lane-7/2");
         assert!(resolve_agent_message_address(&lanes, "lane-7/0").is_err());
+    }
+
+    #[test]
+    fn message_slot_follows_window_when_activity_order_differs() {
+        let mut lane = mail_lane(7, &[Some("first"), Some("second")]);
+        lane.agent_sessions.swap(0, 1);
+        let first = resolve_agent_message_address(&[lane], "lane-7/1").unwrap();
+        assert_eq!(first.window.as_deref(), Some("lane-7"));
+        assert_eq!(first.session_id.as_deref(), Some("session-7-0"));
     }
 
     #[test]

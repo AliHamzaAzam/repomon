@@ -75,7 +75,18 @@ async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
     let Some(session) = lanes
         .iter()
         .find(|lane| lane.id == lane_id)
-        .and_then(|lane| lane.agent_sessions.get(slot.saturating_sub(1) as usize))
+        .and_then(|lane| {
+            message
+                .recipient
+                .window
+                .as_deref()
+                .and_then(|window| {
+                    lane.agent_sessions
+                        .iter()
+                        .find(|session| session.tmux_window.as_deref() == Some(window))
+                })
+                .or_else(|| lane.agent_sessions.get(slot.saturating_sub(1) as usize))
+        })
     else {
         return;
     };

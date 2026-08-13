@@ -143,7 +143,11 @@ export function createActionsStore(fleet: FleetStore) {
   async function adoptAgent(lane: Lane, agent: AgentSession | null) {
     setError(null);
     try {
-      await daemonCall("agent.adopt", { lane_id: lane.id, session_id: agent?.session_id ?? undefined });
+      await daemonCall("agent.adopt", {
+        lane_id: lane.id,
+        session_id: agent?.session_id ?? undefined,
+        agent: agent?.agent,
+      });
       await fleet.refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

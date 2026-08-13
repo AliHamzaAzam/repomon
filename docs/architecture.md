@@ -13,7 +13,7 @@ protocol is identical on both.
 ```
       ┌───────────────────────── repomon-core ────────────────────────┐
       │ model · store(SQLite) · git(gix + worktree shellout) · watch  │
-      │ registry · lane · agent(tmux runtime + Claude/Aider monitors) │
+      │ registry · lane · agent(runtime + backend monitors)           │
       │ analytics · session · indexer · service(launchd/systemd) · protocol │
       └──────────────▲──────────────────────────────▲─────────────────┘
                      │                              │
@@ -54,8 +54,8 @@ protocol is identical on both.
 ## Key flows
 
 **Fleet refresh.** The TUI calls `lane.list`; the daemon enumerates worktrees (porcelain),
-computes live state with gix off the runtime, overlays agent sessions (Claude transcript →
-Aider history → tmux-alive fallback), and returns lanes. The TUI renders cached state
+computes live state with gix off the runtime, overlays agent sessions (Claude transcripts,
+OpenCode SQLite, Antigravity cache, Aider history, then runtime liveness), and returns lanes. The TUI renders cached state
 immediately on every keystroke; git never runs on the UI thread.
 
 **Live agents.** The daemon spawns each agent in its own session backend window: the first at

@@ -264,8 +264,8 @@ mod host_backend {
     use super::super::tmux::TmuxRuntime;
     use super::{
         ConnectOutcome, ScanAction, WINDOWS_BACKGROUND_PROCESS_FLAGS, attach_command_for,
-        exact_target_of, host_spawn_args, is_claude_program, scan_action, split_spawn_program,
-        target_of, user_shell_from, window_from_target,
+        exact_target_of, host_spawn_args, is_supported_agent_program, scan_action,
+        split_spawn_program, target_of, user_shell_from, window_from_target,
     };
     use crate::error::{Error, Result};
     use crate::model::LaneId;
@@ -740,7 +740,7 @@ mod host_backend {
         fn live_agent_cwds(&self) -> Option<HashMap<PathBuf, usize>> {
             let mut counts: HashMap<PathBuf, usize> = HashMap::new();
             for h in self.scan() {
-                if !is_claude_program(&h.hello.program) {
+                if !is_supported_agent_program(&h.hello.program) {
                     continue;
                 }
                 let p = PathBuf::from(&h.hello.cwd);
@@ -1002,7 +1002,7 @@ mod host_backend {
     }
 }
 
-pub fn is_claude_program(program: &str) -> bool {
+pub fn is_supported_agent_program(program: &str) -> bool {
     let base = program
         .rsplit(['\\', '/'])
         .next()
@@ -1012,7 +1012,7 @@ pub fn is_claude_program(program: &str) -> bool {
         .rsplit_once('.')
         .map(|(stem, _ext)| stem)
         .unwrap_or(&base);
-    stem == "claude"
+    matches!(stem, "claude" | "codex" | "opencode" | "agy")
 }
 
 #[cfg(test)]
@@ -1202,15 +1202,17 @@ mod tests {
     }
 
     #[test]
-    fn claude_program_matching_handles_paths_and_extensions() {
-        assert!(is_claude_program("claude"));
-        assert!(is_claude_program("claude.cmd"));
-        assert!(is_claude_program("CLAUDE.EXE"));
-        assert!(is_claude_program(
+    fn supported_agent_matching_handles_paths_and_extensions() {
+        assert!(is_supported_agent_program("claude"));
+        assert!(is_supported_agent_program("claude.cmd"));
+        assert!(is_supported_agent_program("CLAUDE.EXE"));
+        assert!(is_supported_agent_program(
             r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
         ));
-        assert!(!is_claude_program("codex"));
-        assert!(!is_claude_program("claude-helper.exe"));
-        assert!(!is_claude_program(""));
+        assert!(is_supported_agent_program("codex"));
+        assert!(is_supported_agent_program("opencode.exe"));
+        assert!(is_supported_agent_program("agy.cmd"));
+        assert!(!is_supported_agent_program("claude-helper.exe"));
+        assert!(!is_supported_agent_program(""));
     }
 }

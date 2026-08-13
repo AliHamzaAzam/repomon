@@ -4242,16 +4242,16 @@ impl App {
             l.agent_sessions
                 .get(idx)
                 .filter(|s| s.external)
-                .map(|s| (l.id, s.session_id.clone()))
+                .map(|s| (l.id, s.session_id.clone(), s.agent.as_str().into_owned()))
         });
-        let (id, session_id) = match target {
+        let (id, session_id, agent) = match target {
             Some(t) => t,
             None => {
                 self.status = "select an external agent to adopt (tab to switch)".into();
                 return;
             }
         };
-        let mut params = json!({ "lane_id": id });
+        let mut params = json!({ "lane_id": id, "agent": agent });
         if let Some(sid) = session_id {
             params["session_id"] = json!(sid);
         }

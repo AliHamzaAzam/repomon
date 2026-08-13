@@ -6,12 +6,14 @@
 //! [`CodexMonitor`] are best-effort (see `docs/agents.md`). For any repomon-spawned agent the
 //! daemon also falls back to "is the tmux window alive?".
 
+pub mod antigravity;
 pub mod approval;
 pub mod attention;
 pub mod backend;
 pub mod claude;
 pub mod gate;
 pub mod limit;
+pub mod opencode;
 pub mod prompt;
 pub mod text;
 pub mod tmux;
@@ -53,6 +55,8 @@ pub fn default_monitors() -> Vec<Box<dyn AgentMonitor>> {
         Box::new(ClaudeMonitor),
         Box::new(AiderMonitor),
         Box::new(CodexMonitor),
+        Box::new(OpenCodeMonitor),
+        Box::new(AntigravityMonitor),
     ]
 }
 
@@ -103,6 +107,34 @@ impl AgentMonitor for CodexMonitor {
     }
     fn summary_for(&self, _cwd: &Path) -> Option<TranscriptSummary> {
         None
+    }
+}
+
+/// Monitors OpenCode through its read-only SQLite session store.
+#[derive(Debug, Clone, Default)]
+pub struct OpenCodeMonitor;
+
+impl AgentMonitor for OpenCodeMonitor {
+    fn kind(&self) -> AgentKind {
+        AgentKind::OpenCode
+    }
+
+    fn summary_for(&self, cwd: &Path) -> Option<TranscriptSummary> {
+        opencode::summary_for(cwd)
+    }
+}
+
+/// Monitors Antigravity through its stable cwd-to-conversation cache.
+#[derive(Debug, Clone, Default)]
+pub struct AntigravityMonitor;
+
+impl AgentMonitor for AntigravityMonitor {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Antigravity
+    }
+
+    fn summary_for(&self, cwd: &Path) -> Option<TranscriptSummary> {
+        antigravity::summary_for(cwd)
     }
 }
 
