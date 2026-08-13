@@ -1,143 +1,87 @@
-# repomon — Completion Status
+# Repomon 0.6.0 status
 
-_Snapshot: 2026-07-06 · branch `main` · 248 commits · github.com/AliHamzaAzam/repomon (public)_
+Snapshot: 2026-08-13, branch `main`
 
-repomon is a Rust TUI for running a fleet of AI coding agents across many repos,
-branches, and worktrees, backed by a session-owning daemon (tmux on macOS/Linux, per-agent
-host processes on Windows). **Verdict: all planned milestones (M0–M13) are complete and the
-quality/perf gates pass — ready for hands-on testing.**
+Repomon 0.6.0 is at the desktop preview gate. The verified feature train, desktop sound,
+durable fleet messaging, and the OpenCode and Antigravity backend work are merged on `main`.
+The desktop preview is the next distribution point. No stable CLI tag is part of this release
+task.
 
-**Native Windows support has landed** (branch `release/windows-preview`, size-M port across
-Tracks A–I). It is **code-complete and CI-green** on `x86_64-pc-windows-msvc`: the workspace
-builds, `cargo fmt`/clippy are clean, and the test suite passes on the `windows-latest` CI leg
-(tmux-only tests self-skip; the new host and backend integration tests run). The design keeps
-the JSON-RPC wire protocol frozen (iOS-safe) and full durability parity: a `SessionBackend`
-trait with a tmux backend on Unix and a host-process backend on Windows, named-pipe IPC, and
-`repomon-agent-host.exe` (ConPTY + server-side vt100) whose detached hosts survive daemon
-restarts and are re-adopted on start. **Two gates remain before a Windows release is tagged:**
-a physical Windows 11 end-to-end pass ([docs/windows-validation.md](docs/windows-validation.md))
-and binary signing (unsigned binaries trip SmartScreen). There is a preview build on
-`release/windows-preview` and **no published Windows GitHub release yet**.
+## Landed train
 
-## Plan completion (M0–M13) ✅
+- The 27-commit verification train landed in merge `f1ec3c7`.
+- Identity binding and immediate spawn input landed from `fix/spawn-agent-talk-flow`.
+- Live untracked-file lane diffs, the complete CLI lane controls, and the remote lane-diff
+  protocol correction landed.
+- `fix/agent-identity-desync` remains deferred as a superseded subset.
+- `repomind` remains deferred as the older predecessor to the implementation on the train.
+- Mission Control was exercised against an isolated daemon and tmux fleet, including repomind,
+  playbooks, approvals, standing orchestrations, notification fallback, layout modes,
+  extensions, reconnect, and terminal input.
 
-| Phase | Milestones | Status |
-|---|---|---|
-| **1 — Foundation + Fleet** | M0 scaffold · M1 core + SQLite store · M2 git layer (gix + worktree) · M3 registry/lane/watch · M4 daemon (socket + JSON-RPC + pubsub + launchd) · M5 Fleet + Split TUI · M6 CLI | ✅ |
-| **2 — Agent multiplexer** | M7 tmux runtime · M8 Claude monitor + needs-you · M9 live UI (viewport streaming, babysit grid, focus, pin, needs-you jump, attach, merge) · M10 Codex/Aider + `docs/agents.md` | ✅ |
-| **3 — Dashboard / history** | M11 history indexer · timeline · jaccard correlations · session detection · markdown export · commit search | ✅ |
-| **4 — Polish (Rust-only)** | M12 accent-color slot + mouse · M13 docs + perf | ✅ |
+## Desktop sound
 
-10 views, 5 CLI subcommands, 40 RPC methods wired.
+- `notify_sound` remains the master switch and daemon fallback policy.
+- Defaults are master on, volume `0.25`, unfocused-only on, and all six cue toggles on.
+- The six Web Audio cues cover agent attention, agent completion, repomind attention, error or
+  stall, incoming mail, and an available update.
+- Native notifications are silent whenever custom audio is scheduled or policy suppresses a cue.
+  One system sound is allowed only when an otherwise eligible custom cue cannot be scheduled.
+- Unit and isolated live coverage includes event mapping, focus policy, dedupe, sound arbitration,
+  all six previews, volume, and master and per-cue suppression.
 
-## Quality bar (verified)
+## Fleet messaging
 
-- **288 tests passing** (macOS; the Linux CI leg adds Linux-only ones) — core unit + rpc unit +
-  daemon integration (incl. MCP stdio e2e + orchestrator lifecycle) + TUI snapshots.
-- **clippy `-D warnings` clean**, `cargo fmt` clean.
-- **Perf gates met:**
-  - daemon cold start **108 ms** (target < 500)
-  - idle daemon CPU **0.0%** (target < 1%)
-  - warm first paint **~103 ms** (target < 100 — essentially at the line; includes process spawn)
-- Docs: README, `docs/architecture.md`, `docs/protocol.md`, `docs/agents.md`.
+- Canonical lane, slot, label, repomind, and operator addressing is implemented.
+- Messages and MCP identities are durable. Only MCP identity hashes are stored.
+- Managed agents receive a restricted MCP surface for fleet status and mail. Message RPCs remain
+  local-socket-only.
+- Body size, sender rate, thread hop, injection policy, idle delivery, read state, and dedupe
+  guardrails are enforced.
+- CLI, TUI, and desktop Control Center mail surfaces are implemented with lane badges, jump and
+  read actions, native notifications, and the incoming-message cue.
+- Isolated Claude and Codex exchange, plus OpenCode and Claude exchange, proved framed injection,
+  reply routing, and durable thread continuity.
 
-## Beyond the original plan (added during the build, all working)
+## Agent backends
 
-- Single `repomon` command (auto-starts a detached daemon, falls back to in-process).
-- Interactive repo browser (`fs.browse`) to add repos without leaving the TUI.
-- Live key passthrough with **insert / command modes** + ANSI colors; `Esc`, `Shift+Tab`,
-  `Ctrl-C` all forwarded; leave insert with `^O`. In-place interaction in Split; `→` drills in.
-- **Agent manager** — add / edit / delete custom launch commands and set a default.
-- **Multi-account Claude autodetect** — `~/.claude` + any `~/.claude-*` (e.g. `claude-work`
-  via `CLAUDE_CONFIG_DIR`); detection and adopt are account-aware.
-- **External-session detection + adopt** — sessions running in other terminals show as `·ext`;
-  adopt resumes the exact session (`claude --resume <id>`) with the right account/flags.
-- **Multiple concurrent sessions per worktree**, filtered to live processes (so `/exit`ed
-  sessions drop off); Focus auto-exits when its agent ends.
-- **Plain terminals** per worktree (`t`), multiple allowed.
-- Revamped **Grid** (real navigation, Instagram-style position dots, clean exit).
-- repomon's tmux runs on a **dedicated socket**, isolated from the user's own tmux.
-- **Notifications hardened** — desktop popups land faster (daemon edge-detector tick 8s→2s),
-  attach-return no longer replays a duplicate backlog (re-seed instead of re-diff), and a new
-  `notify_subagents` toggle (default off) suppresses alerts when worktree-isolated *subagents*
-  finish — you're alerted only when the *main* agent finishes.
-- **Expand agent rows** (opt-in `expand_agents`) — a lane running several agents can render as a
-  tree in the sidebar (header + one row per agent, each with a 1-4 word summary + status) instead
-  of an `×N` badge; sub-rows are individually selectable. Press `R` to rename an agent; the label
-  persists in the daemon keyed by transcript id (`session.rename` RPC, `session_labels` table).
-- **Account-usage corner** (opt-in `usage_probe`) — limit windows (% used) + reset shown
-  bottom-right for the focused agent's account, **provider-aware**: Claude `/usage` (5h + weekly,
-  per `~/.claude*` account) and Codex `/status` (5h/weekly or Free monthly). Scraped via a hidden
-  throwaway session per account (`usage_watch.rs` + fixture-tested `agent/usage.rs`), with a
-  rate-limit countdown fallback. See `docs/agents.md`.
-- **repomind** — the MCP-driven fleet orchestrator (`repomon orchestrate` + TUI command-center)
-  with a switchable backend (Claude or Codex). Shipped in v0.3.0.
-- **Full Linux support** — systemd user service (`repomon daemon install`), notify-send
-  notifications with sound, wl-copy/xclip clipboard (OSC52 fallback in tmux), image paste via
-  wl-paste/xclip, and a /proc-based liveness probe. CI runs the suite on macOS + Ubuntu;
-  releases ship x86_64 and aarch64 Linux binaries.
+| Backend | Spawn | Mail MCP | Attention | Exact resume | Repomind |
+|---|---:|---:|---:|---:|---:|
+| Claude Code | Yes | Yes | Rich transcript and pane state | Yes | Yes |
+| Codex | Yes | Yes | Managed pane state | Yes | Yes |
+| OpenCode 1.15.5 | Yes | Yes, no approval | Read-only SQLite waiting and end-of-turn | `--session` proven | Omitted |
+| Antigravity 1.1.12 | Yes | Global registration required | Pane permission proven | `--conversation` builder | Omitted |
 
-## Native Windows port (branch `release/windows-preview`)
+OpenCode is omitted from repomind because an orchestrator session cannot yet be pinned to a safe
+attention signal. Antigravity is omitted because its isolated qualification hit trust and
+permission prompts before the repomon MCP could run without approval. Usage is degraded for both
+backends because neither supplied stable quota percentages and reset data compatible with the
+existing usage model.
 
-Code-complete, CI-green, awaiting a physical E2E pass and signing. What landed:
+## Verification
 
-- **Track A, IPC transport + portability.** A `transport` abstraction (Unix socket ⇄ named
-  pipe); pipe-name socket default, `USERNAME`/`getrandom`/`$HOME` and PATHEXT-aware lookup,
-  detached daemon spawn, and a `windows-latest` CI leg.
-- **Track B, `SessionBackend` extraction.** The ~25-method trait lifted from `TmuxRuntime`
-  (the single tmux choke point); `Ctx.backend: Arc<dyn SessionBackend>`; `SpawnSpec` replaces
-  shell strings; the FIFO byte stream folded into `open_byte_stream`. Zero behavior change on
-  Unix.
-- **Track C, `repomon-host` crate.** `repomon-agent-host.exe`: ConPTY + server-side `vt100`
-  with 50k scrollback + a named-pipe control server, against a frozen
-  [PROTOCOL.md](crates/repomon-host/PROTOCOL.md).
-- **Track I, `WindowsBackend`.** Host spawning, registry scan + `hello` verification + stale
-  GC, **re-adoption on daemon start** (durability parity), and a Windows liveness arm that asks
-  the hosts instead of `ps`/`lsof`.
-- **Tracks D1–D4, platform services.** `Set-Clipboard`/`Get-Clipboard` + image paste, WinRT
-  toasts, a Task Scheduler service arm, and PowerShell `shell-init` with a `REPOMON_CD_FILE`
-  temp-file cd-on-exit.
-- **Track E + follow-up, packaging.** `install.ps1` and a `windows-latest` release job; the
-  `x86_64-pc-windows-msvc` leg is now **required**, aarch64 stays best-effort.
-- **Track F, attach.** `repomon attach-host` raw byte proxy + the embedded focus view, popped
-  out into a Windows Terminal tab.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: pass.
+- `cargo fmt --all --check`: pass.
+- `cargo test --workspace --locked`: pass.
+  - `repomon-core`: 279 unit tests plus 2 reconnect integration tests.
+  - `repomon-daemon`: 125 passed with 2 live usage probes ignored.
+  - Daemon integration: 19 passed.
+  - MCP stdio: 12 passed.
+  - `repomon-mcp`: 37 passed.
+  - `repomon-tui`: 95 unit tests plus 5 integration tests.
+  - All remaining orchestrator, remote, standing, host, and documentation suites passed.
+- Desktop bindings and TypeScript checks: pass.
+- Desktop tests: 161 passed across 25 files.
+- Desktop production build: pass.
+- A 20,000-line ANSI terminal sweep preserved the final marker and `λ中✓` glyphs after resize in
+  both DOM and WebGL renderers.
+- Windows remains a required CI platform for the workspace and desktop preview workflows.
 
-## Cutting a Windows release
+## Remaining release and founder actions
 
-The Windows binaries are built and packaged by `.github/workflows/release.yml`:
-
-- **Trigger.** A `v*` tag runs the whole release (macOS, Linux, Windows). A
-  `workflow_dispatch` on any branch runs **only** `build-windows`, so the Windows packaging can
-  be validated before a real tag (it stamps a `0.0.0-<sha>` dev version).
-- **Artifacts.** `build-windows` produces `repomon-<version>-<target>.zip` (containing
-  `repomon.exe` + `repomond.exe` + `repomon-agent-host.exe`) and a matching `.zip.sha256`,
-  uploaded per target.
-- **Targets.** `x86_64-pc-windows-msvc` is **required** (the port has landed); the
-  `aarch64-pc-windows-msvc` leg is **best-effort** (`experimental: true`, `continue-on-error`),
-  and the release step uses `nullglob` so a release without the ARM64 zip still succeeds.
-- **Publish.** The tag-gated `release` job attaches every `*.zip`/`*.zip.sha256` (alongside the
-  macOS/Linux tarballs) plus `install.sh` and `install.ps1` to the GitHub release.
-- **TODO before shipping.** Binary **code-signing** is not wired yet; unsigned binaries trip
-  SmartScreen on first run. Sign the three exes before or as part of the first Windows release.
-  (Do not edit `release.yml` for docs work; this note only describes the existing flow.)
-
-## Deferred (explicitly out of scope in the plan)
-
-SwiftUI menu-bar app · native repomon-owned PTY mode · web dashboard. None blocking.
-
-## Known limitations to keep in mind while testing
-
-- The Grid tiles **agent lanes**, not the plain `t` shells (possible follow-up).
-- **Codex** detection is tmux-alive-only (no transcript); **Aider** is coarse (history-file
-  mtime). Claude is the rich path (status, needs-you, multi-account).
-- **cd-on-exit (`c`)** only acts when the `repomon` shell function is installed (it sets
-  `$REPOMON_CD_FD`); otherwise it shows a hint instead of quitting.
-- In agent views (Focus/Split/Grid) the daemon refreshes ~1 s and runs a cached liveness
-  probe (`ps`+`lsof` on macOS, `/proc` on Linux; on Windows the hosts report child liveness
-  directly, no scan); light, but slightly more active than the 0% Fleet idle.
-
-## Suggested next steps
-
-1. Plain-shell **terminals as Grid tiles** (observe several shells at once).
-2. Tighten warm first paint comfortably under 100 ms.
-3. Optional: richer Codex/Aider status if/when their on-disk formats stabilize.
+- Publish and verify `desktop-v0.6.0-preview.1`, including macOS, Linux, and Windows artifacts and
+  the signed `latest.json` updater manifest.
+- Perform physical Windows 11 end-to-end validation.
+- Add Authenticode signing for the Windows executables and installer.
+- Decide whether the daemon and CLI changes justify a later stable `v0.6.0` tag. This task does
+  not create that tag.
