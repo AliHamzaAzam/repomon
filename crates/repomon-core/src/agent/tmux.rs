@@ -766,11 +766,20 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// Render a [`SpawnSpec`] to the single shell command string tmux runs via `sh -c`:
-/// `K='v' … program 'arg1' 'arg2'`. The program is the user-configured command line and is
-/// passed through verbatim (it may legitimately be a shell fragment); env assignments and
-/// extra args are single-quoted via [`shell_quote`].
+/// `env -u NO_COLOR K='v' … program 'arg1' 'arg2'`. The program is the user-configured command
+/// line and is passed through verbatim (it may legitimately be a shell fragment); env
+/// assignments and extra args are single-quoted via [`shell_quote`].
+///
+/// The leading `env -u NO_COLOR` unconditionally strips `NO_COLOR` from whatever ambient
+/// environment the daemon (and the tmux server it drives) happened to inherit. Nothing else in
+/// the spawn path ever touches TERM/COLORTERM/NO_COLOR, so a `NO_COLOR` set on the daemon's own
+/// process — common when it's launched from a script, CI-flavored wrapper, or another agent's
+/// shell — silently propagated to every spawned pane. Agent CLIs that honor the NO_COLOR
+/// convention (Claude Code, Antigravity's `agy`, and others) then rendered entirely without
+/// color, keeping only bold/dim/reset — reproduced by capturing a real tmux pane with `NO_COLOR=1`
+/// set. `env -u` on an already-unset var is a harmless no-op, so this is safe unconditionally.
 fn render_spawn_command(spec: &SpawnSpec) -> String {
-    let mut cmd = String::new();
+    let mut cmd = String::from("env -u NO_COLOR ");
     for (k, v) in &spec.env {
         cmd.push_str(k);
         cmd.push('=');
@@ -997,22 +1006,42 @@ mod tests {
 
     #[test]
     fn renders_spawn_specs_to_sh_command_strings() {
-        // Program alone passes through verbatim (it may be a user-configured shell fragment).
+        // Program alone passes through verbatim (it may be a user-configured shell fragment),
+        // behind the unconditional `env -u NO_COLOR` prefix.
         let bare = SpawnSpec::new("env -u CLAUDE_CONFIG_DIR claude", "/tmp");
         assert_eq!(
             render_spawn_command(&bare),
-            "env -u CLAUDE_CONFIG_DIR claude"
+            "env -u NO_COLOR env -u CLAUDE_CONFIG_DIR claude"
         );
         // Args are single-quoted and appended — byte-identical to the old
         // `format!("{command} {}", shell_quote(task))` assembly.
         let with_task = SpawnSpec::new("claude", "/tmp").arg("fix the bug");
-        assert_eq!(render_spawn_command(&with_task), "claude 'fix the bug'");
+        assert_eq!(
+            render_spawn_command(&with_task),
+            "env -u NO_COLOR claude 'fix the bug'"
+        );
         let quoted = SpawnSpec::new("claude", "/tmp").arg("it's tricky");
-        assert_eq!(render_spawn_command(&quoted), r"claude 'it'\''s tricky'");
-        // Env pairs become leading KEY='value' assignments.
+        assert_eq!(
+            render_spawn_command(&quoted),
+            r"env -u NO_COLOR claude 'it'\''s tricky'"
+        );
+        // Env pairs become leading KEY='value' assignments, after the NO_COLOR unset.
         let mut with_env = SpawnSpec::new("claude", "/tmp");
         with_env.env.push(("FOO".into(), "a b".into()));
-        assert_eq!(render_spawn_command(&with_env), "FOO='a b' claude");
+        assert_eq!(
+            render_spawn_command(&with_env),
+            "env -u NO_COLOR FOO='a b' claude"
+        );
+    }
+
+    #[test]
+    fn render_spawn_command_always_unsets_no_color() {
+        // The exact reproduction: a daemon whose own environment carries NO_COLOR (set by a
+        // wrapping script, CI runner, or another agent's shell) must not leak it into the
+        // spawned agent — every agent CLI that honors NO_COLOR would otherwise render
+        // monochrome, confirmed against a real tmux pane.
+        let spec = SpawnSpec::new("agy", "/tmp");
+        assert!(render_spawn_command(&spec).starts_with("env -u NO_COLOR "));
     }
 
     #[test]

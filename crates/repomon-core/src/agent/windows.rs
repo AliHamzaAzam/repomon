@@ -660,9 +660,15 @@ mod host_backend {
 
         /// Spawn from a [`SpawnSpec`]: parse the program string (env prefixes + quoting),
         /// merge the spec's env, append its args, and launch the host.
+        ///
+        /// Leads with an unset of `NO_COLOR` (empty value, per the host's unset convention)
+        /// so whatever ambient environment the daemon inherited never silently mutes color in
+        /// agent CLIs that honor it; a later explicit `NO_COLOR` in `spec.env` still wins,
+        /// mirroring the Unix tmux spawn path's `env -u NO_COLOR` prefix.
         fn spawn_spec(&self, window: &str, spec: &SpawnSpec) -> Result<()> {
             let (mut env, mut argv) = split_spawn_program(&spec.program)?;
-            let mut all_env = spec.env.clone();
+            let mut all_env = vec![("NO_COLOR".to_string(), String::new())];
+            all_env.extend(spec.env.iter().cloned());
             all_env.append(&mut env);
             argv.extend(spec.args.iter().cloned());
             self.spawn_host(window, &spec.cwd, &all_env, &argv)
