@@ -143,7 +143,7 @@ interface RpcMap {
   "message.list": { params: { lane_id?: number; unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
   "agent.detect": { params: undefined; result: AgentChoice[] };
   "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string } };
-  "agent.adopt": { params: { lane_id: number; session_id?: string }; result: { lane_id: number; window: string } };
+  "agent.adopt": { params: { lane_id: number; session_id?: string; agent?: string }; result: { lane_id: number; window: string } };
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };
   "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };
   "agent.transcript_page": {

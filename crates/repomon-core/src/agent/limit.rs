@@ -58,15 +58,16 @@ fn is_wait_option(lower_text: &str) -> bool {
 }
 
 /// Parse one menu-option-shaped line: optional selection cursor (`❯` as Claude draws it, `›` as
-/// Codex does), optional `N.` number, then text. Returns `(has_cursor, number, text)`; `None`
+/// Codex does, `>` as Antigravity does), optional `N.` number, then text. Returns
+/// `(has_cursor, number, text)`; `None`
 /// when the line isn't option-shaped. (Shared with the pending-prompt detector in
 /// [`super::prompt`].)
 pub(crate) fn parse_option_line(line: &str) -> Option<(bool, Option<u32>, String)> {
     let clean = strip_ansi(line);
     let mut rest = clean.trim_start();
-    let cursor = rest.starts_with('❯') || rest.starts_with('›');
+    let cursor = rest.starts_with('❯') || rest.starts_with('›') || rest.starts_with('>');
     if cursor {
-        rest = rest.trim_start_matches(['❯', '›']).trim_start();
+        rest = rest.trim_start_matches(['❯', '›', '>']).trim_start();
     }
     let digits: String = rest
         .chars()

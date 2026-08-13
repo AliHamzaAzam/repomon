@@ -340,6 +340,8 @@ pub enum AgentKind {
     Cursor,
     Aider,
     Codex,
+    Antigravity,
+    OpenCode,
     Other(String),
 }
 
@@ -351,6 +353,8 @@ impl AgentKind {
             AgentKind::Cursor => Cow::Borrowed("cursor"),
             AgentKind::Aider => Cow::Borrowed("aider"),
             AgentKind::Codex => Cow::Borrowed("codex"),
+            AgentKind::Antigravity => Cow::Borrowed("antigravity"),
+            AgentKind::OpenCode => Cow::Borrowed("opencode"),
             AgentKind::Other(s) => Cow::Owned(s.clone()),
         }
     }
@@ -362,6 +366,8 @@ impl AgentKind {
             AgentKind::Cursor => "cursor",
             AgentKind::Aider => "aider",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "agy",
+            AgentKind::OpenCode => "opencode",
             AgentKind::Other(s) => s,
         }
     }
@@ -371,6 +377,8 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "agy",
+            AgentKind::OpenCode => "opencode",
             AgentKind::Aider => "aider",
             AgentKind::Cursor => "cursor-agent",
             AgentKind::Other(s) => s,
@@ -382,6 +390,8 @@ impl AgentKind {
         match s {
             "claude-code" | "claude" => AgentKind::ClaudeCode,
             "codex" => AgentKind::Codex,
+            "antigravity" | "agy" => AgentKind::Antigravity,
+            "opencode" | "open-code" => AgentKind::OpenCode,
             "aider" => AgentKind::Aider,
             "cursor" => AgentKind::Cursor,
             other => AgentKind::Other(other.to_string()),
@@ -856,6 +866,8 @@ mod tests {
             AgentKind::Codex,
             AgentKind::Aider,
             AgentKind::Cursor,
+            AgentKind::Antigravity,
+            AgentKind::OpenCode,
             AgentKind::Other("amp".into()),
         ] {
             let s = k.as_str().to_string();

@@ -101,6 +101,10 @@ tools:
 Agent mode cannot call repomind's mutating fleet tools. The server authenticates each request with
 the inherited identity token and the daemon resolves its stored hash to the spawned agent session.
 Claude and Codex launch builders add the server without replacing user MCP configuration.
+OpenCode merges a runtime-only `OPENCODE_CONFIG_CONTENT` object and preserves higher-precedence
+managed settings. Antigravity surgically merges the token-free `mcpServers.repomon` entry into its
+global MCP registry; identity remains in inherited environment and no repository MCP file is
+created.
 
 Repomind keeps its orchestrator tool surface and adds the same messaging tools under the
 `repomind` sender identity. An agent MCP process with a missing, revoked, or mismatched identity can
@@ -137,3 +141,13 @@ longer has a managed window, messages stay stored and can be read through the CL
 
 Backend documentation and the capability matrix must distinguish MCP access, safe injection,
 inbox-only delivery, and unsupported behavior based on live verification.
+
+## Observed backend matrix
+
+| Backend | Managed spawn | Durable MCP mail | Idle or attention | Exact resume | Repomind |
+|---------|---------------|------------------|-------------------|--------------|----------|
+| Claude Code | Yes | Yes | Transcript and pane | `--resume` | Yes |
+| Codex | Yes | Yes | Pane fallback | CLI session behavior only | Yes, pane-only |
+| OpenCode 1.15.5 | Yes | Yes, verified without approval | SQLite finish and tool state | `--session` | Omitted until attention identity is pinned |
+| Antigravity 1.1.12 | Yes | Global registration required; isolated proof did not load it | Pane dialogs and cache identity | `--conversation` | Omitted after trust and approval prompts |
+| Aider or Cursor | Yes when installed | Inbox only | Coarse or pane fallback | Unsupported | No |
