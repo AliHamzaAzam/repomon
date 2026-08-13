@@ -1,11 +1,22 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { TranscriptItem } from "../bindings";
+import { stripAnsi, trimBlankEdges } from "./ansi";
 import { daemonCall, subscribeDaemon, type OrchestratorStatus } from "../ipc/rpc";
 
 type RepomindView = "live" | "transcript";
 
-export default function RepomindPanel() {
+interface RepomindPanelProps {
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
+}
+
+/// Attention words the daemon reports when the pane is sitting on something only a human can
+/// answer. `end_of_turn` is deliberately not here: it means repomind finished talking, which the
+/// message box already handles.
+const AWAITING_ANSWER = ["permission", "decision"];
+
+export default function RepomindPanel(props: RepomindPanelProps) {
   const [status, setStatus] = createSignal<OrchestratorStatus>({ running: false });
   const [items, setItems] = createSignal<TranscriptItem[]>([]);
   const [liveOutput, setLiveOutput] = createSignal("");
@@ -16,6 +27,9 @@ export default function RepomindPanel() {
   let active = true;
   let timer: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: (() => void) | undefined;
+
+  const pane = () => trimBlankEdges(stripAnsi(liveOutput()));
+  const awaitingAnswer = () => AWAITING_ANSWER.includes(status().attention ?? "");
 
   function errorMessage(cause: unknown) {
     return cause instanceof Error ? cause.message : String(cause);
@@ -73,6 +87,27 @@ export default function RepomindPanel() {
     }
   }
 
+  /// Send a bare keystroke to repomind's pane.
+  ///
+  /// `send_input` types text and then Enter, so it cannot express "just press Enter" or "press
+  /// Escape" — and a dialog like Claude Code's trust prompt only accepts those. Without this the
+  /// panel could show the question and offer no way to answer it, which is exactly how a session
+  /// got stuck on "Do you trust this folder?".
+  async function sendKey(key: string, label = key) {
+    if (!status().running) return;
+    setBusy(`key:${label}`);
+    setError(null);
+    try {
+      await daemonCall("orchestrator.key", { key });
+      setView("live");
+      setTimeout(() => void refresh(), 250);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function send() {
     const text = message().trim();
     if (!text || !status().running) return;
@@ -92,14 +127,21 @@ export default function RepomindPanel() {
 
   return (
     <div class="flex min-h-0 flex-1 flex-col">
-      <div class="flex items-center justify-between border-b border-line px-3 py-2">
-        <div class="min-w-0">
-          <p class="truncate text-xs font-medium">{status().running ? status().headline ?? "Orchestrating fleet" : "Orchestrator offline"}</p>
-          <p class="mt-0.5 truncate font-mono text-[0.52rem] uppercase tracking-[0.08em] text-muted">
+      <div class="border-b border-line px-3 py-2">
+        <p class="text-xs leading-snug font-medium">{status().running ? status().headline ?? "Orchestrating fleet" : "Orchestrator offline"}</p>
+        <div class="mt-1.5 flex items-center gap-1">
+          <span class="mr-auto truncate font-mono text-[0.52rem] uppercase tracking-[0.08em] text-muted">
             {status().running ? `${status().agent ?? "agent"} ${status().model ?? ""}` : "local daemon session"}
-          </p>
-        </div>
-        <div class="flex items-center gap-1">
+          </span>
+          <Show when={props.onToggleFullscreen}>
+            <button
+              type="button"
+              class="focus-ring rounded border border-line px-2 py-1 font-mono text-[0.52rem] uppercase text-muted hover:text-foreground"
+              onClick={() => props.onToggleFullscreen?.()}
+              title={props.fullscreen ? "Exit full screen (Esc)" : "Full screen"}
+              aria-label={props.fullscreen ? "Exit full screen" : "Full screen"}
+            >{props.fullscreen ? "Exit" : "Expand"}</button>
+          </Show>
           <Show when={status().running}>
             <button type="button" class="focus-ring rounded border border-line px-2 py-1 font-mono text-[0.52rem] uppercase text-muted hover:text-foreground" onClick={() => void lifecycle("restart")} disabled={Boolean(busy())}>
               {busy() === "restart" ? "Restarting…" : "Restart"}
@@ -131,6 +173,37 @@ export default function RepomindPanel() {
         </Show>
       </div>
 
+      <Show when={status().running && awaitingAnswer()}>
+        <div class="flex items-center gap-1 border-b border-line px-3 py-2">
+          <span class="mr-1 font-mono text-[0.5rem] uppercase tracking-[0.08em] text-attention">Answer</span>
+          <For each={["1", "2", "3"]}>
+            {(digit) => (
+              <button
+                type="button"
+                class="focus-ring rounded border border-line px-1.5 py-0.5 font-mono text-[0.55rem] text-muted hover:text-foreground"
+                disabled={Boolean(busy())}
+                onClick={() => void sendKey(digit)}
+                title={`Pick option ${digit}`}
+              >{digit}</button>
+            )}
+          </For>
+          <button
+            type="button"
+            class="focus-ring rounded border border-signal/40 bg-signal/10 px-2 py-0.5 font-mono text-[0.55rem] uppercase text-signal"
+            disabled={Boolean(busy())}
+            onClick={() => void sendKey("Enter")}
+            title="Confirm the highlighted option"
+          >{busy() === "key:Enter" ? "…" : "Enter"}</button>
+          <button
+            type="button"
+            class="focus-ring rounded border border-line px-2 py-0.5 font-mono text-[0.55rem] uppercase text-muted hover:text-fault"
+            disabled={Boolean(busy())}
+            onClick={() => void sendKey("Escape")}
+            title="Cancel the prompt"
+          >Esc</button>
+        </div>
+      </Show>
+
       <div class="min-h-0 flex-1 overflow-y-auto p-3">
         <Show when={view() === "live"} fallback={
           <div class="space-y-3">
@@ -149,7 +222,13 @@ export default function RepomindPanel() {
             </Show>
           </div>
         }>
-          <pre aria-label="Repomind live pane" class="min-h-full whitespace-pre-wrap break-words font-mono text-[0.62rem] leading-relaxed text-muted">{liveOutput() || (status().running ? "Attaching to the live repomind pane…" : "Start repomind to attach to its live pane.")}</pre>
+          {/* Wrap in the sidebar, where a terminal line is far wider than the column and wrapping
+              is the only readable option; keep true terminal layout in full screen, where there is
+              room for it and reflowed box drawing would be the uglier choice. */}
+          <pre
+            aria-label="Repomind live pane"
+            class={`font-mono text-[0.62rem] leading-relaxed text-muted ${props.fullscreen ? "overflow-x-auto whitespace-pre" : "whitespace-pre-wrap break-words"}`}
+          >{pane() || (status().running ? "Attaching to the live repomind pane…" : "Start repomind to attach to its live pane.")}</pre>
         </Show>
       </div>
 

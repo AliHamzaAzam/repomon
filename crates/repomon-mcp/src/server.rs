@@ -7,6 +7,7 @@
 //! are enforced here in [`crate::policy`], not merely asked for in the persona.
 
 use chrono::Utc;
+use repomon_core::agent::approval;
 use repomon_core::agent::text::strip_ansi;
 use repomon_core::client::DaemonClient;
 use repomon_core::model::{AgentChoice, AgentSession, Lane, Repo, TranscriptItem};
@@ -64,6 +65,8 @@ fn journaled_tool(name: &str) -> bool {
             | "delete_lane"
             | "merge_lane"
             | "repo_notes_write"
+            | "playbook_save"
+            | "approval_allow"
     )
 }
 
@@ -94,6 +97,10 @@ impl ToolHandler for Server {
             "repo_notes" => self.repo_notes(args).await,
             "repo_notes_write" => self.repo_notes_write(args).await,
             "fleet_history" => self.fleet_history(args).await,
+            "playbook_save" => self.playbook_save(args).await,
+            "playbook_search" => self.playbook_search(args).await,
+            "approval_allow" => self.approval_allow(args).await,
+            "approval_rules" => self.approval_rules(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
         if let Some(jargs) = journal_args {
@@ -258,6 +265,26 @@ impl Server {
             ));
         }
 
+        // Verb-level duplicate-agent guard: refuse to drop a second agent into a lane that already
+        // has a live managed one (a clobber hazard). `force` is honored here only — never forwarded
+        // to the daemon, whose agent.spawn intentionally allows the TUI's multi-spawn.
+        if !a.force {
+            let lane: Lane = self
+                .client
+                .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+                .await
+                .map_err(rpc_err)?;
+            if let Some(live) = fleet::live_managed_agent(&lane) {
+                let window = live.tmux_window.as_deref().unwrap_or("?");
+                return Err(format!(
+                    "lane {} already has a live agent (window {window}); spawning another would \
+                     put two agents in one worktree. Pass force:true to override, or use \
+                     send_to_agent / read_agent to drive the existing one.",
+                    a.lane_id
+                ));
+            }
+        }
+
         let agent = match a.agent {
             Some(name) => name,
             None => self.default_agent().await,
@@ -266,7 +293,14 @@ impl Server {
             .client
             .call(
                 "agent.spawn",
-                Some(json!({ "lane_id": a.lane_id, "agent": agent, "task": a.task })),
+                Some(json!({
+                    "lane_id": a.lane_id,
+                    "agent": agent,
+                    "task": a.task,
+                    "effort": a.effort,
+                    "mode": a.mode,
+                    "model": a.model,
+                })),
             )
             .await
             .map_err(rpc_err)?;
@@ -365,17 +399,77 @@ impl Server {
             )
             .await
             .map_err(rpc_err)?;
-        Ok(json!({
+        let mut out = json!({
             "ok": true,
             "sent": key,
             "answered": answered,
             "prompt": primary.and_then(|s| s.pending_prompt.clone()),
-        }))
+        });
+        // Approval-policy learning, best-effort: record this verdict for Bash permission
+        // dialogs and surface the daemon's allowlist proposal when the streak reaches it.
+        if let Some(cmd) = primary
+            .and_then(|s| s.pending_dialog.as_ref())
+            .and_then(approval::dialog_command)
+        {
+            let verdict = if key == "Escape" { "deny" } else { "approve" };
+            if let Ok(res) = self
+                .client
+                .call(
+                    "approval.record",
+                    Some(json!({ "repo": lane.repo.name, "command": cmd, "verdict": verdict })),
+                )
+                .await
+            {
+                if res["propose"] == json!(true) {
+                    let pattern = res["pattern"].as_str().unwrap_or_default().to_string();
+                    out["proposal"] = json!(format!(
+                        "'{pattern}' has now been approved {} times in a row in {}. Ask the \
+                         human whether to allowlist it (the daemon would auto-approve matching \
+                         permissions from now on); ONLY after they explicitly agree, call \
+                         approval_allow {{repo: \"{}\", pattern: \"{pattern}\"}} and then \
+                         confirm with the returned token.",
+                        res["approvals"], lane.repo.name, lane.repo.name
+                    ));
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn interrupt_agent(&self, args: Value) -> Result<Value, String> {
         let a: InterruptAgentArgs = parse(args)?;
         self.policy.record_mutation()?;
+        // Approval-policy learning, best-effort: interrupting a pending Bash permission dialog
+        // is a deny verdict (denies reset streaks and never generalize). Read the dialog
+        // BEFORE the interrupt clears it.
+        if let Ok(lane) = self
+            .client
+            .call_typed::<Lane>("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+        {
+            let primary = fleet::primary_agent(&lane);
+            let attention = primary
+                .map(fleet::agent_attention)
+                .unwrap_or(Attention::None);
+            if attention == Attention::Permission {
+                if let Some(cmd) = primary
+                    .and_then(|s| s.pending_dialog.as_ref())
+                    .and_then(approval::dialog_command)
+                {
+                    let _ = self
+                        .client
+                        .call(
+                            "approval.record",
+                            Some(json!({
+                                "repo": lane.repo.name,
+                                "command": cmd,
+                                "verdict": "deny",
+                            })),
+                        )
+                        .await;
+                }
+            }
+        }
         if a.hard.unwrap_or(false) {
             self.client
                 .call(
@@ -462,6 +556,15 @@ impl Server {
     /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
     async fn delete_lane(&self, args: Value) -> Result<Value, String> {
         let a: DeleteLaneArgs = parse(args)?;
+        // Unattended runs never destroy work, regardless of autonomy (locked design decision:
+        // an unattended orchestrator must be MORE conservative than an attended one).
+        if self.policy.unattended {
+            return Err(
+                "this is an unattended standing run: deleting a lane is never allowed here. \
+                 Report the lane's state and recommend the delete to the human instead."
+                    .into(),
+            );
+        }
         // Defense-in-depth on top of the two-phase confirm below: gate on the same
         // structural-autonomy check create_lane/merge_lane use, checked before either phase so
         // supervised/read-only mode refuses early — before a token is ever minted.
@@ -532,6 +635,15 @@ impl Server {
 
     async fn merge_lane(&self, args: Value) -> Result<Value, String> {
         let a: MergeLaneArgs = parse(args)?;
+        // Unattended runs never land work, regardless of autonomy (locked design decision).
+        if self.policy.unattended {
+            return Err(
+                "this is an unattended standing run: merging is never allowed here. Verify \
+                 with lane_diff, then report the lane as merge-ready and recommend the merge \
+                 to the human instead."
+                    .into(),
+            );
+        }
         self.policy.record_mutation()?;
         if !self.policy.autonomy.allows_structural() {
             return Err(
@@ -731,6 +843,109 @@ impl Server {
         Ok(json!({ "entries": entries }))
     }
 
+    async fn playbook_save(&self, args: Value) -> Result<Value, String> {
+        let a: PlaybookSaveArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        let book: Value = self
+            .client
+            .call(
+                "playbook.save",
+                Some(json!({ "name": a.name, "content": a.content })),
+            )
+            .await
+            .map_err(rpc_err)?;
+        let status = book["status"].as_str().unwrap_or("draft").to_string();
+        let name = book["name"].as_str().unwrap_or_default().to_string();
+        let hint = if status == "approved" {
+            format!(
+                "saved as a pending revision of the approved playbook; the human must \
+                 re-approve it (repomon playbooks approve {name}) before it goes live"
+            )
+        } else {
+            format!(
+                "saved as a DRAFT; it is inert until the human runs: repomon playbooks \
+                 approve {name}"
+            )
+        };
+        Ok(json!({ "ok": true, "name": name, "status": status, "hint": hint }))
+    }
+
+    async fn playbook_search(&self, args: Value) -> Result<Value, String> {
+        let a: PlaybookSearchArgs = parse(args)?;
+        let res: Value = self
+            .client
+            .call("playbook.search", Some(json!({ "query": a.query })))
+            .await
+            .map_err(rpc_err)?;
+        let books: Vec<Value> = res["playbooks"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .map(|b| {
+                        json!({
+                            "name": b["name"],
+                            "content": b["content"],
+                            "approved_at": b["approved_at"],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut out = json!({ "playbooks": books });
+        if out["playbooks"].as_array().is_some_and(Vec::is_empty) {
+            out["hint"] = json!(
+                "no approved playbook matches. Plan from scratch; when the goal completes, \
+                 draft what worked with playbook_save so next time starts here."
+            );
+        }
+        Ok(out)
+    }
+
+    async fn approval_allow(&self, args: Value) -> Result<Value, String> {
+        let a: ApprovalAllowArgs = parse(args)?;
+        self.policy.record_mutation()?;
+        // Same two-phase confirm as delete_lane: allowlisting is a standing permission bypass,
+        // so repomind can never self-confirm — phase 1 mints a token to relay with the impact,
+        // phase 2 redeems it only for the exact (repo, pattern) it was minted for.
+        let flags = format!("approval:{}:{}", a.repo, a.pattern);
+        match a.confirm {
+            None => {
+                let token = self.policy.mint_confirm(0, &flags);
+                Ok(json!({
+                    "impact": format!(
+                        "Allowlisting '{}' in {} means the daemon will auto-approve matching \
+                         Bash permission dialogs from now on, attended or not, without asking \
+                         anyone (force-push / rm -rf / reset --hard still always escalate). \
+                         Relay this to the human; only after they explicitly agree, re-call \
+                         approval_allow with confirm=<token>.",
+                        a.pattern, a.repo
+                    ),
+                    "confirm_token": token,
+                }))
+            }
+            Some(token) => {
+                self.policy.take_confirm(&token, 0, &flags)?;
+                self.client
+                    .call(
+                        "approval.allow",
+                        Some(json!({ "repo": a.repo, "pattern": a.pattern })),
+                    )
+                    .await
+                    .map_err(rpc_err)?;
+                Ok(json!({ "ok": true, "repo": a.repo, "pattern": a.pattern }))
+            }
+        }
+    }
+
+    async fn approval_rules(&self, _args: Value) -> Result<Value, String> {
+        let res: Value = self
+            .client
+            .call("approval.list", None)
+            .await
+            .map_err(rpc_err)?;
+        Ok(json!({ "rules": res["rules"] }))
+    }
+
     /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
     /// or when the notes are empty, so callers can unconditionally `if let Some` — a notes
     /// hiccup must never fail the spawn/create it piggybacks on.
@@ -851,6 +1066,19 @@ struct SpawnAgentArgs {
     agent: Option<String>,
     #[serde(default)]
     task: Option<String>,
+    /// Reasoning-effort hint, translated daemon-side per agent kind. Optional.
+    #[serde(default)]
+    effort: Option<String>,
+    /// Launch mode: "default" (nothing), "auto", or "plan". Optional.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Model override (e.g. "opus"). Optional.
+    #[serde(default)]
+    model: Option<String>,
+    /// Spawn even if the lane already has a live managed agent. Verb-level only (never forwarded
+    /// to the daemon). Optional.
+    #[serde(default)]
+    force: bool,
 }
 #[derive(Deserialize)]
 struct SendToAgentArgs {
@@ -929,6 +1157,22 @@ struct FleetHistoryArgs {
     since_last_session: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct ApprovalAllowArgs {
+    repo: String,
+    pattern: String,
+    #[serde(default)]
+    confirm: Option<String>,
+}
+#[derive(Deserialize)]
+struct PlaybookSaveArgs {
+    name: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct PlaybookSearchArgs {
+    query: String,
 }
 #[derive(Deserialize)]
 struct RepoNotesArgs {
@@ -1066,8 +1310,9 @@ fn tally(lanes: &[LaneDigest]) -> Value {
 
 /// Map an `approve_agent` choice to the tmux key to send and a human-readable summary.
 /// Default (absent / "yes") selects the highlighted option (Yes); "no" cancels with Escape; a
-/// number selects that menu option.
-fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
+/// number selects that menu option. Public so the `repomon lane approve` CLI verb reuses the exact
+/// same mapping instead of reimplementing it.
+pub fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
     match choice {
         None => Ok(("Enter".into(), "yes (default)".into())),
         Some(Value::String(s)) => {
@@ -1099,7 +1344,8 @@ fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
 /// otherwise the primary (most-attention-worthy) managed session's window. Errors when the resolved
 /// session is external or windowless, so we never blind-send to the daemon's default (first) window
 /// — which in a multi-agent lane may be a different session than the one the orchestrator inspected.
-fn target_window(
+/// Public so the `repomon lane send|approve` CLI verbs reuse it (and its external-session refusal).
+pub fn target_window(
     primary: Option<&AgentSession>,
     explicit: Option<String>,
 ) -> Result<String, String> {
@@ -1250,13 +1496,18 @@ fn tool_catalog() -> Vec<ToolDef> {
             description: "Start a coding agent working on a lane with a concrete task. Fold the \
                 repo's notes (from create_lane/repo_notes) into the task text. Counts against \
                 the concurrent-agent cap. Omit 'agent' to use the configured default (usually \
-                claude-code). The result embeds repo_notes (the repo's durable notes) when any \
-                exist — use them in follow-up instructions too.",
+                claude-code). Optional mode/model/effort tune the launch. The result embeds \
+                repo_notes (the repo's durable notes) when any exist; use them in follow-up \
+                instructions too.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane (worktree) to work in." },
                     "agent": { "type": "string", "description": "Agent kind/name, e.g. claude-code or codex. Optional." },
-                    "task": { "type": "string", "description": "The task prompt to start the agent with." }
+                    "task": { "type": "string", "description": "The task prompt to start the agent with." },
+                    "mode": { "type": "string", "enum": ["default", "auto", "plan"], "description": "Launch mode: default (no flag), auto (accept edits / full-auto), or plan. Per-kind; ignored for unknown agents." },
+                    "model": { "type": "string", "description": "Model override (e.g. opus). Optional." },
+                    "effort": { "type": "string", "description": "Reasoning effort, translated per agent kind. Claude: low|medium|high|xhigh|max|ultracode; codex: low|medium|high. Optional." },
+                    "force": { "type": "boolean", "description": "Spawn even if the lane already has a live agent (otherwise refused, to avoid two agents in one worktree)." }
                 }),
                 &["lane_id"],
             ),
@@ -1430,6 +1681,57 @@ fn tool_catalog() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "playbook_save",
+            description: "Draft a playbook after a goal completes: the goal pattern, per-repo \
+                steps, worker prompts that worked, verification steps, and failure modes hit. \
+                Saved as a DRAFT that is inert until the human approves it (repomon playbooks \
+                approve <name>); saving over an approved playbook stashes a pending revision \
+                and the approved text stays live. Max 16 KB; kebab-case names.",
+            input_schema: obj(
+                json!({
+                    "name": { "type": "string", "description": "Stable kebab-case name, e.g. release-all-changed-repos (1-64 chars of [A-Za-z0-9._-])." },
+                    "content": { "type": "string", "description": "The playbook markdown: pattern, steps, prompts, verification, failure modes." }
+                }),
+                &["name", "content"],
+            ),
+        },
+        ToolDef {
+            name: "playbook_search",
+            description: "Search APPROVED playbooks (drafts never appear). Call before planning \
+                any multi-lane or multi-step goal; when one matches, follow it and tell the \
+                human which playbook you're using. If reality deviates, save a revised draft \
+                with playbook_save rather than silently diverging.",
+            input_schema: obj(
+                json!({
+                    "query": { "type": "string", "description": "Substring over names and content, e.g. 'release' or 'fix CI'." }
+                }),
+                &["query"],
+            ),
+        },
+        ToolDef {
+            name: "approval_allow",
+            description: "Allowlist a routine Bash command pattern for a repo, after explicit \
+                human agreement: the daemon will then auto-approve matching permission dialogs \
+                (they stop reaching anyone). Two-phase: call without confirm to get an impact \
+                summary + token to relay to the human; re-call with confirm=<token> only after \
+                they say yes. Force-push / rm -rf / reset --hard always escalate regardless.",
+            input_schema: obj(
+                json!({
+                    "repo": { "type": "string", "description": "Repo name the rule applies to." },
+                    "pattern": { "type": "string", "description": "The command pattern from approve_agent's proposal (first two tokens, e.g. 'cargo test')." },
+                    "confirm": { "type": "string", "description": "The token from a prior call without confirm. Omit to get the impact summary + token first." }
+                }),
+                &["repo", "pattern"],
+            ),
+        },
+        ToolDef {
+            name: "approval_rules",
+            description: "List the confirmed per-repo approval rules (patterns the daemon \
+                auto-approves). Use to answer 'what gets auto-approved?' or before proposing a \
+                new rule.",
+            input_schema: obj(json!({}), &[]),
+        },
+        ToolDef {
             name: "wait_for_change",
             description: "Block until the fleet meaningfully changes (a status/attention edge) or \
                 the timeout elapses, then return the deltas. This is how you watch agents without \
@@ -1465,6 +1767,42 @@ mod tests {
         assert!(
             crate::PERSONA.contains("since_you_last_looked"),
             "persona never mentions the recap block"
+        );
+    }
+
+    /// The persona must teach the playbook cycle: search before multi-lane goals, draft after
+    /// completed ones, human approval gates everything.
+    #[test]
+    fn persona_documents_playbooks() {
+        assert!(
+            crate::PERSONA.contains("playbook_search"),
+            "persona never mentions playbook_search"
+        );
+        assert!(
+            crate::PERSONA.contains("playbook_save"),
+            "persona never mentions playbook_save"
+        );
+    }
+
+    /// The unattended addendum must set the report-and-recommend posture and name the
+    /// refused tools, since the server hard-refuses them.
+    #[test]
+    fn unattended_addendum_documents_the_bounds() {
+        assert!(crate::UNATTENDED_ADDENDUM.contains("merge_lane"));
+        assert!(crate::UNATTENDED_ADDENDUM.contains("RECOMMEND"));
+        assert!(crate::UNATTENDED_ADDENDUM.contains("briefing"));
+    }
+
+    /// The persona must teach the approval-policy loop and its hard limits.
+    #[test]
+    fn persona_documents_approval_policy() {
+        assert!(
+            crate::PERSONA.contains("approval_allow"),
+            "persona never mentions approval_allow"
+        );
+        assert!(
+            crate::PERSONA.contains("always escalate"),
+            "persona must state the always-escalate guarantee"
         );
     }
 

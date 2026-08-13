@@ -68,6 +68,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+,` | Open settings |
 | `mod+4` | Toggle extensions |
 | `mod+5` | Toggle repomind |
+| `mod+shift+5` | Repomind full screen |
 | `mod+6` | Cycle theme (system, dark, light) |
 | `mod+k` | Open the control center |
 
@@ -133,6 +134,17 @@ bottom.
 **Notifications** has a master switch plus one toggle per event: needs-you, rate-limited, resumed,
 idle, sound, show-why, coalescing, click-to-focus, and whether subagents count.
 
+Mission Control asks for notification permission on first launch. That request is what registers
+it with Notification Center, and it is why its alerts carry the repomon icon; decline it and the
+app posts nothing, leaving only the daemon's fallback below.
+
+It also holds **System popup when no window is open**. The daemon posts its own OS notification
+when no UI is covering one, which on macOS goes out through `osascript` and so arrives from Script
+Editor, wearing Script Editor's icon. Turn it off and that popup stops: Mission Control still
+notifies under its own identity while it is running, and the TUI still pops its own while it is on
+screen. The trade is that a machine running neither UI stops notifying at the OS level, which is
+why it ships on.
+
 **Appearance** sets the accent from a swatch or a custom hex value, picks the repomind agent and
 model, and holds **Sort projects by activity**: with it on, sidebar project groups order by their
 most recent lane activity so whatever you are working in floats to the top. Only the groups move.
@@ -175,6 +187,77 @@ first, with a search box over the history.
 
 An entry that names a lane is clickable and jumps you to that lane. Opening the tab shows the
 recent tail rather than a search, so it doubles as "what happened while I was away".
+
+## Playbooks
+
+When repomind finishes a multi-lane goal it drafts a playbook: the pattern, the per-repo steps,
+the worker prompts that worked, the failure modes it hit. **Control center > Playbooks** lists
+them.
+
+A draft is inert. repomind is only offered a playbook back once you approve it, which is
+deliberate: instructions the orchestrator wrote feeding into its own future prompts unreviewed is a
+self-poisoning path. Approve is only reachable once you have opened a playbook and its text is on
+screen, so nothing can be waved through from the list.
+
+A playbook that was approved and then re-drafted reads **approved · revision pending**: the old
+approved text is still what repomind follows, and the revision waits for you. Deleting asks first,
+since the procedure took real work to earn; approving does not, because reading it and clicking
+Approve is the review.
+
+## Standing orchestrations
+
+**Control center > Schedules** runs repomind on a timer without you starting it. Add one with a
+spec, a goal, and optionally an action cap; results arrive as notifications and land in the
+journal.
+
+The spec grammar is `daily HH:MM`, `weekdays HH:MM`, `weekends HH:MM`, `every Nm`, or `every Nh`.
+The app deliberately does not re-implement that grammar to pre-validate your input, because a
+second copy would drift from the daemon's; a bad spec comes back with an error that names the
+accepted forms.
+
+Unattended runs are bounded harder than attended ones: a lower action cap, and repomind refuses to
+merge or delete a lane when nobody is watching. It reports and recommends instead. Leaving the cap
+blank uses the daemon's conservative default rather than sending zero, which would produce a
+schedule that fires and does nothing.
+
+## Approval policy
+
+**Control center > Approvals** lists the command patterns repomind may approve on your behalf,
+grouped by project. These are learned: after you approve the same pattern in the same repo enough
+times, repomind proposes a rule and you confirm it. Revoke any of them here.
+
+Two limits are structural, not settings. Destructive commands always reach you no matter what is
+listed here, and a denial is never generalised into an auto-deny, it just keeps escalating. Rules
+are per-repo, so `cargo test` approved in two projects is two rules and revoking one leaves the
+other standing.
+
+## Repomind
+
+The repomind panel lives in the right sidebar and opens with `mod+5`. `mod+shift+5` blows it up to
+full screen, and Escape or **Exit** brings it back; going full screen opens the panel if it was
+closed, so it has somewhere to shrink back to.
+
+**Answering prompts.** Repomind's agent sometimes stops on something only you can answer, like
+Claude Code's "Do you trust this folder?" trust prompt. The message box types text and presses
+Enter, which cannot express "just press Enter" or "press Escape", so a prompt like that used to be
+unanswerable from the app: the question was visible and there was no way through it. The key row
+above the pane sends those directly. `1` `2` `3` pick a numbered option, **Enter** confirms the
+highlighted one, and **Esc** cancels. The row's label turns amber and reads **Answer** while the
+daemon reports the pane is waiting on a permission or a decision.
+
+Note that the panel's **Esc** button sends Escape to repomind, while pressing Escape on the
+keyboard leaves full screen. They are deliberately different: one is aimed at the agent, the other
+at the window.
+
+The live pane is a raw terminal capture, so it is stripped of escape sequences and trimmed of the
+blank rows a full-pane grab pads with. Colour is lost, but the text is readable; the alternative
+was the literal bytes.
+
+Wrapping depends on width. In the sidebar a terminal line is far wider than the column, so it
+wraps, which is the only readable option there. Full screen keeps the true terminal layout and
+scrolls sideways instead, because there is room for it and reflowed box drawing looks worse than a
+scrollbar. The key row appears only while something is actually waiting on you; the message box is
+the input the rest of the time.
 
 ## Extensions
 

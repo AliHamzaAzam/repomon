@@ -54,6 +54,7 @@ function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(true);
+  const [repomindFull, setRepomindFull] = createSignal(false);
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const [appVersion, setAppVersion] = createSignal("");
@@ -116,6 +117,12 @@ function App(props: AppProps) {
       case "panel.settings": actions.openSettings(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
       case "panel.repomind": setRepomindOpen((open) => !open); break;
+      case "panel.repomindFull":
+        // Going full screen implies opening the panel: the aside is where it shrinks back to, and
+        // collapsing into a hidden panel would look like repomind vanished.
+        if (!repomindFull()) setRepomindOpen(true);
+        setRepomindFull((full) => !full);
+        break;
       case "panel.theme": cycleTheme(); break;
       case "layout.focused": workspace.chooseLayout("focused"); break;
       case "layout.split": workspace.chooseLayout("split"); break;
@@ -193,6 +200,19 @@ function App(props: AppProps) {
     applyTheme(value);
   };
 
+  createEffect(() => {
+    if (!repomindFull()) return;
+    // The panel's own "Esc" button sends Escape to repomind's pane; this bare Escape is the
+    // window-level gesture for leaving full screen, which is what the Exit button advertises.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setRepomindFull(false);
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
   const navigateFleet = (event: KeyboardEvent) => {
     const target = event.target;
     if (
@@ -233,9 +253,6 @@ function App(props: AppProps) {
         </div>
 
         <div class="flex items-center gap-2">
-          <span class="rounded-full border border-line bg-raised px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.14em] text-muted">
-            Local
-          </span>
           <ControlCenter fleet={fleet} notifications={notifications} actions={actions} />
           <button
             type="button"
@@ -315,11 +332,17 @@ function App(props: AppProps) {
             <span class="section-label">Repomind</span>
             <span class="size-1.5 rounded-full bg-muted/50" aria-hidden="true" />
           </div>
-          <Show when={repomindOpen()}>
-            <RepomindPanel />
+          <Show when={repomindOpen() && !repomindFull()}>
+            <RepomindPanel onToggleFullscreen={() => setRepomindFull(true)} />
           </Show>
         </aside>
       </div>
+
+      <Show when={repomindFull()}>
+        <div class="fixed inset-0 z-50 flex flex-col bg-background" role="dialog" aria-modal="true" aria-label="Repomind, full screen">
+          <RepomindPanel fullscreen onToggleFullscreen={() => setRepomindFull(false)} />
+        </div>
+      </Show>
 
       <footer
         role="status"

@@ -33,6 +33,7 @@ const NOTIFY_TOGGLES: Array<[keyof ConfigView, string]> = [
   ["notify_show_why", "Show why (last message)"],
   ["notify_coalesce", "Coalesce bursts"],
   ["notify_click_focus", "Click to focus"],
+  ["notify_desktop_fallback", "System popup when no window is open"],
   ["notify_subagents", "Include subagents"],
 ];
 

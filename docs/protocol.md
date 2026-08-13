@@ -200,13 +200,14 @@ main checkout's current branch name; `merge_base` a short hash of `git merge-bas
 `commits` is `git log --oneline <merge_base>..HEAD`, newline-joined and capped at 20 lines
 (`commits_truncated: true` present only when there were more). `committed_stat` is `git diff
 --stat <merge_base>..HEAD`; `uncommitted_stat` is `git diff HEAD --stat` (staged + unstaged).
-`untracked` is the lane's untracked-file *count* only — untracked file **contents** never
-appear in `patch` or either `*_stat` field. `patch` (`git diff HEAD` text, capped at
+`untracked` is the lane's untracked-file *count* only, computed live alongside the stats (one
+snapshot is self-consistent) — untracked file **contents** never appear in `patch` or either
+`*_stat` field. `patch` (`git diff HEAD` text, capped at
 `max_patch_chars`, char-boundary safe) and `patch_truncated: true` are present only when
 `include_patch: true` and the patch was actually cut; `max_patch_chars` is server-clamped to a
 ceiling of 20000. Errors (`-32000`) when the base branch shares no common history with `HEAD`,
-or the repo's main checkout has no current branch (detached HEAD). Local Unix socket only — not
-on the remote bridge allowlist.
+or the repo's main checkout has no current branch (detached HEAD). Allowed over the remote
+bridge — it joined the allowlist with the rest of fleet control (see "Remote transport" above).
 
 `AccountUsage`: `{ key, label, report: UsageReport, age_secs }` — `key` is how a client attributes
 usage to the focused agent: a Claude agent's config dir (`"default"` for `~/.claude`), or `"codex"`.

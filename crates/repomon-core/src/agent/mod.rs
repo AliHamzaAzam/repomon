@@ -6,6 +6,7 @@
 //! [`CodexMonitor`] are best-effort (see `docs/agents.md`). For any repomon-spawned agent the
 //! daemon also falls back to "is the tmux window alive?".
 
+pub mod approval;
 pub mod attention;
 pub mod backend;
 pub mod claude;
@@ -30,7 +31,7 @@ pub use backend::{
 };
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
-pub use tmux::{TmuxRuntime, shell_quote};
+pub use tmux::{TmuxRuntime, WindowMeta, shell_quote};
 pub use usage::{AccountUsage, UsageReport, UsageWindow, parse_codex_status, parse_usage};
 #[cfg(windows)]
 pub use windows::WindowsBackend;

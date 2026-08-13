@@ -156,6 +156,18 @@ impl Fleet {
     }
 }
 
+/// The lane's live, repomon-managed agent, if any: a session that has a tmux window (managed), an
+/// active status (running/waiting/rate-limited per [`is_active_status`]), and is not external.
+///
+/// Used by the one-shot spawn entry points (CLI `lane spawn`, MCP `spawn_agent`) to refuse silently
+/// dropping a second agent into a worktree that already has one working. Deliberately NOT consulted
+/// daemon-side: the TUI's `do_spawn` / `e` keybind intentionally fan a second managed agent into a
+/// lane through the same `agent.spawn` RPC, and a daemon-level refusal would break that.
+pub fn live_managed_agent(lane: &Lane) -> Option<&AgentSession> {
+    lane.agent_sessions
+        .iter()
+        .find(|s| s.tmux_window.is_some() && is_active_status(&s.status) && !s.external)
+}
 /// Project a live `Lane` into its compact digest.
 pub fn project_lane(lane: &Lane, now: DateTime<Utc>) -> LaneDigest {
     let agent = primary_agent(lane).map(|s| project_agent(lane, s, now));
@@ -462,6 +474,44 @@ mod tests {
             last_activity_at: Utc::now(),
             pinned: false,
         }
+    }
+
+    #[test]
+    fn live_managed_agent_detects_a_working_managed_session() {
+        // A managed (windowed) active session is detected, and its window is reported.
+        let lane = lane_with(vec![sess(AgentStatus::Running, None)]);
+        assert_eq!(
+            live_managed_agent(&lane).and_then(|s| s.tmux_window.as_deref()),
+            Some("lane-1")
+        );
+        let lane = lane_with(vec![sess(AgentStatus::Waiting, Some("proceed?"))]);
+        assert!(live_managed_agent(&lane).is_some());
+
+        // Idle-only -> none (idle is not "live" for the clobber check).
+        assert!(live_managed_agent(&lane_with(vec![sess(AgentStatus::Idle, None)])).is_none());
+
+        // Active but windowless -> none (not repomon-managed).
+        let windowless = {
+            let mut s = sess(AgentStatus::Running, None);
+            s.tmux_window = None;
+            s
+        };
+        assert!(live_managed_agent(&lane_with(vec![windowless])).is_none());
+
+        // Active managed but external -> none (don't refuse over the user's own claude).
+        let external = {
+            let mut s = sess(AgentStatus::Running, None);
+            s.external = true;
+            s
+        };
+        assert!(live_managed_agent(&lane_with(vec![external])).is_none());
+
+        // Multi-session: picks the managed active one among idle siblings.
+        let lane = lane_with(vec![
+            sess(AgentStatus::Idle, None),
+            sess(AgentStatus::Running, None),
+        ]);
+        assert!(live_managed_agent(&lane).is_some());
     }
 
     #[test]

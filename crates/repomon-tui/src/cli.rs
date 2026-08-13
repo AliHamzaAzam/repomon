@@ -6,9 +6,12 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use clap::Subcommand;
-use repomon_core::model::{Lane, Repo};
+use repomon_core::model::{AgentChoice, Lane, LaneId, Repo, TranscriptItem};
 use repomon_core::{Config, config, service};
+use repomon_mcp::fleet::{self, Attention};
+use repomon_mcp::server::{approve_key, target_window};
 use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
@@ -62,6 +65,14 @@ pub enum Command {
         /// Cap on how many agents repomind may run at once (default 4).
         #[arg(long)]
         max_agents: Option<usize>,
+        /// Instead of launching a session, register a standing schedule for this prompt (e.g.
+        /// "weekdays 09:00", "daily 21:00", "every 2h"). The daemon then runs it headless,
+        /// bounded, and delivers the result as a notification.
+        #[arg(long)]
+        schedule: Option<String>,
+        /// Action cap for the scheduled standing run (default 10, max 50).
+        #[arg(long)]
+        max_actions: Option<u32>,
         /// Override the model for the orchestrator session (e.g. opus, sonnet).
         #[arg(long)]
         model: Option<String>,
@@ -70,6 +81,21 @@ pub enum Command {
     },
     /// (Windows) Attach this console to an agent host window — raw proxy; F12 detaches.
     AttachHost { window: String },
+    /// List or remove standing-orchestration schedules (see `orchestrate --schedule`).
+    Schedules {
+        #[command(subcommand)]
+        cmd: SchedulesCmd,
+    },
+    /// Manage the per-repo approval allowlist (patterns the daemon auto-approves).
+    Approvals {
+        #[command(subcommand)]
+        cmd: ApprovalsCmd,
+    },
+    /// Review and approve orchestrator-drafted playbooks (procedural memory).
+    Playbooks {
+        #[command(subcommand)]
+        cmd: PlaybooksCmd,
+    },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
         /// Shell to generate completions for.
@@ -105,6 +131,102 @@ pub enum LaneCmd {
         #[arg(long)]
         delete_branch: bool,
     },
+    /// Spawn an agent into a lane with a task (mirrors the MCP `spawn_agent` tool).
+    Spawn {
+        /// The lane (worktree) id to work in.
+        #[arg(long)]
+        lane: LaneId,
+        /// Agent kind/name (e.g. claude-code, codex). Defaults to the configured default agent.
+        #[arg(long)]
+        agent: Option<String>,
+        /// The task prompt. Use "-" or omit (when piped) to read the prompt from stdin.
+        #[arg(long)]
+        task: Option<String>,
+        /// Launch/permission mode (translated per agent kind; `default` emits nothing).
+        #[arg(long, value_enum, default_value_t = SpawnMode::Default)]
+        mode: SpawnMode,
+        /// Model override forwarded to the agent (e.g. opus).
+        #[arg(long)]
+        model: Option<String>,
+        /// Reasoning effort, translated per agent kind. Claude: low|medium|high|xhigh|max|ultracode;
+        /// codex: low|medium|high (higher levels clamp to high).
+        #[arg(long)]
+        effort: Option<String>,
+        /// Spawn even if the lane already has a live managed agent (otherwise refused, to avoid
+        /// putting two agents in one worktree).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Type an instruction into a lane's agent and submit it (mirrors MCP `send_to_agent`).
+    Send {
+        /// The lane (worktree) id to send to.
+        #[arg(long)]
+        lane: LaneId,
+        /// The text to send. Use "-" or omit (when piped) to read it from stdin.
+        #[arg(long)]
+        text: Option<String>,
+        /// Insert the text without pressing Enter (e.g. to paste a path).
+        #[arg(long)]
+        no_submit: bool,
+        /// Target a specific agent window in a multi-agent lane (default: the primary session).
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Answer a pending permission/decision dialog (mirrors MCP `approve_agent`).
+    Approve {
+        /// The lane (worktree) id to answer.
+        #[arg(long)]
+        lane: LaneId,
+        /// "yes" (default), "no", or an option number.
+        #[arg(long)]
+        choice: Option<String>,
+        /// Target a specific agent window in a multi-agent lane (default: the primary session).
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Interrupt a lane's agent: Escape (soft) by default, or Ctrl-C with --hard (mirrors
+    /// MCP `interrupt_agent`).
+    Interrupt {
+        /// The lane (worktree) id to interrupt.
+        #[arg(long)]
+        lane: LaneId,
+        /// Send Ctrl-C instead of Escape.
+        #[arg(long)]
+        hard: bool,
+        /// Target a specific agent window in a multi-agent lane (default: the lane's first slot).
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Read a lane's agent: status, attention, the open dialog, and a transcript tail
+    /// (mirrors MCP `read_agent`).
+    Read {
+        /// The lane (worktree) id to read.
+        #[arg(long)]
+        lane: LaneId,
+        /// How many transcript items to show (default 12).
+        #[arg(long, default_value_t = 12)]
+        transcript_limit: usize,
+    },
+}
+
+/// `lane spawn --mode`: a constrained launch mode so clap rejects bad values at parse time. The
+/// daemon translates it per agent kind; `Default` is sent as `"default"` and emits no flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum SpawnMode {
+    Default,
+    Auto,
+    Plan,
+}
+
+impl SpawnMode {
+    /// The lowercase wire value forwarded to the daemon's `agent.spawn`.
+    fn as_wire(self) -> &'static str {
+        match self {
+            SpawnMode::Default => "default",
+            SpawnMode::Auto => "auto",
+            SpawnMode::Plan => "plan",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -206,13 +328,25 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
+        Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
+        Command::Schedules { cmd } => handle_schedules(cmd, config, socket).await?,
+        Command::Approvals { cmd } => handle_approvals(cmd, config, socket).await?,
         Command::Orchestrate {
             agent,
             autonomy,
             max_agents,
+            schedule,
+            max_actions,
             model,
             prompt,
-        } => handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt).await?,
+        } => {
+            if let Some(spec) = schedule {
+                handle_schedule_add(config, socket, spec, max_actions, prompt).await?
+            } else {
+                handle_orchestrate(config, socket, agent, autonomy, max_agents, model, prompt)
+                    .await?
+            }
+        }
         Command::AttachHost { window } => attach_client::run(&config.tmux_session, &window).await?,
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -570,6 +704,228 @@ fn tailscale_ip() -> Option<String> {
     None
 }
 
+#[derive(Subcommand)]
+pub enum SchedulesCmd {
+    /// List schedules (id, spec, next run, prompt).
+    List,
+    /// Remove a schedule by id.
+    Remove { id: i64 },
+}
+
+/// `repomon orchestrate --schedule <spec> "<prompt>"` — register a standing run.
+async fn handle_schedule_add(
+    config: &Config,
+    socket: Option<PathBuf>,
+    spec: String,
+    max_actions: Option<u32>,
+    prompt: Option<String>,
+) -> Result<()> {
+    let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
+        anyhow::bail!(
+            "--schedule needs a prompt, e.g. repomon orchestrate --schedule \"weekdays 09:00\" \"morning fleet briefing\""
+        );
+    };
+    let client = connect(socket, config).await?;
+    let res = client
+        .call(
+            "schedule.add",
+            Some(json!({ "spec": spec, "prompt": prompt, "max_actions": max_actions })),
+        )
+        .await?;
+    println!(
+        "scheduled #{} — {} (next run {})",
+        res["id"],
+        res["spec"].as_str().unwrap_or("?"),
+        res["next_run"].as_str().unwrap_or("?")
+    );
+    println!("the daemon runs it headless and bounded; results arrive as notifications");
+    Ok(())
+}
+
+async fn handle_schedules(
+    cmd: SchedulesCmd,
+    config: &Config,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        SchedulesCmd::List => {
+            let res = client.call("schedule.list", None).await?;
+            let scheds = res
+                .get("schedules")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if scheds.is_empty() {
+                println!(
+                    "no schedules (add one with: repomon orchestrate --schedule \"weekdays 09:00\" \"morning fleet briefing\")"
+                );
+                return Ok(());
+            }
+            for sc in scheds {
+                println!(
+                    "#{}\t{}\tnext {}\t{}",
+                    sc["id"],
+                    sc["spec"].as_str().unwrap_or("?"),
+                    sc["next_run"].as_str().unwrap_or("?"),
+                    sc["prompt"].as_str().unwrap_or("")
+                );
+            }
+        }
+        SchedulesCmd::Remove { id } => {
+            client
+                .call("schedule.remove", Some(json!({ "id": id })))
+                .await?;
+            println!("removed schedule #{id}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
+pub enum ApprovalsCmd {
+    /// List confirmed approval rules (repo, pattern, since).
+    List,
+    /// Allowlist a command pattern for a repo (the daemon then auto-approves matches).
+    Allow { repo: String, pattern: String },
+    /// Remove an approval rule.
+    Remove { repo: String, pattern: String },
+}
+
+/// `repomon approvals ...` — the CLI surface over the approval allowlist. The same rules feed
+/// the daemon's auto-approve; force-push/rm -rf/reset --hard always escalate regardless.
+async fn handle_approvals(
+    cmd: ApprovalsCmd,
+    config: &Config,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        ApprovalsCmd::List => {
+            let res = client.call("approval.list", None).await?;
+            let rules = res
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rules.is_empty() {
+                println!("no approval rules (repomind proposes them after 3 consistent approvals)");
+                return Ok(());
+            }
+            for r in rules {
+                println!(
+                    "{}\t{}\tsince {}",
+                    r["repo"].as_str().unwrap_or("?"),
+                    r["pattern"].as_str().unwrap_or("?"),
+                    r["created_at"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        ApprovalsCmd::Allow { repo, pattern } => {
+            client
+                .call(
+                    "approval.allow",
+                    Some(json!({ "repo": repo, "pattern": pattern })),
+                )
+                .await?;
+            println!(
+                "allowlisted '{pattern}' in {repo} — the daemon now auto-approves matching \
+                 Bash permissions (destructive commands still always escalate)"
+            );
+        }
+        ApprovalsCmd::Remove { repo, pattern } => {
+            client
+                .call(
+                    "approval.remove",
+                    Some(json!({ "repo": repo, "pattern": pattern })),
+                )
+                .await?;
+            println!("removed approval rule '{pattern}' in {repo}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
+pub enum PlaybooksCmd {
+    /// List all playbooks (name, status, updated, pending revision marker).
+    List,
+    /// Print a playbook's content (and its pending revision, if any).
+    Show { name: String },
+    /// Approve a draft (or promote an approved playbook's pending revision).
+    Approve { name: String },
+    /// Delete a playbook outright.
+    Delete { name: String },
+}
+
+/// `repomon playbooks ...` — the human approval surface for orchestrator-drafted playbooks.
+/// Drafts are inert until approved here (or via the daemon RPC this drives).
+async fn handle_playbooks(
+    cmd: PlaybooksCmd,
+    config: &Config,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        PlaybooksCmd::List => {
+            let res = client.call("playbook.list", None).await?;
+            let books = res
+                .get("playbooks")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if books.is_empty() {
+                println!("no playbooks yet (repomind drafts them after completed goals)");
+                return Ok(());
+            }
+            for b in books {
+                let name = b["name"].as_str().unwrap_or("?");
+                let status = b["status"].as_str().unwrap_or("?");
+                let updated = b["updated_at"].as_str().unwrap_or("?");
+                let pending = if b["draft_content"].is_string() {
+                    "  (pending revision)"
+                } else {
+                    ""
+                };
+                println!("{name}	{status}	{updated}{pending}");
+            }
+        }
+        PlaybooksCmd::Show { name } => {
+            let res = client.call("playbook.list", None).await?;
+            let books = res
+                .get("playbooks")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let Some(b) = books.iter().find(|b| b["name"].as_str() == Some(&*name)) else {
+                anyhow::bail!("no playbook named {name:?} (see `repomon playbooks list`)");
+            };
+            println!(
+                "# {} [{}]\n\n{}",
+                name,
+                b["status"].as_str().unwrap_or("?"),
+                b["content"].as_str().unwrap_or("")
+            );
+            if let Some(rev) = b["draft_content"].as_str() {
+                println!("\n--- pending revision (approve to promote) ---\n\n{rev}");
+            }
+        }
+        PlaybooksCmd::Approve { name } => {
+            client
+                .call("playbook.approve", Some(json!({ "name": name })))
+                .await?;
+            println!("approved playbook {name} (repomind will follow it from the next search)");
+        }
+        PlaybooksCmd::Delete { name } => {
+            client
+                .call("playbook.delete", Some(json!({ "name": name })))
+                .await?;
+            println!("deleted playbook {name}");
+        }
+    }
+    Ok(())
+}
+
 async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
     let client = connect(socket, config).await?;
     match cmd {
@@ -634,8 +990,235 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
                 .await?;
             println!("deleted lane {} (id={})", lane, target.id);
         }
+        LaneCmd::Spawn {
+            lane,
+            agent,
+            task,
+            mode,
+            model,
+            effort,
+            force,
+        } => {
+            // Verb-level duplicate-agent guard: refuse to spawn into a lane that already has a live
+            // managed agent (which would put two agents in one worktree), unless --force. This is
+            // intentionally NOT enforced daemon-side — the TUI multi-spawns a lane on purpose.
+            if !force {
+                let target: Lane = lane_get(&client, lane).await?;
+                if let Some(live) = fleet::live_managed_agent(&target) {
+                    let window = live.tmux_window.as_deref().unwrap_or("?");
+                    return Err(anyhow!(
+                        "lane {lane} already has a live agent (window {window}); spawning another \
+                         would put two agents in one worktree. Re-run with --force to spawn anyway, \
+                         or use `lane send`/`lane read` to drive the existing one."
+                    ));
+                }
+            }
+            // Mirror the MCP `spawn_agent` tool: resolve the agent (configured default when
+            // omitted) and issue the same `agent.spawn` daemon request. The daemon translates
+            // mode/model/effort per agent kind (`default` mode emits nothing).
+            let task = read_task(task)?;
+            let agent = match agent {
+                Some(name) => name,
+                None => default_agent(&client).await,
+            };
+            let resp = client
+                .call(
+                    "agent.spawn",
+                    Some(json!({
+                        "lane_id": lane,
+                        "agent": agent,
+                        "task": task,
+                        "mode": mode.as_wire(),
+                        "model": model,
+                        "effort": effort,
+                    })),
+                )
+                .await?;
+            // The daemon echoes back the tmux window it launched the agent into.
+            match resp.get("window").and_then(Value::as_str) {
+                Some(window) => println!("spawned {agent} in lane {lane} (window {window})"),
+                None => println!("spawned {agent} in lane {lane}"),
+            }
+        }
+        LaneCmd::Send {
+            lane,
+            text,
+            no_submit,
+            window,
+        } => {
+            // Mirror MCP `send_to_agent`: resolve the primary window (reusing target_window's
+            // external-session refusal) and issue the same `agent.send_input` request.
+            let text = read_task(text)?.ok_or_else(|| {
+                anyhow!("no text to send — pass --text <s>, --text -, or pipe it on stdin")
+            })?;
+            let target: Lane = lane_get(&client, lane).await?;
+            let window =
+                target_window(fleet::primary_agent(&target), window).map_err(|e| anyhow!(e))?;
+            client
+                .call(
+                    "agent.send_input",
+                    Some(json!({
+                        "lane_id": lane,
+                        "text": text,
+                        "enter": !no_submit,
+                        "window": window,
+                    })),
+                )
+                .await?;
+            println!("sent to lane {lane} (window {window})");
+        }
+        LaneCmd::Approve {
+            lane,
+            choice,
+            window,
+        } => {
+            // Mirror MCP `approve_agent`, but: a human at the CLI legitimately answers decisions,
+            // so we only WARN (never refuse) when the lane isn't on a routine permission.
+            let target: Lane = lane_get(&client, lane).await?;
+            let primary = fleet::primary_agent(&target);
+            let attention = primary
+                .map(fleet::agent_attention)
+                .unwrap_or(Attention::None);
+            match attention {
+                Attention::Permission => {}
+                Attention::Decision => eprintln!(
+                    "warning: this lane is on a DECISION, not a routine permission — make sure \
+                     you mean to answer it for the human."
+                ),
+                Attention::EndOfTurn | Attention::DoneCandidate => eprintln!(
+                    "warning: the agent ended its turn (no open dialog) — your keypress will go \
+                     to the prompt. Consider `lane send` instead."
+                ),
+                Attention::None => {
+                    eprintln!("warning: no pending dialog detected on this lane right now.")
+                }
+            }
+            let window = target_window(primary, window).map_err(|e| anyhow!(e))?;
+            let choice = choice.map(Value::String);
+            let (key, answered) = approve_key(choice.as_ref()).map_err(|e| anyhow!(e))?;
+            client
+                .call(
+                    "agent.key",
+                    Some(json!({ "lane_id": lane, "key": key, "window": window })),
+                )
+                .await?;
+            println!("answered {answered} on lane {lane} (sent {key})");
+        }
+        LaneCmd::Interrupt { lane, hard, window } => {
+            // Mirror MCP `interrupt_agent`: soft = Escape via agent.key, --hard = C-c via
+            // agent.signal. `window` is optional (the daemon targets the lane's first slot).
+            if hard {
+                client
+                    .call(
+                        "agent.signal",
+                        Some(json!({ "lane_id": lane, "key": "C-c", "window": window })),
+                    )
+                    .await?;
+                println!("interrupted lane {lane} (hard, C-c)");
+            } else {
+                client
+                    .call(
+                        "agent.key",
+                        Some(json!({ "lane_id": lane, "key": "Escape", "window": window })),
+                    )
+                    .await?;
+                println!("interrupted lane {lane} (Escape)");
+            }
+        }
+        LaneCmd::Read {
+            lane,
+            transcript_limit,
+        } => {
+            // Mirror MCP `read_agent`: project the lane and print a compact transcript tail,
+            // reusing the same fleet helpers so the CLI and MCP report identical state.
+            let target: Lane = lane_get(&client, lane).await?;
+            let digest = fleet::project_lane(&target, Utc::now());
+            let primary = fleet::primary_agent(&target);
+            let session_id = primary.and_then(|s| s.session_id.clone());
+            let pending_prompt = primary.and_then(|s| s.pending_prompt.clone());
+            let transcript: Vec<TranscriptItem> = client
+                .call_typed(
+                    "agent.transcript",
+                    Some(json!({
+                        "lane_id": lane,
+                        "limit": transcript_limit,
+                        "session_id": session_id,
+                    })),
+                )
+                .await
+                .unwrap_or_default();
+
+            println!("lane {lane}  {}/{}", digest.repo, digest.branch);
+            println!("dirty:     {}", digest.dirty);
+            match &digest.agent {
+                Some(a) => {
+                    println!(
+                        "agent:     {} [{}]  attention={}",
+                        a.kind,
+                        a.status,
+                        a.attention.as_str()
+                    );
+                    if let Some(h) = &a.headline {
+                        println!("headline:  {h}");
+                    }
+                }
+                None => println!("agent:     (none)"),
+            }
+            if let Some(p) = &pending_prompt {
+                println!("pending:   {p}");
+            }
+            println!("--- transcript (last {}) ---", transcript.len());
+            for t in &transcript {
+                println!("[{}] {}", t.role, t.text);
+            }
+        }
     }
     Ok(())
+}
+
+/// Fetch a single lane's full state from the daemon (`lane.get`), shared by the read/send/approve
+/// verbs.
+async fn lane_get(client: &DaemonClient, lane: LaneId) -> Result<Lane> {
+    client
+        .call_typed("lane.get", Some(json!({ "lane_id": lane })))
+        .await
+}
+
+/// The configured default agent kind, mirroring the MCP server: ask the daemon to detect agents
+/// and pick the one flagged default, falling back to `claude-code` if detection fails.
+async fn default_agent(client: &DaemonClient) -> String {
+    match client
+        .call_typed::<Vec<AgentChoice>>("agent.detect", None)
+        .await
+    {
+        Ok(choices) => choices
+            .into_iter()
+            .find(|c| c.default)
+            .map(|c| c.name)
+            .unwrap_or_else(|| "claude-code".into()),
+        Err(_) => "claude-code".into(),
+    }
+}
+
+/// Resolve the spawn task prompt. `--task <text>` is used verbatim; `--task -` always reads the
+/// prompt from stdin; omitting `--task` reads stdin when it is piped, or leaves the task unset on
+/// an interactive terminal.
+fn read_task(task: Option<String>) -> Result<Option<String>> {
+    use std::io::{IsTerminal, Read};
+    let from_stdin = match task.as_deref() {
+        Some("-") => true,
+        None => !std::io::stdin().is_terminal(),
+        Some(_) => false,
+    };
+    if !from_stdin {
+        return Ok(task);
+    }
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| anyhow!("failed to read task from stdin: {e}"))?;
+    let trimmed = buf.trim().to_string();
+    Ok((!trimmed.is_empty()).then_some(trimmed))
 }
 
 /// The socket a `daemon` subcommand should target: the CLI `--socket` flag when given, else
@@ -844,6 +1427,279 @@ mod tests {
                 "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
             );
         }
+    }
+
+    #[test]
+    fn lane_spawn_binds_args() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "lane",
+            "spawn",
+            "--lane",
+            "6465124",
+            "--agent",
+            "codex",
+            "--task",
+            "do the thing",
+        ])
+        .expect("lane spawn should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Spawn {
+                        lane, agent, task, ..
+                    },
+            }) => {
+                assert_eq!(lane, 6465124);
+                assert_eq!(agent.as_deref(), Some("codex"));
+                assert_eq!(task.as_deref(), Some("do the thing"));
+            }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_agent_optional() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--lane", "42"])
+            .expect("lane spawn without --agent/--task should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Spawn {
+                        lane,
+                        agent,
+                        task,
+                        mode,
+                        model,
+                        effort,
+                        force,
+                    },
+            }) => {
+                assert_eq!(lane, 42);
+                assert!(agent.is_none());
+                assert!(task.is_none());
+                // Mode defaults to Default; the other launch options are unset; force is off.
+                assert_eq!(mode, super::SpawnMode::Default);
+                assert!(model.is_none());
+                assert!(effort.is_none());
+                assert!(!force);
+            }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_force_binds() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--lane", "42", "--force"])
+                .expect("lane spawn --force should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Spawn { force, .. },
+            }) => assert!(force),
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_launch_options_bind() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon", "lane", "spawn", "--lane", "42", "--mode", "plan", "--model", "opus",
+            "--effort", "high",
+        ])
+        .expect("lane spawn with launch options should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Spawn {
+                        mode,
+                        model,
+                        effort,
+                        ..
+                    },
+            }) => {
+                assert_eq!(mode, super::SpawnMode::Plan);
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            _ => panic!("expected `lane spawn`"),
+        }
+    }
+
+    #[test]
+    fn lane_spawn_rejects_bogus_mode() {
+        use clap::Parser;
+        // The ValueEnum constrains --mode to default|auto|plan, rejected at parse time.
+        assert!(
+            crate::Cli::try_parse_from([
+                "repomon", "lane", "spawn", "--lane", "1", "--mode", "bogus"
+            ])
+            .is_err(),
+            "`--mode bogus` must be rejected by the ValueEnum"
+        );
+    }
+
+    #[test]
+    fn lane_spawn_requires_lane() {
+        use clap::Parser;
+        assert!(
+            crate::Cli::try_parse_from(["repomon", "lane", "spawn", "--task", "hi"]).is_err(),
+            "`lane spawn` must require --lane"
+        );
+    }
+
+    #[test]
+    fn lane_send_binds_args() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "lane",
+            "send",
+            "--lane",
+            "42",
+            "--text",
+            "continue",
+            "--no-submit",
+            "--window",
+            "lane-42-2",
+        ])
+        .expect("lane send should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Send {
+                        lane,
+                        text,
+                        no_submit,
+                        window,
+                    },
+            }) => {
+                assert_eq!(lane, 42);
+                assert_eq!(text.as_deref(), Some("continue"));
+                assert!(no_submit);
+                assert_eq!(window.as_deref(), Some("lane-42-2"));
+            }
+            _ => panic!("expected `lane send`"),
+        }
+    }
+
+    #[test]
+    fn lane_send_requires_lane() {
+        use clap::Parser;
+        assert!(
+            crate::Cli::try_parse_from(["repomon", "lane", "send", "--text", "hi"]).is_err(),
+            "`lane send` must require --lane"
+        );
+    }
+
+    #[test]
+    fn lane_approve_binds_args() {
+        use clap::Parser;
+        // Defaults: no choice, no window.
+        let cli = crate::Cli::try_parse_from(["repomon", "lane", "approve", "--lane", "7"])
+            .expect("lane approve should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Approve {
+                        lane,
+                        choice,
+                        window,
+                    },
+            }) => {
+                assert_eq!(lane, 7);
+                assert!(choice.is_none());
+                assert!(window.is_none());
+            }
+            _ => panic!("expected `lane approve`"),
+        }
+        // An explicit choice binds.
+        let cli = crate::Cli::try_parse_from([
+            "repomon", "lane", "approve", "--lane", "7", "--choice", "no",
+        ])
+        .expect("lane approve --choice should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Approve { choice, .. },
+            }) => assert_eq!(choice.as_deref(), Some("no")),
+            _ => panic!("expected `lane approve`"),
+        }
+    }
+
+    #[test]
+    fn lane_interrupt_binds_args() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["repomon", "lane", "interrupt", "--lane", "9", "--hard"])
+                .expect("lane interrupt should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd: super::LaneCmd::Interrupt { lane, hard, window },
+            }) => {
+                assert_eq!(lane, 9);
+                assert!(hard);
+                assert!(window.is_none());
+            }
+            _ => panic!("expected `lane interrupt`"),
+        }
+    }
+
+    #[test]
+    fn lane_read_binds_args() {
+        use clap::Parser;
+        // Default transcript limit is 12.
+        let cli = crate::Cli::try_parse_from(["repomon", "lane", "read", "--lane", "3"])
+            .expect("lane read should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Read {
+                        lane,
+                        transcript_limit,
+                    },
+            }) => {
+                assert_eq!(lane, 3);
+                assert_eq!(transcript_limit, 12);
+            }
+            _ => panic!("expected `lane read`"),
+        }
+        // An explicit limit overrides.
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "lane",
+            "read",
+            "--lane",
+            "3",
+            "--transcript-limit",
+            "40",
+        ])
+        .expect("lane read --transcript-limit should parse");
+        match cli.command {
+            Some(super::Command::Lane {
+                cmd:
+                    super::LaneCmd::Read {
+                        transcript_limit, ..
+                    },
+            }) => assert_eq!(transcript_limit, 40),
+            _ => panic!("expected `lane read`"),
+        }
+    }
+
+    #[test]
+    fn approve_key_mapping_is_reused_from_mcp() {
+        // The CLI `lane approve` verb reuses the MCP server's approve_key mapping verbatim.
+        use repomon_mcp::server::approve_key;
+        assert_eq!(approve_key(None).unwrap().0, "Enter");
+        assert_eq!(
+            approve_key(Some(&serde_json::json!("no"))).unwrap().0,
+            "Escape"
+        );
+        assert_eq!(approve_key(Some(&serde_json::json!("2"))).unwrap().0, "2");
+        assert!(approve_key(Some(&serde_json::json!("maybe"))).is_err());
     }
 
     #[test]

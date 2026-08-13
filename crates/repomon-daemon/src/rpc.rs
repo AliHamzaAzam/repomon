@@ -105,7 +105,7 @@ const DIALOG_CHANGED: i64 = -32010;
 /// Record that input reached a lane window: stamp `input_seen` (quiets the notification
 /// engine) and drop the window's sniff-cache entry, so an answered dialog can't be
 /// re-advertised by `lane.list` for the rest of its TTL.
-async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
+pub(crate) async fn mark_input(ctx: &Ctx, lane: repomon_core::model::LaneId, window: &str) {
     ctx.input_seen
         .lock()
         .await
@@ -140,6 +140,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_show_why": cfg.notify_show_why,
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
+        "notify_desktop_fallback": cfg.notify_desktop_fallback,
         "notify_subagents": cfg.notify_subagents,
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
@@ -197,6 +198,43 @@ struct JournalQuery {
     limit: Option<usize>,
 }
 #[derive(Deserialize)]
+struct ApprovalRecord {
+    repo: String,
+    command: String,
+    verdict: String,
+}
+#[derive(Deserialize)]
+struct ApprovalRuleRef {
+    repo: String,
+    pattern: String,
+}
+#[derive(Deserialize)]
+struct ScheduleAdd {
+    spec: String,
+    prompt: String,
+    #[serde(default)]
+    max_actions: Option<u32>,
+}
+#[derive(Deserialize)]
+struct ScheduleRemove {
+    id: i64,
+}
+#[derive(Deserialize)]
+struct PlaybookSave {
+    name: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct PlaybookSearch {
+    query: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct PlaybookName {
+    name: String,
+}
+#[derive(Deserialize)]
 struct Discover {
     root: String,
     #[serde(default = "default_depth")]
@@ -228,6 +266,16 @@ struct AgentSpawn {
     agent: String,
     #[serde(default)]
     task: Option<String>,
+    /// Reasoning-effort hint, translated per agent kind (e.g. claude `MAX_THINKING_TOKENS`, codex
+    /// `model_reasoning_effort`). Additive; absent is the unchanged default.
+    #[serde(default)]
+    effort: Option<String>,
+    /// Permission/launch mode: `default` (emit nothing), `auto`, or `plan`. Additive.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Model override forwarded to the agent (e.g. `opus`). Additive.
+    #[serde(default)]
+    model: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentInput {
@@ -574,6 +622,8 @@ struct ConfigSet {
     notify_coalesce: Option<bool>,
     #[serde(default)]
     notify_click_focus: Option<bool>,
+    #[serde(default)]
+    notify_desktop_fallback: Option<bool>,
     #[serde(default)]
     notify_subagents: Option<bool>,
     #[serde(default)]
@@ -971,6 +1021,194 @@ pub async fn dispatch(
             to_value(json!({ "entries": entries }))
         }
 
+        // ---- approval policy ----
+        "approval.record" => {
+            use repomon_core::agent::approval;
+            let p: ApprovalRecord = parse(params)?;
+            if !matches!(p.verdict.as_str(), "approve" | "deny") {
+                return Err(RpcError::invalid_params(
+                    "verdict must be \"approve\" or \"deny\"",
+                ));
+            }
+            let pattern = approval::command_pattern(&p.command);
+            if pattern.is_empty() {
+                return to_value(json!({
+                    "pattern": Value::Null,
+                    "approvals": 0,
+                    "rule_exists": false,
+                    "propose": false,
+                }));
+            }
+            let approvals = ctx
+                .store
+                .record_approval_event(p.repo.clone(), pattern.clone(), p.verdict.clone())
+                .await
+                .map_err(internal)?;
+            let rule_exists = ctx
+                .store
+                .has_approval_rule(p.repo.clone(), pattern.clone())
+                .await
+                .map_err(internal)?;
+            let propose =
+                approvals >= 3 && !rule_exists && !approval::is_always_escalate(&p.command);
+            tracing::info!(
+                repo = %p.repo,
+                pattern = %pattern,
+                verdict = %p.verdict,
+                approvals,
+                "approval verdict recorded"
+            );
+            to_value(json!({
+                "pattern": pattern,
+                "approvals": approvals,
+                "rule_exists": rule_exists,
+                "propose": propose,
+            }))
+        }
+        "approval.allow" => {
+            let p: ApprovalRuleRef = parse(params)?;
+            ctx.store
+                .add_approval_rule(p.repo.clone(), p.pattern.clone())
+                .await
+                .map_err(internal)?;
+            tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule confirmed");
+            Ok(Value::Null)
+        }
+        "approval.remove" => {
+            let p: ApprovalRuleRef = parse(params)?;
+            ctx.store
+                .remove_approval_rule(p.repo.clone(), p.pattern.clone())
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule removed");
+            Ok(Value::Null)
+        }
+        "approval.list" => {
+            let rules = ctx.store.list_approval_rules().await.map_err(internal)?;
+            to_value(json!({ "rules": rules }))
+        }
+
+        // ---- standing-orchestration schedules ----
+        "schedule.add" => {
+            let p: ScheduleAdd = parse(params)?;
+            let spec = repomon_core::schedule::parse_spec(&p.spec)
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            let prompt = p.prompt.trim().to_string();
+            if prompt.is_empty() || prompt.len() > 2000 {
+                return Err(RpcError::invalid_params(
+                    "schedule prompt must be 1-2000 bytes",
+                ));
+            }
+            // Headless standing runs drive `claude -p`; a codex orchestrator can't run them.
+            {
+                let cfg = ctx.config.read().await;
+                if matches!(
+                    resolve_orchestrator_backend(&cfg.orchestrator_agent, &cfg.agents),
+                    Ok(crate::OrchestratorBackend::Codex)
+                ) {
+                    return Err(RpcError::invalid_params(
+                        "headless standing runs support the claude backend only; \
+                         orchestrator_agent is set to codex",
+                    ));
+                }
+            }
+            let max_actions = p.max_actions.unwrap_or(10).min(50);
+            let sched = ctx
+                .store
+                .add_schedule(p.spec.clone(), prompt, max_actions)
+                .await
+                .map_err(internal)?;
+            tracing::info!(id = sched.id, spec = %sched.spec, "schedule added");
+            let mut v = serde_json::to_value(&sched).map_err(internal)?;
+            v["next_run"] = json!(spec.next_after(chrono::Local::now()).to_rfc3339());
+            Ok(v)
+        }
+        "schedule.list" => {
+            let scheds = ctx.store.list_schedules().await.map_err(internal)?;
+            let now = chrono::Local::now();
+            let rows: Vec<Value> = scheds
+                .iter()
+                .map(|s| {
+                    let mut v = serde_json::to_value(s).unwrap_or_default();
+                    if let Ok(spec) = repomon_core::schedule::parse_spec(&s.spec) {
+                        v["next_run"] = json!(spec.next_after(now).to_rfc3339());
+                    }
+                    v
+                })
+                .collect();
+            to_value(json!({ "schedules": rows }))
+        }
+        "schedule.remove" => {
+            let p: ScheduleRemove = parse(params)?;
+            ctx.store
+                .remove_schedule(p.id)
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(id = p.id, "schedule removed");
+            Ok(Value::Null)
+        }
+
+        // ---- playbooks ----
+        "playbook.save" => {
+            let p: PlaybookSave = parse(params)?;
+            let name = p.name.trim();
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                return Err(RpcError::invalid_params(
+                    "playbook name must be 1-64 chars of [A-Za-z0-9._-] (kebab-case works well)",
+                ));
+            }
+            if p.content.len() > 16384 {
+                return Err(RpcError::invalid_params(format!(
+                    "playbook is {} bytes; the cap is 16384 bytes",
+                    p.content.len()
+                )));
+            }
+            let book = ctx
+                .store
+                .save_playbook(name.to_string(), p.content)
+                .await
+                .map_err(internal)?;
+            tracing::info!(playbook = %book.name, status = %book.status, "playbook saved");
+            to_value(book)
+        }
+        "playbook.search" => {
+            let p: PlaybookSearch = parse(params)?;
+            let books = ctx
+                .store
+                .search_playbooks(p.query, p.limit.unwrap_or(10).min(50))
+                .await
+                .map_err(internal)?;
+            to_value(json!({ "playbooks": books }))
+        }
+        "playbook.list" => {
+            let books = ctx.store.list_playbooks().await.map_err(internal)?;
+            to_value(json!({ "playbooks": books }))
+        }
+        "playbook.approve" => {
+            let p: PlaybookName = parse(params)?;
+            let book = ctx
+                .store
+                .approve_playbook(p.name)
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %book.name, "playbook approved");
+            to_value(book)
+        }
+        "playbook.delete" => {
+            let p: PlaybookName = parse(params)?;
+            ctx.store
+                .delete_playbook(p.name.clone())
+                .await
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %p.name, "playbook deleted");
+            Ok(Value::Null)
+        }
+
         // ---- lanes ----
         "lane.list" => to_value(lanes_with_agents(ctx).await?),
         "lane.get" => {
@@ -1065,7 +1303,9 @@ pub async fn dispatch(
                 "commits": d.commits,
                 "committed_stat": d.committed_stat,
                 "uncommitted_stat": d.uncommitted_stat,
-                "untracked": lane.state.dirty.untracked,
+                // d.untracked, not lane.state.dirty.untracked: the cached scan can lag the
+                // live stats computed above, and one lane.diff snapshot must be self-consistent.
+                "untracked": d.untracked,
             });
             if d.commits_truncated {
                 result["commits_truncated"] = json!(true);
@@ -1653,6 +1893,9 @@ pub async fn dispatch(
                 if let Some(b) = p.notify_click_focus {
                     cfg.notify_click_focus = b;
                 }
+                if let Some(b) = p.notify_desktop_fallback {
+                    cfg.notify_desktop_fallback = b;
+                }
                 if let Some(b) = p.notify_subagents {
                     cfg.notify_subagents = b;
                 }
@@ -1687,31 +1930,70 @@ pub async fn dispatch(
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
-            // Resolve the chosen name to a command: a config custom wins, then an autodetected
-            // Claude variant (e.g. claude-work → `CLAUDE_CONFIG_DIR=… claude`), else the kind.
-            let command = {
+            // Resolve the chosen name to a command AND the kind whose flag dialect we translate
+            // launch options for: a config custom wins (kind inferred from the command it runs, so
+            // a claude wrapper still gets claude flags), then an autodetected Claude variant (e.g.
+            // claude-work → `CLAUDE_CONFIG_DIR=… claude`, still Claude under the hood), else the
+            // kind's default binary.
+            let (command, kind) = {
                 let cfg = ctx.config.read().await;
                 if let Some(c) = cfg.agents.get(&p.agent) {
-                    c.clone()
+                    let kind = kind_from_command(c);
+                    (c.clone(), kind)
                 } else if let Some((_, cmd)) = agent::claude::agent_variants()
                     .into_iter()
                     .find(|(n, _)| n == &p.agent)
                 {
-                    cmd
+                    (cmd, AgentKind::ClaudeCode)
                 } else {
-                    AgentKind::from_kind_str(&p.agent).command().to_string()
+                    let k = AgentKind::from_kind_str(&p.agent);
+                    (k.command().to_string(), k)
                 }
             };
-            let mut spec = SpawnSpec::new(command, path);
-            if let Some(task) = p.task.as_deref().filter(|t| !t.is_empty()) {
-                spec = spec.arg(task);
+            // Translate --mode/--model/--effort into the kind's flags (and, for claude `ultracode`,
+            // a `/effort` input to inject). A no-op (byte-identical to the legacy command) when no
+            // options are requested.
+            let plan = apply_launch_options(
+                command,
+                &kind,
+                p.effort.as_deref(),
+                p.mode.as_deref(),
+                p.model.as_deref(),
+            );
+            // When we must inject `/effort` first, the task is sent as input AFTER the injection
+            // (so effort is set before the task), not appended as a launch argument.
+            let task = p
+                .task
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            let mut spec = SpawnSpec::new(plan.command, path);
+            let inject = plan.effort_inject;
+            let inject_task = if inject.is_some() { task.clone() } else { None };
+            if inject.is_none() {
+                if let Some(task) = task {
+                    spec = spec.arg(task);
+                }
             }
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
+            let window = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
+                let window = tmux.spawn(lane, &spec)?;
+                // Best-effort: set the effort level and type the task once the TUI is up. Operators
+                // do exactly this by hand; a short settle lets claude start reading input.
+                if let Some(eff) = inject {
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
+                    tmux.send_text_named(&window, &eff)?;
+                    if let Some(task) = inject_task {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                        tmux.send_text_named(&window, &task)?;
+                    }
+                }
+                Ok(window)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
@@ -1776,6 +2058,21 @@ pub async fn dispatch(
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
+            // The one moment the daemon KNOWS which transcript runs in this window: stamp
+            // the sticky binding deterministically instead of leaving it to first-contact
+            // guessing — `--resume` doesn't touch the resumed .jsonl until the first
+            // exchange, so the binder could otherwise pair a newer external transcript onto
+            // the adopted window and the stamp would wedge it there.
+            if let Some(sid) = p.session_id.clone() {
+                let tmux = ctx.backend.clone();
+                let w = window.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = tmux.set_window_session(&w, &sid) {
+                        tracing::warn!("failed to stamp adopted session on {w}: {e}");
+                    }
+                })
+                .await;
+            }
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
@@ -2750,7 +3047,7 @@ pub async fn dispatch(
             ctx.last_good_windows
                 .lock()
                 .await
-                .retain(|w| w != ORCHESTRATOR_WINDOW);
+                .retain(|w| w.name != ORCHESTRATOR_WINDOW);
             *orch = None;
             *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
             let status = orchestrator_status_value(None, "none", None);
@@ -2893,7 +3190,7 @@ const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(1900);
 pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
     {
         let cache = ctx.overlay_cache.lock().await;
-        if let Some((t, lanes)) = &*cache {
+        if let Some((t, lanes)) = cache.entry() {
             if t.elapsed() < OVERLAY_TTL {
                 return Ok(lanes.clone());
             }
@@ -2914,15 +3211,19 @@ pub(crate) async fn lanes_with_agents_fresh(ctx: &Ctx) -> Result<Vec<Lane>, RpcE
     let _flight = ctx.overlay_flight.lock().await;
     {
         let cache = ctx.overlay_cache.lock().await;
-        if let Some((t, lanes)) = &*cache {
+        if let Some((t, lanes)) = cache.entry() {
             if t.elapsed() < OVERLAY_TTL {
                 return Ok(lanes.clone());
             }
         }
     }
+    let generation = ctx.overlay_cache.lock().await.generation();
     let mut lanes = ctx.lanes.list().await.map_err(internal)?;
     overlay_agents(ctx, &mut lanes).await;
-    *ctx.overlay_cache.lock().await = Some((std::time::Instant::now(), lanes.clone()));
+    ctx.overlay_cache
+        .lock()
+        .await
+        .publish(generation, lanes.clone());
     Ok(lanes)
 }
 
@@ -2971,8 +3272,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
     // every managed agent — that flips sessions to `external`, detaches the focused TUI, and fires
     // stale notifications). A real empty result still clears.
-    let fresh: Result<Vec<String>, String> =
-        match tokio::task::spawn_blocking(move || tmux.list_windows()).await {
+    let fresh: Result<Vec<agent::WindowMeta>, String> =
+        match tokio::task::spawn_blocking(move || tmux.list_windows_meta()).await {
             Ok(Ok(w)) => Ok(w),
             Ok(Err(e)) => Err(e.to_string()),
             Err(e) => Err(e.to_string()),
@@ -2980,6 +3281,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     if let Err(ref e) = fresh {
         tracing::warn!("tmux list-windows failed; reusing last-good window set this overlay: {e}");
     }
+    // A tick that ran on the last-good snapshot pairs against binding info that lags any
+    // stamps by a generation — good enough to display, but never persist first-contact
+    // bindings computed from it (they could overwrite fresh stamps with crossed pairs).
+    let probe_ok = fresh.is_ok();
     let windows = {
         let mut last_good = ctx.last_good_windows.lock().await;
         let mut empty_misses = ctx.window_empty_misses.lock().await;
@@ -2991,8 +3296,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // fresh on the very next line, and the gone agent disappears within one refresh.
     let managed_now: std::collections::HashSet<String> = windows
         .iter()
-        .filter(|w| w.starts_with("lane-"))
-        .cloned()
+        .filter(|w| w.name.starts_with("lane-"))
+        .map(|w| w.name.clone())
         .collect();
     {
         let mut prev = ctx.last_managed_windows.lock().await;
@@ -3016,11 +3321,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let auto_off = ctx.auto_continue_off.lock().await.clone();
     let global_auto = ctx.config.read().await.auto_continue;
 
-    for (lane, mut summaries) in lanes.iter_mut().zip(per_lane) {
-        // The lane's managed agent windows, in slot order (= spawn order). A window only exists
-        // while its agent's process lives (tmux closes it on exit), so it doubles as proof of
-        // liveness and as the routing target for keys/captures.
-        let lane_windows = TmuxRuntime::lane_windows_in(&windows, lane.id);
+    // Per-lane binding candidates + their probe-window pools, resolved against pane
+    // evidence and stamped as `@repomon_session` after the loop.
+    let mut stamp_batches: Vec<StampBatch> = Vec::new();
+    for (lane, summaries) in lanes.iter_mut().zip(per_lane) {
+        // The lane's managed agent windows, in slot order. A window only exists while its
+        // agent's process lives (tmux closes it on exit), so it doubles as proof of liveness
+        // and as the routing target for keys/captures.
+        let lane_windows = TmuxRuntime::lane_windows_meta(&windows, lane.id);
         let managed_n = lane_windows.len();
         // Live `claude` processes whose cwd is this worktree bound how many of its sessions are
         // running (a `/exit`ed one leaves a recent transcript but no process). But never drop a
@@ -3043,13 +3351,24 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             .filter(|s| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS)
             .count();
         let keep = sessions_to_keep(summaries.len(), alive, managed_n, fresh);
-        summaries.truncate(keep);
+        // A transcript bound to a live window IS a live agent regardless of what the process
+        // count says — never truncate it away in favor of a newer unbound one.
+        let bound: std::collections::HashSet<String> = lane_windows
+            .iter()
+            .filter_map(|w| w.session.clone())
+            .collect();
+        let summaries = select_kept_summaries(summaries, &bound, keep, now);
         if !summaries.is_empty() {
-            // Pair the newest `k` transcripts with the `k` windows, oldest with oldest (slot order
-            // tracks spawn order, transcripts arrive newest-first). A heuristic, but it routes
-            // keys/captures to the right pane in practice.
-            let paired = summaries.len().min(managed_n);
-            for (idx, s) in summaries.into_iter().enumerate() {
+            // Pair transcripts with windows by sticky identity (`@repomon_session`), falling
+            // back to the oldest-with-oldest heuristic only on first contact — see
+            // `pair_transcripts_to_windows`. The old purely positional zip re-bound windows
+            // whenever two agents swapped activity rank, which moved names, panes, and usage
+            // accounts between rows.
+            let pairing = pair_transcripts_to_windows(&summaries, &lane_windows, now);
+            if !pairing.new_bindings.is_empty() {
+                stamp_batches.push((pairing.new_bindings, pairing.probe));
+            }
+            for (s, win) in summaries.into_iter().zip(pairing.assignment) {
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
                 }
@@ -3058,11 +3377,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     .session_id
                     .as_ref()
                     .and_then(|id| labels.get(id).cloned());
-                if idx < paired {
-                    session.external = false;
-                    session.tmux_window = Some(lane_windows[paired - 1 - idx].clone());
-                } else {
-                    session.external = true;
+                match win {
+                    Some(w) => {
+                        session.external = false;
+                        session.tmux_window = Some(w);
+                    }
+                    None => session.external = true,
                 }
                 lane.agent_sessions.push(session);
             }
@@ -3072,12 +3392,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // several transcript-less agents at once, and hiding all but one made them
             // invisible and uninteractable until an older agent exited.
             let kind = lane_meta_kind(&metas, lane.id);
-            for w in placeholder_window_indexes(paired, managed_n) {
-                lane.agent_sessions.push(window_placeholder_session(
-                    lane,
-                    kind.clone(),
-                    lane_windows[w].clone(),
-                ));
+            for window in pairing.unpaired {
+                lane.agent_sessions
+                    .push(window_placeholder_session(lane, kind.clone(), window));
             }
         } else if managed_n > 0 {
             // No parseable transcript at all: surface every live repomon-spawned window.
@@ -3086,7 +3403,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 lane.agent_sessions.push(window_placeholder_session(
                     lane,
                     kind.clone(),
-                    window.clone(),
+                    window.name.clone(),
                 ));
             }
         } else if let Some(changed) = lane.state.last_change_at {
@@ -3162,6 +3479,41 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
             }
         }
+    }
+
+    // Persist the sticky bindings established this tick — but only where the pane PROVES
+    // the pairing: each candidate transcript's last-message fingerprint must be visible in
+    // exactly one of its lane's unclaimed panes (`confirmed_stamps`). Activity rank alone
+    // mis-stamped when several transcripts were fresh at once (live incident: two agents'
+    // names swapped and stayed swapped), and a wrong sticky stamp wedges until superseded.
+    // An unconfirmed candidate simply returns next tick — the pairing stamps itself once
+    // the agent's turn is visible on screen. Rare (once per agent lifetime), so the capture
+    // forks don't touch steady-state ticks. Skipped when the window probe failed
+    // (`probe_ok`): a last-good snapshot lags the stamps by a generation.
+    if probe_ok && !stamp_batches.is_empty() {
+        let tmux = ctx.backend.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            for (cands, probe) in stamp_batches {
+                if cands.iter().all(|c| c.needle.is_none()) {
+                    continue;
+                }
+                let panes: Vec<(u64, String, String)> = probe
+                    .into_iter()
+                    .map(|(wid, name)| {
+                        let text = tmux
+                            .capture_named(&name, CaptureOpts::last(60))
+                            .unwrap_or_default();
+                        (wid, name, normalize_fingerprint(&text))
+                    })
+                    .collect();
+                for (wid, name, sid) in confirmed_stamps(&cands, &panes) {
+                    if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
+                        tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
+                    }
+                }
+            }
+        })
+        .await;
     }
 
     // dxkit stop-gate verdicts: worktrees running dxkit's loop pack leave an append-only
@@ -3305,7 +3657,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // liveness ONLY — its old timestamps are the stall clock.
         {
             let live: std::collections::HashSet<&str> =
-                windows.iter().map(String::as_str).collect();
+                windows.iter().map(|w| w.name.as_str()).collect();
             let mut cache = ctx.prompt_cache.lock().await;
             cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
             let mut seen = ctx.pane_seen.lock().await;
@@ -3362,6 +3714,257 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
 /// heartbeats — generous against a busy tick, short enough that a closed/crashed client frees the
 /// pane for reflow within seconds. `pub(crate)` so [`crate::Ctx::viewport_snapshot`] shares it.
 pub(crate) const FOCUS_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A transcript that should get a sticky binding this tick, pending pane evidence: the
+/// fingerprint of its last message must be visible in exactly one of the lane's unclaimed
+/// panes before anything is stamped. Activity rank proved able to guess wrong when several
+/// transcripts were fresh at once, and a wrong sticky stamp wedges until superseded — so the
+/// pane, not the rank, picks the window.
+struct BindingCandidate {
+    sid: String,
+    /// Normalized fingerprint of the transcript's last message ([`message_fingerprint`]);
+    /// `None` (no message yet / too short) means no evidence — the candidate simply returns
+    /// next tick.
+    needle: Option<String>,
+}
+
+/// One lane's binding candidates plus the probe-window pool they may stamp onto.
+type StampBatch = (Vec<BindingCandidate>, Vec<(u64, String)>);
+
+/// A lane's transcript↔window pairing for one overlay tick ([`pair_transcripts_to_windows`]).
+struct Pairing {
+    /// Per input summary (order preserved): its evidence-backed managed window; `None` means
+    /// external or still awaiting pane evidence.
+    assignment: Vec<Option<String>>,
+    /// Transcripts to bind this tick, pending pane confirmation ([`confirmed_stamps`]).
+    new_bindings: Vec<BindingCandidate>,
+    /// The windows a new binding may land on — everything pass 1 didn't claim, `(window_id,
+    /// name)`. Stamps target the window ID: a slot NAME recycled between the probe and the
+    /// stamp must not inherit the old transcript's binding.
+    probe: Vec<(u64, String)>,
+    /// Live managed windows no evidence-backed transcript claimed, newest (highest window id)
+    /// first. The first is the placeholder target while a just-spawned agent's transcript is
+    /// absent or still awaiting pane confirmation (at most one, per the `SessKey::Fallback`
+    /// model).
+    unpaired: Vec<String>,
+}
+
+/// Collapse text to lowercase ASCII alphanumerics. Makes fingerprint matching immune to
+/// tmux line wrapping, markdown styling (the pane renderer strips `**`/`_` markers), ANSI
+/// spacing, and case.
+fn normalize_fingerprint(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Minimum normalized length before a fingerprint is distinctive enough to act on.
+const FINGERPRINT_MIN: usize = 24;
+/// How much of the normalized TAIL to keep — after a long reply scrolls, its tail is what
+/// stays visible above the input box.
+const FINGERPRINT_LEN: usize = 64;
+
+/// The pane fingerprint of a transcript's last message, or `None` when there is no message
+/// or it is too short to be distinctive.
+fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
+    let n = normalize_fingerprint(last_message?);
+    if n.len() < FINGERPRINT_MIN {
+        return None;
+    }
+    // Byte slicing is safe: the normalized form is pure ASCII.
+    Some(n[n.len().saturating_sub(FINGERPRINT_LEN)..].to_string())
+}
+
+/// Which stamps the pane evidence supports: each candidate with a fingerprint is stamped on
+/// the single probe window whose (normalized) pane contains it. No match, several matching
+/// panes, or several candidates matching the same pane → no stamp for those involved; the
+/// candidates return next tick once the screens disambiguate. Returns `(wid, name, sid)`.
+fn confirmed_stamps(
+    cands: &[BindingCandidate],
+    panes: &[(u64, String, String)],
+) -> Vec<(u64, String, String)> {
+    // Every needle↔pane hit, as (candidate index, pane index).
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    for (ci, c) in cands.iter().enumerate() {
+        let Some(needle) = &c.needle else { continue };
+        for (pi, (_, _, text)) in panes.iter().enumerate() {
+            if text.contains(needle.as_str()) {
+                hits.push((ci, pi));
+            }
+        }
+    }
+    // Keep only 1:1 matches — a candidate seen in several panes, or a pane claimed by
+    // several candidates, proves nothing yet.
+    hits.iter()
+        .filter(|&&(ci, pi)| {
+            hits.iter().filter(|(c, _)| *c == ci).count() == 1
+                && hits.iter().filter(|(_, p)| *p == pi).count() == 1
+        })
+        .map(|&(ci, pi)| {
+            let (wid, name, _) = &panes[pi];
+            (*wid, name.clone(), cands[ci].sid.clone())
+        })
+        .collect()
+}
+
+/// Pair a lane's kept transcripts (newest-first) with its live managed windows by STICKY
+/// IDENTITY first, position last.
+///
+/// Pass 1: a window whose `@repomon_session` names a kept transcript keeps it. This is what
+/// makes the pairing immune to two agents swapping activity rank — which used to re-bind
+/// their windows every poll, moving names, panes, and usage accounts between rows — and to
+/// daemon restarts (the binding lives in tmux, not daemon memory).
+///
+/// Pass 2 (first contact only): the newest still-unassigned transcripts become binding
+/// candidates for the still-free windows. They remain external for this response and those
+/// windows remain placeholders until [`confirmed_stamps`] proves a 1:1 pane match; the next
+/// overlay's pass 1 then exposes the durable pairing. This deliberately avoids even a temporary
+/// stale-transcript/new-window display mismatch during spawn.
+fn pair_transcripts_to_windows(
+    summaries: &[agent::TranscriptSummary],
+    windows: &[agent::WindowMeta],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Pairing {
+    let is_fresh =
+        |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
+    // Pass 1 — sticky identity, tentatively: each window claims the kept transcript its
+    // `@repomon_session` names.
+    let mut claim: Vec<Option<usize>> = vec![None; windows.len()];
+    let mut claimed = vec![false; summaries.len()];
+    for (wi, w) in windows.iter().enumerate() {
+        let Some(sid) = &w.session else { continue };
+        if let Some(si) = summaries
+            .iter()
+            .position(|s| s.session_id.as_deref() == Some(sid.as_str()))
+        {
+            if !claimed[si] {
+                claim[wi] = Some(si);
+                claimed[si] = true;
+            }
+        }
+    }
+    // Supersession: a claude process rotates its transcript id in place (`/clear`, a
+    // fork-on-resume), leaving its window bound to a dead transcript while the live
+    // continuation has no window. When more FRESH unclaimed transcripts exist than free
+    // windows to receive them, release claims whose transcript has gone quiet — WARMEST
+    // first: the transcript that stopped writing most recently is the one that just rotated
+    // into the newcomer, while a long-cold one is simply an idle agent whose window must not
+    // be given away. A claim on a fresh transcript is never released, so an idle fleet
+    // can't be shuffled.
+    let fresh_unclaimed = summaries
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| !claimed[*i] && is_fresh(s))
+        .count();
+    let mut free_n = claim.iter().filter(|c| c.is_none()).count();
+    if fresh_unclaimed > free_n {
+        let mut stale_wis: Vec<usize> = (0..windows.len())
+            .filter(|&wi| claim[wi].is_some_and(|si| !is_fresh(&summaries[si])))
+            .collect();
+        stale_wis.sort_by_key(|&wi| std::cmp::Reverse(summaries[claim[wi].unwrap()].last_activity));
+        for wi in stale_wis {
+            if fresh_unclaimed <= free_n {
+                break;
+            }
+            claimed[claim[wi].unwrap()] = false;
+            claim[wi] = None;
+            free_n += 1;
+        }
+    }
+    // Honor the surviving claims.
+    let mut assignment: Vec<Option<String>> = vec![None; summaries.len()];
+    let mut taken = vec![false; windows.len()];
+    for (wi, c) in claim.iter().enumerate() {
+        if let Some(si) = c {
+            assignment[*si] = Some(windows[wi].name.clone());
+            taken[wi] = true;
+        }
+    }
+    // Pass 2 — first contact. Unclaimed transcripts are candidates for the free-window pool,
+    // but remain external for this response. The free windows stay placeholders until pane
+    // evidence writes a durable stamp; a positional display guess is precisely what showed an
+    // old transcript over a just-spawned pane.
+    let mut free: Vec<usize> = (0..windows.len()).filter(|&i| !taken[i]).collect();
+    free.sort_by_key(|&i| (windows[i].session.is_some(), windows[i].wid));
+    let probe: Vec<(u64, String)> = free
+        .iter()
+        .map(|&i| (windows[i].wid, windows[i].name.clone()))
+        .collect();
+    // `summaries` is newest-first, so nominate at most one transcript per free window.
+    let chosen: Vec<usize> = (0..summaries.len())
+        .filter(|&i| assignment[i].is_none())
+        .take(free.len())
+        .collect();
+    let has_never_bound_window = free.iter().any(|&i| windows[i].session.is_none());
+    let mut new_bindings = Vec::new();
+    for si in chosen {
+        // Nominate a transcript for a durable stamp when PANE EVIDENCE could confirm it.
+        // Two routes qualify:
+        //  - it is actively writing (`is_fresh`): it IS some window's agent right now, so
+        //    the evidence pass will find its turn on screen.
+        //  - it is quiet but its window carries NO binding yet AND it has a distinctive
+        //    last-message fingerprint: this recovers an idle agent whose `@repomon_session`
+        //    was lost (a daemon restart of a quiet fleet leaves the window unstamped and no
+        //    transcript fresh, so pass 1 can't reclaim it and this pass never used to try).
+        //    Its pane still shows that last message, so `confirmed_stamps` can reclaim the
+        //    window by evidence. A quiet transcript with no fingerprint stays a display-only
+        //    stand-in — there is nothing to confirm — and a released stale binding
+        //    (`session.is_some()`) is left for a fresh claimant, never re-stamped from a guess.
+        if let Some(sid) = &summaries[si].session_id {
+            let needle = message_fingerprint(summaries[si].last_message.as_deref());
+            if is_fresh(&summaries[si]) || (has_never_bound_window && needle.is_some()) {
+                new_bindings.push(BindingCandidate {
+                    sid: sid.clone(),
+                    needle,
+                });
+            }
+        }
+    }
+    let mut unpaired: Vec<&agent::WindowMeta> = windows
+        .iter()
+        .zip(&taken)
+        .filter(|(_, t)| !**t)
+        .map(|(w, _)| w)
+        .collect();
+    unpaired.sort_by_key(|w| std::cmp::Reverse(w.wid));
+    Pairing {
+        assignment,
+        new_bindings,
+        probe,
+        unpaired: unpaired.into_iter().map(|w| w.name.clone()).collect(),
+    }
+}
+
+/// Which of a lane's newest-first transcripts to keep, honoring bindings: every summary bound
+/// to a live managed window is kept regardless of rank (the window only exists while its
+/// agent's process lives, so it outranks the process-count probe), then newest-first from the
+/// rest up to `keep` total. Output is re-sorted newest-first so the wire order is unchanged.
+/// Without this, a bound-but-quiet agent could be truncated in favor of a newer external
+/// transcript, dropping a live agent from the lane.
+fn select_kept_summaries(
+    summaries: Vec<agent::TranscriptSummary>,
+    bound: &std::collections::HashSet<String>,
+    keep: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<agent::TranscriptSummary> {
+    if summaries.len() <= keep {
+        return summaries;
+    }
+    let is_fresh =
+        |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
+    // Protected: bound to a live window (the window proves its agent alive) OR actively
+    // writing right now — `sessions_to_keep`'s "never drop a session that is working"
+    // contract must survive bound-protection, or a stale binding could make the one live
+    // transcript invisible.
+    let (mut out, rest): (Vec<_>, Vec<_>) = summaries
+        .into_iter()
+        .partition(|s| is_fresh(s) || s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
+    let take_rest = keep.saturating_sub(out.len());
+    out.extend(rest.into_iter().take(take_rest));
+    out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+    out
+}
 
 /// The fit-arbitration-relevant slice of one session, snapshotted so [`fit_allowed`] is a pure
 /// function over plain data (and unit-testable without a live `Ctx`).
@@ -3832,16 +4435,6 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
     }
 }
 
-/// Which managed-window indexes need a window-only placeholder: every live window beyond the
-/// `shown` transcript-backed ones. `shown` = transcript-backed sessions already emitted;
-/// `managed_n` = live managed windows. A managed window exists only while its agent's process
-/// lives (tmux closes it on exit), so each unpaired window is a real agent that simply hasn't
-/// written its `.jsonl` yet — hiding any of them (the old at-most-one rule) left a second
-/// just-spawned agent invisible and uninteractable until an older agent exited.
-fn placeholder_window_indexes(shown: usize, managed_n: usize) -> std::ops::Range<usize> {
-    shown.min(managed_n)..managed_n
-}
-
 /// A Claude session id is safe to interpolate into a resume command (`claude --resume <id>`).
 /// Transcript ids are UUIDs / `[A-Za-z0-9_-]`; anything else (whitespace, `;`, `$`, quotes, `|`,
 /// backticks…) is rejected so `agent.adopt` can't be turned into shell injection — the command is
@@ -3857,11 +4450,11 @@ fn valid_session_id(s: &str) -> bool {
 /// `tmux` failing to spawn under load — distinct from a genuinely empty server), reuse the
 /// last-good list so a single bad snapshot doesn't momentarily drop every managed agent — which
 /// would flip sessions to `external`, detach the focused TUI, and fire stale notifications.
-fn resolve_windows(
-    fresh: Result<Vec<String>, String>,
-    last_good: &mut Vec<String>,
+fn resolve_windows<T: Clone>(
+    fresh: Result<Vec<T>, String>,
+    last_good: &mut Vec<T>,
     empty_misses: &mut u8,
-) -> Vec<String> {
+) -> Vec<T> {
     match fresh {
         // Transient probe fault (fork/connection): reuse last-good; don't touch the empty counter.
         Err(_) => last_good.clone(),
@@ -4298,7 +4891,7 @@ pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
 /// and `cursor-agent` can't speak MCP, and an unknown name has no command — instead of what this
 /// path used to do: silently spawn e.g. `aider --mcp-config …`, a broken window the user had to
 /// diagnose by hand.
-fn resolve_orchestrator_backend(
+pub(crate) fn resolve_orchestrator_backend(
     agent: &Option<String>,
     customs: &HashMap<String, String>,
 ) -> Result<crate::OrchestratorBackend, RpcError> {
@@ -4328,7 +4921,10 @@ fn resolve_orchestrator_backend(
 /// `CLAUDE_CONFIG_DIR=… claude`), else the kind's default binary (`codex` — anything else was
 /// already rejected by [`resolve_orchestrator_backend`]). `None` (no agent chosen) is bare
 /// `claude`.
-fn orchestrator_base_command(agent: &Option<String>, customs: &HashMap<String, String>) -> String {
+pub(crate) fn orchestrator_base_command(
+    agent: &Option<String>,
+    customs: &HashMap<String, String>,
+) -> String {
     match agent {
         Some(name) => {
             if let Some(c) = customs.get(name) {
@@ -4344,6 +4940,183 @@ fn orchestrator_base_command(agent: &Option<String>, customs: &HashMap<String, S
         }
         None => "claude".to_string(),
     }
+}
+
+/// The result of translating spawn launch options: the (possibly augmented) launch command, plus an
+/// optional `/effort` slash-command to inject as the session's FIRST input. Claude's native
+/// `--effort` flag covers low|medium|high|xhigh|max, but `ultracode` (the top level = xhigh +
+/// workflows) is only reachable via the `/effort` slash command, so that case is injected after the
+/// session opens — exactly how an operator sets it. When `effort_inject` is `Some`, the caller must
+/// send the task as input AFTER the injection (so effort is set before the task), not as a launch
+/// argument.
+#[derive(Debug, PartialEq, Eq)]
+struct LaunchPlan {
+    command: String,
+    effort_inject: Option<String>,
+}
+
+/// Translate the optional spawn launch options (`--mode` / `--model` / `--effort`) into the agent
+/// command's flags (and, for claude `ultracode`, a `/effort` input to inject), per [`AgentKind`].
+/// `command` is the already-resolved base launch command (e.g. `claude`, `CLAUDE_CONFIG_DIR=… claude`,
+/// or `codex`); it is run via `sh -c` by tmux, so every interpolated value is `shell_quote`d.
+///
+/// Invariants:
+/// - When nothing is requested (`mode` absent/`"default"`, no `effort`, no `model`) the command is
+///   returned **byte-identical** to the input (and `effort_inject` is `None`), so the default spawn
+///   path is unchanged.
+/// - Flags are only emitted for kinds whose dialect we know (Claude + variants, Codex). For any
+///   other kind (an unknown binary) requested options are ignored with a warning rather than
+///   injecting a flag the binary may not accept (which would make it exit on launch).
+fn apply_launch_options(
+    command: String,
+    kind: &AgentKind,
+    effort: Option<&str>,
+    mode: Option<&str>,
+    model: Option<&str>,
+) -> LaunchPlan {
+    // "default"/empty mean "no override" — treat them exactly like an absent option.
+    let mode = mode.filter(|m| !m.eq_ignore_ascii_case("default") && !m.is_empty());
+    let effort = effort.filter(|e| !e.is_empty());
+    let model = model.filter(|m| !m.is_empty());
+    if mode.is_none() && effort.is_none() && model.is_none() {
+        // Byte-identical default path.
+        return LaunchPlan {
+            command,
+            effort_inject: None,
+        };
+    }
+
+    let mut suffix = String::new(); // flags appended to the command
+    let mut effort_inject = None;
+
+    match kind {
+        AgentKind::ClaudeCode => {
+            if let Some(m) = model {
+                suffix.push_str(&format!(" --model {}", shell_quote(m)));
+            }
+            match mode {
+                Some("auto") => suffix.push_str(" --permission-mode acceptEdits"),
+                Some("plan") => suffix.push_str(" --permission-mode plan"),
+                Some(other) => {
+                    tracing::warn!("spawn: unknown --mode '{other}' for claude; ignoring")
+                }
+                None => {}
+            }
+            if let Some(e) = effort {
+                match claude_effort(e) {
+                    ClaudeEffort::Flag(level) => {
+                        suffix.push_str(&format!(" --effort {}", shell_quote(level)))
+                    }
+                    // `ultracode` isn't a valid --effort flag value (claude warns and ignores it),
+                    // so set it via the /effort slash command injected as the first input.
+                    ClaudeEffort::Inject(level) => effort_inject = Some(format!("/effort {level}")),
+                    ClaudeEffort::Unknown => tracing::warn!(
+                        "spawn: unrecognized --effort '{e}' for claude \
+                         (use low|medium|high|xhigh|max|ultracode); ignoring"
+                    ),
+                }
+            }
+        }
+        AgentKind::Codex => {
+            if let Some(m) = model {
+                suffix.push_str(&format!(" --model {}", shell_quote(m)));
+            }
+            match mode {
+                Some("auto") => suffix.push_str(" --full-auto"),
+                Some("plan") => {
+                    tracing::warn!("spawn: codex has no plan mode; ignoring --mode plan")
+                }
+                Some(other) => {
+                    tracing::warn!("spawn: unknown --mode '{other}' for codex; ignoring")
+                }
+                None => {}
+            }
+            if let Some(e) = effort {
+                match codex_reasoning_effort(e) {
+                    Some(level) => suffix.push_str(&format!(
+                        " -c model_reasoning_effort={}",
+                        shell_quote(level)
+                    )),
+                    None => tracing::warn!(
+                        "spawn: unrecognized --effort '{e}' for codex (use low|medium|high); ignoring"
+                    ),
+                }
+            }
+        }
+        other => tracing::warn!(
+            "spawn: launch options (--mode/--model/--effort) aren't supported for agent kind \
+             '{}'; ignoring",
+            other.as_str()
+        ),
+    }
+
+    LaunchPlan {
+        command: format!("{command}{suffix}"),
+        effort_inject,
+    }
+}
+
+/// How a claude `--effort` level is realized: a native `--effort` flag value (low|medium|high|
+/// xhigh|max), or `ultracode` which must be injected as a `/effort` slash command after launch.
+enum ClaudeEffort {
+    Flag(&'static str),
+    Inject(&'static str),
+    Unknown,
+}
+
+/// Classify an `--effort` level for a claude-kind agent. The native `--effort` launch flag accepts
+/// low|medium|high|xhigh|max; `ultracode` (= xhigh + workflows) is only settable via the `/effort`
+/// slash command, so it is injected instead.
+fn claude_effort(effort: &str) -> ClaudeEffort {
+    match effort.trim().to_lowercase().as_str() {
+        "low" => ClaudeEffort::Flag("low"),
+        "medium" => ClaudeEffort::Flag("medium"),
+        "high" => ClaudeEffort::Flag("high"),
+        "xhigh" => ClaudeEffort::Flag("xhigh"),
+        "max" => ClaudeEffort::Flag("max"),
+        "ultracode" => ClaudeEffort::Inject("ultracode"),
+        _ => ClaudeEffort::Unknown,
+    }
+}
+
+/// Normalize an `--effort` level to a codex `model_reasoning_effort` value. Codex tops out at
+/// `high`, so the claude-only levels (xhigh/max/ultracode) clamp to `high` with a warning.
+fn codex_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort.trim().to_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "max" | "ultracode" => {
+            tracing::warn!(
+                "spawn: codex has no '{}' effort; clamping to high",
+                effort.trim().to_lowercase()
+            );
+            Some("high")
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort agent kind for a resolved (custom) launch command, so a custom configured agent that
+/// wraps `claude`/`codex` still gets the right flag dialect. Reuses [`program_of`] (which skips
+/// leading `VAR=value` env assignments) and matches the program's basename. An unrecognized program
+/// yields `Other` (launch options are then ignored rather than guessed). A custom command with a
+/// space inside a quoted env value can't be parsed by whitespace and falls back to `Other` — a safe
+/// no-op, not a wrong flag.
+fn kind_from_command(command: &str) -> AgentKind {
+    match program_of(command).map(program_basename) {
+        Some("claude") => AgentKind::ClaudeCode,
+        Some("codex") => AgentKind::Codex,
+        Some("aider") => AgentKind::Aider,
+        Some("cursor") | Some("cursor-agent") => AgentKind::Cursor,
+        Some(other) => AgentKind::Other(other.to_string()),
+        None => AgentKind::Other(String::new()),
+    }
+}
+
+/// The basename of a program path (`/usr/bin/claude` → `claude`).
+fn program_basename(prog: &str) -> &str {
+    prog.rsplit('/').next().unwrap_or(prog)
 }
 
 /// Build the full `claude` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
@@ -4496,12 +5269,28 @@ fn write_orchestrator_mcp_config(
     autonomy: &str,
     max_agents: Option<usize>,
 ) -> std::io::Result<PathBuf> {
+    write_orchestrator_mcp_config_named(socket, autonomy, max_agents, &[], "repomind-mcp.json")
+}
+
+/// Like [`write_orchestrator_mcp_config`] but with extra env pairs and a caller-chosen file
+/// name — standing runs write `repomind-standing-mcp.json` with the unattended guardrail env so
+/// they never clobber (or inherit) the interactive session's config.
+pub(crate) fn write_orchestrator_mcp_config_named(
+    socket: &Path,
+    autonomy: &str,
+    max_agents: Option<usize>,
+    extra_env: &[(&str, String)],
+    filename: &str,
+) -> std::io::Result<PathBuf> {
     let repomond = repomon_core::service::repomond_path();
     let mut env = serde_json::Map::new();
     env.insert("REPOMON_MCP_SOCKET".into(), json!(socket.to_string_lossy()));
     env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
     if let Some(n) = max_agents {
         env.insert("REPOMON_MCP_MAX_AGENTS".into(), json!(n.to_string()));
+    }
+    for (k, v) in extra_env {
+        env.insert((*k).into(), json!(v));
     }
     let mcp_config = json!({
         "mcpServers": {
@@ -4514,7 +5303,7 @@ fn write_orchestrator_mcp_config(
     });
     let cfg_dir = repomon_core::config::config_dir();
     std::fs::create_dir_all(&cfg_dir)?;
-    let path = cfg_dir.join("repomind-mcp.json");
+    let path = cfg_dir.join(filename);
     std::fs::write(
         &path,
         serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),
@@ -4717,29 +5506,495 @@ mod tests {
         assert_eq!(misses, 0);
     }
 
+    /// A minimal transcript summary for pairing tests: `sid` + activity time.
+    fn tsum(sid: &str, last_activity: chrono::DateTime<chrono::Utc>) -> agent::TranscriptSummary {
+        agent::TranscriptSummary {
+            kind: repomon_core::model::AgentKind::ClaudeCode,
+            manifest_path: PathBuf::from(format!("/tmp/{sid}.jsonl")),
+            cwd: None,
+            last_activity,
+            tool_call_count: 0,
+            status: repomon_core::model::AgentStatus::Idle,
+            title: None,
+            last_message: None,
+            config_dir: None,
+            session_id: Some(sid.to_string()),
+            ended_turn: false,
+        }
+    }
+
+    /// A `tsum` that also carries a last message, so it has a pane-evidence fingerprint.
+    fn tsum_msg(
+        sid: &str,
+        last_activity: chrono::DateTime<chrono::Utc>,
+        last_message: &str,
+    ) -> agent::TranscriptSummary {
+        agent::TranscriptSummary {
+            last_message: Some(last_message.to_string()),
+            ..tsum(sid, last_activity)
+        }
+    }
+
+    fn candidate_sids(p: &Pairing) -> Vec<&str> {
+        p.new_bindings.iter().map(|b| b.sid.as_str()).collect()
+    }
+
+    fn wm(name: &str, wid: u64, sid: Option<&str>) -> agent::WindowMeta {
+        agent::WindowMeta {
+            name: name.into(),
+            wid,
+            session: sid.map(str::to_string),
+        }
+    }
+
+    /// Activity times t(0) < t(1) < … in 10s steps, so several consecutive stamps all count
+    /// as "fresh" (within `RECENTLY_ACTIVE_SECS`) relative to a nearby `now`.
+    fn t(n: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_700_000_000 + n * 10, 0).unwrap()
+    }
+
     #[test]
-    fn placeholders_for_every_unpaired_window() {
-        // One existing agent (transcript) + a freshly-spawned second window: surface the new
-        // window immediately so it isn't invisible until its transcript lands.
+    fn first_contact_stays_placeholder_until_pane_evidence() {
+        // First contact (nothing bound yet): no transcript is exposed on a window until pane
+        // evidence confirms it. This prevents a stale transcript from appearing over a new pane.
+        let summaries = vec![tsum("c", t(3)), tsum("b", t(2)), tsum("a", t(1))];
+        let windows = vec![wm("lane-5", 1, None), wm("lane-5-2", 2, None)];
+        let p = pair_transcripts_to_windows(&summaries, &windows, t(3));
+        assert_eq!(p.assignment, vec![None, None, None]);
+        // The two newest transcripts are actively fresh → both are nominated for bindings,
+        // with every window as a legal stamp target for the evidence pass.
+        let mut sids = candidate_sids(&p);
+        sids.sort();
+        assert_eq!(sids, vec!["b", "c"]);
         assert_eq!(
-            placeholder_window_indexes(1, 2).collect::<Vec<_>>(),
-            vec![1]
+            p.probe,
+            vec![(1, "lane-5".to_string()), (2, "lane-5-2".to_string())]
         );
-        // Every managed window already transcript-backed → no placeholder.
-        assert!(placeholder_window_indexes(2, 2).is_empty());
-        assert!(placeholder_window_indexes(1, 1).is_empty());
-        assert!(placeholder_window_indexes(0, 0).is_empty());
-        // Three windows, one transcript: BOTH unpaired windows surface (hiding one made a
-        // second just-spawned agent unreachable until an older agent exited).
         assert_eq!(
-            placeholder_window_indexes(1, 3).collect::<Vec<_>>(),
-            vec![1, 2]
+            p.unpaired,
+            vec!["lane-5-2".to_string(), "lane-5".to_string()]
         );
-        // No transcripts at all: every window gets a placeholder.
+    }
+
+    #[test]
+    fn pairing_sticks_across_activity_flip() {
+        // The reported bug: two bound agents swap activity rank; the pairing must not move.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        // b most recently active…
+        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &windows, t(2));
         assert_eq!(
-            placeholder_window_indexes(0, 2).collect::<Vec<_>>(),
-            vec![0, 1]
+            p.assignment,
+            vec![Some("lane-7-2".into()), Some("lane-7".into())]
         );
+        assert!(p.new_bindings.is_empty());
+        // …then a takes a turn and the order flips: same windows per session id.
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &windows, t(3));
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), Some("lane-7-2".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+        assert!(p.unpaired.is_empty());
+    }
+
+    #[test]
+    fn first_contact_binds_then_holds_through_flip() {
+        // Unbound windows (daemon restart / pre-upgrade agents) stay placeholders while the
+        // candidates await evidence; re-running with confirmed bindings and flipped activity
+        // keeps the original assignment.
+        let unbound = vec![wm("lane-7", 1, None), wm("lane-7-2", 2, None)];
+        let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &unbound, t(2));
+        assert_eq!(p.assignment, vec![None, None]);
+        let bound = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3)), tsum("b", t(2))], &bound, t(3));
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7".into()), Some("lane-7-2".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+    }
+
+    #[test]
+    fn slot_recycling_pairs_new_transcript_to_new_window() {
+        // Slot 1 (`lane-7`) died and was respawned: same NAME, higher window id, no binding.
+        // The surviving agent b keeps its bound `lane-7-2`; newcomer c awaits pane evidence
+        // against the recycled window instead of inheriting it by slot-name order.
+        let windows = vec![wm("lane-7", 7, None), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("c", t(9)), tsum("b", t(2))], &windows, t(9));
+        assert_eq!(p.assignment, vec![None, Some("lane-7-2".into())]);
+        assert_eq!(candidate_sids(&p), vec!["c"]);
+        assert_eq!(p.probe, vec![(7, "lane-7".to_string())]);
+        assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
+    }
+
+    #[test]
+    fn one_tick_transcript_flap_does_not_rebind() {
+        // b's transcript flaps out for one tick: its window merely goes unpaired (placeholder
+        // target); it is NOT rebound to the surviving transcript and no binding is written.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("a", t(3))], &windows, t(3));
+        assert_eq!(p.assignment, vec![Some("lane-7".into())]);
+        assert!(p.new_bindings.is_empty());
+        assert_eq!(p.unpaired, vec!["lane-7-2".to_string()]);
+    }
+
+    #[test]
+    fn stale_binding_released_to_a_genuinely_new_transcript() {
+        // The bound transcript is gone AND a new (actively writing) one needs a window: the
+        // stale binding is released, but its replacement remains a candidate until confirmed.
+        let windows = vec![wm("lane-7", 1, Some("x"))];
+        let p = pair_transcripts_to_windows(&[tsum("y", t(5))], &windows, t(5));
+        assert_eq!(p.assignment, vec![None]);
+        assert_eq!(candidate_sids(&p), vec!["y"]);
+        assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
+        assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
+    }
+
+    #[test]
+    fn placeholder_target_is_the_newest_unpaired_window() {
+        // One transcript, two windows (second freshly spawned, no `.jsonl` yet): the leftover
+        // is the NEWEST window (highest id) so the placeholder lands on the fresh spawn.
+        let windows = vec![wm("lane-5", 1, None), wm("lane-5-2", 2, None)];
+        let p = pair_transcripts_to_windows(&[tsum("a", t(1))], &windows, t(1));
+        assert_eq!(p.assignment, vec![None]);
+        assert_eq!(
+            p.unpaired,
+            vec!["lane-5-2".to_string(), "lane-5".to_string()]
+        );
+        // Even with enough candidate transcripts, both windows remain placeholders until evidence.
+        let p = pair_transcripts_to_windows(
+            &[tsum("b", t(2)), tsum("a", t(1))],
+            &[wm("lane-5", 1, None), wm("lane-5-2", 2, None)],
+            t(2),
+        );
+        assert_eq!(p.assignment, vec![None, None]);
+        assert_eq!(
+            p.unpaired,
+            vec!["lane-5-2".to_string(), "lane-5".to_string()]
+        );
+    }
+
+    #[test]
+    fn spawn_race_keeps_a_stale_transcript_off_the_new_window() {
+        // agent.spawn created the window but claude hasn't written its .jsonl yet; the only
+        // transcript around is a stale leftover (an /exited session, or the user's own
+        // external one). It must remain external while the new window stays a placeholder;
+        // displaying it on that window is already a user-visible transcript mismatch.
+        let windows = vec![wm("lane-7", 5, None)];
+        let stale = tsum("e", t(0));
+        let p = pair_transcripts_to_windows(std::slice::from_ref(&stale), &windows, t(100));
+        assert_eq!(p.assignment, vec![None]);
+        assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
+        assert!(
+            p.new_bindings.is_empty(),
+            "a quiet transcript is a guess, not a binding"
+        );
+        // The real transcript appears (actively writing): it becomes the sole stamp candidate;
+        // both transcripts remain external for this response and the pane stays a placeholder.
+        let p = pair_transcripts_to_windows(&[tsum("x", t(100)), stale], &windows, t(100));
+        assert_eq!(p.assignment, vec![None, None]);
+        assert_eq!(candidate_sids(&p), vec!["x"]);
+        assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
+    }
+
+    #[test]
+    fn idle_agent_recovers_its_unstamped_window_by_pane_evidence() {
+        // Daemon restarted a quiet fleet: the agent's `@repomon_session` is gone (unstamped
+        // window) and it went idle far longer than RECENTLY_ACTIVE_SECS ago. Its pane still
+        // shows its last message, so it MUST be nominated for a pane-evidence stamp — before
+        // this fix a quiet transcript was never nominated and the window stayed unrecoverable,
+        // so the positional guess wedged and reopening attached the wrong conversation.
+        let msg = "recovered idle agent distinctive last message tail marker";
+        let windows = vec![wm("lane-7", 1, None)];
+        let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
+        assert_eq!(p.assignment, vec![None]);
+        assert_eq!(candidate_sids(&p), vec!["a"]);
+        assert_eq!(p.new_bindings[0].needle, message_fingerprint(Some(msg)));
+        assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
+    }
+
+    #[test]
+    fn restart_recovers_two_idle_agents_to_their_own_windows() {
+        // Two idle agents, both windows unstamped after a restart. They remain placeholders
+        // while the evidence pass pins each to the window whose pane shows ITS OWN last
+        // message — never crosswise.
+        let ma = "idle alpha last message evidence tail one two three";
+        let mb = "idle bravo last message evidence tail four five six";
+        let windows = vec![wm("lane-7", 1, None), wm("lane-7-2", 2, None)];
+        let p = pair_transcripts_to_windows(
+            &[tsum_msg("b", t(1), mb), tsum_msg("a", t(0), ma)],
+            &windows,
+            t(100),
+        );
+        let mut sids = candidate_sids(&p);
+        sids.sort();
+        assert_eq!(sids, vec!["a", "b"]);
+        // Each agent's message sits on its own pane; evidence must resolve each to its window.
+        let panes = vec![
+            (
+                1,
+                "lane-7".to_string(),
+                normalize_fingerprint(&format!("✻ {ma}\n❯")),
+            ),
+            (
+                2,
+                "lane-7-2".to_string(),
+                normalize_fingerprint(&format!("✻ {mb}\n❯")),
+            ),
+        ];
+        let mut got = confirmed_stamps(&p.new_bindings, &panes);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (1, "lane-7".to_string(), "a".to_string()),
+                (2, "lane-7-2".to_string(), "b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn idle_recovery_without_matching_pane_stamps_nothing() {
+        // A nominated idle agent (unstamped window + fingerprint) whose message is NOT on the
+        // captured pane — scrolled off, or the window is a fresh-spawn stand-in showing a
+        // different agent — gets no 1:1 evidence, so nothing is stamped and no guess wedges.
+        let msg = "idle agent whose tail is not on the captured pane at all";
+        let windows = vec![wm("lane-7", 1, None)];
+        let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
+        assert_eq!(candidate_sids(&p), vec!["a"]);
+        let panes = vec![(
+            1,
+            "lane-7".to_string(),
+            normalize_fingerprint("a completely different agent booting up on this pane"),
+        )];
+        assert!(confirmed_stamps(&p.new_bindings, &panes).is_empty());
+    }
+
+    #[test]
+    fn idle_transcript_without_fingerprint_is_not_nominated() {
+        // A quiet transcript with no distinctive last message (too short to fingerprint, or
+        // None) stays external while the pane remains a placeholder: no evidence means no
+        // display guess and no durable binding.
+        let windows = vec![wm("lane-7", 1, None)];
+        // Too short to fingerprint (< FINGERPRINT_MIN normalized chars).
+        let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), "ok")], &windows, t(100));
+        assert!(p.new_bindings.is_empty());
+        // A None last message (the plain `tsum`) likewise.
+        let p = pair_transcripts_to_windows(&[tsum("a", t(0))], &windows, t(100));
+        assert!(p.new_bindings.is_empty());
+    }
+
+    #[test]
+    fn clear_rotation_rebinds_window_to_the_live_transcript() {
+        // `/clear` (or a fork-on-resume) rotates the session id in place: the window stays
+        // bound to the dead transcript e while the live continuation x has no window. The
+        // stale binding must be superseded — released, then re-stamped only after pane evidence
+        // identifies the transcript that is actually writing.
+        let windows = vec![wm("lane-7", 1, Some("e"))];
+        let p =
+            pair_transcripts_to_windows(&[tsum("x", t(100)), tsum("e", t(0))], &windows, t(100));
+        assert_eq!(
+            p.assignment,
+            vec![None, None],
+            "the live transcript awaits evidence; the dead one goes external"
+        );
+        assert_eq!(candidate_sids(&p), vec!["x"]);
+        assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
+    }
+
+    #[test]
+    fn clear_rotation_releases_the_rotated_window_not_the_coldest() {
+        // Two bound agents, both currently quiet: a rotated its session id a moment ago
+        // (`/clear` → continuation c), b has been idle for much longer. The window released
+        // for c must be a's — the transcript that went quiet MOST recently is the one that
+        // just rotated; sacrificing the long-idle b would route c's keys into b's pane.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(
+            &[tsum("c", t(100)), tsum("a", t(50)), tsum("b", t(0))],
+            &windows,
+            t(100),
+        );
+        assert_eq!(
+            p.assignment,
+            vec![None, None, Some("lane-7-2".into())],
+            "c awaits evidence for a's released window; b keeps its own; dead a goes external"
+        );
+        assert_eq!(candidate_sids(&p), vec!["c"]);
+        assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
+    }
+
+    #[test]
+    fn fresh_external_does_not_steal_a_bound_window_when_a_free_one_exists() {
+        // An idle bound agent e plus a fresh unpaired transcript x: with a free window
+        // available, x becomes a candidate for that free window and e's binding is left alone —
+        // supersession only fires when the fresh transcript would otherwise have no home.
+        let windows = vec![wm("lane-7", 1, Some("e")), wm("lane-7-2", 9, None)];
+        let p =
+            pair_transcripts_to_windows(&[tsum("x", t(100)), tsum("e", t(0))], &windows, t(100));
+        assert_eq!(p.assignment, vec![None, Some("lane-7".into())]);
+        assert_eq!(candidate_sids(&p), vec!["x"]);
+        assert_eq!(p.probe, vec![(9, "lane-7-2".to_string())]);
+    }
+
+    #[test]
+    fn idle_bound_pairing_holds_without_fresh_claimants() {
+        // Nothing fresh in the lane (everyone idle): stale-bound windows keep their agents —
+        // supersession must never shuffle a merely-idle fleet.
+        let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
+        let p = pair_transcripts_to_windows(&[tsum("b", t(1)), tsum("a", t(0))], &windows, t(100));
+        assert_eq!(
+            p.assignment,
+            vec![Some("lane-7-2".into()), Some("lane-7".into())]
+        );
+        assert!(p.new_bindings.is_empty());
+    }
+
+    #[test]
+    fn select_kept_summaries_protects_bound_sessions() {
+        // A bound-but-quiet agent (its window is alive — that IS liveness) must survive
+        // truncation ahead of newer unbound transcripts; output stays newest-first. `now` is
+        // far past every activity time so freshness plays no part here.
+        let bound: std::collections::HashSet<String> = ["a".to_string()].into();
+        let kept = select_kept_summaries(
+            vec![tsum("e1", t(3)), tsum("e2", t(2)), tsum("a", t(1))],
+            &bound,
+            2,
+            t(1000),
+        );
+        let ids: Vec<&str> = kept
+            .iter()
+            .filter_map(|s| s.session_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["e1", "a"]);
+        // Under the cap nothing is dropped.
+        let kept =
+            select_kept_summaries(vec![tsum("e1", t(3)), tsum("a", t(1))], &bound, 5, t(1000));
+        assert_eq!(kept.len(), 2);
+        // More bound sessions than `keep` says: the windows win (each proves a live agent).
+        let bound: std::collections::HashSet<String> = ["a".to_string(), "b".to_string()].into();
+        let kept =
+            select_kept_summaries(vec![tsum("b", t(3)), tsum("a", t(1))], &bound, 1, t(1000));
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn message_fingerprint_normalizes_and_gates() {
+        // Markdown styling and line wrapping vanish under normalization.
+        let m = "**Done!** The deploy isn't blocked on the invite anymore.";
+        let f = message_fingerprint(Some(m)).unwrap();
+        assert!(pane_text_contains(
+            "✻ Done! The deploy isn't\nblocked on the invite anymore.\n❯",
+            &f
+        ));
+        // A different conversation's pane does not match.
+        assert!(!pane_text_contains(
+            "recap: building Store Listen landing page",
+            &f
+        ));
+        // Long messages fingerprint their TAIL (what stays visible above the input box).
+        let long = format!(
+            "{} tail marker alpha beta gamma delta epsilon",
+            "x".repeat(500)
+        );
+        let f = message_fingerprint(Some(&long)).unwrap();
+        assert!(f.len() <= FINGERPRINT_LEN);
+        let pane = format!(
+            "{} tail marker alpha beta gamma delta epsilon",
+            "x".repeat(60)
+        );
+        assert!(pane_text_contains(&pane, &f));
+        // Absent or indistinct messages give no fingerprint: no evidence, no stamp.
+        assert_eq!(message_fingerprint(Some("ok")), None);
+        assert_eq!(message_fingerprint(None), None);
+    }
+
+    /// Test-side helper mirroring the stamp task's pane check.
+    fn pane_text_contains(pane: &str, needle: &str) -> bool {
+        normalize_fingerprint(pane).contains(needle)
+    }
+
+    #[test]
+    fn stamps_follow_pane_evidence_not_the_hint() {
+        let cand = |sid: &str, msg: &str| BindingCandidate {
+            sid: sid.into(),
+            needle: message_fingerprint(Some(msg)),
+        };
+        let a = cand("a", "fingerprint marker for agent alpha pane evidence");
+        let b = cand("b", "fingerprint marker for agent bravo pane evidence");
+        // Panes are CROSSED relative to candidate order: evidence must decide, so a lands
+        // on @2 and b on @1 regardless of any heuristic hint.
+        let panes = vec![
+            (
+                1,
+                "lane-7".to_string(),
+                normalize_fingerprint("✻ fingerprint marker for agent bravo pane evidence\n❯"),
+            ),
+            (
+                2,
+                "lane-7-2".to_string(),
+                normalize_fingerprint("✻ fingerprint marker for agent alpha pane evidence\n❯"),
+            ),
+        ];
+        let mut got = confirmed_stamps(&[a, b], &panes);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (1, "lane-7".to_string(), "b".to_string()),
+                (2, "lane-7-2".to_string(), "a".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_absent_pane_evidence_stamps_nothing() {
+        let cand = |sid: &str, msg: Option<&str>| BindingCandidate {
+            sid: sid.into(),
+            needle: message_fingerprint(msg),
+        };
+        let marker = "identical rotation continuation marker text";
+        // Two panes showing the same text: ambiguous for a matching candidate.
+        let twin_panes = vec![
+            (1, "lane-7".to_string(), normalize_fingerprint(marker)),
+            (2, "lane-7-2".to_string(), normalize_fingerprint(marker)),
+        ];
+        assert!(confirmed_stamps(&[cand("a", Some(marker))], &twin_panes).is_empty());
+        // Two candidates whose needles both match one pane: mutual ambiguity, skip both.
+        let one_pane = vec![(1, "lane-7".to_string(), normalize_fingerprint(marker))];
+        assert!(
+            confirmed_stamps(
+                &[cand("a", Some(marker)), cand("b", Some(marker))],
+                &one_pane
+            )
+            .is_empty()
+        );
+        // No fingerprint (agent mid-first-turn) or no matching pane: nothing stamped.
+        assert!(confirmed_stamps(&[cand("a", None)], &one_pane).is_empty());
+        assert!(
+            confirmed_stamps(
+                &[cand(
+                    "a",
+                    Some("completely unrelated conversation text here")
+                )],
+                &one_pane
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn select_kept_summaries_never_drops_a_fresh_transcript() {
+        // The fresh backstop must survive bound-protection: with keep=1 and the budget
+        // filled by a bound-but-stale transcript, the actively-writing one is kept too —
+        // truncating the only session doing work would make the live agent invisible.
+        let bound: std::collections::HashSet<String> = ["e".to_string()].into();
+        let kept =
+            select_kept_summaries(vec![tsum("x", t(100)), tsum("e", t(0))], &bound, 1, t(100));
+        let ids: Vec<&str> = kept
+            .iter()
+            .filter_map(|s| s.session_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["x", "e"]);
     }
 
     #[test]
@@ -4946,6 +6201,200 @@ mod tests {
         let cmd =
             build_codex_orchestrator_command("codex", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" -s read-only"), "{cmd}");
+    }
+
+    #[test]
+    fn launch_options_default_path_is_byte_identical() {
+        // The whole point: with no options requested, the command is returned VERBATIM (and no
+        // injection) so the default spawn path is unchanged from before this feature landed.
+        let base = "CLAUDE_CONFIG_DIR='/h/.claude' claude".to_string();
+        let identical = |plan: LaunchPlan, expect: &str| {
+            assert_eq!(plan.command, expect);
+            assert_eq!(plan.effort_inject, None);
+        };
+        identical(
+            apply_launch_options(base.clone(), &AgentKind::ClaudeCode, None, None, None),
+            &base,
+        );
+        // mode "default" (and an empty string) are treated as "no override".
+        identical(
+            apply_launch_options(
+                base.clone(),
+                &AgentKind::ClaudeCode,
+                None,
+                Some("default"),
+                None,
+            ),
+            &base,
+        );
+        identical(
+            apply_launch_options(
+                base.clone(),
+                &AgentKind::ClaudeCode,
+                Some(""),
+                Some(""),
+                Some(""),
+            ),
+            &base,
+        );
+        // Codex and unknown kinds with no options are also identical.
+        identical(
+            apply_launch_options("codex".into(), &AgentKind::Codex, None, None, None),
+            "codex",
+        );
+        identical(
+            apply_launch_options(
+                "ultracode --x".into(),
+                &AgentKind::Other("ultracode".into()),
+                None,
+                None,
+                None,
+            ),
+            "ultracode --x",
+        );
+    }
+
+    #[test]
+    fn launch_options_claude_mode_and_model() {
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            None,
+            Some("plan"),
+            Some("opus"),
+        );
+        assert_eq!(plan.command, "claude --model 'opus' --permission-mode plan");
+        assert_eq!(plan.effort_inject, None);
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            None,
+            Some("auto"),
+            None,
+        );
+        assert_eq!(plan.command, "claude --permission-mode acceptEdits");
+    }
+
+    #[test]
+    fn launch_options_claude_effort_uses_native_flag() {
+        // claude's native --effort flag covers low|medium|high|xhigh|max.
+        for level in ["low", "medium", "high", "xhigh", "max"] {
+            let plan = apply_launch_options(
+                "claude".into(),
+                &AgentKind::ClaudeCode,
+                Some(level),
+                None,
+                None,
+            );
+            assert_eq!(plan.command, format!("claude --effort '{level}'"));
+            assert_eq!(plan.effort_inject, None);
+        }
+        // An unrecognized effort is ignored (no stray flag that would confuse the binary).
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            Some("turbo"),
+            None,
+            None,
+        );
+        assert_eq!(plan.command, "claude");
+        assert_eq!(plan.effort_inject, None);
+    }
+
+    #[test]
+    fn launch_options_claude_ultracode_injects_slash_effort() {
+        // `ultracode` isn't a valid --effort flag value (claude warns + ignores it), so it is set
+        // via the /effort slash command injected as the session's first input — NOT a launch flag.
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            Some("ultracode"),
+            None,
+            Some("opus"),
+        );
+        assert_eq!(plan.command, "claude --model 'opus'"); // no --effort flag
+        assert_eq!(plan.effort_inject.as_deref(), Some("/effort ultracode"));
+    }
+
+    #[test]
+    fn launch_options_codex_mapping() {
+        let plan = apply_launch_options(
+            "codex".into(),
+            &AgentKind::Codex,
+            Some("high"),
+            Some("auto"),
+            Some("gpt-5"),
+        );
+        assert_eq!(
+            plan.command,
+            "codex --model 'gpt-5' --full-auto -c model_reasoning_effort='high'"
+        );
+        assert_eq!(plan.effort_inject, None);
+        // codex has no plan mode -> ignored, no stray flag.
+        let plan =
+            apply_launch_options("codex".into(), &AgentKind::Codex, None, Some("plan"), None);
+        assert_eq!(plan.command, "codex");
+        // claude-only levels clamp to high (codex tops out there); ultracode is NOT injected here.
+        let plan = apply_launch_options(
+            "codex".into(),
+            &AgentKind::Codex,
+            Some("ultracode"),
+            None,
+            None,
+        );
+        assert_eq!(plan.command, "codex -c model_reasoning_effort='high'");
+        assert_eq!(plan.effort_inject, None);
+    }
+
+    #[test]
+    fn launch_options_unknown_kind_never_injects_flags() {
+        // A truly unknown agent gets every option ignored (a stray flag could make it exit on
+        // launch); the command is left untouched.
+        let plan = apply_launch_options(
+            "weirdbin".into(),
+            &AgentKind::Other("weirdbin".into()),
+            Some("high"),
+            Some("plan"),
+            Some("opus"),
+        );
+        assert_eq!(plan.command, "weirdbin");
+        assert_eq!(plan.effort_inject, None);
+    }
+
+    #[test]
+    fn launch_options_shell_quotes_values() {
+        // Every value reaches `sh -c`, so a model with metacharacters must be quoted, not injected.
+        let plan = apply_launch_options(
+            "claude".into(),
+            &AgentKind::ClaudeCode,
+            None,
+            None,
+            Some("a'b; rm -rf /"),
+        );
+        assert_eq!(plan.command, "claude --model 'a'\\''b; rm -rf /'");
+    }
+
+    #[test]
+    fn kind_from_command_infers_dialect_for_custom_agents() {
+        // A custom configured agent that wraps claude (incl. a work-account env prefix) is Claude.
+        assert_eq!(
+            kind_from_command("claude --dangerously-skip-permissions"),
+            AgentKind::ClaudeCode
+        );
+        assert_eq!(
+            kind_from_command("CLAUDE_CONFIG_DIR=/h/.claude-work claude"),
+            AgentKind::ClaudeCode
+        );
+        // A full path resolves by basename.
+        assert_eq!(
+            kind_from_command("/opt/homebrew/bin/codex --full-auto"),
+            AgentKind::Codex
+        );
+        // An unrecognized wrapper stays Other (launch options are then ignored, never guessed).
+        assert_eq!(
+            kind_from_command("my-wrapper.sh"),
+            AgentKind::Other("my-wrapper.sh".into())
+        );
     }
 
     #[test]

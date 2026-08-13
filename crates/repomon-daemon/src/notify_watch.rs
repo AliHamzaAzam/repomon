@@ -62,6 +62,10 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut orch_scan_tick = false;
     let mut orch_transcript: Option<(AgentStatus, Option<String>)> = None;
     let mut orch_popup_fired: Option<Instant> = None;
+    // Needs-you edges awaiting a triage orchestration (config-gated on `triage_after_mins`).
+    // An entry is consumed when its triage fires or when the session stops needing attention;
+    // the notify latch above prevents re-adds until the agent does real work again.
+    let mut pending_triage: HashMap<(LaneId, SessKey), Instant> = HashMap::new();
 
     loop {
         tick.tick().await;
@@ -160,8 +164,59 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                     latch.insert(dkey, (a, Instant::now()));
                 }
             }
+            if kind == NotifKind::NeedsYou && cfg.triage_after_mins.is_some() {
+                pending_triage.insert((key.0, key.1.clone()), Instant::now());
+            }
             fires.push((key, kind));
         }
+        // Needs-you triage: after `triage_after_mins` with the agent still stuck and still no
+        // UI attached (no TUI heartbeat, no live connections), fire one bounded triage
+        // orchestration for the lane. The entry is consumed either way.
+        if let Some(after_mins) = cfg.triage_after_mins {
+            let ui_attached = tui_active || !ctx.sessions.lock().await.is_empty();
+            let mut due: Vec<(LaneId, SessKey)> = Vec::new();
+            pending_triage.retain(|(lane_id, sess), fired| {
+                if !now.contains_key(&(*lane_id, sess.clone())) {
+                    return false; // agent moved on; triage moot
+                }
+                if crate::standing::triage_due(fired.elapsed(), after_mins, ui_attached) {
+                    due.push((*lane_id, sess.clone()));
+                    return false;
+                }
+                true
+            });
+            for (lane_id, _sess) in due {
+                let repo = lanes
+                    .iter()
+                    .find(|l| l.id == lane_id)
+                    .map(|l| l.repo.name.clone())
+                    .unwrap_or_default();
+                let prompt = format!(
+                    "Triage lane {lane_id} (repo {repo}): an agent there has needed attention \
+                     for over {after_mins} minutes with nobody watching. Use read_agent to see \
+                     its state, classify the situation, and recommend exactly ONE next action \
+                     for the human. Do not approve, merge, or delete anything. End with a 2-3 \
+                     sentence briefing."
+                );
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    tracing::info!(lane = lane_id, "needs-you triage firing");
+                    crate::standing::run_standing(
+                        &ctx,
+                        "triage_run",
+                        &format!("triage-{lane_id}"),
+                        &prompt,
+                        5,
+                        json!({ "lane_id": lane_id, "repo": repo }),
+                        Some(lane_id),
+                    )
+                    .await;
+                });
+            }
+        } else {
+            pending_triage.clear();
+        }
+
         prev = now;
         let snapshot = &prev;
         debounce.retain(|(lane, sess, _), t| {
@@ -178,6 +233,66 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 continue;
             };
             let sess = session_by_key(lane, &key, subagents);
+            // Approval-policy auto-approve: a routine Bash permission matching a confirmed
+            // per-repo rule is answered by the daemon itself (the default-approve key, same
+            // assumption as approve_agent's choice=None) and the alert is suppressed — the
+            // acceptance is precisely "the fourth cargo test never reaches your phone". The
+            // hardcoded always-escalate sniffer wins over any learned rule.
+            if kind == NotifKind::NeedsYou {
+                use repomon_core::agent::approval;
+                let auto = match sess {
+                    Some(s) => match (s.pending_dialog.as_ref(), s.tmux_window.clone()) {
+                        (Some(dialog), Some(window)) => approval::dialog_command(dialog)
+                            .map(|cmd| (approval::command_pattern(&cmd), cmd, window)),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if let Some((pattern, cmd, window)) = auto {
+                    let allowed = !approval::is_always_escalate(&cmd)
+                        && ctx
+                            .store
+                            .has_approval_rule(lane.repo.name.clone(), pattern.clone())
+                            .await
+                            .unwrap_or(false);
+                    if allowed {
+                        tracing::info!(
+                            lane = lane_id,
+                            pattern = %pattern,
+                            "auto-approving allowlisted permission"
+                        );
+                        let tmux = ctx.backend.clone();
+                        let win = window.clone();
+                        let sent =
+                            tokio::task::spawn_blocking(move || tmux.send_key_named(&win, "Enter"))
+                                .await;
+                        if matches!(sent, Ok(Ok(_))) {
+                            rpc::mark_input(&ctx, lane_id, &window).await;
+                            let _ = ctx
+                                .store
+                                .append_journal(repomon_core::model::JournalEntry {
+                                    id: 0,
+                                    at: chrono::Utc::now(),
+                                    session: format!("auto-approve-{lane_id}"),
+                                    action: "auto_approve".into(),
+                                    lane_id: Some(lane_id),
+                                    repo: Some(lane.repo.name.clone()),
+                                    params: Some(
+                                        json!({ "pattern": pattern, "command": cmd }).to_string(),
+                                    ),
+                                    outcome: "ok".into(),
+                                    detail: None,
+                                })
+                                .await;
+                            continue;
+                        }
+                        tracing::warn!(
+                            lane = lane_id,
+                            "auto-approve key send failed; escalating normally"
+                        );
+                    }
+                }
+            }
             let (title, body) = compose(
                 kind,
                 lane,
@@ -232,9 +347,11 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 push::send_all(&ctx, &title, &body, category, &payload).await;
             }
 
-            // Local desktop popup — fired by the daemon only when the TUI isn't already covering it
-            // (it's parked in an attach or closed), so we never double-notify with the TUI's own.
-            if !tui_active {
+            // Local desktop popup, fired by the daemon only when no local UI is already covering
+            // it (the TUI is parked in an attach, or nothing is open), so we never double-notify
+            // with the TUI's own. `notify_desktop_fallback` turns it off entirely: on macOS this
+            // goes out via `osascript`, which delivers as Script Editor and wears its icon.
+            if repomon_core::notify::daemon_popup_allowed(tui_active, cfg.notify_desktop_fallback) {
                 repomon_core::notify::send_native(
                     &title,
                     &body,
@@ -351,20 +468,57 @@ async fn check_orchestrator_attention(
     drop(orch);
     ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status);
 
-    if edge_to_attention && !tui_active && cfg.notify_enabled && cfg.notify_needs_you {
+    if edge_to_attention && cfg.notify_enabled && cfg.notify_needs_you {
         let due = popup_fired
             .map(|t| t.elapsed() >= ORCH_POPUP_DEBOUNCE)
             .unwrap_or(true);
         if due {
             *popup_fired = Some(Instant::now());
-            repomon_core::notify::send_native(
-                "repomind needs you",
-                headline.as_deref().unwrap_or(""),
-                cfg.notify_sound,
-                cfg.notify_click_focus,
-            );
+            // Phone loop: repomind's own escalations reach remote clients like a managed
+            // agent's would — event.notification for the in-app feed plus APNs — regardless of
+            // whether a TUI is open locally (mirrors the lane path's remote gating).
+            if cfg.remote.enabled {
+                let (title, body, payload) =
+                    orchestrator_attention_payload(word, headline.as_deref());
+                ctx.broadcast("event.notification", payload.clone());
+                push::send_all(ctx, &title, &body, push::CATEGORY_ALERT, &payload).await;
+            }
+            // Local desktop popup only when the TUI isn't already covering it, and only if the
+            // user left the daemon's own popup switched on.
+            if repomon_core::notify::daemon_popup_allowed(tui_active, cfg.notify_desktop_fallback) {
+                repomon_core::notify::send_native(
+                    "repomind needs you",
+                    headline.as_deref().unwrap_or(""),
+                    cfg.notify_sound,
+                    cfg.notify_click_focus,
+                );
+            }
         }
     }
+}
+
+/// Build the remote notification for a repomind needs-you edge: title, push body, and the
+/// event payload. Pure so the shape is testable; `attention` is the derived word
+/// (permission / decision / end_of_turn) and `headline` the dialog summary or last message.
+fn orchestrator_attention_payload(
+    attention: &str,
+    headline: Option<&str>,
+) -> (String, String, serde_json::Value) {
+    let title = "repomind needs you".to_string();
+    let body = match headline {
+        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => format!("repomind is waiting on you ({attention})"),
+    };
+    let payload = json!({
+        // One live orchestrator pane exists, so attention-kind granularity is enough for
+        // client-side dedup (a re-fire only happens after the attention word changed).
+        "id": format!("orchestrator:{attention}"),
+        "kind": "orchestrator_needs_you",
+        "attention": attention,
+        "title": title,
+        "body": body,
+    });
+    (title, body, payload)
 }
 
 /// Map the orchestrator's pane dialog (if any — already detected/classified by
@@ -402,6 +556,32 @@ fn tail(s: &str, max: usize) -> String {
     let start = count - max;
     let clipped: String = s.chars().skip(start).collect();
     format!("…{}", clipped.trim_start())
+}
+
+#[cfg(test)]
+mod orch_payload_tests {
+    use super::*;
+
+    #[test]
+    fn orchestrator_payload_carries_attention_and_headline() {
+        let (title, body, payload) =
+            orchestrator_attention_payload("decision", Some("Which auth method should we use?"));
+        assert_eq!(title, "repomind needs you");
+        assert!(body.contains("auth method"));
+        assert_eq!(payload["kind"], serde_json::json!("orchestrator_needs_you"));
+        assert_eq!(payload["attention"], serde_json::json!("decision"));
+        assert!(payload["id"].as_str().unwrap().contains("orchestrator"));
+    }
+
+    #[test]
+    fn orchestrator_payload_survives_a_missing_headline() {
+        let (_, body, payload) = orchestrator_attention_payload("end_of_turn", None);
+        assert!(
+            !body.is_empty(),
+            "an empty push body reads as a bug on the phone"
+        );
+        assert_eq!(payload["attention"], serde_json::json!("end_of_turn"));
+    }
 }
 
 #[cfg(test)]

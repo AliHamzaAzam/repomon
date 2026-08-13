@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::model::LaneId;
 
-use super::tmux::TmuxRuntime;
+use super::tmux::{TmuxRuntime, WindowMeta};
 
 /// How to launch an agent process, structurally — program, extra arguments, working directory,
 /// and environment overrides — instead of a pre-quoted shell string.
@@ -154,6 +154,31 @@ pub trait SessionBackend: Send + Sync {
 
     /// Window names currently live in the session. A vanished server reads as empty.
     fn list_windows(&self) -> Result<Vec<String>>;
+
+    /// Window identity metadata used to keep transcript routing stable across refreshes.
+    /// Backends without durable window metadata degrade to name-only entries.
+    fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
+        Ok(self
+            .list_windows()?
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| WindowMeta {
+                name,
+                wid: index as u64 + 1,
+                session: None,
+            })
+            .collect())
+    }
+
+    /// Persist a transcript identity on a named window when the backend supports it.
+    fn set_window_session(&self, _window: &str, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Persist a transcript identity on a backend-native window id when supported.
+    fn set_window_session_by_id(&self, _wid: u64, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Every window's name, pane cwd, and last-activity time — the orphan reaper's view.
     fn list_windows_with_activity(&self) -> Result<Vec<WindowActivity>>;
