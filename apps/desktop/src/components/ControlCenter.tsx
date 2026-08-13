@@ -6,6 +6,7 @@ import { isMac } from "../keymap";
 import { agentLabel } from "./agentLabel";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
+import type { MessageStore } from "../stores/messages";
 import type { ActionsStore } from "../stores/actions";
 
 const JOURNAL_LIMIT = 200;
@@ -64,6 +65,7 @@ export function groupApprovalRules(rules: ApprovalRule[]): Array<{ repo: string;
 interface ControlCenterProps {
   fleet: FleetStore;
   notifications: NotificationStore;
+  messages: MessageStore;
   actions: ActionsStore;
 }
 
@@ -111,6 +113,13 @@ export default function ControlCenter(props: ControlCenterProps) {
   const selectedAgents = createMemo(() => selectedLane()?.agent_sessions ?? []);
   const selectedAgent = createMemo(() => selectedAgents().find((agent, index) => agentKey(agent, index) === selectedAgentKey()) ?? selectedAgents()[0] ?? null);
   const pendingAgent = createMemo(() => selectedLane()?.agent_sessions.find((agent) => agent.pending_dialog) ?? null);
+  const mailLaneBadges = createMemo(() => [...props.messages.unreadByLane().entries()]
+    .map(([laneId, count]) => ({
+      laneId,
+      count,
+      label: props.fleet.lanes().find((lane) => lane.id === laneId)?.worktree.name ?? `lane-${laneId}`,
+    }))
+    .sort((left, right) => left.laneId - right.laneId));
 
   createEffect(() => {
     const agents = selectedAgents();
@@ -364,7 +373,10 @@ export default function ControlCenter(props: ControlCenterProps) {
     if (next === "playbooks") await loadPlaybooks();
     if (next === "schedules") await loadSchedules();
     if (next === "approvals") await loadApprovals();
-    if (next === "feed") props.notifications.markAllRead();
+    if (next === "feed") {
+      props.notifications.markAllRead();
+      await props.messages.refresh();
+    }
   }
 
   const currentDialog = () => dialog() ?? pendingAgent()?.pending_dialog ?? null;
@@ -379,9 +391,9 @@ export default function ControlCenter(props: ControlCenterProps) {
         aria-haspopup="dialog"
       >
         Control <span class="ml-1 text-[0.5rem] opacity-60">⌘K</span>
-        <Show when={props.notifications.unread()}>
+        <Show when={props.notifications.unread() + props.messages.unread()}>
           <span class="absolute -right-1.5 -top-1.5 grid size-4 place-items-center rounded-full bg-attention text-[0.5rem] font-bold text-background">
-            {props.notifications.unread()}
+            {props.notifications.unread() + props.messages.unread()}
           </span>
         </Show>
       </button>
@@ -397,8 +409,8 @@ export default function ControlCenter(props: ControlCenterProps) {
                 {(item) => (
                   <button type="button" class={`focus-ring mb-1 flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs capitalize ${tab() === item ? "bg-signal/10 text-signal" : "text-muted hover:bg-raised hover:text-foreground"}`} onClick={() => void chooseTab(item)}>
                     <span>{item}</span>
-                    <Show when={item === "feed" && props.notifications.unread()}>
-                      <span class="rounded-full bg-attention/15 px-1.5 font-mono text-[0.52rem] text-attention">{props.notifications.unread()}</span>
+                    <Show when={item === "feed" && props.notifications.unread() + props.messages.unread()}>
+                      <span class="rounded-full bg-attention/15 px-1.5 font-mono text-[0.52rem] text-attention">{props.notifications.unread() + props.messages.unread()}</span>
                     </Show>
                   </button>
                 )}
@@ -741,9 +753,38 @@ export default function ControlCenter(props: ControlCenterProps) {
                   <button class="focus-ring rounded border border-line px-2 py-1 text-xs text-muted" onClick={() => void props.notifications.enableNative()}>{props.notifications.nativeEnabled() ? "Native alerts enabled" : "Enable native alerts"}</button>
                   <button class="focus-ring rounded border border-line px-2 py-1 text-xs text-muted" onClick={props.notifications.clear}>Clear</button>
                 </div>
-                <For each={props.notifications.items()} fallback={<p class="text-sm text-muted">No notifications yet.</p>}>
-                  {(item) => <button type="button" class="focus-ring mb-2 block w-full rounded-lg border border-line p-3 text-left" onClick={() => { props.fleet.setSelectedLaneId(item.lane_id); setTab("actions"); }}><span class="flex items-center justify-between"><b class="text-xs">{item.title}</b><span class="font-mono text-[0.5rem] uppercase text-muted">{item.kind.replace(/_/g, " ")}</span></span><span class="mt-1 block text-xs leading-relaxed text-muted">{item.body}</span></button>}
-                </For>
+                <div class="grid gap-5 lg:grid-cols-2">
+                  <section>
+                    <p class="section-label mb-2">Fleet mail <Show when={props.messages.unread()}><span class="text-attention">· {props.messages.unread()} unread</span></Show></p>
+                    <Show when={mailLaneBadges().length}>
+                      <div class="mb-2 flex flex-wrap gap-1" aria-label="Unread mail by lane">
+                        <For each={mailLaneBadges()}>{(entry) => <button type="button" class="focus-ring rounded-full bg-attention/10 px-2 py-0.5 font-mono text-[0.52rem] text-attention" onClick={() => props.fleet.setSelectedLaneId(entry.laneId)}>{entry.label} · {entry.count}</button>}</For>
+                      </div>
+                    </Show>
+                    <For each={props.messages.items()} fallback={<p class="text-sm text-muted">No fleet mail yet.</p>}>
+                      {(message) => (
+                        <button
+                          type="button"
+                          class={`focus-ring mb-2 block w-full rounded-lg border p-3 text-left ${message.read_state === "unread" ? "border-attention/40 bg-attention/5" : "border-line"}`}
+                          onClick={() => { void props.messages.open(message).then(() => setTab("actions")); }}
+                        >
+                          <span class="flex items-center justify-between gap-2">
+                            <b class="truncate text-xs">{message.sender.address} <span class="font-normal text-muted">to {message.recipient.address}</span></b>
+                            <span class="shrink-0 font-mono text-[0.5rem] uppercase text-muted">{message.read_state}</span>
+                          </span>
+                          <span class="mt-1 block text-xs leading-relaxed text-muted">{message.body}</span>
+                          <span class="mt-2 flex justify-between font-mono text-[0.5rem] text-muted/70"><span>{formatTime(message.created_at)}</span><span>{message.delivery_state}</span></span>
+                        </button>
+                      )}
+                    </For>
+                  </section>
+                  <section>
+                    <p class="section-label mb-2">Agent notifications</p>
+                    <For each={props.notifications.items()} fallback={<p class="text-sm text-muted">No notifications yet.</p>}>
+                      {(item) => <button type="button" class="focus-ring mb-2 block w-full rounded-lg border border-line p-3 text-left" onClick={() => { props.fleet.setSelectedLaneId(item.lane_id); setTab("actions"); }}><span class="flex items-center justify-between"><b class="text-xs">{item.title}</b><span class="font-mono text-[0.5rem] uppercase text-muted">{item.kind.replace(/_/g, " ")}</span></span><span class="mt-1 block text-xs leading-relaxed text-muted">{item.body}</span></button>}
+                    </For>
+                  </section>
+                </div>
               </Show>
             </div>
           </section>

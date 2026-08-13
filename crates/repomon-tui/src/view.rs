@@ -823,12 +823,17 @@ fn render_notifications(f: &mut Frame, app: &App) {
     let unread = app.unread_notifs();
     let counts = if unread > 0 {
         format!(
-            "{} event(s) · {} new · newest first",
+            "{} mail · {} event(s) · {} new",
+            app.mail.len(),
             app.notifications.len(),
             unread
         )
     } else {
-        format!("{} event(s) · newest first", app.notifications.len())
+        format!(
+            "{} mail · {} event(s) · newest first",
+            app.mail.len(),
+            app.notifications.len()
+        )
     };
     let mut lines = vec![
         header_line(area.width, "REPOMON · NOTIFICATIONS", &fmt_clock(), app),
@@ -837,23 +842,66 @@ fn render_notifications(f: &mut Frame, app: &App) {
         Line::from(Span::styled(counts, app.theme.dim())),
         Line::raw(""),
     ];
-    if app.notifications.is_empty() {
+    if app.notifications.is_empty() && app.mail.is_empty() {
         lines.push(Line::raw(
-            "  no notifications yet — agent state changes show up here".to_string(),
+            "  no notifications or fleet mail yet".to_string(),
         ));
     }
     // Two lines per event (title + detail); reserve room for the header block already pushed.
     let budget = ((rows[0].height as usize).saturating_sub(lines.len()) / 2).max(1);
     // Scroll the window just enough to keep the cursor (▸) on screen.
     let skip = app.notif_sel.saturating_sub(budget.saturating_sub(1));
-    for (i, ev) in app
+    for (i, message) in app.mail.iter().enumerate().skip(skip).take(budget) {
+        let mark = if i == app.notif_sel { "▸ " } else { "  " };
+        let unread = message.read_state == repomon_core::model::MessageReadState::Unread;
+        let (dot, dot_style) = if unread {
+            ("● ", app.theme.needs_you())
+        } else {
+            ("  ", app.theme.muted())
+        };
+        let when = message.created_at.with_timezone(&chrono::Local);
+        let style = if unread {
+            app.theme.accented().add_modifier(Modifier::BOLD)
+        } else {
+            app.theme.dim()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(mark, app.theme.accented()),
+            Span::styled(dot, dot_style),
+            Span::styled(when.format("%H:%M:%S").to_string(), app.theme.muted()),
+            Span::raw("  MAIL  "),
+            Span::styled(
+                format!(
+                    "{} -> {}",
+                    message.sender.address, message.recipient.address
+                ),
+                style,
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("              "),
+            Span::styled(
+                message
+                    .body
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                app.theme.dim(),
+            ),
+        ]));
+    }
+    let used_mail = app.mail.len().saturating_sub(skip).min(budget);
+    let remaining = budget.saturating_sub(used_mail);
+    let event_skip = skip.saturating_sub(app.mail.len());
+    for (event_i, ev) in app
         .notifications
         .iter()
         .rev()
         .enumerate()
-        .skip(skip)
-        .take(budget)
+        .skip(event_skip)
+        .take(remaining)
     {
+        let i = app.mail.len() + event_i;
         let mark = if i == app.notif_sel { "▸ " } else { "  " };
         // Unseen events keep a ● until the feed visit ends (they arrived while it was open).
         let (dot, dot_style) = if ev.read {

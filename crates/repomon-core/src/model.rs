@@ -16,6 +16,113 @@ pub type WorktreeId = i64;
 pub type LaneId = i64;
 pub type SessionId = i64;
 
+/// A canonical fleet address as accepted on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(transparent)]
+pub struct AgentAddress(pub String);
+
+impl AgentAddress {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AgentAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A fleet address bound to the identity selected when a message was sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct ResolvedAgentAddress {
+    pub address: AgentAddress,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub lane_id: Option<LaneId>,
+    #[serde(default)]
+    pub slot: Option<u32>,
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub agent_kind: Option<String>,
+}
+
+/// The durable delivery state of a fleet message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageDeliveryState {
+    Queued,
+    Delivered,
+    Failed,
+}
+
+/// The durable read state of a fleet message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageReadState {
+    Unread,
+    Read,
+}
+
+/// One durable fleet message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FleetMessage {
+    pub id: String,
+    pub requested_to: AgentAddress,
+    pub sender: ResolvedAgentAddress,
+    pub recipient: ResolvedAgentAddress,
+    pub body: String,
+    pub thread_id: String,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    pub remaining_hops: u8,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub delivered_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub read_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub delivery_error: Option<String>,
+    pub delivery_state: MessageDeliveryState,
+    pub read_state: MessageReadState,
+}
+
+/// A newest-first page of durable fleet messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct MessagePage {
+    pub messages: Vec<FleetMessage>,
+    #[serde(default)]
+    pub next_before: Option<String>,
+}
+
+/// A stored hash that authenticates one managed agent's restricted MCP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpIdentity {
+    pub token_hash: String,
+    pub identity: ResolvedAgentAddress,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 /// (De)serialize a [`gix::ObjectId`] as a lowercase hex string.
 pub mod oid_hex {
     use serde::{Deserialize, Deserializer, Serializer};

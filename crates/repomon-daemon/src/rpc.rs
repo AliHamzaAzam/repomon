@@ -7,8 +7,8 @@ use repomon_core::agent::backend::{CaptureOpts, ScrollEvent, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
-    AgentChoice, AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult, Commit,
-    CreateLaneParams, Lane, RemoteDevice, RepoId, TimeRange,
+    AgentAddress, AgentChoice, AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult,
+    Commit, CreateLaneParams, Lane, RemoteDevice, RepoId, ResolvedAgentAddress, TimeRange,
 };
 use repomon_core::protocol::RpcError;
 use repomon_core::{Indexer, TmuxRuntime, analytics, config, session};
@@ -145,6 +145,8 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "notify_sound_error_or_stall": cfg.notify_sound_error_or_stall,
         "notify_sound_incoming_message": cfg.notify_sound_incoming_message,
         "notify_sound_update_ready": cfg.notify_sound_update_ready,
+        "message_inject_agents": cfg.message_inject_agents,
+        "message_inject_operator": cfg.message_inject_operator,
         "notify_show_why": cfg.notify_show_why,
         "notify_coalesce": cfg.notify_coalesce,
         "notify_click_focus": cfg.notify_click_focus,
@@ -254,6 +256,49 @@ fn default_depth() -> usize {
 #[derive(Deserialize)]
 struct LaneId {
     lane_id: repomon_core::model::LaneId,
+}
+#[derive(Deserialize)]
+struct MessageSend {
+    to: String,
+    body: String,
+    #[serde(default)]
+    reply_to: Option<String>,
+    #[serde(default)]
+    identity_token: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+#[derive(Deserialize)]
+struct MessageInbox {
+    #[serde(default)]
+    unread_only: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default)]
+    identity_token: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+#[derive(Deserialize)]
+struct MessageMarkRead {
+    id: String,
+    #[serde(default)]
+    identity_token: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+#[derive(Deserialize)]
+struct MessageList {
+    #[serde(default)]
+    lane_id: Option<repomon_core::model::LaneId>,
+    #[serde(default)]
+    unread_only: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before: Option<String>,
 }
 #[derive(Deserialize)]
 struct LaneDelete {
@@ -641,6 +686,10 @@ struct ConfigSet {
     #[serde(default)]
     notify_sound_update_ready: Option<bool>,
     #[serde(default)]
+    message_inject_agents: Option<bool>,
+    #[serde(default)]
+    message_inject_operator: Option<bool>,
+    #[serde(default)]
     notify_show_why: Option<bool>,
     #[serde(default)]
     notify_coalesce: Option<bool>,
@@ -848,6 +897,139 @@ struct OrchestratorTranscript {
     /// How many recent transcript items to return.
     #[serde(default = "default_transcript_limit")]
     limit: usize,
+}
+
+fn resolved_named(address: &str, window: Option<String>) -> ResolvedAgentAddress {
+    ResolvedAgentAddress {
+        address: AgentAddress::new(address),
+        lane_id: None,
+        slot: None,
+        window,
+        session_id: None,
+        agent_kind: None,
+    }
+}
+
+fn resolved_lane(lane: &Lane, slot: usize) -> Result<ResolvedAgentAddress, RpcError> {
+    if slot == 0 {
+        return Err(RpcError::invalid_params("agent slot is 1-based"));
+    }
+    let session = lane.agent_sessions.get(slot - 1).ok_or_else(|| {
+        RpcError::invalid_params(format!("lane-{} has no agent slot {slot}", lane.id))
+    })?;
+    Ok(ResolvedAgentAddress {
+        address: AgentAddress::new(format!("lane-{}/{}", lane.id, slot)),
+        lane_id: Some(lane.id),
+        slot: Some(slot as u32),
+        window: session.tmux_window.clone(),
+        session_id: session.session_id.clone(),
+        agent_kind: Some(session.agent.as_str().into_owned()),
+    })
+}
+
+async fn resolve_message_address(
+    ctx: &Ctx,
+    requested: &str,
+) -> Result<ResolvedAgentAddress, RpcError> {
+    let requested = requested.trim();
+    if requested == "operator" {
+        return Ok(resolved_named("operator", None));
+    }
+    if requested == "repomind" {
+        let orchestrator = ctx.orchestrator.lock().await;
+        return orchestrator
+            .as_ref()
+            .map(|session| resolved_named("repomind", Some(session.window.clone())))
+            .ok_or_else(|| RpcError::invalid_params("repomind is not running"));
+    }
+
+    let lanes = lanes_with_agents(ctx).await?;
+    resolve_agent_message_address(&lanes, requested)
+}
+
+fn resolve_agent_message_address(
+    lanes: &[Lane],
+    requested: &str,
+) -> Result<ResolvedAgentAddress, RpcError> {
+    if let Some(label) = requested.strip_prefix('@') {
+        if label.is_empty() {
+            return Err(RpcError::invalid_params("message label must not be empty"));
+        }
+        let mut matches = Vec::new();
+        for lane in lanes {
+            for (index, session) in lane.agent_sessions.iter().enumerate() {
+                if session.custom_label.as_deref() == Some(label) {
+                    matches.push((lane, index + 1));
+                }
+            }
+        }
+        return match matches.as_slice() {
+            [] => Err(RpcError::invalid_params(format!(
+                "no agent has the exact label @{label}"
+            ))),
+            [(lane, slot)] => resolved_lane(lane, *slot),
+            _ => Err(RpcError::invalid_params(format!(
+                "agent label @{label} is ambiguous"
+            ))),
+        };
+    }
+
+    let Some(rest) = requested.strip_prefix("lane-") else {
+        return Err(RpcError::invalid_params(format!(
+            "invalid fleet address {requested:?}"
+        )));
+    };
+    let mut parts = rest.split('/');
+    let lane_id: i64 = parts
+        .next()
+        .and_then(|part| part.parse().ok())
+        .ok_or_else(|| RpcError::invalid_params("invalid lane address"))?;
+    let slot = match parts.next() {
+        Some(part) => part
+            .parse::<usize>()
+            .ok()
+            .filter(|slot| *slot > 0)
+            .ok_or_else(|| RpcError::invalid_params("agent slot is 1-based"))?,
+        None => 1,
+    };
+    if parts.next().is_some() {
+        return Err(RpcError::invalid_params("invalid lane address"));
+    }
+    let lane = lanes
+        .iter()
+        .find(|lane| lane.id == lane_id)
+        .ok_or_else(|| RpcError::invalid_params(format!("no lane {lane_id}")))?;
+    resolved_lane(lane, slot)
+}
+
+async fn message_sender(
+    ctx: &Ctx,
+    identity_token: Option<String>,
+    source: Option<String>,
+) -> Result<ResolvedAgentAddress, RpcError> {
+    if let Some(token) = identity_token {
+        return ctx
+            .store
+            .resolve_mcp_identity(token)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| RpcError::invalid_params("invalid or revoked MCP identity"));
+    }
+    match source.as_deref() {
+        None | Some("operator") => Ok(resolved_named("operator", None)),
+        Some("repomind") => Ok(resolved_named("repomind", Some(ORCHESTRATOR_WINDOW.into()))),
+        Some(_) => Err(RpcError::invalid_params("invalid message sender source")),
+    }
+}
+
+fn message_event(message: &repomon_core::model::FleetMessage) -> Value {
+    json!({
+        "id": message.id,
+        "lane_id": message.recipient.lane_id,
+        "from": message.sender.address,
+        "body": message.body,
+        "message": message,
+    })
 }
 
 /// Dispatch a single request to its handler.
@@ -1241,6 +1423,75 @@ pub async fn dispatch(
             let mut one = vec![lane];
             overlay_agents(ctx, &mut one).await;
             to_value(one.into_iter().next().unwrap())
+        }
+
+        // ---- durable fleet messages ----
+        "message.send" => {
+            let p: MessageSend = parse(params)?;
+            let sender = message_sender(ctx, p.identity_token, p.source).await?;
+            let recipient = resolve_message_address(ctx, &p.to).await?;
+            let message = ctx
+                .store
+                .send_message(
+                    AgentAddress::new(p.to),
+                    sender,
+                    recipient,
+                    p.body,
+                    p.reply_to,
+                )
+                .await
+                .map_err(internal)?;
+            ctx.broadcast("event.message.stored", message_event(&message));
+            to_value(message)
+        }
+        "message.inbox" => {
+            let p: MessageInbox = parse(params)?;
+            let recipient = message_sender(ctx, p.identity_token, p.source).await?;
+            let page = ctx
+                .store
+                .list_messages(
+                    Some(recipient.address),
+                    None,
+                    p.unread_only,
+                    p.limit.unwrap_or(50),
+                    p.before,
+                    true,
+                )
+                .await
+                .map_err(internal)?;
+            to_value(page)
+        }
+        "message.mark_read" => {
+            let p: MessageMarkRead = parse(params)?;
+            let sender = message_sender(ctx, p.identity_token, p.source).await?;
+            let current = ctx
+                .store
+                .get_message(p.id.clone())
+                .await
+                .map_err(internal)?;
+            if sender.address.as_str() != "operator" && current.recipient.address != sender.address
+            {
+                return Err(RpcError::invalid_params(
+                    "message does not belong to this inbox",
+                ));
+            }
+            to_value(ctx.store.mark_message_read(p.id).await.map_err(internal)?)
+        }
+        "message.list" => {
+            let p: MessageList = parse(params)?;
+            to_value(
+                ctx.store
+                    .list_messages(
+                        None,
+                        p.lane_id,
+                        p.unread_only,
+                        p.limit.unwrap_or(50),
+                        p.before,
+                        false,
+                    )
+                    .await
+                    .map_err(internal)?,
+            )
         }
         "lane.create" => {
             let mut p: CreateLaneParams = parse(params)?;
@@ -1932,6 +2183,12 @@ pub async fn dispatch(
                 if let Some(b) = p.notify_sound_update_ready {
                     cfg.notify_sound_update_ready = b;
                 }
+                if let Some(b) = p.message_inject_agents {
+                    cfg.message_inject_agents = b;
+                }
+                if let Some(b) = p.message_inject_operator {
+                    cfg.message_inject_operator = b;
+                }
                 if let Some(b) = p.notify_show_why {
                     cfg.notify_show_why = b;
                 }
@@ -2017,7 +2274,46 @@ pub async fn dispatch(
                 .as_deref()
                 .filter(|t| !t.is_empty())
                 .map(str::to_string);
-            let mut spec = SpawnSpec::new(plan.command, path);
+            let _spawn_guard = ctx.spawn_lock.lock().await;
+            let backend = ctx.backend.clone();
+            let lane_for_allocation = p.lane_id;
+            let (expected_window, slot) = tokio::task::spawn_blocking(move || {
+                next_agent_window(backend.as_ref(), lane_for_allocation)
+            })
+            .await
+            .map_err(internal)??;
+            let identity = ResolvedAgentAddress {
+                address: AgentAddress::new(format!("lane-{}/{}", p.lane_id, slot)),
+                lane_id: Some(p.lane_id),
+                slot: Some(slot),
+                window: Some(expected_window.clone()),
+                session_id: None,
+                agent_kind: Some(kind.as_str().into_owned()),
+            };
+            let identity_token = ctx
+                .store
+                .create_mcp_identity(identity)
+                .await
+                .map_err(internal)?;
+            let socket = {
+                let config = ctx.config.read().await;
+                repomon_core::config::socket_path(&config)
+            };
+            let command = if matches!(kind, AgentKind::ClaudeCode | AgentKind::Codex) {
+                let mcp_config = write_agent_mcp_config(&expected_window).map_err(internal)?;
+                attach_agent_mcp(plan.command, &kind, &mcp_config)
+            } else {
+                plan.command
+            };
+            let mut spec = SpawnSpec::new(command, path);
+            spec.env.extend([
+                (
+                    "REPOMON_MCP_SOCKET".into(),
+                    socket.to_string_lossy().into_owned(),
+                ),
+                ("REPOMON_MCP_MODE".into(), "agent".into()),
+                ("REPOMON_MCP_IDENTITY_TOKEN".into(), identity_token),
+            ]);
             let inject = plan.effort_inject;
             let inject_task = if inject.is_some() { task.clone() } else { None };
             if inject.is_none() {
@@ -2027,7 +2323,7 @@ pub async fn dispatch(
             }
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let window = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
+            let spawned = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
                 let window = tmux.spawn(lane, &spec)?;
                 // Best-effort: set the effort level and type the task once the TUI is up. Operators
                 // do exactly this by hand; a short settle lets claude start reading input.
@@ -2042,8 +2338,26 @@ pub async fn dispatch(
                 Ok(window)
             })
             .await
-            .map_err(internal)?
             .map_err(internal)?;
+            let window = match spawned {
+                Ok(window) if window == expected_window => window,
+                Ok(window) => {
+                    let _ = ctx
+                        .store
+                        .revoke_mcp_identity_for_window(expected_window.clone())
+                        .await;
+                    return Err(internal(format!(
+                        "spawn allocated {window}, expected {expected_window}"
+                    )));
+                }
+                Err(error) => {
+                    let _ = ctx
+                        .store
+                        .revoke_mcp_identity_for_window(expected_window.clone())
+                        .await;
+                    return Err(internal(error));
+                }
+            };
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
@@ -2079,7 +2393,7 @@ pub async fn dispatch(
                 }
             }
             let session_id = p.session_id.clone();
-            let spec = tokio::task::spawn_blocking(move || {
+            let mut spec = tokio::task::spawn_blocking(move || {
                 // Which account (config dir) the session belongs to, and how to resume it.
                 let (config_dir, resume) = match &session_id {
                     Some(sid) => (
@@ -2102,12 +2416,65 @@ pub async fn dispatch(
             })
             .await
             .map_err(internal)?;
+            let _spawn_guard = ctx.spawn_lock.lock().await;
+            let backend = ctx.backend.clone();
+            let lane_for_allocation = p.lane_id;
+            let (expected_window, slot) = tokio::task::spawn_blocking(move || {
+                next_agent_window(backend.as_ref(), lane_for_allocation)
+            })
+            .await
+            .map_err(internal)??;
+            let identity = ResolvedAgentAddress {
+                address: AgentAddress::new(format!("lane-{}/{}", p.lane_id, slot)),
+                lane_id: Some(p.lane_id),
+                slot: Some(slot),
+                window: Some(expected_window.clone()),
+                session_id: p.session_id.clone(),
+                agent_kind: Some("claude-code".into()),
+            };
+            let token = ctx
+                .store
+                .create_mcp_identity(identity)
+                .await
+                .map_err(internal)?;
+            let socket = {
+                let config = ctx.config.read().await;
+                repomon_core::config::socket_path(&config)
+            };
+            let mcp_config = write_agent_mcp_config(&expected_window).map_err(internal)?;
+            spec.program = attach_agent_mcp(spec.program, &AgentKind::ClaudeCode, &mcp_config);
+            spec.env.extend([
+                (
+                    "REPOMON_MCP_SOCKET".into(),
+                    socket.to_string_lossy().into_owned(),
+                ),
+                ("REPOMON_MCP_MODE".into(), "agent".into()),
+                ("REPOMON_MCP_IDENTITY_TOKEN".into(), token),
+            ]);
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
+            let spawned = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
                 .await
-                .map_err(internal)?
                 .map_err(internal)?;
+            let window = match spawned {
+                Ok(window) if window == expected_window => window,
+                Ok(window) => {
+                    let _ = ctx
+                        .store
+                        .revoke_mcp_identity_for_window(expected_window.clone())
+                        .await;
+                    return Err(internal(format!(
+                        "adopt allocated {window}, expected {expected_window}"
+                    )));
+                }
+                Err(error) => {
+                    let _ = ctx
+                        .store
+                        .revoke_mcp_identity_for_window(expected_window.clone())
+                        .await;
+                    return Err(internal(error));
+                }
+            };
             // The one moment the daemon KNOWS which transcript runs in this window: stamp
             // the sticky binding deterministically instead of leaving it to first-contact
             // guessing — `--resume` doesn't touch the resumed .jsonl until the first
@@ -2420,6 +2787,10 @@ pub async fn dispatch(
             // read this agent back as still live while waiting out `resolve_windows`'s
             // total-vanish debounce. See `reap::kill_and_forget`.
             crate::reap::kill_and_forget(ctx, &window).await;
+            let _ = ctx
+                .store
+                .revoke_mcp_identity_for_window(window.clone())
+                .await;
             let tmux = ctx.backend.clone();
             let remaining = tokio::task::spawn_blocking(move || {
                 tmux.windows_for(lane).unwrap_or_default().len()
@@ -5169,6 +5540,69 @@ fn program_basename(prog: &str) -> &str {
     prog.rsplit('/').next().unwrap_or(prog)
 }
 
+fn next_agent_window(
+    backend: &dyn repomon_core::agent::backend::SessionBackend,
+    lane: i64,
+) -> Result<(String, u32), RpcError> {
+    let windows = backend.list_windows().map_err(internal)?;
+    let next = repomon_core::TmuxRuntime::lane_windows_in(&windows, lane)
+        .last()
+        .and_then(|window| repomon_core::TmuxRuntime::slot_of_window(window))
+        .unwrap_or(0)
+        + 1;
+    Ok((
+        repomon_core::TmuxRuntime::slot_name(lane, next),
+        next as u32,
+    ))
+}
+
+fn write_agent_mcp_config(window: &str) -> std::io::Result<PathBuf> {
+    let repomond = repomon_core::service::repomond_path();
+    let config = json!({
+        "mcpServers": {
+            "repomon": {
+                "command": repomond.to_string_lossy(),
+                "args": ["mcp"],
+            }
+        }
+    });
+    let dir = repomon_core::config::config_dir().join("agent-mcp");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{window}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&config).unwrap_or_default(),
+    )?;
+    Ok(path)
+}
+
+fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> String {
+    match kind {
+        AgentKind::ClaudeCode => format!(
+            "{command} --mcp-config {} --allowedTools mcp__repomon",
+            shell_quote(&mcp_config.to_string_lossy())
+        ),
+        AgentKind::Codex => {
+            let repomond = repomon_core::service::repomond_path();
+            let command_override = format!(
+                "mcp_servers.repomon.command=\"{}\"",
+                repomond.to_string_lossy()
+            );
+            format!(
+                "{command} -c {} -c {} -c {} -c {} -c {}",
+                shell_quote(&command_override),
+                shell_quote("mcp_servers.repomon.args=[\"mcp\"]"),
+                shell_quote("mcp_servers.repomon.enabled=true"),
+                shell_quote(
+                    "mcp_servers.repomon.env_vars=[\"REPOMON_MCP_SOCKET\",\"REPOMON_MCP_MODE\",\"REPOMON_MCP_IDENTITY_TOKEN\"]"
+                ),
+                shell_quote("mcp_servers.repomon.default_tools_approval_mode=\"approve\"")
+            )
+        }
+        _ => command,
+    }
+}
+
 /// Build the full `claude` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
 /// the window command through a shell). `--mcp-config` *adds* the repomon fleet server; the user's
 /// own basic-memory (mnemind) server still loads from their Claude config, so we don't redeclare
@@ -5364,6 +5798,104 @@ pub(crate) fn write_orchestrator_mcp_config_named(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mail_lane(id: i64, labels: &[Option<&str>]) -> Lane {
+        let now = chrono::Utc::now();
+        let repo = repomon_core::model::Repo {
+            id,
+            path: PathBuf::from(format!("/repo-{id}")),
+            name: format!("repo-{id}"),
+            added_at: now,
+            worktree_root_template: None,
+            hidden: false,
+        };
+        let worktree = repomon_core::model::Worktree {
+            id,
+            repo_id: id,
+            path: repo.path.clone(),
+            branch: Some("main".into()),
+            head: "0000000000000000000000000000000000000000".parse().unwrap(),
+            is_main: true,
+            name: "main".into(),
+        };
+        let state = repomon_core::model::WorktreeState {
+            worktree_id: id,
+            head: worktree.head,
+            branch: worktree.branch.clone(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            dirty: Default::default(),
+            last_commit_at: None,
+            locked: false,
+            prunable: false,
+            last_change_at: None,
+        };
+        let agent_sessions = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| AgentSession {
+                id: index as i64 + 1,
+                agent: AgentKind::ClaudeCode,
+                repo_id: id,
+                worktree_id: Some(id),
+                started_at: now,
+                last_activity_at: now,
+                ended_at: None,
+                manifest_path: PathBuf::from(format!("/session-{id}-{index}.jsonl")),
+                tool_call_count: 0,
+                title: None,
+                status: AgentStatus::Waiting,
+                external: false,
+                session_id: Some(format!("session-{id}-{index}")),
+                resume_at: None,
+                inferred: false,
+                tmux_window: Some(repomon_core::TmuxRuntime::slot_name(id, index + 1)),
+                last_message: None,
+                pending_prompt: None,
+                pending_dialog: None,
+                stale: false,
+                stalled_since: None,
+                ended_turn: true,
+                gate: None,
+                config_dir: None,
+                custom_label: label.map(str::to_string),
+            })
+            .collect();
+        Lane {
+            id,
+            repo,
+            worktree,
+            state,
+            agent_sessions,
+            last_activity_at: now,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn message_addresses_route_lane_slots_and_exact_labels() {
+        let lanes = vec![mail_lane(7, &[Some("first"), Some("reviewer")])];
+        let first = resolve_agent_message_address(&lanes, "lane-7").unwrap();
+        assert_eq!(first.slot, Some(1));
+        assert_eq!(first.address.as_str(), "lane-7/1");
+        let second = resolve_agent_message_address(&lanes, "lane-7/2").unwrap();
+        assert_eq!(second.slot, Some(2));
+        assert_eq!(second.window.as_deref(), Some("lane-7-2"));
+        let label = resolve_agent_message_address(&lanes, "@reviewer").unwrap();
+        assert_eq!(label.address.as_str(), "lane-7/2");
+        assert!(resolve_agent_message_address(&lanes, "lane-7/0").is_err());
+    }
+
+    #[test]
+    fn duplicate_exact_message_labels_are_ambiguous() {
+        let lanes = vec![
+            mail_lane(7, &[Some("reviewer")]),
+            mail_lane(8, &[Some("reviewer")]),
+        ];
+        let error = resolve_agent_message_address(&lanes, "@reviewer").unwrap_err();
+        assert!(error.message.contains("ambiguous"));
+    }
 
     fn fit_snap(
         local: bool,
@@ -6251,6 +6783,34 @@ mod tests {
         let cmd =
             build_codex_orchestrator_command("codex", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" -s read-only"), "{cmd}");
+    }
+
+    #[test]
+    fn codex_agent_mcp_forwards_restricted_identity_environment() {
+        let command = attach_agent_mcp(
+            "codex".into(),
+            &AgentKind::Codex,
+            Path::new("/tmp/unused-for-codex.json"),
+        );
+        assert!(
+            command.contains("mcp_servers.repomon.command="),
+            "{command}"
+        );
+        assert!(
+            command.contains("mcp_servers.repomon.args=[\"mcp\"]"),
+            "{command}"
+        );
+        assert!(
+            command.contains(
+                "mcp_servers.repomon.env_vars=[\"REPOMON_MCP_SOCKET\",\"REPOMON_MCP_MODE\",\"REPOMON_MCP_IDENTITY_TOKEN\"]"
+            ),
+            "{command}"
+        );
+        assert!(
+            command.contains("mcp_servers.repomon.default_tools_approval_mode=\"approve\""),
+            "{command}"
+        );
+        assert!(!command.contains("test-token"), "{command}");
     }
 
     #[test]

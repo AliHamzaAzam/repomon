@@ -203,6 +203,20 @@ so it survives refreshes and daemon restarts, and never bleeds onto a different 
 reuses the slot. (Sessions without a transcript id yet — a just-spawned placeholder — can't be
 renamed until their transcript appears.) See `session.rename` in `docs/protocol.md`.
 
+## Fleet mail for managed agents
+
+Managed Claude and Codex sessions receive a restricted local `repomon` MCP server at spawn or
+adopt time. It exposes `fleet_status`, `message_send`, `message_inbox`, and
+`message_mark_read`. It does not expose repomind's mutating fleet tools. The agent process
+inherits a one-time identity token; only its SHA-256 hash is stored, and the generated MCP config
+contains no token.
+
+Messages are durable in the daemon database. Terminal injection is only attempted when the
+recipient has a live managed window and is waiting, idle, or at an ended turn with no dialog,
+rate limit, or stall. Agent-to-agent injection is off by default. Operator and repomind injection
+is on by default. Inbox access works even when injection is disabled or unsupported. See
+`docs/messaging.md` for addressing, threading, limits, and UI behavior.
+
 ## External sessions (running in another terminal)
 
 Because status comes from the transcript, a `claude` you start in any other terminal inside a

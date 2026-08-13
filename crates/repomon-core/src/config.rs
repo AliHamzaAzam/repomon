@@ -90,6 +90,12 @@ pub struct Config {
     pub notify_sound_incoming_message: bool,
     /// Play the desktop cue when a newly discovered update version is ready.
     pub notify_sound_update_ready: bool,
+    /// Allow one managed agent to receive durable mail by terminal injection from another agent.
+    /// Storage and inbox access are unaffected.
+    pub message_inject_agents: bool,
+    /// Allow operator and repomind mail to use safe terminal injection when the recipient is idle.
+    /// Storage and inbox access are unaffected.
+    pub message_inject_operator: bool,
     /// Include the agent's actual last message (what it said/asked) in notification bodies,
     /// instead of just the original task title.
     pub notify_show_why: bool,
@@ -182,6 +188,8 @@ impl Default for Config {
             notify_sound_error_or_stall: true,
             notify_sound_incoming_message: true,
             notify_sound_update_ready: true,
+            message_inject_agents: false,
+            message_inject_operator: true,
             notify_show_why: true,
             notify_coalesce: true,
             notify_click_focus: true,

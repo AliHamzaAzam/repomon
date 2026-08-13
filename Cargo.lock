@@ -5149,6 +5149,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tauri-winrt-notification 0.8.1",
  "tempfile",
  "thiserror 2.0.18",
