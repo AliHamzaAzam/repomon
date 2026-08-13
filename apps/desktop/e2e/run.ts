@@ -2,6 +2,12 @@ import { remote } from "webdriverio";
 
 const application = process.env.REPOMON_DESKTOP_BIN;
 if (!application) throw new Error("REPOMON_DESKTOP_BIN is required");
+const screenshot = process.env.REPOMON_E2E_SCREENSHOT;
+
+const terminalText = (selector = ".terminal-host") => browser.execute(
+  (terminalSelector) => document.querySelector(terminalSelector)?.textContent ?? "",
+  selector,
+);
 
 const browser = await remote({
   hostname: "127.0.0.1",
@@ -29,11 +35,15 @@ try {
   await browser.$(".terminal-host .xterm").waitForDisplayed({ timeout: 15_000 });
 
   const input = await browser.$(".terminal-host .xterm-helper-textarea");
+  await browser.waitUntil(async () => (await terminalText()).trim().length > 0, {
+    timeout: 15_000,
+    timeoutMsg: "interactive shell prompt did not render",
+  });
   await input.click();
-  await browser.keys("printf GUI_E2E_OK");
+  await browser.keys("echo GUI_E2E_OK");
   await browser.keys("Enter");
   await browser.waitUntil(
-    async () => (await browser.$(".terminal-host").getText()).includes("GUI_E2E_OK"),
+    async () => (await terminalText()).includes("GUI_E2E_OK"),
     { timeout: 15_000, timeoutMsg: "interactive shell output did not return through xterm" },
   );
 
@@ -56,7 +66,7 @@ try {
     )),
     { timeout: 15_000, timeoutMsg: "warm terminal did not become visible again" },
   );
-  if (!(await browser.$("[data-e2e-first-pane='true'] .terminal-host").getText()).includes("GUI_E2E_OK")) {
+  if (!(await terminalText("[data-e2e-first-pane='true'] .terminal-host")).includes("GUI_E2E_OK")) {
     throw new Error("warm terminal lost its rendered contents");
   }
 
@@ -65,9 +75,12 @@ try {
   await browser.$("button=triage").click();
   await browser.$("button=Close").click();
   await browser.$("[role='dialog'][aria-label='Control center']").waitForDisplayed({ reverse: true });
-  if (process.env.REPOMON_E2E_SCREENSHOT) {
-    await browser.saveScreenshot(process.env.REPOMON_E2E_SCREENSHOT);
+  if (screenshot) {
+    await browser.saveScreenshot(screenshot);
   }
+} catch (error) {
+  if (screenshot) await browser.saveScreenshot(screenshot);
+  throw error;
 } finally {
   await browser.deleteSession();
 }
