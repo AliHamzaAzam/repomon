@@ -23,7 +23,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show                              # installs the rust-toolchain.toml version
       - run: rustup target add ${{ matrix.target }}  # add the cross std for this toolchain
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Scoped to the two release binaries: a full workspace build also compiles the desktop
+      # Tauri app, which needs system UI toolkit deps this job doesn't install (see build-linux).
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p repomon-tui -p repomon-daemon
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -55,7 +57,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Scoped to the two release binaries — a full workspace build also pulls in the desktop
+      # Tauri app's Linux UI toolkit deps (glib-sys, gtk-sys, ...), which this runner lacks.
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p repomon-tui -p repomon-daemon
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -93,7 +97,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Scoped to the release binaries (repomon-host adds the optional agent-host exe) — a full
+      # workspace build also pulls in the desktop Tauri app, unneeded for this CLI/daemon release.
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p repomon-tui -p repomon-daemon -p repomon-host
       - name: Package
         shell: pwsh
         run: |
