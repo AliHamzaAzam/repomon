@@ -1091,6 +1091,23 @@ export function IconBrandOpenCode(props: IconProps): JSX.Element {
   );
 }
 
+export function IconBrandCursor(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      fill-rule="evenodd"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z" />
+    </svg>
+  );
+}
+
 export interface AgentIconCatalogEntry {
   id: string;
   label: string;
@@ -1104,6 +1121,7 @@ export const AGENT_ICON_CATALOG: AgentIconCatalogEntry[] = [
   { id: "brand-antigravity", label: "Antigravity Brand Mark", category: "brands", Icon: IconBrandAntigravity },
   { id: "brand-openai", label: "OpenAI / Codex Mark", category: "brands", Icon: IconBrandOpenAI },
   { id: "brand-opencode", label: "OpenCode Brand Mark", category: "brands", Icon: IconBrandOpenCode },
+  { id: "brand-cursor", label: "Cursor Brand Mark", category: "brands", Icon: IconBrandCursor },
 
   // Abstract Geometric Library
   { id: "sparkle", label: "Sparkle Star", category: "agents", Icon: IconAgentClaudeCode },
@@ -1145,14 +1163,14 @@ export function resolveAgentIconKey(agent?: string | null, customKey?: string | 
   if (overrides[raw]) return overrides[raw];
   if (agent && overrides[agent]) return overrides[agent];
 
-  // Default brand icons for the four requested kinds:
+  // Default brand icons for the five requested kinds:
   if (raw === "claude-code" || raw === "claude") return "brand-claude";
   if (raw === "antigravity" || raw === "agy") return "brand-antigravity";
   if (raw === "codex") return "brand-openai";
   if (raw === "opencode") return "brand-opencode";
+  if (raw === "cursor") return "brand-cursor";
 
   // Abstract geometric defaults for other agents:
-  if (raw === "cursor") return "cursor";
   if (raw === "aider") return "binary-orbit";
 
   return "bot";
@@ -1178,6 +1196,7 @@ export function AgentIcon(props: AgentIconProps): JSX.Element {
       <Match when={iconKey() === "brand-antigravity"}><IconBrandAntigravity {...props} /></Match>
       <Match when={iconKey() === "brand-openai"}><IconBrandOpenAI {...props} /></Match>
       <Match when={iconKey() === "brand-opencode"}><IconBrandOpenCode {...props} /></Match>
+      <Match when={iconKey() === "brand-cursor"}><IconBrandCursor {...props} /></Match>
 
       {/* Abstract Geometric Library */}
       <Match when={iconKey() === "sparkle"}><IconAgentClaudeCode {...props} /></Match>

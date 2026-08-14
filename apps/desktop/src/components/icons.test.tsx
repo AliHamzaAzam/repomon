@@ -26,16 +26,16 @@ describe("Agent icon resolution and catalog", () => {
     }
   });
 
-  it("resolves official brand marks as defaults for Claude, Antigravity, Codex, OpenCode", () => {
+  it("resolves official brand marks as defaults for Claude, Antigravity, Codex, OpenCode, Cursor", () => {
     expect(resolveAgentIconKey("claude-code")).toBe("brand-claude");
     expect(resolveAgentIconKey("claude")).toBe("brand-claude");
     expect(resolveAgentIconKey("antigravity")).toBe("brand-antigravity");
     expect(resolveAgentIconKey("agy")).toBe("brand-antigravity");
     expect(resolveAgentIconKey("codex")).toBe("brand-openai");
     expect(resolveAgentIconKey("opencode")).toBe("brand-opencode");
+    expect(resolveAgentIconKey("cursor")).toBe("brand-cursor");
 
-    // Cursor and Aider keep their abstract defaults
-    expect(resolveAgentIconKey("cursor")).toBe("cursor");
+    // Aider keeps its abstract default
     expect(resolveAgentIconKey("aider")).toBe("binary-orbit");
   });
 
@@ -79,7 +79,10 @@ describe("Agent icon resolution and catalog", () => {
     const { container: c5 } = render(() => <AgentIcon agent="opencode" />);
     expect(c5.querySelector("svg")).toBeTruthy();
 
-    const { container: c6 } = render(() => <AgentIcon agent="my-bot" iconKey="brand-claude" />);
+    const { container: c6 } = render(() => <AgentIcon agent="cursor" />);
     expect(c6.querySelector("svg")).toBeTruthy();
+
+    const { container: c7 } = render(() => <AgentIcon agent="my-bot" iconKey="brand-claude" />);
+    expect(c7.querySelector("svg")).toBeTruthy();
   });
 });
