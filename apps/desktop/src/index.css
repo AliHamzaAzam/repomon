@@ -14,7 +14,8 @@
   --shadow: hsl(222 24% 11% / 0.08);
 }
 
-.dark {
+.dark,
+.theme-dark {
   --background: hsl(224 20% 7%);
   --foreground: hsl(210 20% 96%);
   --surface: hsl(224 18% 11%);
@@ -25,6 +26,72 @@
   --attention: hsl(36 90% 64%);
   --fault: hsl(4 82% 64%);
   --shadow: hsl(224 35% 2% / 0.5);
+}
+
+.theme-midnight {
+  --background: hsl(0 0% 0%);
+  --foreground: hsl(0 0% 98%);
+  --surface: hsl(0 0% 5%);
+  --raised: hsl(0 0% 10%);
+  --line: hsl(0 0% 18%);
+  --muted: hsl(0 0% 60%);
+  --signal: hsl(168 70% 50%);
+  --attention: hsl(38 95% 58%);
+  --fault: hsl(0 85% 62%);
+  --shadow: hsl(0 0% 0% / 0.8);
+}
+
+.theme-nord {
+  --background: hsl(220 16% 14%);
+  --foreground: hsl(218 27% 92%);
+  --surface: hsl(222 16% 19%);
+  --raised: hsl(220 17% 24%);
+  --line: hsl(220 16% 30%);
+  --muted: hsl(219 14% 71%);
+  --signal: hsl(179 25% 65%);
+  --attention: hsl(40 71% 73%);
+  --fault: hsl(354 42% 56%);
+  --shadow: hsl(220 30% 6% / 0.5);
+}
+
+.theme-dracula {
+  --background: hsl(231 15% 14%);
+  --foreground: hsl(60 30% 96%);
+  --surface: hsl(232 14% 19%);
+  --raised: hsl(231 15% 26%);
+  --line: hsl(232 14% 34%);
+  --muted: hsl(228 10% 62%);
+  --signal: hsl(135 94% 65%);
+  --attention: hsl(31 100% 71%);
+  --fault: hsl(0 100% 67%);
+  --shadow: hsl(231 35% 5% / 0.5);
+}
+
+.theme-sepia {
+  --background: hsl(36 30% 93%);
+  --foreground: hsl(30 25% 18%);
+  --surface: hsl(36 33% 97%);
+  --raised: hsl(36 22% 87%);
+  --line: hsl(36 18% 78%);
+  --muted: hsl(30 12% 45%);
+  --signal: hsl(168 50% 32%);
+  --attention: hsl(28 85% 44%);
+  --fault: hsl(4 65% 46%);
+  --shadow: hsl(30 25% 18% / 0.08);
+}
+
+.light,
+.theme-light {
+  --background: hsl(220 18% 97%);
+  --foreground: hsl(222 24% 11%);
+  --surface: hsl(0 0% 100%);
+  --raised: hsl(220 14% 93%);
+  --line: hsl(220 13% 86%);
+  --muted: hsl(220 9% 46%);
+  --signal: hsl(168 60% 36%);
+  --attention: hsl(36 90% 48%);
+  --fault: hsl(4 72% 50%);
+  --shadow: hsl(222 24% 11% / 0.08);
 }
 
 @theme inline {

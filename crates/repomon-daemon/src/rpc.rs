@@ -1640,89 +1640,186 @@ pub async fn dispatch(
         "plugin.enable" | "plugin.disable" => {
             let enabled = method == "plugin.enable";
             let p: PluginToggle = parse(params)?;
-            let (settings, fanout_root) = match &p.scope {
-                ExtScope::Global => {
-                    let home = crate::ext::claude_home_for(p.account.as_deref())
-                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
-                    (home.join("settings.json"), None)
+            let account = p.account.as_deref();
+            match account {
+                Some("opencode") => {
+                    let repo_path = match &p.scope {
+                        ExtScope::Repo { repo_id } => {
+                            Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?.path)
+                        }
+                        ExtScope::Global => None,
+                    };
+                    if enabled {
+                        crate::ext::add_opencode_plugin(&p.id, repo_path.as_deref())
+                            .map_err(internal)?;
+                    } else {
+                        crate::ext::remove_opencode_plugin(&p.id, repo_path.as_deref())
+                            .map_err(internal)?;
+                    }
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
                 }
-                ExtScope::Repo { repo_id } => {
-                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
-                    (
-                        repo.path.join(".claude/settings.local.json"),
-                        Some(repo.path),
-                    )
+                Some("antigravity") | Some("codex") | Some("cursor") => {
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
                 }
-            };
-            let id = p.id.clone();
-            let fanout = tokio::task::spawn_blocking(move || {
-                crate::ext::set_plugin_enabled(&settings, &id, Some(enabled))?;
-                Ok::<_, std::io::Error>(fanout_root.map(|root| crate::ext::fan_out(&root)))
-            })
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
-            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
-            Ok(json!({ "ok": true, "fanout": fanout }))
-        }
-        "plugin.install" => {
-            // Always -s user: the cache and install record stay global; per-repo activation is
-            // purely an enabledPlugins toggle (worktree projectPath records would never match
-            // otherwise).
-            //
-            // Deliberately NOT run_cli_op: that helper broadcasts event.ext.changed immediately
-            // after the CLI call, but repo-scope installs still have an enable + fan-out step to
-            // run afterward. Broadcasting before that lands let clients refresh into a
-            // half-applied state, and a failure in the enable/fan-out step (after the CLI install
-            // had already succeeded) still emitted the "changed" event. So here the broadcast is
-            // held until every side effect has actually succeeded.
-            let p: PluginInstall = parse(params)?;
-            let cli = claude_cli().await?;
-            let config_dir = crate::ext::account_config_dir(p.account.as_deref());
-            let args: [String; 5] = [
-                "plugin".into(),
-                "install".into(),
-                p.r#ref.clone(),
-                "-s".into(),
-                "user".into(),
-            ];
-            let stdout = tokio::task::spawn_blocking(move || {
-                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                cli.run_for(config_dir.as_deref(), &arg_refs)
-            })
-            .await
-            .map_err(internal)?
-            .map_err(cli_error)?;
-            // Repo-scope install also enables it there so "install to this repo" does what it says.
-            let fanout = match &p.scope {
-                ExtScope::Repo { repo_id } => {
-                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
-                    let settings = repo.path.join(".claude/settings.local.json");
-                    let id = p.r#ref.clone();
-                    let root = repo.path.clone();
-                    let summary = tokio::task::spawn_blocking(move || {
-                        crate::ext::set_plugin_enabled(&settings, &id, Some(true))?;
-                        Ok::<_, std::io::Error>(crate::ext::fan_out(&root))
+                _ => {
+                    let (settings, fanout_root) = match &p.scope {
+                        ExtScope::Global => {
+                            let home = crate::ext::claude_home_for(account)
+                                .ok_or_else(|| internal("this account has no Claude config directory"))?;
+                            (home.join("settings.json"), None)
+                        }
+                        ExtScope::Repo { repo_id } => {
+                            let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                            (
+                                repo.path.join(".claude/settings.local.json"),
+                                Some(repo.path),
+                            )
+                        }
+                    };
+                    let id = p.id.clone();
+                    let fanout = tokio::task::spawn_blocking(move || {
+                        crate::ext::set_plugin_enabled(&settings, &id, Some(enabled))?;
+                        Ok::<_, std::io::Error>(fanout_root.map(|root| crate::ext::fan_out(&root)))
                     })
                     .await
                     .map_err(internal)?
                     .map_err(internal)?;
-                    Some(summary)
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true, "fanout": fanout }))
                 }
-                ExtScope::Global => None,
-            };
-            ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
-            Ok(json!({ "ok": true, "stdout": stdout, "fanout": fanout }))
+            }
+        }
+        "plugin.install" => {
+            let p: PluginInstall = parse(params)?;
+            let account = p.account.as_deref();
+            match account {
+                Some("opencode") => {
+                    let repo_path = match &p.scope {
+                        ExtScope::Repo { repo_id } => {
+                            Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?.path)
+                        }
+                        ExtScope::Global => None,
+                    };
+                    crate::ext::add_opencode_plugin(&p.r#ref, repo_path.as_deref())
+                        .map_err(internal)?;
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("antigravity") | Some("codex") | Some("cursor") => {
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                _ => {
+                    let cli = claude_cli().await?;
+                    let config_dir = crate::ext::account_config_dir(account);
+                    let args: [String; 5] = [
+                        "plugin".into(),
+                        "install".into(),
+                        p.r#ref.clone(),
+                        "-s".into(),
+                        "user".into(),
+                    ];
+                    let stdout = tokio::task::spawn_blocking(move || {
+                        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                        cli.run_for(config_dir.as_deref(), &arg_refs)
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(cli_error)?;
+                    // Repo-scope install also enables it there so "install to this repo" does what it says.
+                    let fanout = match &p.scope {
+                        ExtScope::Repo { repo_id } => {
+                            let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                            let settings = repo.path.join(".claude/settings.local.json");
+                            let id = p.r#ref.clone();
+                            let root = repo.path.clone();
+                            let summary = tokio::task::spawn_blocking(move || {
+                                crate::ext::set_plugin_enabled(&settings, &id, Some(true))?;
+                                Ok::<_, std::io::Error>(crate::ext::fan_out(&root))
+                            })
+                            .await
+                            .map_err(internal)?
+                            .map_err(internal)?;
+                            Some(summary)
+                        }
+                        ExtScope::Global => None,
+                    };
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true, "stdout": stdout, "fanout": fanout }))
+                }
+            }
         }
         "plugin.remove" => {
             let p: PluginToggle = parse(params)?;
-            run_cli_op(
-                ctx,
-                p.account.as_deref(),
-                vec!["plugin".into(), "uninstall".into(), p.id.clone()],
-                ext_scope_json(&p.scope),
-            )
-            .await
+            let account = p.account.as_deref();
+            let repo_path = match &p.scope {
+                ExtScope::Repo { repo_id } => {
+                    Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?.path)
+                }
+                ExtScope::Global => None,
+            };
+
+            match account {
+                Some("opencode") => {
+                    crate::ext::remove_opencode_plugin(&p.id, repo_path.as_deref())
+                        .map_err(internal)?;
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("antigravity") => {
+                    let plugin_name = p.id.split('@').next().unwrap_or(&p.id);
+                    if let Some(dirs) = directories::BaseDirs::new() {
+                        let gemini = dirs.home_dir().join(".gemini");
+                        for dir in [gemini.join("plugins").join(plugin_name), gemini.join("config/plugins").join(plugin_name)] {
+                            if dir.is_dir() {
+                                let _ = std::fs::remove_dir_all(dir);
+                            }
+                        }
+                    }
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("codex") => {
+                    let plugin_name = p.id.split('@').next().unwrap_or(&p.id);
+                    if let Some(dirs) = directories::BaseDirs::new() {
+                        let codex = dirs.home_dir().join(".codex");
+                        let dir = codex.join("plugins").join(plugin_name);
+                        if dir.is_dir() {
+                            let _ = std::fs::remove_dir_all(dir);
+                        }
+                    }
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("cursor") => {
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                _ => {
+                    let cli = claude_cli().await?;
+                    let config_dir = crate::ext::account_config_dir(account);
+                    let home = crate::ext::claude_home_for(account)
+                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
+                    let id = p.id.clone();
+                    let stdout = tokio::task::spawn_blocking(move || {
+                        crate::ext::uninstall_claude_plugin(
+                            &cli,
+                            config_dir.as_deref(),
+                            &home,
+                            &id,
+                            repo_path.as_deref(),
+                        )
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(cli_error)?;
+
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true, "stdout": stdout }))
+                }
+            }
         }
         "plugin.update" => {
             let p: OptionalId = parse(params)?;
@@ -4607,9 +4704,8 @@ fn fit_allowed(
 const STALL_AFTER_MINS: i64 = 5;
 
 /// When a sniffed session counts as stalled, returns the stall's start (the pane's last
-/// change). A stall is: workless status (Running mid-tool, or the post-decay Idle) with no
-/// dialog on screen, a turn that did NOT end (that would be waiting-for-instructions, not
-/// stuck), and a pane frozen for [`STALL_AFTER_MINS`]. `None` = not stalled.
+/// change). A stall is: Running mid-tool with no dialog on screen, a turn that did NOT end,
+/// and a pane frozen for [`STALL_AFTER_MINS`]. `None` = not stalled.
 fn stall_since(
     status: AgentStatus,
     ended_turn: bool,
@@ -4617,7 +4713,7 @@ fn stall_since(
     pane_changed_at: Option<chrono::DateTime<chrono::Utc>>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    if has_dialog || ended_turn || !matches!(status, AgentStatus::Running | AgentStatus::Idle) {
+    if has_dialog || ended_turn || status != AgentStatus::Running {
         return None;
     }
     pane_changed_at.filter(|&t| now - t >= chrono::Duration::minutes(STALL_AFTER_MINS))
@@ -7521,13 +7617,13 @@ mod tests {
         let old = now - chrono::Duration::minutes(6);
         let fresh = now - chrono::Duration::minutes(1);
 
-        // Frozen mid-work — Running (transcript ends in a tool call) or the post-10-min Idle
-        // decay of the same shape: stalled, anchored on the pane's last change.
+        // Frozen mid-work — Running (transcript ends in a tool call): stalled, anchored on the pane's last change.
         assert_eq!(
             stall_since(Running, false, false, Some(old), now),
             Some(old)
         );
-        assert_eq!(stall_since(Idle, false, false, Some(old), now), Some(old));
+        // Idle is never stalled
+        assert_eq!(stall_since(Idle, false, false, Some(old), now), None);
         // The pane is still moving: not stalled.
         assert_eq!(stall_since(Running, false, false, Some(fresh), now), None);
         // A dialog is up (waiting on you): never a stall.

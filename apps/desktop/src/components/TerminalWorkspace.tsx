@@ -146,13 +146,13 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                 <button
                   type="button"
                   aria-pressed={activeWindow() === target.window}
-                  class="focus-ring flex items-center gap-1.5 px-2.5 py-1"
+                  class="focus-ring flex min-w-[7.5rem] max-w-[13rem] items-center gap-1.5 px-2.5 py-1 text-left"
                   onClick={() => setActiveWindow(target.window)}
                 >
-                  <span class={target.shell ? "text-attention" : "text-signal"}>
+                  <span class={`shrink-0 ${target.shell ? "text-attention" : "text-signal"}`}>
                     <AgentIcon agent={target.agent} shell={target.shell} size={13} />
                   </span>
-                  <span class="max-w-44 truncate">{labelOf(target)}</span>
+                  <span class="truncate flex-1 min-w-0">{labelOf(target)}</span>
                 </button>
                 <Show when={target.shell}>
                   <button
@@ -168,7 +168,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               </div>
             )}
           </For>
-          <div class="flex items-center gap-1 pl-1">
+          <div class="ml-2 flex items-center gap-2 border-l border-line/60 pl-2">
             <button
               type="button"
               class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"

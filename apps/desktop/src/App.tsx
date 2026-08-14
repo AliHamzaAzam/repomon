@@ -53,10 +53,27 @@ function formatUptime(totalSeconds?: number): string {
   return hours > 0 ? `${hours}h ${minutes.toString().padStart(2, "0")}m` : `${minutes}m`;
 }
 
+const REPOMIND_OPEN_STORAGE_KEY = "repomon.repomind_open";
+
+function readRepomindOpen(): boolean {
+  try {
+    const raw = localStorage.getItem(REPOMIND_OPEN_STORAGE_KEY);
+    return raw !== null ? raw === "true" : false;
+  } catch {
+    return false;
+  }
+}
+
+function persistRepomindOpen(open: boolean) {
+  try {
+    localStorage.setItem(REPOMIND_OPEN_STORAGE_KEY, String(open));
+  } catch {}
+}
+
 function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
-  const [repomindOpen, setRepomindOpen] = createSignal(true);
+  const [repomindOpen, setRepomindOpen] = createSignal(readRepomindOpen());
   const [repomindFull, setRepomindFull] = createSignal(false);
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
@@ -143,9 +160,18 @@ function App(props: AppProps) {
       case "panel.control": actions.toggleControl(); break;
       case "panel.settings": actions.openSettings(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
-      case "panel.repomind": setRepomindOpen((open) => !open); break;
+      case "panel.repomind":
+        setRepomindOpen((open) => {
+          const next = !open;
+          persistRepomindOpen(next);
+          return next;
+        });
+        break;
       case "panel.repomindFull":
-        if (!repomindFull()) setRepomindOpen(true);
+        if (!repomindFull()) {
+          setRepomindOpen(true);
+          persistRepomindOpen(true);
+        }
         setRepomindFull((full) => !full);
         break;
       case "panel.theme": cycleTheme(); break;
@@ -294,7 +320,11 @@ function App(props: AppProps) {
                 ? "border-signal/50 bg-signal/10 text-signal font-semibold"
                 : "border-line bg-raised/70 text-muted hover:bg-raised hover:text-foreground"
             }`}
-            onClick={() => setRepomindOpen(!repomindOpen())}
+            onClick={() => {
+              const next = !repomindOpen();
+              setRepomindOpen(next);
+              persistRepomindOpen(next);
+            }}
             aria-pressed={repomindOpen()}
             title="Repomind (⌘3)"
           >
@@ -309,15 +339,6 @@ function App(props: AppProps) {
             title="Settings (⌘,)"
           >
             <IconSettings size={14} />
-          </button>
-          <button
-            type="button"
-            class="focus-ring flex h-7 items-center rounded-lg border border-line bg-raised/70 px-2 font-mono text-[10px] uppercase tracking-wider text-muted transition-colors hover:bg-raised hover:text-foreground"
-            onClick={cycleTheme}
-            aria-label={`Theme: ${themeLabel(theme())}`}
-            title="Toggle theme"
-          >
-            {themeLabel(theme())}
           </button>
         </div>
       </header>

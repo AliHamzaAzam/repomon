@@ -269,6 +269,7 @@ async fn peek_popup_shows_the_dialog_and_queue() {
     assert_eq!(app.lanes.len(), 1);
 
     // With nothing waiting, `v` reports there is nothing to peek at.
+    app.lanes[0].agent_sessions.clear();
     app.open_peek().await;
     assert!(app.peek.is_none(), "no popup without waiting agents");
     assert!(

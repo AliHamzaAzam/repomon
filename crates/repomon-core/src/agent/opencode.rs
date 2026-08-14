@@ -14,7 +14,7 @@ use serde_json::Value;
 use super::TranscriptSummary;
 use crate::model::{AgentKind, AgentStatus};
 
-const IDLE_AFTER: Duration = Duration::minutes(10);
+const IDLE_AFTER: Duration = Duration::minutes(2);
 
 pub fn database_path() -> PathBuf {
     if let Ok(path) = std::env::var("REPOMON_OPENCODE_DB") {

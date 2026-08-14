@@ -120,4 +120,32 @@ describe("Settings auto-save persistence", () => {
       codex: "bolt",
     });
   });
+
+  it("renders theme presets and allows accent color selection in appearance tab", async () => {
+    state.config = { ...config, accent: "cyan" };
+    render(() => (
+      <SettingsModal
+        initialTab="appearance"
+        onClose={() => undefined}
+      />
+    ));
+
+    await screen.findByText("Color Themes & Presets");
+    expect(screen.getByText("Midnight OLED")).toBeInTheDocument();
+    expect(screen.getByText("Nord Arctic")).toBeInTheDocument();
+    expect(screen.getByText("Dracula")).toBeInTheDocument();
+    expect(screen.getByText("Warm Paper")).toBeInTheDocument();
+    expect(screen.getByText("Modern Light")).toBeInTheDocument();
+
+    // Click Nord Arctic theme
+    const nordButton = screen.getByRole("button", { name: /Nord Arctic/i });
+    fireEvent.click(nordButton);
+
+    // Select an accent color swatch
+    const emeraldButton = screen.getByRole("button", { name: /Emerald/i });
+    fireEvent.click(emeraldButton);
+
+    await waitFor(() => expect(calls.saved.length).toBeGreaterThan(0));
+    expect(calls.saved[calls.saved.length - 1].accent).toBe("green");
+  });
 });

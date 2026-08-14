@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::model::{AgentKind, AgentSession, AgentStatus, RepoId, WorktreeId};
 
 /// How long with no transcript activity before we consider a session idle.
-const IDLE_AFTER: Duration = Duration::minutes(10);
+const IDLE_AFTER: Duration = Duration::minutes(2);
 
 /// A digest of an agent session (transcript- or activity-derived).
 #[derive(Debug, Clone)]

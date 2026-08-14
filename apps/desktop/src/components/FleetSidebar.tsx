@@ -153,9 +153,11 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
               <span>{sessionCount()}</span>
             </span>
           </Show>
-          <span class={`lane-badge is-${indicator().tone}`}>
-            {indicator().label}
-          </span>
+          <Show when={indicator().label}>
+            <span class={`lane-badge is-${indicator().tone}`}>
+              {indicator().label}
+            </span>
+          </Show>
         </div>
 
         {/* Bottom slot: Telemetry in fixed order: Divergence (ahead/behind), Dirty count */}

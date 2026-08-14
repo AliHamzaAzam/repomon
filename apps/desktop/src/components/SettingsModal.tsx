@@ -4,7 +4,7 @@ import type { AgentChoice } from "../bindings";
 import type { SoundCue } from "../audio/sound";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
-import { applyAccent } from "../theme";
+import { applyAccent, applyTheme, readTheme, ACCENT_SWATCHES, THEME_PRESETS, type Theme } from "../theme";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
 import Switch from "./controls/Switch";
@@ -156,6 +156,18 @@ export default function SettingsModal(props: SettingsModalProps) {
       setSaveStatus("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
+  }
+
+  const [currentTheme, setCurrentTheme] = createSignal<Theme>(readTheme());
+
+  function selectTheme(themeId: Theme) {
+    setCurrentTheme(themeId);
+    applyTheme(themeId);
+  }
+
+  function selectAccent(accentKey: string) {
+    patch({ accent: accentKey });
+    applyAccent(accentKey);
   }
 
   function patch(next: Partial<ConfigView>, debounce = false) {
@@ -357,6 +369,22 @@ export default function SettingsModal(props: SettingsModalProps) {
                     {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
                   </For>
                 </div>
+              </section>
+
+              <section class="space-y-3 border-t border-line/70 pt-5">
+                <p class="section-label">Repomind Orchestration</p>
+                <Select
+                  label="Repomind Orchestrator Runtime"
+                  value={String(settings().orchestrator_agent ?? "")}
+                  options={agentSelectOptions(agents(), settings().orchestrator_agent)}
+                  onChange={(value) => patch({ orchestrator_agent: value || null })}
+                />
+                <TextField
+                  label="Repomind Model"
+                  value={String(settings().orchestrator_model ?? "")}
+                  placeholder="opus / sonnet"
+                  onInput={(value) => patch({ orchestrator_model: value || null }, true)}
+                />
               </section>
 
               <section class="space-y-3 border-t border-line/70 pt-5">
@@ -578,22 +606,136 @@ export default function SettingsModal(props: SettingsModalProps) {
             </Show>
 
             <Show when={tab() === "appearance"}>
-              <section class="space-y-4">
-                <p class="section-label">Visual Preferences</p>
-                <Switch
-                  label="Sort projects by activity"
-                  checked={Boolean(settings().sort_repos_by_activity)}
-                  onChange={(value) => patch({ sort_repos_by_activity: value })}
-                />
-                <ColorField label="Accent Color" value={String(settings().accent ?? "")} onChange={(value) => patch({ accent: value })} />
-                <Select
-                  label="Repomind Orchestrator Runtime"
-                  value={String(settings().orchestrator_agent ?? "")}
-                  options={agentSelectOptions(agents(), settings().orchestrator_agent)}
-                  onChange={(value) => patch({ orchestrator_agent: value || null })}
-                />
-                <TextField label="Repomind Model" value={String(settings().orchestrator_model ?? "")} placeholder="opus / sonnet" onInput={(value) => patch({ orchestrator_model: value || null }, true)} />
-              </section>
+              <div class="space-y-6">
+                {/* 1. Theme Presets */}
+                <section class="space-y-3">
+                  <div>
+                    <p class="section-label">Color Themes & Presets</p>
+                    <p class="mt-0.5 text-xs text-muted">
+                      Select a theme palette for the application, terminal panes, and interactive chrome.
+                    </p>
+                  </div>
+
+                  <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                    <For each={THEME_PRESETS}>
+                      {(preset) => {
+                        const isSelected = () => currentTheme() === preset.id;
+                        return (
+                          <button
+                            type="button"
+                            class={`focus-ring relative flex flex-col rounded-xl border p-3 text-left transition-all ${
+                              isSelected()
+                                ? "border-signal bg-signal/5 shadow-xs ring-1 ring-signal/30"
+                                : "border-line bg-surface hover:border-line hover:bg-raised/40"
+                            }`}
+                            onClick={() => selectTheme(preset.id)}
+                          >
+                            {/* Miniature Color Swatch Preview */}
+                            <div
+                              class="mb-2.5 flex h-10 w-full items-center justify-between rounded-lg border px-3"
+                              style={{
+                                "background-color": preset.preview.bg,
+                                "border-color": preset.preview.line,
+                              }}
+                            >
+                              <div class="flex items-center gap-1.5">
+                                <span
+                                  class="size-2.5 rounded-full"
+                                  style={{ "background-color": preset.preview.signal }}
+                                />
+                                <span
+                                  class="h-2 w-8 rounded-sm"
+                                  style={{ "background-color": preset.preview.surface }}
+                                />
+                              </div>
+                              <span
+                                class="h-2 w-12 rounded-sm"
+                                style={{ "background-color": preset.preview.line }}
+                              />
+                            </div>
+
+                            <div class="flex items-center justify-between">
+                              <span class="text-xs font-semibold text-foreground">
+                                {preset.name}
+                              </span>
+                              <Show when={isSelected()}>
+                                <span class="text-signal">
+                                  <IconCheck size={14} />
+                                </span>
+                              </Show>
+                            </div>
+                            <span class="mt-0.5 text-[11px] leading-snug text-muted line-clamp-2">
+                              {preset.description}
+                            </span>
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </section>
+
+                {/* 2. Accent Color Choice */}
+                <section class="space-y-3 border-t border-line/70 pt-5">
+                  <div>
+                    <p class="section-label">Brand & Accent Color</p>
+                    <p class="mt-0.5 text-xs text-muted">
+                      Customizes the primary highlight color used for badges, buttons, active focus rings, and terminal cursors.
+                    </p>
+                  </div>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <For each={ACCENT_SWATCHES}>
+                      {(swatch) => {
+                        const isSelected = () => (settings().accent?.toLowerCase() ?? "cyan") === swatch.id;
+                        return (
+                          <button
+                            type="button"
+                            class={`focus-ring relative flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all ${
+                              isSelected()
+                                ? "border-signal bg-raised text-foreground shadow-xs font-semibold"
+                                : "border-line bg-surface text-muted hover:bg-raised hover:text-foreground"
+                            }`}
+                            onClick={() => selectAccent(swatch.id)}
+                            aria-pressed={isSelected()}
+                          >
+                            <span
+                              class="size-3 shrink-0 rounded-full border border-black/10 dark:border-white/10"
+                              style={{ "background-color": swatch.color }}
+                            />
+                            <span>{swatch.label}</span>
+                            <Show when={isSelected()}>
+                              <span class="ml-0.5 text-signal">
+                                <IconCheck size={12} />
+                              </span>
+                            </Show>
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+
+                  <div class="mt-2 max-w-xs">
+                    <ColorField
+                      label="Custom Accent Color (Hex)"
+                      value={String(settings().accent ?? "")}
+                      onChange={(value) => {
+                        patch({ accent: value });
+                        applyAccent(value);
+                      }}
+                    />
+                  </div>
+                </section>
+
+                {/* 3. Layout & Visual Preferences */}
+                <section class="space-y-3 border-t border-line/70 pt-5">
+                  <p class="section-label">Sidebar & Layout</p>
+                  <Switch
+                    label="Sort projects by activity"
+                    checked={Boolean(settings().sort_repos_by_activity)}
+                    onChange={(value) => patch({ sort_repos_by_activity: value })}
+                  />
+                </section>
+              </div>
             </Show>
 
             <Show when={tab() === "keyboard"}>

@@ -777,6 +777,206 @@ pub fn set_plugin_enabled(settings: &Path, id: &str, enabled: Option<bool>) -> i
     fs::rename(&tmp, settings)
 }
 
+/// Remove an installed plugin record from `installed_plugins.json` and from `enabledPlugins` in `settings.json`.
+pub fn clean_claude_plugin_records(
+    claude_home: &Path,
+    plugin_id: &str,
+    repo_root: Option<&Path>,
+) -> io::Result<()> {
+    let installed_json = claude_home.join("plugins/installed_plugins.json");
+    if let Ok(text) = fs::read_to_string(&installed_json) {
+        if let Ok(mut root) = serde_json::from_str::<Value>(&text) {
+            if let Some(plugins) = root.get_mut("plugins").and_then(|p| p.as_object_mut()) {
+                if plugins.remove(plugin_id).is_some() {
+                    let tmp = installed_json.with_extension("tmp");
+                    if let Ok(bytes) = serde_json::to_vec_pretty(&root) {
+                        let _ = fs::write(&tmp, bytes);
+                        let _ = fs::rename(&tmp, &installed_json);
+                    }
+                }
+            }
+        }
+    }
+
+    // Also remove from global settings.json enabledPlugins
+    let global_settings = claude_home.join("settings.json");
+    let _ = set_plugin_enabled(&global_settings, plugin_id, None);
+
+    // If repo_root is provided, also remove from .claude/settings.local.json and settings.json
+    if let Some(repo) = repo_root {
+        let local_settings = repo.join(".claude/settings.local.json");
+        let _ = set_plugin_enabled(&local_settings, plugin_id, None);
+        let project_settings = repo.join(".claude/settings.json");
+        let _ = set_plugin_enabled(&project_settings, plugin_id, None);
+    }
+
+    Ok(())
+}
+
+/// Robust Claude plugin uninstaller that respects local/project/user scopes and cleans up state.
+pub fn uninstall_claude_plugin(
+    cli: &ClaudeCli,
+    config_dir: Option<&Path>,
+    claude_home: &Path,
+    plugin_id: &str,
+    repo_root: Option<&Path>,
+) -> Result<String, CliFailure> {
+    let mut outputs = Vec::new();
+
+    // 1. Read installed_plugins.json to find recorded scopes and project paths
+    let installed_json = claude_home.join("plugins/installed_plugins.json");
+    if let Ok(text) = fs::read_to_string(&installed_json) {
+        if let Ok(root) = serde_json::from_str::<Value>(&text) {
+            if let Some(instances) = root
+                .get("plugins")
+                .and_then(|p| p.get(plugin_id))
+                .and_then(Value::as_array)
+            {
+                for inst in instances {
+                    let scope = inst.get("scope").and_then(Value::as_str).unwrap_or("user");
+                    let proj = inst.get("projectPath").and_then(Value::as_str).map(PathBuf::from);
+                    let cwd = proj.as_deref().or(repo_root);
+
+                    let mut cmd = std::process::Command::new(&cli.bin);
+                    cmd.args(["plugin", "uninstall", plugin_id, "-s", scope]);
+                    if let Some(dir) = config_dir {
+                        cmd.env("CLAUDE_CONFIG_DIR", dir);
+                    } else {
+                        cmd.env_remove("CLAUDE_CONFIG_DIR");
+                    }
+                    if let Some(work_dir) = cwd {
+                        if work_dir.is_dir() {
+                            cmd.current_dir(work_dir);
+                        }
+                    }
+                    if let Ok(out) = cmd.output() {
+                        if out.status.success() {
+                            outputs.push(String::from_utf8_lossy(&out.stdout).into_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. If no recorded instances succeeded, try fallback scopes directly
+    if outputs.is_empty() {
+        let candidate_scopes = match repo_root {
+            Some(_) => &["local", "project", "user"][..],
+            None => &["user", "local", "project"][..],
+        };
+        for &scope in candidate_scopes {
+            let mut cmd = std::process::Command::new(&cli.bin);
+            cmd.args(["plugin", "uninstall", plugin_id, "-s", scope]);
+            if let Some(dir) = config_dir {
+                cmd.env("CLAUDE_CONFIG_DIR", dir);
+            } else {
+                cmd.env_remove("CLAUDE_CONFIG_DIR");
+            }
+            if let Some(repo) = repo_root {
+                cmd.current_dir(repo);
+            }
+            if let Ok(out) = cmd.output() {
+                if out.status.success() {
+                    outputs.push(String::from_utf8_lossy(&out.stdout).into_owned());
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Always clean up local records and cache cleanly
+    let _ = clean_claude_plugin_records(claude_home, plugin_id, repo_root);
+
+    if !outputs.is_empty() {
+        Ok(outputs.join("\n"))
+    } else {
+        Ok(format!("Uninstalled plugin {plugin_id}"))
+    }
+}
+
+/// Add an OpenCode plugin reference to `opencode.json`.
+pub fn add_opencode_plugin(plugin_ref: &str, repo_root: Option<&Path>) -> io::Result<()> {
+    let cfg_path = match repo_root {
+        Some(repo) => repo.join("opencode.json"),
+        None => {
+            let Some(dirs) = directories::BaseDirs::new() else {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "no home directory"));
+            };
+            dirs.home_dir().join(".config/opencode/opencode.json")
+        }
+    };
+
+    let mut root: Value = match fs::read_to_string(&cfg_path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or(Value::Object(Default::default())),
+        Err(_) => Value::Object(Default::default()),
+    };
+
+    let Value::Object(map) = &mut root else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "opencode.json not an object"));
+    };
+
+    let plugins = map
+        .entry("plugin")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(arr) = plugins {
+        if !arr.iter().any(|v| v.as_str() == Some(plugin_ref)) {
+            arr.push(Value::String(plugin_ref.to_string()));
+        }
+    }
+
+    if let Some(dir) = cfg_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = cfg_path.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
+    fs::rename(&tmp, &cfg_path)
+}
+
+/// Remove an OpenCode plugin reference from `opencode.json`.
+pub fn remove_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::Result<()> {
+    let raw_name = plugin_id.split('@').next().unwrap_or(plugin_id);
+    let paths = match repo_root {
+        Some(repo) => vec![
+            repo.join("opencode.json"),
+            repo.join(".opencode/opencode.json"),
+        ],
+        None => {
+            if let Some(dirs) = directories::BaseDirs::new() {
+                vec![dirs.home_dir().join(".config/opencode/opencode.json")]
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    for cfg_path in paths {
+        if let Ok(text) = fs::read_to_string(&cfg_path) {
+            if let Ok(mut root) = serde_json::from_str::<Value>(&text) {
+                if let Some(arr) = root.get_mut("plugin").and_then(Value::as_array_mut) {
+                    let prev_len = arr.len();
+                    arr.retain(|item| {
+                        if let Some(s) = item.as_str() {
+                            let name = s.split('@').next().unwrap_or(s);
+                            s != plugin_id && name != raw_name
+                        } else {
+                            true
+                        }
+                    });
+                    if arr.len() != prev_len {
+                        let tmp = cfg_path.with_extension("tmp");
+                        if let Ok(bytes) = serde_json::to_vec_pretty(&root) {
+                            let _ = fs::write(&tmp, bytes);
+                            let _ = fs::rename(&tmp, &cfg_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Kebab-case-ish skill names only: no separators means no traversal and no surprise dirs.
 pub(crate) fn valid_skill_name(name: &str) -> bool {
     !name.is_empty()
@@ -1471,5 +1671,44 @@ mod tests {
             found.unwrap().description.as_deref(),
             Some("Analysis tools for Cursor")
         );
+    }
+
+    #[test]
+    fn test_opencode_plugin_add_and_remove() {
+        let repo = tempfile::tempdir().unwrap();
+        add_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
+
+        let snap = scan_for_account("opencode", Some(repo.path()), None);
+        let found = snap.plugins.iter().find(|p| p.name == "sample-tool");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().version.as_deref(), Some("1.0.0"));
+
+        remove_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
+        let snap2 = scan_for_account("opencode", Some(repo.path()), None);
+        assert!(!snap2.plugins.iter().any(|p| p.name == "sample-tool"));
+    }
+
+    #[test]
+    fn test_clean_claude_plugin_records() {
+        let home = tempfile::tempdir().unwrap();
+        let plugins_dir = home.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(
+            plugins_dir.join("installed_plugins.json"),
+            r#"{"version":2,"plugins":{"test-plugin@official":[{"scope":"user"}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"enabledPlugins":{"test-plugin@official":true}}"#,
+        )
+        .unwrap();
+
+        clean_claude_plugin_records(home.path(), "test-plugin@official", None).unwrap();
+
+        let installed_txt = std::fs::read_to_string(plugins_dir.join("installed_plugins.json")).unwrap();
+        assert!(!installed_txt.contains("test-plugin@official"));
+        let settings_txt = std::fs::read_to_string(home.path().join("settings.json")).unwrap();
+        assert!(!settings_txt.contains("test-plugin@official"));
     }
 }

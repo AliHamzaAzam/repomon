@@ -77,7 +77,7 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   if (agents.some((agent) => agent.inferred)) {
     return { label: "active · inferred", tone: "signal", urgent: false };
   }
-  return { label: agents.length ? "idle" : "open", tone: "muted", urgent: false };
+  return { label: agents.length ? "idle" : "", tone: "muted", urgent: false };
 }
 
 /// The usage-probe key for the account a session runs under, matching how the daemon keys its

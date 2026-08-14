@@ -158,6 +158,8 @@ describe("fleet presentation", () => {
 
     expect(laneIndicator(blocked)).toEqual({ label: "running · gate 3", tone: "signal", urgent: false });
     expect(laneIndicator(inferred)).toEqual({ label: "active · inferred", tone: "signal", urgent: false });
+    expect(laneIndicator(lane({ agent_sessions: [] }))).toEqual({ label: "", tone: "muted", urgent: false });
+    expect(laneIndicator(lane({ agent_sessions: [agent({ status: "idle" })] }))).toEqual({ label: "idle", tone: "muted", urgent: false });
   });
 
   it("fuzzy matches repo, branch, and agent text", () => {
