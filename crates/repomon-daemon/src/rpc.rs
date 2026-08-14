@@ -4622,7 +4622,10 @@ fn select_kept_summaries(
     keep: usize,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<agent::TranscriptSummary> {
-    if summaries.len() <= keep {
+    if keep == 0 && bound.is_empty() {
+        return Vec::new();
+    }
+    if summaries.len() <= keep && bound.is_empty() {
         return summaries;
     }
     let is_fresh =
@@ -4630,10 +4633,10 @@ fn select_kept_summaries(
     // Protected: bound to a live window (the window proves its agent alive) OR actively
     // writing right now — `sessions_to_keep`'s "never drop a session that is working"
     // contract must survive bound-protection, or a stale binding could make the one live
-    // transcript invisible.
+    // transcript invisible. When keep == 0 and bound is empty, the agent has exited and is dropped.
     let (mut out, rest): (Vec<_>, Vec<_>) = summaries
         .into_iter()
-        .partition(|s| is_fresh(s) || s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
+        .partition(|s| (keep > 0 && is_fresh(s)) || s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
     let take_rest = keep.saturating_sub(out.len());
     out.extend(rest.into_iter().take(take_rest));
     out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
@@ -7080,6 +7083,15 @@ mod tests {
             .filter_map(|s| s.session_id.as_deref())
             .collect();
         assert_eq!(ids, vec!["x", "e"]);
+    }
+
+    #[test]
+    fn select_kept_summaries_drops_everything_when_keep_is_zero_and_unbound() {
+        // When keep is 0 and no windows are bound (e.g. agent exited and window destroyed),
+        // fresh lingering transcripts on disk must NOT be kept as phantom external sessions.
+        let bound: std::collections::HashSet<String> = [].into();
+        let kept = select_kept_summaries(vec![tsum("x", t(100))], &bound, 0, t(100));
+        assert!(kept.is_empty());
     }
 
     #[test]
