@@ -154,7 +154,14 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
             </span>
           </Show>
           <Show when={indicator().label}>
-            <span class={`lane-badge is-${indicator().tone}`}>
+            <span
+              class={`lane-badge is-${indicator().tone}`}
+              title={
+                indicator().label === "external"
+                  ? "External session running outside repomon. Select lane to adopt into tmux management."
+                  : undefined
+              }
+            >
               {indicator().label}
             </span>
           </Show>

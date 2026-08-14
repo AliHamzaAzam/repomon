@@ -230,6 +230,24 @@ export default function ControlCenter(props: ControlCenterProps) {
           if (firstWindow) props.fleet.setFocusedWindow(firstWindow);
         },
       });
+
+      for (const sess of lane.agent_sessions) {
+        if (sess.external) {
+          items.push({
+            id: `adopt-${lane.id}-${sess.session_id || "ext"}`,
+            category: "Actions",
+            title: `Adopt External ${sess.agent} Session`,
+            subtitle: `Resume into repomon management on ${lane.worktree.branch ?? lane.worktree.name}`,
+            badge: "EXTERNAL",
+            badgeType: "attention",
+            icon: "bot",
+            run: () => {
+              props.fleet.setSelectedLaneId(lane.id);
+              void props.actions.adoptAgent(lane, sess);
+            },
+          });
+        }
+      }
     }
 
     // --- REPOSITORIES ---

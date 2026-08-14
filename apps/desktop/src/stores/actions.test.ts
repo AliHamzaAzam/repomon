@@ -112,6 +112,21 @@ describe("lane operations", () => {
       dispose();
     });
   });
+
+  it("adopt targets external session and calls agent.adopt RPC", async () => {
+    await createRoot(async (dispose) => {
+      const fleet = fleetStub();
+      const actions = createActionsStore(fleet);
+      const extSession = { session_id: "sid-123", agent: "claude-code", external: true } as AgentSession;
+      await actions.adoptAgent(lane(), extSession);
+      expect(calls.list[0]).toEqual({
+        method: "agent.adopt",
+        params: { lane_id: 7, session_id: "sid-123", agent: "claude-code" },
+      });
+      expect(fleet.refresh).toHaveBeenCalled();
+      dispose();
+    });
+  });
 });
 
 describe("settings modal tab", () => {

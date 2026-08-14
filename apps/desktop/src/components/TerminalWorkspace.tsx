@@ -13,6 +13,7 @@ import {
 } from "./terminalTargets";
 import {
   AgentIcon,
+  IconBot,
   IconClose,
   IconFocus,
   IconGrid,
@@ -31,6 +32,7 @@ interface TerminalWorkspaceProps {
 
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [openingShell, setOpeningShell] = createSignal(false);
+  const [adopting, setAdopting] = createSignal(false);
   const [closingShell, setClosingShell] = createSignal<string | null>(null);
   const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
   const [warmWindows, setWarmWindows] = createSignal<string[]>([]);
@@ -130,6 +132,18 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     }
   }
 
+  async function handleAdopt(lane: import("../bindings").Lane, session: import("../bindings").AgentSession) {
+    setAdopting(true);
+    setWorkspaceError(null);
+    try {
+      await props.actions.adoptAgent(lane, session);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAdopting(false);
+    }
+  }
+
   return (
     <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)] bg-background">
       <div class="flex h-10 shrink-0 min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
@@ -169,6 +183,20 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             )}
           </For>
           <div class="ml-2 flex items-center gap-2 border-l border-line/60 pl-2">
+            <Show when={props.fleet.selectedLane()?.agent_sessions.find((s) => s.external)}>
+              {(extSess) => (
+                <button
+                  type="button"
+                  class="focus-ring flex h-6 items-center gap-1 rounded-md border border-signal/40 bg-signal/15 px-2 text-[11px] font-medium text-signal transition-colors hover:bg-signal/25 disabled:opacity-40"
+                  onClick={() => void handleAdopt(props.fleet.selectedLane()!, extSess())}
+                  disabled={adopting()}
+                  title={`Adopt external ${extSess().agent} session into repomon tmux management`}
+                >
+                  <IconBot size={11} />
+                  <span>{adopting() ? "Adopting…" : "Adopt External"}</span>
+                </button>
+              )}
+            </Show>
             <button
               type="button"
               class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
@@ -271,26 +299,56 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                 {props.fleet.selectedLane() ? "Spawn an AI agent or open an interactive shell in this worktree." : "Choose a lane from the fleet sidebar or register a repository to begin."}
               </p>
               <Show when={props.fleet.selectedLane()}>
-                {(lane) => (
-                  <div class="mt-5 flex items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-signal/40 bg-signal/10 px-3.5 py-2 text-xs font-medium text-signal transition-colors hover:bg-signal/20"
-                      onClick={() => props.actions.spawn(lane())}
-                    >
-                      <IconPlus size={13} />
-                      <span>Spawn agent</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-raised"
-                      onClick={() => void openShell()}
-                    >
-                      <IconTerminal size={13} />
-                      <span>Open shell</span>
-                    </button>
-                  </div>
-                )}
+                {(lane) => {
+                  const extSess = () => lane().agent_sessions.find((s) => s.external);
+                  return (
+                    <div class="mt-5 space-y-4">
+                      <Show when={extSess()}>
+                        {(ext) => (
+                          <div class="rounded-xl border border-signal/30 bg-signal/5 p-3.5 text-left">
+                            <div class="flex items-center gap-1.5 text-xs font-semibold text-signal">
+                              <IconBot size={14} />
+                              <span>External session detected</span>
+                            </div>
+                            <p class="mt-1 text-[11px] leading-relaxed text-muted">
+                              An external <strong class="text-foreground">{ext().agent}</strong> session is running in this worktree ({ext().title || "running in another terminal"}). Adopt it to bring it under full tmux management with live streaming, rate limits, and fleet mail.
+                            </p>
+                            <div class="mt-2.5">
+                              <button
+                                type="button"
+                                class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-signal bg-signal/15 px-3 py-1.5 text-xs font-medium text-signal transition-colors hover:bg-signal/25 disabled:opacity-40"
+                                onClick={() => void handleAdopt(lane(), ext())}
+                                disabled={adopting()}
+                              >
+                                <IconBot size={13} />
+                                <span>{adopting() ? "Adopting session…" : `Adopt ${ext().agent} session`}</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </Show>
+
+                      <div class="flex items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-signal/40 bg-signal/10 px-3.5 py-2 text-xs font-medium text-signal transition-colors hover:bg-signal/20"
+                          onClick={() => props.actions.spawn(lane())}
+                        >
+                          <IconPlus size={13} />
+                          <span>Spawn agent</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-raised"
+                          onClick={() => void openShell()}
+                        >
+                          <IconTerminal size={13} />
+                          <span>Open shell</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }}
               </Show>
             </section>
           </div>
