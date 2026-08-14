@@ -5,21 +5,30 @@ export default function Switch(props: {
   onChange: (value: boolean) => void;
 }) {
   return (
-    <div class="flex items-center justify-between rounded border border-line px-3 py-2 text-xs" classList={{ "opacity-50": props.disabled }}>
-      <span>{props.label}</span>
+    <div
+      class="flex items-center justify-between rounded-lg border border-line bg-surface/60 px-3.5 py-2.5 text-xs transition-colors hover:bg-surface"
+      classList={{ "opacity-50 pointer-events-none": props.disabled }}
+    >
+      <span class="font-medium text-foreground">{props.label}</span>
       <button
         type="button"
         role="switch"
         aria-checked={props.checked}
         aria-label={props.label}
         disabled={props.disabled}
-        class="focus-ring relative h-4 w-8 shrink-0 rounded-full border border-line transition-colors"
-        classList={{ "bg-signal/70": props.checked, "bg-raised": !props.checked }}
+        class="focus-ring relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors duration-150 ease-in-out"
+        classList={{
+          "bg-signal": props.checked,
+          "bg-raised border-line": !props.checked,
+        }}
         onClick={() => props.onChange(!props.checked)}
       >
         <span
-          class="absolute top-0.5 h-2.5 w-2.5 rounded-full bg-foreground transition-all"
-          classList={{ "left-4": props.checked, "left-0.5": !props.checked }}
+          class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform duration-150 ease-in-out"
+          classList={{
+            "translate-x-4": props.checked,
+            "translate-x-0.5 bg-foreground/80": !props.checked,
+          }}
         />
       </button>
     </div>

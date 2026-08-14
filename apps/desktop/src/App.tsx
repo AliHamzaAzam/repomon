@@ -25,6 +25,7 @@ import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
+import { IconClose, IconExtensions, IconSettings, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -116,21 +117,15 @@ function App(props: AppProps) {
     }
   });
 
-  /// One listener for every shortcut. Registered in bubble phase so an open Modal (which listens
-  /// in capture phase and stops propagation on Escape) still closes first.
   const onShortcut = (event: KeyboardEvent) => {
     const binding = matchChord(event);
     if (!binding) return;
 
-    // A modal owns the keyboard while it is open. ControlCenter keeps its own Cmd+K listener.
     if (actions.settingsOpen() || actions.spawnLane() || actions.newLaneOpen()
       || actions.renameTarget() || actions.confirmOptions()) return;
 
     const lane = fleet.selectedLane();
     if (binding.when && !lane) return;
-    // Prefer the agent whose terminal is actually focused: on a multi-agent lane the first
-    // windowed session is not necessarily the one the user is looking at, and lane.stop must
-    // never guess.
     const active = workspace.activeWindow();
     const agent = lane?.agent_sessions.find((session) => session.tmux_window === active)
       ?? lane?.agent_sessions.find((session) => session.tmux_window)
@@ -143,8 +138,6 @@ function App(props: AppProps) {
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
       case "panel.repomind": setRepomindOpen((open) => !open); break;
       case "panel.repomindFull":
-        // Going full screen implies opening the panel: the aside is where it shrinks back to, and
-        // collapsing into a hidden panel would look like repomind vanished.
         if (!repomindFull()) setRepomindOpen(true);
         setRepomindFull((full) => !full);
         break;
@@ -170,7 +163,6 @@ function App(props: AppProps) {
       case "agents.next": workspace.cycleTab(1, workspace.laneTargets()); break;
       case "help.open": actions.openSettingsTab("keyboard"); break;
       default:
-        // A binding exists in the table with no handler. Warn rather than silently eating the key.
         console.warn(`No handler for keyboard binding: ${binding.id}`);
         break;
     }
@@ -180,7 +172,6 @@ function App(props: AppProps) {
     window.addEventListener("keydown", onShortcut);
     void getVersion().then(setAppVersion).catch(() => undefined);
 
-    // Check for a newer build once on launch; silent if current or if not a Tauri build.
     void checkForUpdate()
       .then((available) => {
         if (active && available) {
@@ -230,8 +221,6 @@ function App(props: AppProps) {
 
   createEffect(() => {
     if (!repomindFull()) return;
-    // The panel's own "Esc" button sends Escape to repomind's pane; this bare Escape is the
-    // window-level gesture for leaving full screen, which is what the Exit button advertises.
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -268,45 +257,58 @@ function App(props: AppProps) {
   };
 
   return (
-    <div class="grid h-screen min-h-[38rem] grid-rows-[3.5rem_minmax(0,1fr)_2.75rem] overflow-hidden bg-background text-foreground">
-      <header class="flex items-center justify-between border-b border-line bg-surface px-4">
-        <div class="flex items-center gap-3">
-          <BrandMark />
-          <div class="flex items-baseline gap-3">
-            <h1 class="text-[0.95rem] font-semibold tracking-[-0.02em]">Repomon</h1>
-            <span class="font-mono text-[0.64rem] uppercase tracking-[0.18em] text-muted">
-              Mission control
-            </span>
-          </div>
+    <div class="grid h-screen min-h-[36rem] grid-rows-[2.75rem_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
+      <header class="flex items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
+        <div class="flex items-center gap-2.5">
+          <BrandMark size={22} />
+          <h1 class="text-xs font-semibold tracking-tight text-foreground">Repomon</h1>
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1.5">
           <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
           <button
             type="button"
-            class="focus-ring rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
-            onClick={() => actions.openSettings()}
-            aria-label="Settings"
-            title="Settings (⌘,)"
-          >Settings</button>
-          <button
-            type="button"
-            class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${extensionsOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
+            class={`focus-ring flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+              extensionsOpen()
+                ? "border-signal/50 bg-signal/10 text-signal font-semibold"
+                : "border-line bg-raised/70 text-muted hover:bg-raised hover:text-foreground"
+            }`}
             onClick={() => setExtensionsOpen(!extensionsOpen())}
             aria-pressed={extensionsOpen()}
             title="Extensions (⌘4)"
-          >Extensions</button>
+          >
+            <IconExtensions size={13} />
+            <span>Extensions</span>
+          </button>
           <button
             type="button"
-            class={`focus-ring rounded-md border px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] ${repomindOpen() ? "border-signal/40 bg-signal/10 text-signal" : "border-line bg-raised text-muted"}`}
+            class={`focus-ring flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+              repomindOpen()
+                ? "border-signal/50 bg-signal/10 text-signal font-semibold"
+                : "border-line bg-raised/70 text-muted hover:bg-raised hover:text-foreground"
+            }`}
             onClick={() => setRepomindOpen(!repomindOpen())}
             aria-pressed={repomindOpen()}
-          >Repomind</button>
+            title="Repomind (⌘3)"
+          >
+            <IconSparkles size={13} />
+            <span>Repomind</span>
+          </button>
           <button
             type="button"
-            class="focus-ring rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.64rem] uppercase tracking-[0.12em] text-muted transition-colors hover:text-foreground"
+            class="focus-ring flex size-7 items-center justify-center rounded-lg border border-line bg-raised/70 text-muted transition-colors hover:bg-raised hover:text-foreground"
+            onClick={() => actions.openSettings()}
+            aria-label="Settings"
+            title="Settings (⌘,)"
+          >
+            <IconSettings size={14} />
+          </button>
+          <button
+            type="button"
+            class="focus-ring flex h-7 items-center rounded-lg border border-line bg-raised/70 px-2 font-mono text-[10px] uppercase tracking-wider text-muted transition-colors hover:bg-raised hover:text-foreground"
             onClick={cycleTheme}
             aria-label={`Theme: ${themeLabel(theme())}`}
+            title="Toggle theme"
           >
             {themeLabel(theme())}
           </button>
@@ -320,11 +322,11 @@ function App(props: AppProps) {
           tabIndex={0}
           onKeyDown={navigateFleet}
         >
-          <div class="flex items-center justify-between border-b border-line px-4 py-3">
+          <div class="flex items-center justify-between border-b border-line px-3 py-2.5">
             <span class="section-label">Fleet</span>
-              <span class="font-mono text-[0.62rem] text-muted">
-                {fleet.visibleRepos().length} / {fleet.unhiddenLanes().length}
-              </span>
+            <span class="font-mono text-[10px] text-muted">
+              {fleet.visibleRepos().length} repos · {fleet.unhiddenLanes().length} lanes
+            </span>
           </div>
           <FleetSidebar
             fleet={fleet}
@@ -356,10 +358,6 @@ function App(props: AppProps) {
           aria-label="Repomind"
           class="repomind-panel min-h-0 border-l border-line bg-surface"
         >
-          <div class="flex items-center justify-between border-b border-line px-4 py-3">
-            <span class="section-label">Repomind</span>
-            <span class="size-1.5 rounded-full bg-muted/50" aria-hidden="true" />
-          </div>
           <Show when={repomindOpen() && !repomindFull()}>
             <RepomindPanel onToggleFullscreen={() => setRepomindFull(true)} />
           </Show>
@@ -375,11 +373,11 @@ function App(props: AppProps) {
       <footer
         role="status"
         aria-label="Daemon connection"
-        class="connection-rail grid grid-cols-[auto_minmax(11rem,1fr)_auto_auto_auto] items-center gap-5 border-t border-line bg-surface px-4 font-mono text-[0.64rem] text-muted"
+        class="connection-rail grid grid-cols-[auto_minmax(10rem,1fr)_auto_auto_auto] items-center gap-4 border-t border-line bg-surface px-3.5 font-mono text-[11px] text-muted"
       >
-        <div class="flex items-center gap-2 text-foreground">
+        <div class="flex items-center gap-2 text-foreground font-medium">
           <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
-          <span class="uppercase tracking-[0.12em]">{phaseLabel(connection().phase)}</span>
+          <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
         </div>
         <span class="flex min-w-0 items-center gap-2 truncate">
           <span class="truncate">{connection().endpoint}</span>
@@ -397,12 +395,19 @@ function App(props: AppProps) {
       <ActionModals actions={actions} notifications={notifications} />
       <Show when={actions.error() ?? fleet.error()}>
         {(message) => (
-          <div role="alert" class="fixed right-4 top-16 z-[70] flex max-w-md items-start gap-3 rounded-md border border-fault/40 bg-surface p-3 text-xs text-fault shadow-lg">
-            <span>{message()}</span>
-            <button type="button" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Dismiss error" onClick={() => {
-              actions.dismissError();
-              fleet.dismissError();
-            }}>×</button>
+          <div role="alert" class="fixed right-4 top-14 z-[70] flex max-w-md items-start gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-[0_14px_40px_var(--shadow)]">
+            <span class="flex-1 font-medium">{message()}</span>
+            <button
+              type="button"
+              class="focus-ring -mr-1 -mt-1 flex size-5 items-center justify-center rounded text-muted hover:text-foreground"
+              aria-label="Dismiss error"
+              onClick={() => {
+                actions.dismissError();
+                fleet.dismissError();
+              }}
+            >
+              <IconClose size={12} />
+            </button>
           </div>
         )}
       </Show>

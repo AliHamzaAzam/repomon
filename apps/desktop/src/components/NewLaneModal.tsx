@@ -1,7 +1,8 @@
-import { For, Show, createSignal } from "solid-js";
+import { Show, createSignal } from "solid-js";
 
 import type { Repo } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
+import Select from "./controls/Select";
 import Modal from "./Modal";
 
 export default function NewLaneModal(props: {
@@ -37,32 +38,58 @@ export default function NewLaneModal(props: {
 
   const footer = (
     <>
-      <button type="button" class="focus-ring rounded border border-line px-3 py-2 text-xs text-muted" onClick={props.onClose}>Cancel</button>
-      <button type="button" class="focus-ring rounded bg-signal px-4 py-2 font-mono text-[0.6rem] font-semibold uppercase text-background disabled:opacity-50" disabled={busy() || !branch().trim() || !repoId()} onClick={() => void create()}>
-        {busy() ? "Creating…" : "Create lane"}
+      <button
+        type="button"
+        class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+        onClick={props.onClose}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
+        disabled={busy() || !branch().trim() || !repoId()}
+        onClick={() => void create()}
+      >
+        {busy() ? "Creating…" : "Create Lane"}
       </button>
     </>
   );
 
   return (
-    <Modal title="New lane" subtitle="Creates a git worktree and branch for a new agent to work in." onClose={props.onClose} footer={footer}>
+    <Modal
+      title="New lane"
+      subtitle="Creates an isolated git worktree and branch for development."
+      onClose={props.onClose}
+      footer={footer}
+    >
       <div class="space-y-4">
+        <Select
+          label="Repository"
+          value={String(repoId())}
+          options={props.repos.map((r) => ({ value: String(r.id), label: r.name }))}
+          onChange={(val) => setRepoId(Number(val))}
+        />
         <label class="block">
-          <span class="section-label">Repository</span>
-          <select class="settings-input" value={repoId()} onChange={(event) => setRepoId(Number(event.currentTarget.value))}>
-            <For each={props.repos}>{(repo) => <option value={repo.id}>{repo.name}</option>}</For>
-          </select>
+          <span class="section-label">New Branch Name</span>
+          <input
+            class="focus-ring mt-1.5 h-9 w-full rounded-lg border border-line bg-surface px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted/60"
+            value={branch()}
+            placeholder="feature/my-change"
+            onInput={(event) => setBranch(event.currentTarget.value)}
+          />
         </label>
         <label class="block">
-          <span class="section-label">New branch</span>
-          <input class="settings-input" value={branch()} placeholder="feature/my-change" onInput={(event) => setBranch(event.currentTarget.value)} />
-        </label>
-        <label class="block">
-          <span class="section-label">Source branch (optional)</span>
-          <input class="settings-input" value={source()} placeholder="defaults to the repo's current branch" onInput={(event) => setSource(event.currentTarget.value)} />
+          <span class="section-label">Source Branch (Optional)</span>
+          <input
+            class="focus-ring mt-1.5 h-9 w-full rounded-lg border border-line bg-surface px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted/60"
+            value={source()}
+            placeholder="defaults to current branch"
+            onInput={(event) => setSource(event.currentTarget.value)}
+          />
         </label>
         <Show when={error()}>
-          <p class="rounded-md border border-fault/40 bg-fault/8 p-2 text-xs text-fault">{error()}</p>
+          <p class="rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>
         </Show>
       </div>
     </Modal>

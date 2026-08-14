@@ -2,29 +2,29 @@
 @import "@xterm/xterm/css/xterm.css";
 
 :root {
-  --background: hsl(210 20% 96%);
-  --foreground: hsl(216 20% 8%);
-  --surface: hsl(210 25% 99%);
-  --raised: hsl(210 18% 94%);
-  --line: hsl(215 14% 82%);
-  --muted: hsl(216 10% 42%);
-  --signal: hsl(169 55% 38%);
-  --attention: hsl(35 86% 52%);
-  --fault: hsl(5 68% 52%);
-  --shadow: hsl(216 20% 8% / 0.12);
+  --background: hsl(220 18% 97%);
+  --foreground: hsl(222 24% 11%);
+  --surface: hsl(0 0% 100%);
+  --raised: hsl(220 14% 93%);
+  --line: hsl(220 13% 86%);
+  --muted: hsl(220 9% 46%);
+  --signal: hsl(168 60% 36%);
+  --attention: hsl(36 90% 48%);
+  --fault: hsl(4 72% 50%);
+  --shadow: hsl(222 24% 11% / 0.08);
 }
 
 .dark {
-  --background: hsl(216 20% 8%);
+  --background: hsl(224 20% 7%);
   --foreground: hsl(210 20% 96%);
-  --surface: hsl(216 21% 12%);
-  --raised: hsl(215 19% 15%);
-  --line: hsl(214 14% 25%);
-  --muted: hsl(215 10% 66%);
-  --signal: hsl(169 61% 59%);
-  --attention: hsl(35 86% 67%);
-  --fault: hsl(5 81% 67%);
-  --shadow: hsl(220 30% 3% / 0.42);
+  --surface: hsl(224 18% 11%);
+  --raised: hsl(224 16% 15%);
+  --line: hsl(224 12% 21%);
+  --muted: hsl(218 12% 64%);
+  --signal: hsl(168 62% 54%);
+  --attention: hsl(36 90% 64%);
+  --fault: hsl(4 82% 64%);
+  --shadow: hsl(224 35% 2% / 0.5);
 }
 
 @theme inline {
@@ -37,8 +37,8 @@
   --color-signal: var(--signal);
   --color-attention: var(--attention);
   --color-fault: var(--fault);
-  --font-sans: "Aptos", "Segoe UI Variable", "Noto Sans", system-ui, sans-serif;
-  --font-mono: "Berkeley Mono", "SFMono-Regular", "Cascadia Code", "Roboto Mono", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "ui-monospace", "SFMono-Regular", Menlo, Monaco, "Cascadia Code", monospace;
 }
 
 @layer base {
@@ -58,9 +58,13 @@
     background-color: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
   }
 
   button {
@@ -70,26 +74,26 @@
 
 .section-label {
   font-family: var(--font-mono);
-  font-size: 0.625rem;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .focus-ring:focus-visible {
   outline: 2px solid var(--signal);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
 .mission-grid {
   display: grid;
   min-height: 0;
-  grid-template-columns: 14.5rem minmax(0, 1fr) 0;
+  grid-template-columns: 15rem minmax(0, 1fr) 0;
 }
 
 .mission-grid.is-repomind-open {
-  grid-template-columns: 14.5rem minmax(0, 1fr) 17rem;
+  grid-template-columns: 15rem minmax(0, 1fr) 19rem;
 }
 
 .repomind-panel {
@@ -137,35 +141,44 @@
 }
 
 .repomind-message {
-  border-left: 2px solid var(--line);
-  padding-left: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  padding: 0.75rem 0.85rem;
+  box-shadow: 0 1px 3px var(--shadow);
 }
 
 .repomind-message.is-assistant {
-  border-color: var(--signal);
+  border-color: color-mix(in srgb, var(--signal) 25%, var(--line));
+  background: color-mix(in srgb, var(--signal) 4%, var(--surface));
 }
 
 .repomind-message.is-user {
-  border-color: var(--attention);
+  border-color: color-mix(in srgb, var(--attention) 25%, var(--line));
+  background: color-mix(in srgb, var(--attention) 4%, var(--surface));
 }
 
 .agent-history-message {
   content-visibility: auto;
   contain-intrinsic-size: auto 5rem;
-  border-left: 2px solid var(--line);
-  padding-left: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 0.5rem;
 }
 
 .agent-history-message.is-assistant {
-  border-color: var(--signal);
+  border-color: color-mix(in srgb, var(--signal) 22%, var(--line));
 }
 
 .agent-history-message.is-user {
-  border-color: var(--attention);
+  border-color: color-mix(in srgb, var(--attention) 22%, var(--line));
 }
 
 .agent-history-message.is-tools {
   color: var(--muted);
+  background: var(--raised);
 }
 
 .action-grid {
@@ -175,51 +188,69 @@
 }
 
 .action-grid button {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   border: 1px solid var(--line);
-  border-radius: 0.45rem;
-  background: var(--raised);
-  padding: 0.65rem;
+  border-radius: 0.5rem;
+  background: var(--surface);
+  padding: 0.65rem 0.75rem;
   color: var(--foreground);
-  font-size: 0.75rem;
+  font-size: 12px;
+  font-weight: 500;
   text-align: left;
+  transition: all 120ms ease;
+  box-shadow: 0 1px 2px var(--shadow);
 }
 
 .action-grid button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--signal) 45%, var(--line));
+  border-color: color-mix(in srgb, var(--signal) 40%, var(--line));
+  background: color-mix(in srgb, var(--signal) 5%, var(--surface));
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px var(--shadow);
 }
 
 .action-grid button.is-danger {
   color: var(--fault);
 }
 
+.action-grid button.is-danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--fault) 40%, var(--line));
+  background: color-mix(in srgb, var(--fault) 5%, var(--surface));
+}
+
 .action-grid button:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+  box-shadow: none;
+  transform: none;
 }
 
 .settings-input {
   display: block;
   width: 100%;
-  height: 2.25rem;
-  margin-top: 0.4rem;
+  height: 2.15rem;
+  margin-top: 0.35rem;
   border: 1px solid var(--line);
-  border-radius: 0.4rem;
+  border-radius: 0.45rem;
   background: var(--background);
-  padding: 0 0.6rem;
+  padding: 0 0.65rem;
   color: var(--foreground);
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-family: var(--font-sans);
+  font-size: 12px;
   outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .settings-input:focus {
   border-color: var(--signal);
+  box-shadow: 0 0 0 1px var(--signal);
 }
 
 @media (max-width: 980px) {
   .mission-grid,
   .mission-grid.is-repomind-open {
-    grid-template-columns: 13rem minmax(0, 1fr);
+    grid-template-columns: 13.5rem minmax(0, 1fr);
   }
 
   .repomind-panel {
@@ -234,23 +265,26 @@
   gap: 0.5rem;
   border: 1px solid transparent;
   border-radius: 0.45rem;
-  padding: 0.48rem 0.45rem;
+  padding: 0.42rem 0.5rem;
   color: var(--muted);
-  transition: background-color 120ms ease, border-color 120ms ease;
+  font-size: 12px;
+  transition: background-color 100ms ease, border-color 100ms ease, color 100ms ease;
 }
 
 .fleet-row:hover {
-  background: color-mix(in srgb, var(--raised) 72%, transparent);
+  background: color-mix(in srgb, var(--raised) 70%, transparent);
+  color: var(--foreground);
 }
 
 .fleet-row.is-selected {
-  border-color: color-mix(in srgb, var(--signal) 32%, var(--line));
-  background: color-mix(in srgb, var(--signal) 9%, var(--raised));
+  border-color: color-mix(in srgb, var(--signal) 30%, var(--line));
+  background: color-mix(in srgb, var(--signal) 8%, var(--raised));
+  color: var(--foreground);
 }
 
 .lane-pulse {
-  width: 0.4rem;
-  height: 0.4rem;
+  width: 0.45rem;
+  height: 0.45rem;
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--muted);
@@ -258,76 +292,53 @@
 
 .lane-pulse.is-signal {
   background: var(--signal);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 12%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 20%, transparent);
 }
 
 .lane-pulse.is-attention {
   background: var(--attention);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--attention) 12%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--attention) 20%, transparent);
 }
 
 .lane-pulse.is-fault {
   background: var(--fault);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fault) 20%, transparent);
 }
 
 .lane-badge {
   flex: 0 0 auto;
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 0.1rem 0.35rem;
+  padding: 0.1rem 0.4rem;
   font-family: var(--font-mono);
-  font-size: 0.5rem;
+  font-size: 10px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
+  background: var(--raised);
 }
 
 .lane-badge.is-signal {
-  border-color: color-mix(in srgb, var(--signal) 34%, var(--line));
+  border-color: color-mix(in srgb, var(--signal) 30%, var(--line));
+  background: color-mix(in srgb, var(--signal) 10%, transparent);
   color: var(--signal);
 }
 
 .lane-badge.is-attention {
-  border-color: color-mix(in srgb, var(--attention) 38%, var(--line));
+  border-color: color-mix(in srgb, var(--attention) 30%, var(--line));
+  background: color-mix(in srgb, var(--attention) 10%, transparent);
   color: var(--attention);
 }
 
 .lane-badge.is-fault {
-  border-color: color-mix(in srgb, var(--fault) 38%, var(--line));
+  border-color: color-mix(in srgb, var(--fault) 30%, var(--line));
+  background: color-mix(in srgb, var(--fault) 10%, transparent);
   color: var(--fault);
 }
 
-.terminal-bay::before {
-  position: absolute;
-  inset: 0;
-  content: "";
-  pointer-events: none;
-  background-image:
-    linear-gradient(to right, var(--line) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--line) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(circle at center, black 0%, transparent 72%);
-  opacity: 0.2;
-}
-
-.terminal-glyph {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--signal);
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.terminal-glyph i {
-  display: block;
-  width: 0.48rem;
-  height: 1px;
-  background: currentColor;
-}
-
 .connection-rail {
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--signal) 30%, transparent);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
 }
 
 .terminal-host .xterm,
@@ -347,27 +358,24 @@
   height: 0.45rem;
   border-radius: 999px;
   background: var(--signal);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 16%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 22%, transparent);
 }
 
-.status-light.is-connecting {
-  animation: connection-breathe 1.4s ease-in-out infinite;
-}
-
+.status-light.is-connecting,
 .status-light.is-starting {
   animation: connection-breathe 1.4s ease-in-out infinite;
 }
 
 .status-light.is-retrying {
   background: var(--fault);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fault) 16%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fault) 22%, transparent);
   animation: connection-breathe 1s ease-in-out infinite;
 }
 
 @keyframes connection-breathe {
   50% {
-    opacity: 0.35;
-    transform: scale(0.8);
+    opacity: 0.4;
+    transform: scale(0.85);
   }
 }
 

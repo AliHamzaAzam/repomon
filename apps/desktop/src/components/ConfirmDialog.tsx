@@ -29,12 +29,20 @@ export default function ConfirmDialog(props: { options: ConfirmOptions; onClose:
 
   const footer = (
     <>
-      <button type="button" class="focus-ring rounded border border-line px-3 py-2 text-xs text-muted" onClick={props.onClose}>
+      <button
+        type="button"
+        class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+        onClick={props.onClose}
+      >
         Cancel
       </button>
       <button
         type="button"
-        class={`focus-ring rounded px-4 py-2 font-mono text-[0.6rem] font-semibold uppercase text-background disabled:opacity-50 ${props.options.danger ? "bg-fault" : "bg-signal"}`}
+        class={`focus-ring rounded-lg px-4 py-1.5 text-xs font-semibold text-background transition-colors disabled:opacity-50 ${
+          props.options.danger
+            ? "bg-fault hover:bg-fault/90 text-white"
+            : "bg-signal hover:bg-signal/90 text-background"
+        }`}
         disabled={busy()}
         onClick={() => void confirm()}
       >
@@ -45,9 +53,9 @@ export default function ConfirmDialog(props: { options: ConfirmOptions; onClose:
 
   return (
     <Modal title={props.options.title} onClose={props.onClose} footer={footer}>
-      <p class="text-sm leading-relaxed">{props.options.message}</p>
+      <p class="text-xs leading-relaxed text-foreground/80">{props.options.message}</p>
       <Show when={error()}>
-        <p class="mt-3 rounded-md border border-fault/40 bg-fault/8 p-2 text-xs text-fault">{error()}</p>
+        <p class="mt-3 rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>
       </Show>
     </Modal>
   );

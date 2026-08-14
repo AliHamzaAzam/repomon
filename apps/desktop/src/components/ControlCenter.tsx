@@ -8,6 +8,17 @@ import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
 import type { MessageStore } from "../stores/messages";
 import type { ActionsStore } from "../stores/actions";
+import {
+  IconBot,
+  IconCheck,
+  IconClose,
+  IconCommand,
+  IconLayers,
+  IconPin,
+  IconRefresh,
+  IconSparkles,
+  IconTerminal,
+} from "./icons";
 
 const JOURNAL_LIMIT = 200;
 
@@ -381,55 +392,97 @@ export default function ControlCenter(props: ControlCenterProps) {
 
   const currentDialog = () => dialog() ?? pendingAgent()?.pending_dialog ?? null;
 
+  const tabIcon = (t: ControlTab) => {
+    switch (t) {
+      case "actions": return <IconCommand size={14} />;
+      case "triage": return <IconSparkles size={14} />;
+      case "history": return <IconRefresh size={14} />;
+      case "journal": return <IconLayers size={14} />;
+      case "playbooks": return <IconTerminal size={14} />;
+      case "schedules": return <IconPin size={14} />;
+      case "approvals": return <IconCheck size={14} />;
+      case "feed": return <IconBot size={14} />;
+    }
+  };
+
   return (
     <>
-      <button
-        ref={trigger}
-        type="button"
-        class="focus-ring relative rounded-md border border-line bg-raised px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
-        onClick={openControl}
-        aria-haspopup="dialog"
-      >
-        Control <span class="ml-1 text-[0.5rem] opacity-60">⌘K</span>
-        <Show when={props.notifications.unread() + props.messages.unread()}>
-          <span class="absolute -right-1.5 -top-1.5 grid size-4 place-items-center rounded-full bg-attention text-[0.5rem] font-bold text-background">
-            {props.notifications.unread() + props.messages.unread()}
-          </span>
-        </Show>
-      </button>
+        <button
+          ref={trigger}
+          type="button"
+          class="focus-ring relative flex h-7 items-center gap-1.5 rounded-lg border border-line bg-raised/70 px-2.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+          onClick={openControl}
+          aria-haspopup="dialog"
+        >
+          <IconCommand size={13} />
+          <span>Control</span>
+          <kbd class="ml-0.5 rounded border border-line bg-surface px-1 py-0.2 font-mono text-[9px] text-muted">
+            ⌘K
+          </kbd>
+          <Show when={props.notifications.unread() + props.messages.unread()}>
+            <span class="absolute -right-1 -top-1 grid size-4 place-items-center rounded-full bg-attention font-mono text-[9px] font-bold text-background">
+              {props.notifications.unread() + props.messages.unread()}
+            </span>
+          </Show>
+        </button>
 
-      <Show when={open()}>
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-6 backdrop-blur-sm" onPointerDown={(event) => {
-          if (event.target === event.currentTarget) closeControl();
-        }}>
-          <section ref={dialogElement} role="dialog" aria-modal="true" aria-label="Control center" tabIndex={-1} class="grid h-[min(46rem,88vh)] w-[min(62rem,94vw)] grid-cols-[11rem_minmax(0,1fr)] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
-            <nav aria-label="Control sections" class="border-r border-line bg-raised/50 p-2">
-              <p class="section-label px-2 pb-3 pt-2">Control center</p>
-              <For each={["actions", "triage", "history", "journal", "playbooks", "schedules", "approvals", "feed"] as ControlTab[]}>
-                {(item) => (
-                  <button type="button" class={`focus-ring mb-1 flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs capitalize ${tab() === item ? "bg-signal/10 text-signal" : "text-muted hover:bg-raised hover:text-foreground"}`} onClick={() => void chooseTab(item)}>
-                    <span>{item}</span>
-                    <Show when={item === "feed" && props.notifications.unread() + props.messages.unread()}>
-                      <span class="rounded-full bg-attention/15 px-1.5 font-mono text-[0.52rem] text-attention">{props.notifications.unread() + props.messages.unread()}</span>
-                    </Show>
-                  </button>
-                )}
-              </For>
-              <button type="button" class="focus-ring absolute bottom-[8%] ml-2 font-mono text-[0.55rem] uppercase text-muted" onClick={() => closeControl()}>Esc close</button>
-            </nav>
-
-            <div class="min-h-0 overflow-y-auto p-5">
-              <div class="mb-5 flex items-start justify-between border-b border-line pb-4">
+        <Show when={open()}>
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-6 backdrop-blur-md" onPointerDown={(event) => {
+            if (event.target === event.currentTarget) closeControl();
+          }}>
+            <section ref={dialogElement} role="dialog" aria-modal="true" aria-label="Control center" tabIndex={-1} class="flex h-[min(48rem,90vh)] w-[min(64rem,95vw)] overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]">
+              <nav aria-label="Control sections" class="flex w-44 flex-col justify-between border-r border-line bg-surface/50 p-2.5">
                 <div>
-                  <p class="section-label">{tab()}</p>
-                  <h2 class="mt-1 text-lg font-semibold">{selectedLane()?.repo.name ?? "Fleet"} <span class="font-normal text-muted">/ {selectedLane()?.worktree.branch ?? "no lane"}</span></h2>
+                  <p class="section-label px-2.5 pb-2.5 pt-1.5">Control Center</p>
+                  <div class="space-y-0.5">
+                    <For each={["actions", "triage", "history", "journal", "playbooks", "schedules", "approvals", "feed"] as ControlTab[]}>
+                      {(item) => (
+                        <button
+                          type="button"
+                          class={`focus-ring flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium capitalize transition-colors ${tab() === item ? "bg-raised text-foreground shadow-xs" : "text-muted hover:bg-raised/60 hover:text-foreground"}`}
+                          onClick={() => void chooseTab(item)}
+                        >
+                          <span class="flex items-center gap-2">
+                            <span class={tab() === item ? "text-signal" : "text-muted"}>{tabIcon(item)}</span>
+                            <span>{item}</span>
+                          </span>
+                          <Show when={item === "feed" && props.notifications.unread() + props.messages.unread()}>
+                            <span class="rounded-full bg-attention/15 px-1.5 font-mono text-[10px] font-semibold text-attention">
+                              {props.notifications.unread() + props.messages.unread()}
+                            </span>
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </div>
                 </div>
-                <button type="button" class="focus-ring rounded border border-line px-2 py-1 text-xs text-muted" onClick={() => closeControl()}>Close</button>
-              </div>
+                <div class="border-t border-line/60 px-2 pt-2">
+                  <span class="font-mono text-[10px] text-muted">Press Esc to close</span>
+                </div>
+              </nav>
 
-              <Show when={error()}>
-                <p class="mb-4 rounded-md border border-fault/40 bg-fault/8 p-2 text-xs text-fault">{error()}</p>
-              </Show>
+              <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div class="flex items-center justify-between border-b border-line px-6 py-4">
+                  <div>
+                    <span class="section-label">{tab()}</span>
+                    <h2 class="text-base font-semibold text-foreground">
+                      {selectedLane()?.repo.name ?? "Fleet"} <span class="font-normal text-muted">/ {selectedLane()?.worktree.branch ?? "no lane"}</span>
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    class="focus-ring flex size-7 items-center justify-center rounded-lg text-muted transition-colors hover:bg-raised hover:text-foreground"
+                    aria-label="Close Control Center"
+                    onClick={() => closeControl()}
+                  >
+                    <IconClose size={15} />
+                  </button>
+                </div>
+
+                <div class="min-h-0 flex-1 overflow-y-auto p-6">
+                  <Show when={error()}>
+                    <p class="mb-4 rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>
+                  </Show>
 
               <Show when={tab() === "actions"}>
                 <div class="space-y-5">
@@ -787,11 +840,12 @@ export default function ControlCenter(props: ControlCenterProps) {
                 </div>
               </Show>
             </div>
-          </section>
-        </div>
-      </Show>
-    </>
-  );
+          </div>
+        </section>
+      </div>
+    </Show>
+  </>
+);
 }
 
 export { replacementDialog };

@@ -4,12 +4,22 @@ import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
+import type { WorkspaceStore } from "../stores/workspace";
 import { agentLabel } from "./agentLabel";
 import {
   warmTargetWindows,
   type PaneTarget,
 } from "./terminalTargets";
+import {
+  IconBot,
+  IconChevronDown,
+  IconClose,
+  IconFocus,
+  IconGrid,
+  IconPlus,
+  IconSplit,
+  IconTerminal,
+} from "./icons";
 
 const TerminalPane = lazy(() => import("./TerminalPane"));
 
@@ -32,9 +42,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const targets = () => props.workspace.targets();
   const laneTargets = () => props.workspace.laneTargets();
 
-  // Labels read reactively from the fleet store: pane targets deliberately keep stable object
-  // identity across polls (so mounted panes never remount), which means a mutated target.label
-  // alone can't re-render — this memo tracks the store's fine-grained updates instead.
   const labelByWindow = createMemo(() => {
     const map = new Map<string, string>();
     for (const lane of props.fleet.lanes()) {
@@ -124,83 +131,130 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   }
 
   return (
-    <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)]">
-      <div class="flex min-w-0 items-center justify-between border-b border-line bg-surface/90 px-2 backdrop-blur">
-        <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="group" aria-label="Lane terminals and actions">
+    <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)] bg-background">
+      <div class="flex min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3 backdrop-blur">
+        <div class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto" role="group" aria-label="Lane terminals and actions">
           <For each={laneTargets()}>
             {(target) => (
-              <div class={`flex h-7 shrink-0 items-stretch overflow-hidden rounded border font-mono text-[0.58rem] ${activeWindow() === target.window ? "border-signal/40 bg-signal/10 text-foreground" : "border-line bg-raised text-muted"}`}>
+              <div
+                class={`group/tab flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all ${
+                  activeWindow() === target.window
+                    ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
+                    : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
+                }`}
+              >
                 <button
                   type="button"
                   aria-pressed={activeWindow() === target.window}
-                  class="focus-ring flex items-center gap-1.5 px-2"
+                  class="focus-ring flex items-center gap-1.5 px-2.5 py-1"
                   onClick={() => setActiveWindow(target.window)}
                 >
-                  <span class={target.shell ? "text-attention" : "text-signal"}>{target.shell ? ">_" : "●"}</span>
-                  <span class="max-w-32 truncate">{labelOf(target)}</span>
+                  <span class={target.shell ? "text-attention" : "text-signal"}>
+                    {target.shell ? <IconTerminal size={13} /> : <IconBot size={13} />}
+                  </span>
+                  <span class="max-w-44 truncate">{labelOf(target)}</span>
                 </button>
                 <Show when={target.shell}>
                   <button
                     type="button"
-                    class="focus-ring border-l border-line px-1.5 text-muted hover:bg-fault/10 hover:text-fault disabled:opacity-40"
+                    class="focus-ring mr-1 flex size-5 items-center justify-center rounded text-muted opacity-60 transition-opacity hover:bg-fault/10 hover:text-fault hover:opacity-100 disabled:opacity-30"
                     aria-label={`Close ${target.label}`}
                     disabled={closingShell() === target.window}
                     onClick={() => void closeShell(target)}
-                  >×</button>
+                  >
+                    <IconClose size={11} />
+                  </button>
                 </Show>
               </div>
             )}
           </For>
-          <button
-            type="button"
-            class="focus-ring h-7 shrink-0 rounded border border-dashed border-signal/40 px-2 font-mono text-[0.58rem] text-signal hover:bg-signal/10 disabled:opacity-40"
-            onClick={() => {
-              const lane = props.fleet.selectedLane();
-              if (lane) props.actions.spawn(lane);
-            }}
-            disabled={!props.fleet.selectedLane()}
-            title="Spawn an agent in this lane"
-          >
-            + agent
-          </button>
-          <button
-            type="button"
-            class="focus-ring h-7 shrink-0 rounded border border-dashed border-line px-2 font-mono text-[0.58rem] text-muted hover:text-foreground"
-            onClick={() => void openShell()}
-            disabled={props.fleet.selectedLaneId() === null || openingShell()}
-          >
-            {openingShell() ? "opening…" : "+ shell"}
-          </button>
+          <div class="flex items-center gap-1 pl-1">
+            <button
+              type="button"
+              class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
+              onClick={() => {
+                const lane = props.fleet.selectedLane();
+                if (lane) props.actions.spawn(lane);
+              }}
+              disabled={!props.fleet.selectedLane()}
+              title="Spawn an agent in this lane"
+            >
+              <IconPlus size={11} />
+              <span>Agent</span>
+            </button>
+            <button
+              type="button"
+              class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
+              onClick={() => void openShell()}
+              disabled={props.fleet.selectedLaneId() === null || openingShell()}
+            >
+              <IconPlus size={11} />
+              <span>{openingShell() ? "Opening…" : "Shell"}</span>
+            </button>
+          </div>
         </div>
 
-        <div class="ml-2 flex shrink-0 items-center gap-1">
-          <For each={["focused", "split", "grid"] as WorkspaceLayout[]}>
-            {(item) => (
-              <button
-                type="button"
-                class={`focus-ring rounded px-1.5 py-1 font-mono text-[0.52rem] uppercase ${layout() === item ? "bg-signal/12 text-signal" : "text-muted"}`}
-                onClick={() => chooseLayout(item)}
-              >{item}</button>
-            )}
-          </For>
-          <select
-            aria-label="Terminal renderer"
-            class="focus-ring ml-1 h-6 rounded border border-line bg-raised px-1 font-mono text-[0.5rem] uppercase text-muted"
-            value={renderer()}
-            onChange={(event) => chooseRenderer(event.currentTarget.value as TerminalRenderer)}
-          >
-            <option value="auto">auto</option>
-            <option value="webgl">webgl</option>
-            <option value="dom">dom</option>
-          </select>
+        <div class="ml-3 flex shrink-0 items-center gap-2">
+          <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5" role="group" aria-label="Layout view mode">
+            <button
+              type="button"
+              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${layout() === "focused" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              onClick={() => chooseLayout("focused")}
+              title="Focused layout"
+              aria-label="Focused layout"
+            >
+              <IconFocus size={13} />
+            </button>
+            <button
+              type="button"
+              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${layout() === "split" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              onClick={() => chooseLayout("split")}
+              title="Split layout"
+              aria-label="Split layout"
+            >
+              <IconSplit size={13} />
+            </button>
+            <button
+              type="button"
+              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${layout() === "grid" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              onClick={() => chooseLayout("grid")}
+              title="Grid layout"
+              aria-label="Grid layout"
+            >
+              <IconGrid size={13} />
+            </button>
+          </div>
+
+          <div class="relative">
+            <select
+              aria-label="Terminal renderer"
+              class="focus-ring h-7 appearance-none rounded-lg border border-line bg-surface pl-2 pr-6 font-mono text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-muted/50 focus:text-foreground"
+              value={renderer()}
+              onChange={(event) => chooseRenderer(event.currentTarget.value as TerminalRenderer)}
+            >
+              <option value="auto">auto</option>
+              <option value="webgl">webgl</option>
+              <option value="dom">dom</option>
+            </select>
+            <span class="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted">
+              <IconChevronDown size={10} strokeWidth={2} />
+            </span>
+          </div>
         </div>
       </div>
 
       <Show when={workspaceError()}>
         {(message) => (
-          <div role="alert" class="absolute right-3 top-12 z-40 flex max-w-md items-start gap-3 rounded-md border border-fault/40 bg-surface p-3 text-xs text-fault shadow-lg">
-            <span>{message()}</span>
-            <button type="button" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Dismiss terminal error" onClick={() => setWorkspaceError(null)}>×</button>
+          <div role="alert" class="absolute right-4 top-12 z-40 flex max-w-md items-start gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-[0_12px_36px_var(--shadow)]">
+            <span class="flex-1 font-medium">{message()}</span>
+            <button
+              type="button"
+              class="focus-ring -mr-1 -mt-1 flex size-5 items-center justify-center rounded text-muted hover:text-foreground"
+              aria-label="Dismiss terminal error"
+              onClick={() => setWorkspaceError(null)}
+            >
+              <IconClose size={12} />
+            </button>
           </div>
         )}
       </Show>
@@ -209,30 +263,36 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         when={visibleTargets().length}
         fallback={
           <div class="relative flex items-center justify-center px-8 text-center">
-            <section class="max-w-md">
-              <div class="mx-auto mb-5 grid size-14 place-items-center rounded-xl border border-line bg-surface shadow-[0_14px_40px_var(--shadow)]">
-                <div class="terminal-glyph" aria-hidden="true"><span>&gt;</span><i /></div>
+            <section class="max-w-md rounded-2xl border border-line bg-surface/80 p-8 shadow-[0_20px_60px_var(--shadow)]">
+              <div class="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl border border-line bg-raised text-signal">
+                <IconTerminal size={22} />
               </div>
-              <p class="section-label mb-2">Terminal bay</p>
-              <h2 class="text-xl font-semibold tracking-[-0.025em]">
-                {props.fleet.selectedLane()?.worktree.branch ?? "Ready for the first lane"}
+              <p class="section-label mb-1">Terminal Bay</p>
+              <h2 class="text-lg font-semibold tracking-tight text-foreground">
+                {props.fleet.selectedLane()?.worktree.branch ?? "Select or create a lane"}
               </h2>
-              <p class="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
-                {props.fleet.selectedLane() ? "Spawn an agent or open a shell to work in this lane." : "Add a repository to begin monitoring work."}
+              <p class="mx-auto mt-2 max-w-xs text-xs leading-relaxed text-muted">
+                {props.fleet.selectedLane() ? "Spawn an AI agent or open an interactive shell in this worktree." : "Choose a lane from the fleet sidebar or register a repository to begin."}
               </p>
               <Show when={props.fleet.selectedLane()}>
                 {(lane) => (
-                  <div class="mt-4 flex items-center justify-center gap-2">
+                  <div class="mt-5 flex items-center justify-center gap-2">
                     <button
                       type="button"
-                      class="focus-ring rounded-md border border-signal/40 bg-signal/10 px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-signal"
+                      class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-signal/40 bg-signal/10 px-3.5 py-2 text-xs font-medium text-signal transition-colors hover:bg-signal/20"
                       onClick={() => props.actions.spawn(lane())}
-                    >Spawn agent</button>
+                    >
+                      <IconPlus size={13} />
+                      <span>Spawn agent</span>
+                    </button>
                     <button
                       type="button"
-                      class="focus-ring rounded-md border border-line px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-muted hover:text-foreground"
+                      class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-raised"
                       onClick={() => void openShell()}
-                    >Open shell</button>
+                    >
+                      <IconTerminal size={13} />
+                      <span>Open shell</span>
+                    </button>
                   </div>
                 )}
               </Show>

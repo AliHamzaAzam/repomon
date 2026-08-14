@@ -1,4 +1,5 @@
 import { Show, createUniqueId, onCleanup, onMount, type JSX } from "solid-js";
+import { IconClose } from "./icons";
 
 interface ModalProps {
   title: string;
@@ -9,8 +10,7 @@ interface ModalProps {
   width?: string;
 }
 
-/// Shared modal shell: centered card, backdrop-dismiss, Escape-to-close. Replaces the browser
-/// prompt()/confirm() popups the app used to lean on, so every input flow renders in-app.
+/// Shared modal shell: centered card, backdrop-dismiss, Escape-to-close.
 export default function Modal(props: ModalProps) {
   let dialog!: HTMLElement;
   let previouslyFocused: HTMLElement | null = null;
@@ -46,6 +46,7 @@ export default function Modal(props: ModalProps) {
       first.focus();
     }
   };
+
   onMount(() => {
     previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     window.addEventListener("keydown", onKey, true);
@@ -54,6 +55,7 @@ export default function Modal(props: ModalProps) {
       initial.focus();
     });
   });
+
   onCleanup(() => {
     window.removeEventListener("keydown", onKey, true);
     if (previouslyFocused?.isConnected) queueMicrotask(() => previouslyFocused?.focus());
@@ -61,7 +63,7 @@ export default function Modal(props: ModalProps) {
 
   return (
     <div
-      class="fixed inset-0 z-[60] flex items-center justify-center bg-background/70 p-6 backdrop-blur-sm"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-background/80 p-6 backdrop-blur-md"
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) props.onClose();
       }}
@@ -73,28 +75,28 @@ export default function Modal(props: ModalProps) {
         aria-labelledby={titleId}
         aria-describedby={props.subtitle ? subtitleId : undefined}
         tabIndex={-1}
-        class="flex max-h-[88vh] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-[0_28px_90px_var(--shadow)]"
+        class="flex max-h-[88vh] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_24px_80px_var(--shadow)]"
         style={{ width: props.width ?? "min(34rem, 94vw)" }}
       >
         <header class="flex items-start justify-between border-b border-line px-5 py-4">
           <div>
-            <p id={titleId} class="section-label">{props.title}</p>
+            <h2 id={titleId} class="text-sm font-semibold tracking-tight text-foreground">{props.title}</h2>
             <Show when={props.subtitle}>
-              <p id={subtitleId} class="mt-1 text-sm text-muted">{props.subtitle}</p>
+              <p id={subtitleId} class="mt-1 text-xs text-muted leading-normal">{props.subtitle}</p>
             </Show>
           </div>
           <button
             type="button"
-            class="focus-ring rounded border border-line px-2 py-1 text-xs text-muted hover:text-foreground"
+            class="focus-ring -mr-1 -mt-1 flex size-7 items-center justify-center rounded-lg text-muted transition-colors hover:bg-raised hover:text-foreground"
             aria-label={`Close ${props.title}`}
             onClick={props.onClose}
           >
-            Esc
+            <IconClose size={15} />
           </button>
         </header>
         <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">{props.children}</div>
         <Show when={props.footer}>
-          <footer class="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
+          <footer class="flex items-center justify-end gap-2 border-t border-line bg-surface px-5 py-3.5">
             {props.footer}
           </footer>
         </Show>

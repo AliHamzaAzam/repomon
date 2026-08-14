@@ -56,11 +56,11 @@ describe("agentLabel", () => {
     expect(agentLabel(agent({ custom_label: "reviewer", title: "Ship desktop" }))).toBe("reviewer");
   });
 
-  it("falls back to the session title before the numbered form", () => {
-    expect(agentLabel(agent({ title: "Ship desktop" }))).toBe("Ship desktop");
+  it("ignores raw truncated transcript titles in favor of stable slot identifier", () => {
+    expect(agentLabel(agent({ title: "can you see the antigravity transcript..." }))).toBe("claude-code 1");
   });
 
-  it("numbers by window slot when there is no title", () => {
+  it("numbers by window slot", () => {
     expect(agentLabel(agent({ agent: "codex", tmux_window: "lane-7-2" }))).toBe("codex 2");
   });
 

@@ -61,9 +61,6 @@ const GENERAL_TOGGLES: Array<[keyof ConfigView, string]> = [
   ["embedded_pty", "Embedded terminal renderer"],
 ];
 
-/// Builds Select options from the detected agents, plus a "Default" empty option and, if the
-/// currently configured value is not among the detected agents (a custom name entered before
-/// this control existed, or one no longer on PATH), a fallback option that preserves it.
 function agentSelectOptions(agents: AgentChoice[], current: string | null | undefined): Array<{ value: string; label: string }> {
   const options = [{ value: "", label: "Default" }, ...agents.map((choice) => ({ value: choice.name, label: choice.name }))];
   const value = current ?? "";
@@ -83,7 +80,7 @@ function TextField(props: {
     <label class="block">
       <span class="section-label">{props.label}</span>
       <input
-        class="settings-input"
+        class="focus-ring mt-1.5 h-8 w-full rounded-lg border border-line bg-surface px-3 text-xs text-foreground outline-none placeholder:text-muted/60"
         value={props.value}
         placeholder={props.placeholder}
         onInput={(event) => props.onInput(event.currentTarget.value)}
@@ -95,9 +92,6 @@ function TextField(props: {
 export default function SettingsModal(props: SettingsModalProps) {
   const [tab, setTab] = createSignal<SettingsTab>(props.initialTab ?? "general");
 
-  // Keep the visible tab in sync if the opener changes it. Today the shortcut handler cannot
-  // fire while a modal is open, so this only matters if that guard ever relaxes, but a tab
-  // signal that silently ignores its own prop is a trap worth closing.
   createEffect(() => {
     const requested = props.initialTab;
     if (requested) setTab(requested);
@@ -184,12 +178,16 @@ export default function SettingsModal(props: SettingsModalProps) {
       <Show when={status()}>
         <span class="mr-auto text-xs text-muted">{status()}</span>
       </Show>
-      <button type="button" class="focus-ring rounded border border-line px-3 py-2 text-xs text-muted" onClick={props.onClose}>
+      <button
+        type="button"
+        class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+        onClick={props.onClose}
+      >
         Close
       </button>
       <button
         type="button"
-        class="focus-ring rounded bg-signal px-4 py-2 font-mono text-[0.6rem] font-semibold uppercase text-background disabled:opacity-50"
+        class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
         disabled={saving() || !config()}
         onClick={() => void save()}
       >
@@ -200,18 +198,17 @@ export default function SettingsModal(props: SettingsModalProps) {
 
   return (
     <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width="min(44rem, 95vw)" onClose={props.onClose} footer={footer()}>
-      {/* The Modal body scrolls (overflow-y-auto with px-5 py-4 padding); this strip cancels that
-          padding and sticks to the top of the scrollport so the tabs stay reachable while the
-          section below scrolls, without changing Modal.tsx's shared layout. */}
-      <div class="sticky -top-4 z-10 -mx-5 -mt-4 mb-4 border-b border-line bg-surface px-5 pt-4 pb-2">
-        <div class="flex items-center gap-1" role="tablist" aria-label="Settings sections">
+      <div class="sticky -top-4 z-10 -mx-5 -mt-4 mb-5 border-b border-line bg-surface/95 px-5 pt-3 pb-2.5 backdrop-blur">
+        <div class="flex items-center gap-1 rounded-lg border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Settings sections">
           <For each={TABS}>
             {(item) => (
               <button
                 type="button"
                 role="tab"
                 aria-selected={tab() === item.id}
-                class={`focus-ring rounded px-2 py-1 font-mono text-[0.52rem] uppercase ${tab() === item.id ? "bg-signal/10 text-signal" : "text-muted"}`}
+                class={`focus-ring flex-1 rounded-md py-1 text-center text-xs font-medium transition-colors ${
+                  tab() === item.id ? "bg-surface text-foreground shadow-xs font-semibold" : "text-muted hover:text-foreground"
+                }`}
                 onClick={() => setTab(item.id)}
               >
                 {item.label}
@@ -222,22 +219,22 @@ export default function SettingsModal(props: SettingsModalProps) {
       </div>
 
       <Show when={error()}>
-        <p class="mb-4 rounded-md border border-fault/40 bg-fault/8 p-2 text-xs text-fault">{error()}</p>
+        <p class="mb-4 rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>
       </Show>
-      <Show when={config()} fallback={<p class="text-sm text-muted">Loading settings…</p>}>
+      <Show when={config()} fallback={<p class="text-xs text-muted">Loading settings…</p>}>
         {(settings) => (
           <div class="space-y-6">
             <Show when={tab() === "general"}>
-              <section class="space-y-3">
-                <p class="section-label text-signal">General</p>
+              <section class="space-y-4">
+                <p class="section-label">General Configuration</p>
                 <Select
-                  label="Default agent"
+                  label="Default Agent Runtime"
                   value={String(settings().default_agent ?? "")}
                   options={agentSelectOptions(agents(), settings().default_agent)}
                   onChange={(value) => patch({ default_agent: value || null })}
                 />
-                <TextField label="Worktree template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value })} />
-                <TextField label="Auto-continue message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value })} />
+                <TextField label="Worktree Template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value })} />
+                <TextField label="Auto-continue Message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value })} />
                 <div class="grid gap-2 sm:grid-cols-2">
                   <For each={GENERAL_TOGGLES}>
                     {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
@@ -245,16 +242,26 @@ export default function SettingsModal(props: SettingsModalProps) {
                 </div>
               </section>
 
-              <section class="space-y-3 border-t border-line pt-4">
-                <p class="section-label text-signal">Updates</p>
+              <section class="space-y-3 border-t border-line/70 pt-5">
+                <p class="section-label">Software Updates</p>
                 <div class="flex items-center gap-3">
-                  <button type="button" class="focus-ring rounded border border-line px-3 py-2 font-mono text-[0.58rem] uppercase text-muted disabled:opacity-50" disabled={checking()} onClick={() => void checkForUpdates()}>
+                  <button
+                    type="button"
+                    class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-raised disabled:opacity-50"
+                    disabled={checking()}
+                    onClick={() => void checkForUpdates()}
+                  >
                     {checking() ? "Checking…" : "Check for updates"}
                   </button>
                   <Show when={availableUpdate()}>
                     {(update) => (
-                      <button type="button" class="focus-ring rounded bg-signal px-3 py-2 font-mono text-[0.58rem] font-semibold uppercase text-background disabled:opacity-50" disabled={checking()} onClick={() => void installUpdate()}>
-                        Install {update().version} and restart
+                      <button
+                        type="button"
+                        class="focus-ring rounded-lg bg-signal px-3.5 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
+                        disabled={checking()}
+                        onClick={() => void installUpdate()}
+                      >
+                        Install {update().version} & restart
                       </button>
                     )}
                   </Show>
@@ -267,18 +274,18 @@ export default function SettingsModal(props: SettingsModalProps) {
 
             <Show when={tab() === "notifications"}>
               <section class="space-y-4">
-                <p class="section-label text-signal">Notifications</p>
+                <p class="section-label">Alert Notifications</p>
                 <Switch label="Enable notifications" checked={settings().notify_enabled} onChange={(value) => patch({ notify_enabled: value })} />
                 <div class="grid gap-2 sm:grid-cols-2">
                   <For each={NOTIFY_TOGGLES}>
                     {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} disabled={!settings().notify_enabled} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
                   </For>
                 </div>
-                <div class="space-y-3 border-t border-line pt-4">
-                  <p class="section-label text-signal">Sound cues</p>
+                <div class="space-y-3 border-t border-line/70 pt-5">
+                  <p class="section-label">Audio Cues</p>
                   <div class="grid gap-2 sm:grid-cols-2">
                     <Switch
-                      label="Play sound"
+                      label="Play sound cues"
                       checked={settings().notify_sound}
                       disabled={!settings().notify_enabled}
                       onChange={(value) => patch({ notify_sound: value })}
@@ -291,7 +298,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                     />
                   </div>
                   <label class="block">
-                    <span class="section-label">Volume {Math.round(settings().notify_sound_volume * 100)}%</span>
+                    <span class="section-label">Volume ({Math.round(settings().notify_sound_volume * 100)}%)</span>
                     <input
                       class="mt-2 w-full accent-signal"
                       type="range"
@@ -306,7 +313,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                   <div class="grid gap-2 sm:grid-cols-2">
                     <For each={SOUND_CUE_CONTROLS}>
                       {(item) => (
-                        <div class="flex items-center gap-2 rounded-md border border-line bg-raised p-2">
+                        <div class="flex items-center gap-2 rounded-lg border border-line bg-surface/50 p-2">
                           <div class="min-w-0 flex-1">
                             <Switch
                               label={item.label}
@@ -317,11 +324,11 @@ export default function SettingsModal(props: SettingsModalProps) {
                           </div>
                           <button
                             type="button"
-                            class="focus-ring rounded border border-line px-2 py-1 font-mono text-[0.52rem] uppercase text-muted hover:text-foreground"
+                            class="focus-ring rounded-md border border-line bg-surface px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
                             aria-label={`Preview ${item.label}`}
                             onClick={() => props.onPreviewSound?.(item.cue, settings().notify_sound_volume)}
                           >
-                            Preview
+                            Play
                           </button>
                         </div>
                       )}
@@ -332,27 +339,27 @@ export default function SettingsModal(props: SettingsModalProps) {
             </Show>
 
             <Show when={tab() === "appearance"}>
-              <section class="space-y-3">
-                <p class="section-label text-signal">Appearance</p>
+              <section class="space-y-4">
+                <p class="section-label">Visual Preferences</p>
                 <Switch
                   label="Sort projects by activity"
                   checked={Boolean(settings().sort_repos_by_activity)}
                   onChange={(value) => patch({ sort_repos_by_activity: value })}
                 />
-                <ColorField label="Accent" value={String(settings().accent ?? "")} onChange={(value) => patch({ accent: value })} />
+                <ColorField label="Accent Color" value={String(settings().accent ?? "")} onChange={(value) => patch({ accent: value })} />
                 <Select
-                  label="Repomind agent"
+                  label="Repomind Orchestrator Runtime"
                   value={String(settings().orchestrator_agent ?? "")}
                   options={agentSelectOptions(agents(), settings().orchestrator_agent)}
                   onChange={(value) => patch({ orchestrator_agent: value || null })}
                 />
-                <TextField label="Repomind model" value={String(settings().orchestrator_model ?? "")} placeholder="opus / sonnet" onInput={(value) => patch({ orchestrator_model: value || null })} />
+                <TextField label="Repomind Model" value={String(settings().orchestrator_model ?? "")} placeholder="opus / sonnet" onInput={(value) => patch({ orchestrator_model: value || null })} />
               </section>
             </Show>
 
             <Show when={tab() === "keyboard"}>
               <section class="space-y-3">
-                <p class="section-label text-signal">Keyboard</p>
+                <p class="section-label">Keyboard Shortcuts</p>
                 <KeyboardHelp />
               </section>
             </Show>

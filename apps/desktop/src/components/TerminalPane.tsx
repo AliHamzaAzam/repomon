@@ -20,6 +20,7 @@ import {
   type TerminalTarget,
 } from "../ipc/term";
 import AgentHistory from "./AgentHistory";
+import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
 
 interface TerminalPaneProps extends TerminalTarget {
   label: string;
@@ -420,54 +421,79 @@ export default function TerminalPane(props: TerminalPaneProps) {
           />
         </div>
       </Show>
-      <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-6 items-center justify-between border-b border-line bg-surface/90 px-2 font-mono text-[0.52rem] uppercase tracking-[0.08em] text-muted backdrop-blur">
+      <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-7 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">
         <Show
           when={finding()}
-          fallback={<span class="truncate">{props.label}</span>}
+          fallback={<span class="truncate font-semibold text-foreground/80">{props.label}</span>}
         >
           <form
-            class="pointer-events-auto flex min-w-0 flex-1 items-center gap-1"
+            class="pointer-events-auto flex min-w-0 flex-1 items-center gap-1.5"
             onSubmit={(event) => {
               event.preventDefault();
               find(true);
             }}
           >
             <label class="sr-only" for={`terminal-find-${props.laneId}-${props.window}`}>Find in terminal</label>
-            <input
-              ref={searchInput}
-              id={`terminal-find-${props.laneId}-${props.window}`}
-              type="search"
-              class="focus-ring h-5 min-w-20 flex-1 rounded border border-line bg-raised px-1.5 text-[0.58rem] normal-case tracking-normal text-foreground"
-              value={query()}
-              placeholder="Find in terminal"
-              onInput={(event) => {
-                setQuery(event.currentTarget.value);
-                find(true);
+            <div class="relative flex min-w-28 flex-1 items-center">
+              <input
+                ref={searchInput}
+                id={`terminal-find-${props.laneId}-${props.window}`}
+                type="search"
+                class="focus-ring h-5 w-full rounded border border-line bg-raised pl-5 pr-2 font-sans text-xs normal-case tracking-normal text-foreground placeholder:text-muted/60"
+                value={query()}
+                placeholder="Find in buffer…"
+                onInput={(event) => {
+                  setQuery(event.currentTarget.value);
+                  find(true);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setFinding(false);
+                    terminal?.focus();
+                  }
+                }}
+              />
+              <span class="pointer-events-none absolute left-1.5 text-muted">
+                <IconSearch size={11} />
+              </span>
+            </div>
+            <button
+              type="button"
+              class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+              aria-label="Previous match"
+              onClick={() => find(false)}
+            >
+              <IconArrowUp size={11} />
+            </button>
+            <button
+              type="submit"
+              class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+              aria-label="Next match"
+            >
+              <IconArrowDown size={11} />
+            </button>
+            <button
+              type="button"
+              class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+              aria-label="Close terminal search"
+              onClick={() => {
+                setFinding(false);
+                terminal?.focus();
               }}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setFinding(false);
-                  terminal?.focus();
-                }
-              }}
-            />
-            <button type="button" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Previous match" onClick={() => find(false)}>↑</button>
-            <button type="submit" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Next match">↓</button>
-            <button type="button" class="focus-ring rounded px-1 text-muted hover:text-foreground" aria-label="Close terminal search" onClick={() => {
-              setFinding(false);
-              terminal?.focus();
-            }}>×</button>
+            >
+              <IconClose size={12} />
+            </button>
           </form>
         </Show>
-        <div class="ml-2 flex shrink-0 items-center gap-1">
+        <div class="ml-2 flex shrink-0 items-center gap-2">
           <Show when={props.sessionId && !finding()}>
-            <div class="pointer-events-auto flex items-center gap-0.5" role="tablist" aria-label="Agent pane views">
+            <div class="pointer-events-auto flex items-center rounded border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Agent pane views">
               <button
                 type="button"
                 role="tab"
                 aria-selected={view() === "live"}
-                class={`focus-ring rounded px-1.5 py-0.5 ${view() === "live" ? "bg-signal/10 text-signal" : "hover:text-foreground"}`}
+                class={`focus-ring rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${view() === "live" ? "bg-surface text-foreground shadow-xs" : "text-muted hover:text-foreground"}`}
                 onClick={() => {
                   setView("live");
                   queueMicrotask(() => terminal?.focus());
@@ -477,7 +503,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
                 type="button"
                 role="tab"
                 aria-selected={view() === "history"}
-                class={`focus-ring rounded px-1.5 py-0.5 ${view() === "history" ? "bg-signal/10 text-signal" : "hover:text-foreground"}`}
+                class={`focus-ring rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${view() === "history" ? "bg-surface text-foreground shadow-xs" : "text-muted hover:text-foreground"}`}
                 onClick={() => {
                   setFinding(false);
                   setView("history");
@@ -485,11 +511,13 @@ export default function TerminalPane(props: TerminalPaneProps) {
               >History</button>
             </div>
           </Show>
-          <span>{view() === "history" ? "HISTORY" : renderer()}</span>
+          <span class="rounded bg-raised/70 px-1.5 py-0.5 font-mono text-[9px] font-medium text-muted">
+            {view() === "history" ? "HISTORY" : renderer()}
+          </span>
         </div>
       </div>
       <Show when={view() === "live" && transportError()}>
-        <div class="absolute inset-x-4 top-10 z-20 rounded-md border border-fault/40 bg-surface p-2 text-xs text-fault shadow-lg">
+        <div class="absolute inset-x-4 top-10 z-20 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg">
           Terminal transport unavailable: {transportError()}
         </div>
       </Show>

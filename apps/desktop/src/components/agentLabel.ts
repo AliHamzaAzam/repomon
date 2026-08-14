@@ -12,12 +12,11 @@ export function slotOf(window: string | null | undefined): number | null {
 
 /// The display label for one agent session.
 ///
-/// The number comes from the window slot, never from the session's position in
-/// `lane.agent_sessions`: the daemon builds that array newest-transcript-first, so it re-sorts
-/// itself every time the lane's agents take turns, while their windows stay put. Numbering off the
-/// array index made two agents swap labels between two stationary panes on every turn.
+/// Returns the user's explicit custom label if set, or a stable identifier based on the agent kind
+/// and its window slot (e.g. `claude-code 1`, `antigravity 2`). Never uses raw truncated transcript
+/// messages (`session.title`), which produce jittery, meaningless sentence fragments in tabs.
 export function agentLabel(session: AgentSession): string {
-  return session.custom_label ?? session.title ?? `${session.agent} ${slotOf(session.tmux_window) ?? 1}`;
+  return session.custom_label ?? `${session.agent} ${slotOf(session.tmux_window) ?? 1}`;
 }
 
 /// The session that names a lane: the one in the lowest window slot, i.e. the lane's first-spawned
