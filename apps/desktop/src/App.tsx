@@ -140,6 +140,7 @@ function App(props: AppProps) {
 
     event.preventDefault();
     switch (binding.id) {
+      case "panel.control": actions.toggleControl(); break;
       case "panel.settings": actions.openSettings(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
       case "panel.repomind": setRepomindOpen((open) => !open); break;

@@ -4,16 +4,12 @@ import { BINDINGS, formatChord, type KeymapSection } from "../keymap";
 
 const SECTIONS: KeymapSection[] = ["Panels", "Layout", "Fleet", "Lane", "Agents", "Help"];
 
-/// Two real shortcuts live outside BINDINGS and must still appear here, or the reference lies by
-/// omission. Neither belongs in the shared table:
-/// - Cmd+K / Ctrl+K opens the control center via ControlCenter.tsx's own listener. Putting it in
-///   BINDINGS would make the global handler in App.tsx call preventDefault and swallow the key
-///   before ControlCenter ever saw it.
+/// One real shortcut lives outside BINDINGS and must still appear here, or the reference lies by
+/// omission:
 /// - Shift+Escape leaves a focused terminal. It has no Cmd/Ctrl modifier, unlike every BINDINGS
 ///   entry, so it gets a literal chord label instead of formatChord, which always assumes a mod
 ///   key is present.
 const STATIC_ROWS: Array<{ id: string; label: string; chord: string }> = [
-  { id: "static.controlCenter", label: "Open the control center", chord: formatChord("mod+k") },
   { id: "static.leaveTerminal", label: "Leave the terminal", chord: "Shift+Esc" },
 ];
 

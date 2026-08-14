@@ -15,6 +15,7 @@ export interface RenameTarget {
 /// Owns the state for every input/confirm modal so any surface (sidebar, control center,
 /// header) can open one without threading callbacks. The matching <ActionModals> renders them.
 export function createActionsStore(fleet: FleetStore) {
+  const [controlOpen, setControlOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general");
   const [spawnLane, setSpawnLane] = createSignal<Lane | null>(null);
@@ -159,6 +160,10 @@ export function createActionsStore(fleet: FleetStore) {
     error,
     dismissError: () => setError(null),
     reportError: (message: string) => setError(message),
+    controlOpen,
+    openControl: () => setControlOpen(true),
+    closeControl: () => setControlOpen(false),
+    toggleControl: () => setControlOpen((open) => !open),
     settingsOpen,
     settingsTab,
     openSettings: () => {

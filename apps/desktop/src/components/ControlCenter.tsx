@@ -2,7 +2,6 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 
 import type { AgentSession, ApprovalRule, BrowseResult, Commit, JournalEntry, PendingDialog, Playbook, Schedule, TimelineData, WorkSession } from "../bindings";
 import { DaemonRpcError, daemonCall } from "../ipc/rpc";
-import { isMac } from "../keymap";
 import { agentLabel } from "./agentLabel";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { NotificationStore } from "../stores/notifications";
@@ -96,7 +95,7 @@ function agentKey(agent: AgentSession, index: number): string {
 }
 
 export default function ControlCenter(props: ControlCenterProps) {
-  const [open, setOpen] = createSignal(false);
+  const open = () => props.actions.controlOpen();
   const [tab, setTab] = createSignal<ControlTab>("actions");
   const [busy, setBusy] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
@@ -141,6 +140,7 @@ export default function ControlCenter(props: ControlCenterProps) {
   });
 
   function focusableElements() {
+    if (!dialogElement) return [];
     return [...dialogElement.querySelectorAll<HTMLElement>(
       'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
     )];
@@ -148,33 +148,42 @@ export default function ControlCenter(props: ControlCenterProps) {
 
   function openControl() {
     previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : trigger;
-    setOpen(true);
-    queueMicrotask(() => (focusableElements()[0] ?? dialogElement).focus());
+    props.actions.openControl();
   }
 
   function closeControl(restoreFocus = true) {
-    setOpen(false);
+    props.actions.closeControl();
     if (restoreFocus) queueMicrotask(() => (previouslyFocused?.isConnected ? previouslyFocused : trigger)?.focus());
   }
 
+  createEffect(() => {
+    if (open()) {
+      queueMicrotask(() => {
+        if (dialogElement) {
+          const focusable = focusableElements();
+          const initial = focusable[0] ?? dialogElement;
+          initial.focus();
+        }
+      });
+    }
+  });
+
   const onKey = (event: KeyboardEvent) => {
-    // Same platform gate as keymap.ts: Cmd is mod on macOS and a held Ctrl there is a terminal
-    // chord meant for the agent, not this shortcut. Elsewhere mod is Ctrl.
-    const mod = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey;
-    if (mod && event.key.toLowerCase() === "k") {
+    if (!open()) return;
+    if (event.key === "Escape") {
       event.preventDefault();
-      if (open()) closeControl();
-      else openControl();
-    } else if (event.key === "Escape" && open()) {
+      event.stopPropagation();
       closeControl();
-    } else if (event.key === "Tab" && open()) {
+    } else if (event.key === "Tab") {
       const focusable = focusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogElement?.focus();
+        return;
+      }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (!first || !last) {
-        event.preventDefault();
-        dialogElement.focus();
-      } else if (event.shiftKey && document.activeElement === first) {
+      if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -184,8 +193,8 @@ export default function ControlCenter(props: ControlCenterProps) {
     }
   };
 
-  onMount(() => window.addEventListener("keydown", onKey));
-  onCleanup(() => window.removeEventListener("keydown", onKey));
+  onMount(() => window.addEventListener("keydown", onKey, true));
+  onCleanup(() => window.removeEventListener("keydown", onKey, true));
 
   async function run(label: string, task: () => Promise<unknown>) {
     setBusy(label);
@@ -412,8 +421,12 @@ export default function ControlCenter(props: ControlCenterProps) {
           ref={trigger}
           type="button"
           class="focus-ring relative flex h-7 items-center gap-1.5 rounded-lg border border-line bg-raised/70 px-2.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
-          onClick={openControl}
+          onClick={() => {
+            if (open()) closeControl();
+            else openControl();
+          }}
           aria-haspopup="dialog"
+          aria-expanded={open()}
         >
           <IconCommand size={13} />
           <span>Control</span>

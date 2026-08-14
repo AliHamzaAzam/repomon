@@ -20,6 +20,7 @@ export interface Binding {
 }
 
 export const BINDINGS: Binding[] = [
+  { id: "panel.control", chord: "mod+k", label: "Open the control center", section: "Panels" },
   { id: "panel.settings", chord: "mod+,", label: "Open settings", section: "Panels" },
   { id: "panel.extensions", chord: "mod+4", label: "Toggle extensions", section: "Panels" },
   { id: "panel.repomind", chord: "mod+5", label: "Toggle repomind", section: "Panels" },

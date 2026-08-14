@@ -23,7 +23,7 @@ describe("keyboard reference", () => {
     expect(screen.queryByText("Refresh")).not.toBeInTheDocument();
   });
 
-  it("lists the two shortcuts that live outside BINDINGS", () => {
+  it("lists the static shortcut that lives outside BINDINGS", () => {
     render(() => <KeyboardHelp />);
     expect(screen.getByText("Open the control center")).toBeInTheDocument();
     expect(screen.getByText("Leave the terminal")).toBeInTheDocument();
