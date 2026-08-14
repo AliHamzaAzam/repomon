@@ -36,6 +36,9 @@ pub struct WindowMeta {
     /// option ([`TmuxRuntime::set_window_session`]), if any. tmux destroys window options
     /// with the window, so a binding can never outlive its agent.
     pub session: Option<String>,
+    /// The agent kind bound to this window via the `@repomon_agent_kind` window option
+    /// ([`TmuxRuntime::set_window_agent_kind`]), if any.
+    pub agent_kind: Option<String>,
 }
 
 impl TmuxRuntime {
@@ -282,8 +285,9 @@ impl TmuxRuntime {
             .collect())
     }
 
-    /// One window as the overlay probes it: name, tmux's window id, and the transcript
-    /// session id stuck to it via the `@repomon_session` window option, if bound.
+    /// One window as the overlay probes it: name, tmux's window id, the transcript
+    /// session id stuck to it via the `@repomon_session` window option, and the agent kind
+    /// option `@repomon_agent_kind`, if bound.
     pub fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
         // Same single fork the overlay already pays for `list_windows`, richer format string.
         let out = self.run_allow_absent(&[
@@ -291,16 +295,16 @@ impl TmuxRuntime {
             "-t",
             &self.session,
             "-F",
-            "#{window_name}\t#{window_id}\t#{@repomon_session}",
+            "#{window_name}\t#{window_id}\t#{@repomon_session}\t#{@repomon_agent_kind}",
         ])?;
         Ok(Self::parse_windows_meta(&out))
     }
 
-    /// Parse `list_windows_meta` probe lines (`name\t@id\tsession?`).
+    /// Parse `list_windows_meta` probe lines (`name\t@id\tsession?\tagent_kind?`).
     fn parse_windows_meta(out: &str) -> Vec<WindowMeta> {
         out.lines()
             .filter_map(|l| {
-                let mut it = l.splitn(3, '\t');
+                let mut it = l.splitn(4, '\t');
                 let name = it.next()?.to_string();
                 let wid = it
                     .next()
@@ -312,7 +316,17 @@ impl TmuxRuntime {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from);
-                Some(WindowMeta { name, wid, session })
+                let agent_kind = it
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                Some(WindowMeta {
+                    name,
+                    wid,
+                    session,
+                    agent_kind,
+                })
             })
             .collect()
     }
@@ -347,6 +361,35 @@ impl TmuxRuntime {
             &target,
             "@repomon_session",
             session_id,
+        ])?;
+        Ok(())
+    }
+
+    /// Stamp `@repomon_agent_kind` on `window` by NAME — for callers that just created the
+    /// window and know which agent kind runs in it (`agent.spawn`, `agent.adopt`).
+    pub fn set_window_agent_kind(&self, window: &str, kind: &str) -> Result<()> {
+        let target = self.exact_target(window);
+        self.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-t",
+            &target,
+            "@repomon_agent_kind",
+            kind,
+        ])?;
+        Ok(())
+    }
+
+    /// Stamp `@repomon_agent_kind` by window ID (`@N`) — the overlay binder's write-back.
+    pub fn set_window_agent_kind_by_id(&self, wid: u64, kind: &str) -> Result<()> {
+        let target = format!("@{wid}");
+        self.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-t",
+            &target,
+            "@repomon_agent_kind",
+            kind,
         ])?;
         Ok(())
     }
@@ -841,6 +884,14 @@ impl SessionBackend for TmuxRuntime {
         TmuxRuntime::set_window_session_by_id(self, wid, session_id)
     }
 
+    fn set_window_agent_kind(&self, window: &str, kind: &str) -> Result<()> {
+        TmuxRuntime::set_window_agent_kind(self, window, kind)
+    }
+
+    fn set_window_agent_kind_by_id(&self, wid: u64, kind: &str) -> Result<()> {
+        TmuxRuntime::set_window_agent_kind_by_id(self, wid, kind)
+    }
+
     fn list_windows_with_activity(&self) -> Result<Vec<WindowActivity>> {
         Ok(TmuxRuntime::list_windows_with_activity(self)?
             .into_iter()
@@ -1095,8 +1146,8 @@ mod tests {
 
     #[test]
     fn parses_windows_meta_lines() {
-        // `name\t@id\tsession?` — the third field is empty when `@repomon_session` is unset.
-        let out = "lane-1\t@3\tabc-123\nlane-1-2\t@7\t\norchestrator\t@1\t\n";
+        // `name\t@id\tsession?\tagent_kind?` — fields 3 and 4 are empty when options are unset.
+        let out = "lane-1\t@3\tabc-123\tclaude-code\nlane-1-2\t@7\t\tantigravity\norchestrator\t@1\t\t\n";
         assert_eq!(
             TmuxRuntime::parse_windows_meta(out),
             vec![
@@ -1104,22 +1155,25 @@ mod tests {
                     name: "lane-1".into(),
                     wid: 3,
                     session: Some("abc-123".into()),
+                    agent_kind: Some("claude-code".into()),
                 },
                 WindowMeta {
                     name: "lane-1-2".into(),
                     wid: 7,
                     session: None,
+                    agent_kind: Some("antigravity".into()),
                 },
                 WindowMeta {
                     name: "orchestrator".into(),
                     wid: 1,
                     session: None,
+                    agent_kind: None,
                 },
             ]
         );
         // A malformed window id sorts last (u64::MAX), never panics.
         assert_eq!(
-            TmuxRuntime::parse_windows_meta("w\tbogus\t\n")[0].wid,
+            TmuxRuntime::parse_windows_meta("w\tbogus\t\t\n")[0].wid,
             u64::MAX
         );
         // Empty probe (no server) → no windows.
@@ -1132,6 +1186,7 @@ mod tests {
             name: name.into(),
             wid,
             session: None,
+            agent_kind: None,
         };
         // Exact lane matching (`lane-1` never claims `lane-12`), slot order regardless of
         // probe order or window id.

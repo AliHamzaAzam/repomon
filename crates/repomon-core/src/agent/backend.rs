@@ -166,6 +166,7 @@ pub trait SessionBackend: Send + Sync {
                 name,
                 wid: index as u64 + 1,
                 session: None,
+                agent_kind: None,
             })
             .collect())
     }
@@ -177,6 +178,16 @@ pub trait SessionBackend: Send + Sync {
 
     /// Persist a transcript identity on a backend-native window id when supported.
     fn set_window_session_by_id(&self, _wid: u64, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Persist an agent kind on a named window when the backend supports it.
+    fn set_window_agent_kind(&self, _window: &str, _kind: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Persist an agent kind on a backend-native window id when supported.
+    fn set_window_agent_kind_by_id(&self, _wid: u64, _kind: &str) -> Result<()> {
         Ok(())
     }
 
