@@ -126,6 +126,7 @@ fn cap_chars(s: &str, max_chars: usize) -> (String, bool) {
 fn config_json(cfg: &repomon_core::config::Config) -> Value {
     json!({
         "accent": cfg.accent,
+        "theme": cfg.theme,
         "auto_continue": cfg.auto_continue,
         "auto_continue_message": cfg.auto_continue_message,
         "default_agent": cfg.default_agent,
@@ -660,6 +661,8 @@ struct AgentSetDefault {
 struct ConfigSet {
     #[serde(default)]
     accent: Option<String>,
+    #[serde(default)]
+    theme: Option<String>,
     #[serde(default)]
     auto_continue: Option<bool>,
     #[serde(default)]
@@ -2251,6 +2254,9 @@ pub async fn dispatch(
                 let prev = cfg.clone();
                 if let Some(a) = p.accent {
                     cfg.accent = Some(a);
+                }
+                if let Some(t) = p.theme {
+                    cfg.theme = Some(t);
                 }
                 if let Some(b) = p.auto_continue {
                     cfg.auto_continue = b;

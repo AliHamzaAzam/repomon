@@ -45,6 +45,8 @@ pub struct Config {
     /// cyan; `"mono"` (or `"none"`/`"off"`) turns all color off for the original monochrome look.
     /// (Status colors — running=green, needs-you=amber, rate-limited=cyan — are fixed.)
     pub accent: Option<String>,
+    /// Theme preset for the GUI ("system", "dark", "midnight", "nord", "dracula", "sepia", "light").
+    pub theme: Option<String>,
     /// The agent preselected in New Lane (a built-in kind like "claude-code" or a custom
     /// name). `None` falls back to the first listed agent.
     pub default_agent: Option<String>,
@@ -172,6 +174,7 @@ impl Default for Config {
             time_format: DEFAULT_TIME_FORMAT.to_string(),
             tmux_session: DEFAULT_TMUX_SESSION.to_string(),
             accent: None,
+            theme: None,
             default_agent: None,
             agents: HashMap::new(),
             agent_icons: HashMap::new(),

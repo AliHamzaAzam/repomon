@@ -412,6 +412,12 @@
   background: var(--background);
 }
 
+.terminal-host .xterm,
+.terminal-host .xterm-viewport,
+.terminal-host .xterm-screen {
+  background-color: transparent !important;
+}
+
 .terminal-host .xterm {
   height: 100%;
 }

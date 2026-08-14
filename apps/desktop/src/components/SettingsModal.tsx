@@ -185,6 +185,7 @@ export default function SettingsModal(props: SettingsModalProps) {
   function selectTheme(themeId: Theme) {
     setCurrentTheme(themeId);
     applyTheme(themeId);
+    patch({ theme: themeId });
   }
 
   function selectAccent(accentKey: string) {

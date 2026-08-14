@@ -51,6 +51,7 @@ export type ExtScopeParams = ExtScope & { account?: string };
 
 export interface ConfigView {
   accent?: string | null;
+  theme?: string | null;
   worktree_template: string;
   default_agent?: string | null;
   auto_continue: boolean;

@@ -98,11 +98,19 @@ function App(props: AppProps) {
   let active = true;
 
   createEffect(() => {
+    applyTheme(theme());
+  });
+
+  createEffect(() => {
     if (connection().phase === "connected" && !fleetStarted) {
       fleetStarted = true;
       fleet.start();
       void daemonCall("config.get")
         .then((config) => {
+          if (config.theme && typeof config.theme === "string") {
+            setTheme(config.theme as Theme);
+            applyTheme(config.theme as Theme);
+          }
           applyAccent(config.accent);
           if (config.agent_icons) setAgentIconOverrides(config.agent_icons);
         })
@@ -250,6 +258,7 @@ function App(props: AppProps) {
     const value = nextTheme(theme());
     setTheme(value);
     applyTheme(value);
+    void daemonCall("config.set", { theme: value }).catch(() => undefined);
   };
 
   createEffect(() => {
