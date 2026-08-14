@@ -35,6 +35,7 @@ function formatUsageWindow(label: string): string {
   const lower = label.toLowerCase();
   if (lower === "5h" || lower.includes("5h") || lower.includes("5-hour")) return "5-Hour Quota";
   if (lower === "wk" || lower.includes("week") || lower === "7d") return "Weekly Quota";
+  if (lower === "mo" || lower.includes("month") || lower === "30d") return "Monthly Quota";
   if (lower === "day" || lower === "24h" || lower === "1d") return "Daily Limit";
   if (lower === "fable") return "Model Quota";
   return label;

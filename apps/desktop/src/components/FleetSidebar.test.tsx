@@ -148,4 +148,27 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("Weekly Quota")).toBeInTheDocument();
     expect(screen.getByText("85%")).toBeInTheDocument();
   });
+
+  it("renders codex usage with monthly quota correctly", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({
+      label: "codex",
+      age_secs: 30,
+      report: {
+        windows: [
+          { label: "5h", pct_used: 20 },
+          { label: "mo", pct_used: 65 },
+        ],
+      },
+    });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText("Rate Limits (codex)")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour Quota")).toBeInTheDocument();
+    expect(screen.getByText("20%")).toBeInTheDocument();
+    expect(screen.getByText("Monthly Quota")).toBeInTheDocument();
+    expect(screen.getByText("65%")).toBeInTheDocument();
+  });
 });
