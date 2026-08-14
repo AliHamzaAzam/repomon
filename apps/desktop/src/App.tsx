@@ -17,7 +17,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { matchChord } from "./keymap";
+import { isMac, matchChord } from "./keymap";
 import BrandMark from "./components/BrandMark";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
@@ -300,10 +300,15 @@ function App(props: AppProps) {
 
   return (
     <div class="grid h-screen min-h-[36rem] grid-rows-[2.75rem_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
-      <header class="flex items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
-        <div class="flex items-center gap-2.5">
-          <BrandMark size={22} />
-          <h1 class="text-xs font-semibold tracking-tight text-foreground">Repomon</h1>
+      <header
+        data-tauri-drag-region
+        class={`flex h-11 items-center justify-between border-b border-line bg-surface/95 pr-3.5 backdrop-blur select-none ${
+          isMac() ? "pl-[78px]" : "px-3.5"
+        }`}
+      >
+        <div class="flex items-center gap-2.5" data-tauri-drag-region>
+          <BrandMark size={20} />
+          <h1 class="text-xs font-semibold tracking-tight text-foreground pointer-events-none select-none">Repomon</h1>
         </div>
 
         <div class="flex items-center gap-1.5">
