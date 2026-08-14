@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { Portal } from "solid-js/web";
 
 import type { Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
@@ -375,161 +376,163 @@ export default function ControlCenter(props: ControlCenterProps) {
 
       {/* Command Palette Modal */}
       <Show when={isOpen()}>
-        <div
-          class="fixed inset-0 z-50 flex items-start justify-center pt-[14vh] bg-background/80 p-4 backdrop-blur-xs"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) closePalette();
-          }}
-          role="presentation"
-        >
+        <Portal>
           <div
-            class="focus-ring flex w-full max-w-xl flex-col rounded-2xl border border-line bg-surface shadow-2xl overflow-hidden transition-all animate-in fade-in zoom-in-95 duration-150"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Command Palette"
+            class="fixed inset-0 z-[70] flex items-start justify-center pt-[14vh] bg-background/80 p-4 backdrop-blur-md"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) closePalette();
+            }}
+            role="presentation"
           >
-            {/* Search Bar Header */}
-            <div class="flex items-center gap-3 border-b border-line bg-surface px-4 py-3.5">
-              <IconSearch size={16} class="text-muted shrink-0" />
-              <input
-                ref={inputRef}
-                type="text"
-                class="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted/60"
-                placeholder="Type a command or search repos, lanes…"
-                value={query()}
-                onInput={(e) => setQuery(e.currentTarget.value)}
-                aria-label="Search commands, repositories, and lanes"
-              />
-              <Show when={query()}>
-                <button
-                  type="button"
-                  class="rounded p-1 text-muted hover:text-foreground"
-                  onClick={() => {
-                    setQuery("");
-                    inputRef?.focus();
-                  }}
-                  aria-label="Clear query"
-                >
-                  <IconClose size={14} />
-                </button>
-              </Show>
-              <kbd class="hidden sm:inline-block rounded border border-line bg-raised px-1.5 py-0.5 text-[10px] font-mono text-muted">
-                ESC
-              </kbd>
-            </div>
-
-            {/* Results List */}
             <div
-              ref={listRef}
-              class="max-h-[55vh] overflow-y-auto p-2 space-y-3"
-              role="listbox"
-              aria-label="Commands and targets"
+              class="focus-ring flex w-full max-w-xl flex-col rounded-2xl border border-line bg-surface shadow-2xl overflow-hidden transition-all animate-in fade-in zoom-in-95 duration-150"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Command Palette"
             >
-              <For each={groupedSections()}>
-                {(section) => (
-                  <div class="space-y-1">
-                    <p class="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted/70">
-                      {section.category}
-                    </p>
-                    <For each={section.items}>
-                      {({ item, globalIndex }) => {
-                        const isSelected = () => selectedIndex() === globalIndex;
-                        return (
-                          <div
-                            data-item-index={globalIndex}
-                            role="option"
-                            aria-selected={isSelected()}
-                            class={`focus-ring flex cursor-pointer items-center justify-between rounded-xl px-3 py-2.5 transition-colors ${
-                              isSelected()
-                                ? "bg-signal/15 text-foreground font-medium"
-                                : "text-foreground/90 hover:bg-raised/60"
-                            }`}
-                            onClick={() => executeItem(item)}
-                            onMouseEnter={() => setSelectedIndex(globalIndex)}
-                          >
-                            <div class="flex min-w-0 items-center gap-3">
-                              <div
-                                class={`flex size-6 shrink-0 items-center justify-center rounded-lg border transition-colors ${
-                                  isSelected()
-                                    ? "border-signal/40 bg-signal/20 text-signal"
-                                    : "border-line bg-raised text-muted"
-                                }`}
-                              >
-                                {renderIcon(item.icon)}
-                              </div>
-                              <div class="min-w-0">
-                                <div class="flex items-center gap-2">
-                                  <span class="truncate text-xs font-medium">{item.title}</span>
-                                  <Show when={item.badge}>
-                                    <span
-                                      class={`rounded-full px-1.5 py-0.2 font-mono text-[9px] font-semibold uppercase ${
-                                        item.badgeType === "attention"
-                                          ? "bg-attention/15 text-attention"
-                                          : item.badgeType === "signal"
-                                          ? "bg-signal/15 text-signal"
-                                          : "bg-raised text-muted"
-                                      }`}
-                                    >
-                                      {item.badge}
-                                    </span>
-                                  </Show>
-                                </div>
-                                <Show when={item.subtitle}>
-                                  <span class="block truncate text-[11px] text-muted">
-                                    {item.subtitle}
-                                  </span>
-                                </Show>
-                              </div>
-                            </div>
+              {/* Search Bar Header */}
+              <div class="flex items-center gap-3 border-b border-line bg-surface px-4 py-3.5">
+                <IconSearch size={16} class="text-muted shrink-0" />
+                <input
+                  ref={inputRef}
+                  type="text"
+                  class="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted/60"
+                  placeholder="Type a command or search repos, lanes…"
+                  value={query()}
+                  onInput={(e) => setQuery(e.currentTarget.value)}
+                  aria-label="Search commands, repositories, and lanes"
+                />
+                <Show when={query()}>
+                  <button
+                    type="button"
+                    class="rounded p-1 text-muted hover:text-foreground"
+                    onClick={() => {
+                      setQuery("");
+                      inputRef?.focus();
+                    }}
+                    aria-label="Clear query"
+                  >
+                    <IconClose size={14} />
+                  </button>
+                </Show>
+                <kbd class="hidden sm:inline-block rounded border border-line bg-raised px-1.5 py-0.5 text-[10px] font-mono text-muted">
+                  ESC
+                </kbd>
+              </div>
 
-                            <Show when={item.shortcut}>
-                              {(kbd) => (
-                                <kbd
-                                  class={`ml-2 shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+              {/* Results List */}
+              <div
+                ref={listRef}
+                class="max-h-[55vh] overflow-y-auto p-2 space-y-3"
+                role="listbox"
+                aria-label="Commands and targets"
+              >
+                <For each={groupedSections()}>
+                  {(section) => (
+                    <div class="space-y-1">
+                      <p class="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted/70">
+                        {section.category}
+                      </p>
+                      <For each={section.items}>
+                        {({ item, globalIndex }) => {
+                          const isSelected = () => selectedIndex() === globalIndex;
+                          return (
+                            <div
+                              data-item-index={globalIndex}
+                              role="option"
+                              aria-selected={isSelected()}
+                              class={`focus-ring flex cursor-pointer items-center justify-between rounded-xl px-3 py-2.5 transition-colors ${
+                                isSelected()
+                                  ? "bg-signal/15 text-foreground font-medium"
+                                  : "text-foreground/90 hover:bg-raised/60"
+                              }`}
+                              onClick={() => executeItem(item)}
+                              onMouseEnter={() => setSelectedIndex(globalIndex)}
+                            >
+                              <div class="flex min-w-0 items-center gap-3">
+                                <div
+                                  class={`flex size-6 shrink-0 items-center justify-center rounded-lg border transition-colors ${
                                     isSelected()
-                                      ? "border-signal/30 bg-signal/10 text-signal"
+                                      ? "border-signal/40 bg-signal/20 text-signal"
                                       : "border-line bg-raised text-muted"
                                   }`}
                                 >
-                                  {kbd()}
-                                </kbd>
-                              )}
-                            </Show>
-                          </div>
-                        );
-                      }}
-                    </For>
+                                  {renderIcon(item.icon)}
+                                </div>
+                                <div class="min-w-0">
+                                  <div class="flex items-center gap-2">
+                                    <span class="truncate text-xs font-medium">{item.title}</span>
+                                    <Show when={item.badge}>
+                                      <span
+                                        class={`rounded-full px-1.5 py-0.2 font-mono text-[9px] font-semibold uppercase ${
+                                          item.badgeType === "attention"
+                                            ? "bg-attention/15 text-attention"
+                                            : item.badgeType === "signal"
+                                            ? "bg-signal/15 text-signal"
+                                            : "bg-raised text-muted"
+                                        }`}
+                                      >
+                                        {item.badge}
+                                      </span>
+                                    </Show>
+                                  </div>
+                                  <Show when={item.subtitle}>
+                                    <span class="block truncate text-[11px] text-muted">
+                                      {item.subtitle}
+                                    </span>
+                                  </Show>
+                                </div>
+                              </div>
+
+                              <Show when={item.shortcut}>
+                                {(kbd) => (
+                                  <kbd
+                                    class={`ml-2 shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                                      isSelected()
+                                        ? "border-signal/30 bg-signal/10 text-signal"
+                                        : "border-line bg-raised text-muted"
+                                    }`}
+                                  >
+                                    {kbd()}
+                                  </kbd>
+                                )}
+                              </Show>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </div>
+                  )}
+                </For>
+
+                <Show when={!filteredItems().length}>
+                  <div class="py-12 text-center">
+                    <p class="text-xs font-medium text-foreground">No matching commands or lanes</p>
+                    <p class="mt-1 text-[11px] text-muted">Try searching for a branch name, repo, or action.</p>
                   </div>
-                )}
-              </For>
-
-              <Show when={!filteredItems().length}>
-                <div class="py-12 text-center">
-                  <p class="text-xs font-medium text-foreground">No matching commands or lanes</p>
-                  <p class="mt-1 text-[11px] text-muted">Try searching for a branch name, repo, or action.</p>
-                </div>
-              </Show>
-            </div>
-
-            {/* Footer Navigation Bar */}
-            <div class="flex items-center justify-between border-t border-line bg-raised/30 px-4 py-2 text-[11px] text-muted">
-              <div class="flex items-center gap-3">
-                <span class="flex items-center gap-1">
-                  <kbd class="rounded border border-line bg-surface px-1 text-[10px] font-mono">↑</kbd>
-                  <kbd class="rounded border border-line bg-surface px-1 text-[10px] font-mono">↓</kbd>
-                  <span>Navigate</span>
-                </span>
-                <span class="flex items-center gap-1">
-                  <kbd class="rounded border border-line bg-surface px-1 text-[10px] font-mono">↵</kbd>
-                  <span>Select</span>
-                </span>
+                </Show>
               </div>
-              <div class="flex items-center gap-1">
-                <span>Repomon Fleet Command</span>
+
+              {/* Footer Navigation Bar */}
+              <div class="flex items-center justify-between border-t border-line bg-raised/30 px-4 py-2 text-[11px] text-muted">
+                <div class="flex items-center gap-3">
+                  <span class="flex items-center gap-1">
+                    <kbd class="rounded border border-line bg-surface px-1 text-[10px] font-mono">↑</kbd>
+                    <kbd class="rounded border border-line bg-surface px-1 text-[10px] font-mono">↓</kbd>
+                    <span>Navigate</span>
+                  </span>
+                  <span class="flex items-center gap-1">
+                    <kbd class="rounded border border-line bg-surface px-1 text-[10px] font-mono">↵</kbd>
+                    <span>Select</span>
+                  </span>
+                </div>
+                <div class="flex items-center gap-1">
+                  <span>Repomon Fleet Command</span>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </Portal>
       </Show>
     </>
   );

@@ -551,18 +551,30 @@ async fn skill_repo_roots(ctx: &Ctx) -> Result<Vec<(PathBuf, PathBuf)>, RpcError
 }
 
 /// Every directory `skill.read`/`skill.write`/`skill.delete` are allowed to touch: the global
-/// `claude_home()/skills` (when resolvable) plus `.claude/skills` for every registered repo.
+/// skills dirs across agent ecosystems plus repo skills dirs for every registered repo.
 async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
     let mut roots = Vec::new();
     if let Some(home) = crate::ext::claude_home() {
         roots.push(home.join("skills"));
     }
-    roots.extend(
-        skill_repo_roots(ctx)
-            .await?
-            .into_iter()
-            .map(|(_, skills_root)| skills_root),
-    );
+    if let Some(dirs) = directories::BaseDirs::new() {
+        let home = dirs.home_dir();
+        roots.push(home.join(".gemini/config/skills"));
+        roots.push(home.join(".gemini/skills"));
+        roots.push(home.join(".codex/skills"));
+        roots.push(home.join(".config/opencode/skills"));
+        roots.push(home.join(".opencode/skills"));
+        roots.push(home.join(".cursor/skills"));
+    }
+    for repo in ctx.registry.list().await.map_err(internal)? {
+        roots.push(repo.path.join(".claude/skills"));
+        roots.push(repo.path.join(".gemini/skills"));
+        roots.push(repo.path.join(".gemini/config/skills"));
+        roots.push(repo.path.join(".agents/skills"));
+        roots.push(repo.path.join(".codex/skills"));
+        roots.push(repo.path.join(".opencode/skills"));
+        roots.push(repo.path.join(".cursor/skills"));
+    }
     Ok(roots)
 }
 #[derive(Deserialize)]
@@ -1895,17 +1907,20 @@ pub async fn dispatch(
         // ---- skills (create/read/write/delete SKILL.md, path-guarded) ----
         "skill.create" => {
             let p: SkillCreate = parse(params)?;
-            let (skills_dir, fanout_root) = match &p.scope {
-                ExtScope::Global => {
-                    let home = crate::ext::claude_home_for(p.account.as_deref())
-                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
-                    (home.join("skills"), None)
-                }
+            let is_global = matches!(p.scope, ExtScope::Global);
+            let repo = match &p.scope {
                 ExtScope::Repo { repo_id } => {
-                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
-                    (repo.path.join(".claude/skills"), Some(repo.path))
+                    Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?)
                 }
+                ExtScope::Global => None,
             };
+            let skills_dir = crate::ext::skills_dir_for(
+                p.account.as_deref(),
+                is_global,
+                repo.as_ref().map(|r| r.path.as_path()),
+            )
+            .ok_or_else(|| internal("failed to resolve skills directory for account"))?;
+            let fanout_root = repo.map(|r| r.path);
             let (name, description) = (p.name.clone(), p.description.clone());
             let path = tokio::task::spawn_blocking(move || {
                 let path = crate::ext::scaffold_skill(&skills_dir, &name, description.as_deref())?;
@@ -1981,20 +1996,24 @@ pub async fn dispatch(
             if !crate::ext::valid_skill_name(&p.name) {
                 return Err(RpcError::invalid_params("invalid skill name"));
             }
-            let (skills_dir, fanout_root) = match &p.scope {
-                ExtScope::Global => {
-                    let home = crate::ext::claude_home_for(p.account.as_deref())
-                        .ok_or_else(|| internal("this account has no Claude config directory"))?;
-                    (home.join("skills"), None)
-                }
+            let is_global = matches!(p.scope, ExtScope::Global);
+            let repo = match &p.scope {
                 ExtScope::Repo { repo_id } => {
-                    let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
-                    (repo.path.join(".claude/skills"), Some(repo.path))
+                    Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?)
                 }
+                ExtScope::Global => None,
             };
+            let fanout_root = repo.as_ref().map(|r| r.path.clone());
+            let account = p.account.clone();
             let name = p.name.clone();
+            let repo_path = repo.map(|r| r.path);
             let fanout = tokio::task::spawn_blocking(move || {
-                std::fs::remove_dir_all(skills_dir.join(&name))?;
+                crate::ext::delete_skill(
+                    account.as_deref(),
+                    is_global,
+                    &name,
+                    repo_path.as_deref(),
+                )?;
                 // sync_worktree prunes skills whose source dir is gone (see this task's ext.rs
                 // change), so one fan-out both deletes the skill everywhere and re-syncs the
                 // survivors.

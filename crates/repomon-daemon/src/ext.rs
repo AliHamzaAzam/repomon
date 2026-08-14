@@ -1015,6 +1015,156 @@ pub fn scaffold_skill(
     Ok(dir)
 }
 
+/// Resolve the target directory for skills management (creation, deletion, reading)
+/// given an account key, whether scope is global or repo, and optional repository root path.
+pub fn skills_dir_for(
+    account: Option<&str>,
+    is_global: bool,
+    repo_path: Option<&Path>,
+) -> Option<PathBuf> {
+    match account {
+        Some("antigravity") => {
+            if is_global {
+                let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+                let gemini = home.join(".gemini");
+                let cfg_skills = gemini.join("config/skills");
+                let plain_skills = gemini.join("skills");
+                if cfg_skills.exists() {
+                    Some(cfg_skills)
+                } else if plain_skills.exists() {
+                    Some(plain_skills)
+                } else {
+                    Some(cfg_skills)
+                }
+            } else {
+                let repo = repo_path?;
+                let gem_skills = repo.join(".gemini/skills");
+                let gem_config = repo.join(".gemini/config/skills");
+                let agents_skills = repo.join(".agents/skills");
+                if gem_skills.exists() {
+                    Some(gem_skills)
+                } else if gem_config.exists() {
+                    Some(gem_config)
+                } else if agents_skills.exists() {
+                    Some(agents_skills)
+                } else {
+                    Some(gem_skills)
+                }
+            }
+        }
+        Some("codex") => {
+            if is_global {
+                let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+                Some(home.join(".codex/skills"))
+            } else {
+                let repo = repo_path?;
+                Some(repo.join(".codex/skills"))
+            }
+        }
+        Some("opencode") => {
+            if is_global {
+                let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+                Some(home.join(".config/opencode/skills"))
+            } else {
+                let repo = repo_path?;
+                Some(repo.join(".opencode/skills"))
+            }
+        }
+        Some("cursor") => {
+            if is_global {
+                let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+                Some(home.join(".cursor/skills"))
+            } else {
+                let repo = repo_path?;
+                Some(repo.join(".cursor/skills"))
+            }
+        }
+        _ => {
+            if is_global {
+                let home = claude_home_for(account)?;
+                Some(home.join("skills"))
+            } else {
+                let repo = repo_path?;
+                Some(repo.join(".claude/skills"))
+            }
+        }
+    }
+}
+
+/// Delete a skill by name from the appropriate agent directory.
+pub fn delete_skill(
+    account: Option<&str>,
+    is_global: bool,
+    name: &str,
+    repo_path: Option<&Path>,
+) -> io::Result<()> {
+    match account {
+        Some("antigravity") => {
+            let mut removed = false;
+            if is_global {
+                if let Some(dirs) = directories::BaseDirs::new() {
+                    let home = dirs.home_dir();
+                    let gemini = home.join(".gemini");
+                    for dir in [gemini.join("config/skills"), gemini.join("skills")] {
+                        let target = dir.join(name);
+                        if target.exists() {
+                            fs::remove_dir_all(target)?;
+                            removed = true;
+                        }
+                    }
+                }
+            } else if let Some(repo) = repo_path {
+                for dir in [
+                    repo.join(".gemini/skills"),
+                    repo.join(".gemini/config/skills"),
+                    repo.join(".agents/skills"),
+                ] {
+                    let target = dir.join(name);
+                    if target.exists() {
+                        fs::remove_dir_all(target)?;
+                        removed = true;
+                    }
+                }
+            }
+            if removed {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("skill '{name}' not found for antigravity"),
+                ))
+            }
+        }
+        Some("codex") => {
+            let dir = skills_dir_for(account, is_global, repo_path).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no codex skills directory")
+            })?;
+            fs::remove_dir_all(dir.join(name))
+        }
+        Some("opencode") => {
+            let dir = skills_dir_for(account, is_global, repo_path).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no opencode skills directory")
+            })?;
+            fs::remove_dir_all(dir.join(name))
+        }
+        Some("cursor") => {
+            let dir = skills_dir_for(account, is_global, repo_path).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no cursor skills directory")
+            })?;
+            fs::remove_dir_all(dir.join(name))
+        }
+        _ => {
+            let dir = skills_dir_for(account, is_global, repo_path).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "this account has no Claude config directory",
+                )
+            })?;
+            fs::remove_dir_all(dir.join(name))
+        }
+    }
+}
+
 /// Resolve `path` as canonically as possible without requiring it to exist: walk up to the
 /// nearest existing ancestor, canonicalize that ancestor, then rejoin the (possibly
 /// nonexistent) tail. Applying this to both sides of a comparison keeps them on the same
@@ -1710,5 +1860,24 @@ mod tests {
         assert!(!installed_txt.contains("test-plugin@official"));
         let settings_txt = std::fs::read_to_string(home.path().join("settings.json")).unwrap();
         assert!(!settings_txt.contains("test-plugin@official"));
+    }
+
+    #[test]
+    fn test_delete_skill_antigravity_and_multiagent() {
+        let repo = tempfile::tempdir().unwrap();
+        let gem_skill = repo.path().join(".gemini/skills/my-gem-skill");
+        std::fs::create_dir_all(&gem_skill).unwrap();
+        std::fs::write(gem_skill.join("SKILL.md"), "---\nname: my-gem-skill\n---\n").unwrap();
+
+        assert!(gem_skill.exists());
+        delete_skill(Some("antigravity"), false, "my-gem-skill", Some(repo.path())).unwrap();
+        assert!(!gem_skill.exists());
+
+        let codex_skill = repo.path().join(".codex/skills/my-codex-skill");
+        std::fs::create_dir_all(&codex_skill).unwrap();
+        std::fs::write(codex_skill.join("SKILL.md"), "---\nname: my-codex-skill\n---\n").unwrap();
+        assert!(codex_skill.exists());
+        delete_skill(Some("codex"), false, "my-codex-skill", Some(repo.path())).unwrap();
+        assert!(!codex_skill.exists());
     }
 }
