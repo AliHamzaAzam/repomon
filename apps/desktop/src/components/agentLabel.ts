@@ -12,11 +12,16 @@ export function slotOf(window: string | null | undefined): number | null {
 
 /// The display label for one agent session.
 ///
-/// Returns the user's explicit custom label if set, or a stable identifier based on the agent kind
-/// and its window slot (e.g. `claude-code 1`, `antigravity 2`). Never uses raw truncated transcript
-/// messages (`session.title`), which produce jittery, meaningless sentence fragments in tabs.
+/// Precedence:
+/// 1. User's explicit custom label (`session.custom_label`) if set.
+/// 2. Auto-generated concise slug from local LLM (`session.generated_label`) if available.
+/// 3. Stable identifier based on agent kind and window slot (e.g. `claude-code 1`, `antigravity 2`).
 export function agentLabel(session: AgentSession): string {
-  return session.custom_label ?? `${session.agent} ${slotOf(session.tmux_window) ?? 1}`;
+  return (
+    session.custom_label ??
+    session.generated_label ??
+    `${session.agent} ${slotOf(session.tmux_window) ?? 1}`
+  );
 }
 
 /// The session that names a lane: the one in the lowest window slot, i.e. the lane's first-spawned

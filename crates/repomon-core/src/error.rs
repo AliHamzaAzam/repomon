@@ -26,6 +26,9 @@ pub enum Error {
     #[error("agent runtime error: {0}")]
     Agent(String),
 
+    #[error("local llm error: {0}")]
+    LocalLlm(String),
+
     #[error("{0}")]
     Other(String),
 }

@@ -52,11 +52,30 @@ describe("slotOf", () => {
 });
 
 describe("agentLabel", () => {
-  it("prefers a user-set label", () => {
-    expect(agentLabel(agent({ custom_label: "reviewer", title: "Ship desktop" }))).toBe("reviewer");
+  it("prefers a user-set label over generated_label", () => {
+    expect(
+      agentLabel(
+        agent({
+          custom_label: "reviewer",
+          generated_label: "fix-auth-tokens",
+          title: "Ship desktop",
+        }),
+      ),
+    ).toBe("reviewer");
   });
 
-  it("ignores raw truncated transcript titles in favor of stable slot identifier", () => {
+  it("uses generated_label when custom_label is absent", () => {
+    expect(
+      agentLabel(
+        agent({
+          generated_label: "redesign-fleet-sidebar",
+          title: "Can you redesign the sidebar",
+        }),
+      ),
+    ).toBe("redesign-fleet-sidebar");
+  });
+
+  it("ignores raw truncated transcript titles in favor of stable slot identifier when no labels exist", () => {
     expect(agentLabel(agent({ title: "can you see the antigravity transcript..." }))).toBe("claude-code 1");
   });
 

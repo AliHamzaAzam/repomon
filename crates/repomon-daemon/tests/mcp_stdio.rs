@@ -130,6 +130,9 @@ fn spawn_mcp_child(sock: &Path, extra_env: &[(&str, &str)]) -> Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Clear inherited repomon session env so test runner environment does not force agent mode
+    cmd.env_remove("REPOMON_MCP_MODE");
+    cmd.env_remove("REPOMON_MCP_IDENTITY_TOKEN");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

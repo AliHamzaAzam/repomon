@@ -380,6 +380,7 @@ mod tests {
             gate: None,
             config_dir: None,
             custom_label: None,
+            generated_label: None,
         }
     }
 

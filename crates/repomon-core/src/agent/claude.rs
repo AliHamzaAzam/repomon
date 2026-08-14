@@ -77,6 +77,7 @@ impl TranscriptSummary {
             gate: None,
             config_dir: self.config_dir,
             custom_label: None, // overlay sets this from the session_labels store
+            generated_label: None, // overlay sets this from the session_generated_labels store
         }
     }
 }

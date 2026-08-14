@@ -3767,6 +3767,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let metas = ctx.store.list_lane_meta().await.unwrap_or_default();
     // User-set session labels (keyed by transcript session_id), overlaid below.
     let labels = ctx.store.list_session_labels().await.unwrap_or_default();
+    // Auto-generated session labels from the local LLM subsystem.
+    let generated_labels = ctx.store.list_session_generated_labels().await.unwrap_or_default();
     let tmux = ctx.backend.clone();
     // Distinguish a *failed* probe from a genuinely empty server: on failure reuse the last-good
     // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
@@ -3872,11 +3874,51 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
                 }
+                let initial_prompt = s.title.clone();
                 let mut session = s.into_session(lane.repo.id, lane.worktree.id);
                 session.custom_label = session
                     .session_id
                     .as_ref()
                     .and_then(|id| labels.get(id).cloned());
+                session.generated_label = session
+                    .session_id
+                    .as_ref()
+                    .and_then(|id| generated_labels.get(id).cloned());
+
+                // Trigger local LLM session naming if no custom or generated label exists yet
+                if let Some(session_id) = session.session_id.clone() {
+                    if session.custom_label.is_none()
+                        && session.generated_label.is_none()
+                        && !labels.contains_key(&session_id)
+                        && !generated_labels.contains_key(&session_id)
+                    {
+                        if let Some(prompt) = initial_prompt {
+                            if !prompt.trim().is_empty() {
+                                let in_flight = ctx.in_flight_naming.clone();
+                                let store = ctx.store.clone();
+                                let sid = session_id.clone();
+                                tokio::spawn(async move {
+                                    let should_run = {
+                                        let mut set = in_flight.lock().await;
+                                        set.insert(sid.clone())
+                                    };
+                                    if should_run {
+                                        match repomon_core::local_llm::generate_session_slug_async(prompt).await {
+                                            Ok(slug) => {
+                                                let _ = store.set_session_generated_label(sid.clone(), slug).await;
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!("Local LLM naming skipped for {sid}: {e}");
+                                            }
+                                        }
+                                        in_flight.lock().await.remove(&sid);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
                 match win {
                     Some(w) => {
                         session.external = false;
@@ -3949,6 +3991,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     gate: None,
                     config_dir: None,
                     custom_label: None,
+                    generated_label: None,
                 });
             }
         }
@@ -4960,6 +5003,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         gate: None,
         config_dir: None,
         custom_label: None,
+        generated_label: None,
     }
 }
 
@@ -6083,6 +6127,7 @@ mod tests {
                 gate: None,
                 config_dir: None,
                 custom_label: label.map(str::to_string),
+                generated_label: None,
             })
             .collect();
         Lane {
@@ -6157,6 +6202,7 @@ mod tests {
                 gate: None,
                 config_dir: None,
                 custom_label: label.map(str::to_string),
+                generated_label: None,
             })
             .collect();
         Lane {

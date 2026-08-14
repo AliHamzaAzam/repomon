@@ -84,4 +84,9 @@ config_dir: string | null,
  * auto-derived summary. `None` when unset or when the session has no durable id. Not persisted
  * on the session row itself.
  */
-custom_label: string | null, };
+custom_label: string | null, 
+/**
+ * An auto-generated concise summary slug from the local LLM subsystem (e.g. "fix-auth-tokens"),
+ * overlaid at list time from the persisted `session_generated_labels` store.
+ */
+generated_label?: string | null, };

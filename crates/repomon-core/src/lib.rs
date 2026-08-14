@@ -18,6 +18,7 @@ pub mod indexer;
 pub mod input;
 pub mod lane;
 pub mod launch;
+pub mod local_llm;
 pub mod model;
 pub mod notes;
 pub mod notify;

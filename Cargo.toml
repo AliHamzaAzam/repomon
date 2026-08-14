@@ -38,6 +38,10 @@ directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ts-rs = { version = "12", features = ["chrono-impl", "serde-compat", "serde-json-impl"] }
+candle-core = "0.8"
+candle-transformers = "0.8"
+tokenizers = "0.21"
+hf-hub = "0.4"
 # --- daemon: async, ipc, cli ---
 tokio = { version = "1", features = [
     "rt-multi-thread",

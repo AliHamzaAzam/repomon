@@ -540,6 +540,10 @@ pub struct AgentSession {
     /// on the session row itself.
     #[serde(default)]
     pub custom_label: Option<String>,
+    /// An auto-generated concise summary slug from the local LLM subsystem (e.g. "fix-auth-tokens"),
+    /// overlaid at list time from the persisted `session_generated_labels` store.
+    #[serde(default)]
+    pub generated_label: Option<String>,
 }
 
 /// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.

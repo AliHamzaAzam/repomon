@@ -300,6 +300,8 @@ pub struct Ctx {
     /// from `remote_tokens`'s own (std) `RwLock`, which only guards a single read/write of the Vec —
     /// not the compound mutate+rebuild transaction.
     pub remote_mutate_lock: Mutex<()>,
+    /// In-flight local LLM session naming tasks, keyed by transcript session_id, to prevent duplicate background workers.
+    pub in_flight_naming: Arc<Mutex<HashSet<String>>>,
     pub shutdown: Notify,
 }
 
@@ -400,6 +402,7 @@ impl Ctx {
             orchestrator_attention: Mutex::new(("none".to_string(), None)),
             remote_tokens: std::sync::RwLock::new(Vec::new()),
             remote_mutate_lock: Mutex::new(()),
+            in_flight_naming: Arc::new(Mutex::new(HashSet::new())),
             shutdown: Notify::new(),
         })
     }

@@ -187,6 +187,7 @@ mod tests {
             pending_dialog: None,
             config_dir: None,
             custom_label: None,
+            generated_label: None,
         }
     }
 
