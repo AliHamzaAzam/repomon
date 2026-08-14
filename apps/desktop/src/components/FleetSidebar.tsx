@@ -145,12 +145,12 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
         <div class="flex items-center gap-1">
           <Show when={sessionCount() > 1}>
             <span
-              class="inline-flex items-center gap-0.5 rounded border border-line bg-raised px-1 py-0.5 text-[9px] leading-none text-muted"
-              title={`${sessionCount()} agents open in this lane`}
-              aria-label={`${sessionCount()} agents open`}
+              class="inline-flex items-center gap-1 rounded border border-line bg-raised/80 px-1.5 py-0.5 text-[9px] font-medium leading-none text-muted transition-colors hover:bg-raised hover:text-foreground"
+              title={`${sessionCount()} active agent sessions open in this lane`}
+              aria-label={`${sessionCount()} active agent sessions open`}
             >
-              <IconLayers size={9} />
-              <span>{sessionCount()}</span>
+              <IconLayers size={10} class="text-muted/80 shrink-0" />
+              <span>{sessionCount()} agents</span>
             </span>
           </Show>
           <Show when={indicator().label}>

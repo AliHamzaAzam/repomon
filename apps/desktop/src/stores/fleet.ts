@@ -59,13 +59,13 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   if (agents.some((agent) => agent.pending_dialog)) {
     return { label: `decision${gate}`, tone: "attention", urgent: true };
   }
-  if (agents.some((agent) => agent.stale)) {
+  if (agents.some((agent) => !agent.external && agent.stale)) {
     return { label: "stalled", tone: "fault", urgent: true };
   }
   if (agents.some((agent) => agent.status === "rate-limited")) {
     return { label: "limited", tone: "fault", urgent: true };
   }
-  if (agents.some((agent) => !agent.inferred && agent.status === "waiting")) {
+  if (agents.some((agent) => !agent.external && !agent.inferred && agent.status === "waiting")) {
     return { label: `needs you${gate}`, tone: "attention", urgent: true };
   }
   if (agents.some((agent) => agent.external)) {
