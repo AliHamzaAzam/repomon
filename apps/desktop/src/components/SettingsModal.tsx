@@ -5,6 +5,7 @@ import type { SoundCue } from "../audio/sound";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
 import { applyAccent, applyTheme, readTheme, ACCENT_SWATCHES, THEME_PRESETS, type Theme } from "../theme";
+import AutomationSettings from "./AutomationSettings";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
 import Switch from "./controls/Switch";
@@ -22,7 +23,7 @@ import {
   IconSearch,
 } from "./icons";
 
-export type SettingsTab = "general" | "agents" | "notifications" | "appearance" | "keyboard";
+export type SettingsTab = "general" | "agents" | "notifications" | "appearance" | "automation" | "keyboard";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -37,6 +38,7 @@ const TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "agents", label: "Agents & Icons" },
   { id: "notifications", label: "Notifications" },
   { id: "appearance", label: "Appearance" },
+  { id: "automation", label: "Automation" },
   { id: "keyboard", label: "Keyboard" },
 ];
 
@@ -736,6 +738,10 @@ export default function SettingsModal(props: SettingsModalProps) {
                   />
                 </section>
               </div>
+            </Show>
+
+            <Show when={tab() === "automation"}>
+              <AutomationSettings />
             </Show>
 
             <Show when={tab() === "keyboard"}>

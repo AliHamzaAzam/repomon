@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ApprovalRule, Playbook } from "../bindings";
+import type { ApprovalRule, Lane, Playbook, Repo } from "../bindings";
 import { DaemonRpcError } from "../ipc/rpc";
 import { createActionsStore } from "../stores/actions";
 import { createFleetStore } from "../stores/fleet";
@@ -147,19 +148,66 @@ describe("approval rules grouping", () => {
 });
 
 describe("ControlCenter component UI", () => {
+  const mockRepo: Repo = {
+    id: 1,
+    name: "my-project",
+    path: "/path/to/my-project",
+    added_at: "2026-07-20T00:00:00Z",
+    worktree_root_template: null,
+    hidden: false,
+  };
+  const mockLane: Lane = {
+    id: 10,
+    repo: mockRepo,
+    worktree: {
+      id: 10,
+      repo_id: 1,
+      path: "/path/to/my-project/wt",
+      branch: "feature-branch",
+      head: "abc",
+      is_main: false,
+      name: "feature-branch",
+    },
+    state: {
+      worktree_id: 10,
+      head: "abc",
+      branch: "feature-branch",
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      dirty: { staged: 0, unstaged: 0, untracked: 0 },
+      last_commit_at: null,
+      locked: false,
+      prunable: false,
+      last_change_at: null,
+    },
+    agent_sessions: [],
+    last_activity_at: "2026-07-20T00:00:00Z",
+    pinned: false,
+  };
+
   function setup() {
-    const fleet = createFleetStore({
-      load: async () => ({
-        repos: [],
-        lanes: [],
-        selected_lane_id: null,
-        usage: [],
-        terminals: [],
-        sortReposByActivity: false,
-      }),
-      subscribe: async () => () => undefined,
-    });
-    const actions = createActionsStore(fleet);
+    const [controlOpen, setControlOpen] = createSignal(false);
+    const fleet = {
+      repos: () => [mockRepo],
+      lanes: () => [mockLane],
+      selectedLane: () => mockLane,
+      selectedLaneId: () => mockLane.id,
+      setSelectedLaneId: vi.fn(),
+      setFocusedWindow: vi.fn(),
+      refresh: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FleetStore;
+    const actions = {
+      controlOpen,
+      openControl: () => setControlOpen(true),
+      closeControl: () => setControlOpen(false),
+      toggleControl: () => setControlOpen((o) => !o),
+      spawn: vi.fn(),
+      newLane: vi.fn(),
+      addRepo: vi.fn(),
+      openSettings: vi.fn(),
+      openSettingsTab: vi.fn(),
+    } as unknown as ActionsStore;
     const notifications = createNotificationStore(() => undefined);
     const messages = createMessageStore(() => undefined, {
       list: async () => ({ messages: [], next_before: null }),
@@ -167,10 +215,10 @@ describe("ControlCenter component UI", () => {
       subscribe: async () => () => undefined,
     });
 
-    return { fleet, actions, notifications, messages };
+    return { fleet, actions, notifications, messages, setControlOpen };
   }
 
-  it("opens modal via trigger button and toggles properly", async () => {
+  it("opens palette via trigger button and renders search input", async () => {
     const { fleet, actions, notifications, messages } = setup();
     render(() => (
       <ControlCenter
@@ -181,39 +229,30 @@ describe("ControlCenter component UI", () => {
       />
     ));
 
-    const trigger = screen.getByRole("button", { name: /Control/i });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("dialog", { name: "Control center" })).not.toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: /Command Palette/i });
+    expect(screen.queryByRole("dialog", { name: "Command Palette" })).not.toBeInTheDocument();
 
     // Click trigger to open
     fireEvent.click(trigger);
     expect(actions.controlOpen()).toBe(true);
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
 
-    const dialog = await screen.findByRole("dialog", { name: "Control center" });
+    const dialog = await screen.findByRole("dialog", { name: "Command Palette" });
     expect(dialog).toBeInTheDocument();
 
-    // Navigation tabs rendered
-    expect(screen.getByRole("button", { name: /actions/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /triage/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /history/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /journal/i })).toBeInTheDocument();
+    // Search input rendered
+    const searchInput = screen.getByPlaceholderText(/Type a command or search repos, lanes…/i);
+    expect(searchInput).toBeInTheDocument();
 
-    // Switch tab to journal
-    fireEvent.click(screen.getByRole("button", { name: /journal/i }));
-    expect(await screen.findByPlaceholderText("Search what repomind did")).toBeInTheDocument();
+    // Commands rendered
+    expect(screen.getByText("Spawn New Agent Session")).toBeInTheDocument();
+    expect(screen.getByText("Add Repository")).toBeInTheDocument();
+    expect(screen.getByText("Open Settings")).toBeInTheDocument();
 
-    // Close via close button
-    const closeBtn = screen.getByRole("button", { name: "Close Control Center" });
-    fireEvent.click(closeBtn);
-
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Control center" })).not.toBeInTheDocument();
-      expect(actions.controlOpen()).toBe(false);
-    });
+    // Lanes rendered
+    expect(screen.getByText("feature-branch")).toBeInTheDocument();
   });
 
-  it("closes modal on Escape key press", async () => {
+  it("filters items by search input", async () => {
     const { fleet, actions, notifications, messages } = setup();
     render(() => (
       <ControlCenter
@@ -225,11 +264,32 @@ describe("ControlCenter component UI", () => {
     ));
 
     actions.openControl();
-    await screen.findByRole("dialog", { name: "Control center" });
+    await screen.findByRole("dialog", { name: "Command Palette" });
+
+    const searchInput = screen.getByPlaceholderText(/Type a command or search repos, lanes…/i);
+    fireEvent.input(searchInput, { target: { value: "feature" } });
+
+    expect(screen.getByText("feature-branch")).toBeInTheDocument();
+    expect(screen.queryByText("Add Repository")).not.toBeInTheDocument();
+  });
+
+  it("closes palette on Escape key press", async () => {
+    const { fleet, actions, notifications, messages } = setup();
+    render(() => (
+      <ControlCenter
+        fleet={fleet}
+        actions={actions}
+        notifications={notifications}
+        messages={messages}
+      />
+    ));
+
+    actions.openControl();
+    await screen.findByRole("dialog", { name: "Command Palette" });
 
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Control center" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Command Palette" })).not.toBeInTheDocument();
       expect(actions.controlOpen()).toBe(false);
     });
   });
