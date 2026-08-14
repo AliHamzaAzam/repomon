@@ -9,6 +9,7 @@ export type { BrowseResult } from "./BrowseResult";
 export type { Commit } from "./Commit";
 export type { CreateLaneParams } from "./CreateLaneParams";
 export type { EnabledSource } from "./EnabledSource";
+export type { ExtAccount } from "./ExtAccount";
 export type { ExtSnapshot } from "./ExtSnapshot";
 export type { FanoutSummary } from "./FanoutSummary";
 export type { FleetMessage } from "./FleetMessage";

@@ -1627,25 +1627,11 @@ pub async fn dispatch(
             // A missing CLI is fine for listing: just leave cli_version unset.
             let cli_version = claude_cli().await.ok().map(|c| c.version.clone());
             let accounts = crate::ext::ext_accounts();
-            // `claude_home_for` returns None for Codex (no Claude-style extension home).
-            let home = crate::ext::claude_home_for(p.account.as_deref());
-            let snap = tokio::task::spawn_blocking(move || match home {
-                Some(home) => {
-                    let mut snap = crate::ext::scan(&home, repo_root.as_deref(), cli_version);
-                    snap.accounts = accounts;
-                    snap.account = account;
-                    snap
-                }
-                // Codex or an unknown account: return an empty, correctly-attributed snapshot
-                // rather than silently falling back to the default account's extensions.
-                None => repomon_core::model::ExtSnapshot {
-                    cli_version,
-                    marketplaces: Vec::new(),
-                    plugins: Vec::new(),
-                    skills: Vec::new(),
-                    accounts,
-                    account,
-                },
+            let snap = tokio::task::spawn_blocking(move || {
+                let mut snap = crate::ext::scan_for_account(&account, repo_root.as_deref(), cli_version);
+                snap.accounts = accounts;
+                snap.account = account;
+                snap
             })
             .await
             .map_err(internal)?;

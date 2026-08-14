@@ -132,7 +132,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
 
   return (
     <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)] bg-background">
-      <div class="flex min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3 backdrop-blur">
+      <div class="flex h-10 shrink-0 min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
         <div class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto" role="group" aria-label="Lane terminals and actions">
           <For each={laneTargets()}>
             {(target) => (

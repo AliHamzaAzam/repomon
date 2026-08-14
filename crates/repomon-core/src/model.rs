@@ -808,21 +808,21 @@ pub struct MarketplaceInfo {
     pub last_updated: Option<String>,
 }
 
-/// One account the extensions view can target. Keyed the same way as the usage probe
-/// (`agent::claude::account_key`) so the two surfaces agree on account identity.
+/// One account or agent ecosystem scope the extensions view can target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct ExtAccount {
     /// Stable key: `"default"` for `~/.claude`, the config-dir path for a variant
-    /// (e.g. `~/.claude-work`), or `"codex"` for Codex.
+    /// (e.g. `~/.claude-work`), `"antigravity"`, `"codex"`, `"opencode"`, `"cursor"`.
     pub key: String,
-    /// Short human label: `"main"`, `"work"`, `"codex"`.
+    /// Short human label: `"Claude (main)"`, `"Claude (work)"`, `"Antigravity"`, `"Codex"`, `"OpenCode"`, `"Cursor"`.
     pub label: String,
-    /// Whether repomon manages Claude-style extensions (marketplaces/plugins/skills) for this
-    /// account. False for Codex, which uses a different model, so the UI can show an honest empty
-    /// state instead of pretending it has Claude plugins.
+    /// Whether repomon manages Claude-style extensions (marketplaces/plugins/skills) for this account.
     pub claude: bool,
+    /// The agent kind this extension scope belongs to (e.g. ClaudeCode, Antigravity, Codex, OpenCode, Cursor).
+    #[serde(default)]
+    pub agent_kind: Option<AgentKind>,
 }
 
 /// The full extensions snapshot for one scope, returned by `ext.list`.

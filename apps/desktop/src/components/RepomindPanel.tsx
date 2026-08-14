@@ -117,7 +117,7 @@ export default function RepomindPanel(props: RepomindPanelProps) {
 
   return (
     <div class="flex h-full flex-col bg-surface">
-      <div class="flex items-center justify-between border-b border-line px-3.5 py-2.5">
+      <div class="flex h-10 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5">
         <div class="flex items-center gap-2">
           <span class={`lane-pulse ${status().running ? "is-signal" : ""}`} />
           <div>

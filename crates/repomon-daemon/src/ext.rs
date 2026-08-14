@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use repomon_core::agent::claude::{account_key, account_label, config_bases, default_config_base};
 use repomon_core::model::{
-    EnabledSource, ExtAccount, ExtSnapshot, FanoutSummary, MarketplaceInfo, PluginInfo,
+    AgentKind, EnabledSource, ExtAccount, ExtSnapshot, FanoutSummary, MarketplaceInfo, PluginInfo,
     PluginProvides, SkillInfo, SkillSource, SkippedLane,
 };
 use serde_json::Value;
@@ -23,9 +23,12 @@ pub fn claude_home() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.home_dir().join(".claude"))
 }
 
-/// Accounts to offer in the extensions picker: each detected Claude config dir that has actually
-/// been used (has a `projects/` dir), plus Codex if `~/.codex` exists. Keys match the usage probe's
-/// `account_key`, so the extensions and usage surfaces agree on account identity.
+/// Accounts and agent ecosystem scopes to offer in the extensions picker:
+/// - Claude config dirs (main and variants)
+/// - Antigravity (`~/.gemini`)
+/// - Codex (`~/.codex`)
+/// - OpenCode (`~/.config/opencode`)
+/// - Cursor (`~/.cursor`)
 pub fn ext_accounts() -> Vec<ExtAccount> {
     let default = default_config_base();
     let mut out: Vec<ExtAccount> = config_bases()
@@ -37,15 +40,47 @@ pub fn ext_accounts() -> Vec<ExtAccount> {
                 key: account_key(cfg.as_deref()),
                 label: account_label(cfg.as_deref()),
                 claude: true,
+                agent_kind: Some(AgentKind::ClaudeCode),
             }
         })
         .collect();
+
     if let Some(dirs) = directories::BaseDirs::new() {
-        if dirs.home_dir().join(".codex").is_dir() {
+        let home = dirs.home_dir();
+
+        if home.join(".gemini").is_dir() {
+            out.push(ExtAccount {
+                key: "antigravity".to_string(),
+                label: "Antigravity".to_string(),
+                claude: false,
+                agent_kind: Some(AgentKind::Antigravity),
+            });
+        }
+
+        if home.join(".codex").is_dir() {
             out.push(ExtAccount {
                 key: "codex".to_string(),
-                label: "codex".to_string(),
+                label: "Codex".to_string(),
                 claude: false,
+                agent_kind: Some(AgentKind::Codex),
+            });
+        }
+
+        if home.join(".config/opencode").is_dir() {
+            out.push(ExtAccount {
+                key: "opencode".to_string(),
+                label: "OpenCode".to_string(),
+                claude: false,
+                agent_kind: Some(AgentKind::OpenCode),
+            });
+        }
+
+        if home.join(".cursor").is_dir() {
+            out.push(ExtAccount {
+                key: "cursor".to_string(),
+                label: "Cursor".to_string(),
+                claude: false,
+                agent_kind: Some(AgentKind::Cursor),
             });
         }
     }
@@ -54,11 +89,11 @@ pub fn ext_accounts() -> Vec<ExtAccount> {
 
 /// Resolve an account key (see `ExtAccount::key`) to the Claude config home to scan and mutate.
 /// `None`/`"default"` -> the default `~/.claude` (honoring `REPOMON_CLAUDE_HOME`). A config-dir
-/// path -> that path. `"codex"` -> `None`: Codex has no Claude-style extension home to scan.
+/// path -> that path. Non-Claude agent scopes -> `None`.
 pub fn claude_home_for(account: Option<&str>) -> Option<PathBuf> {
     match account {
         None | Some("default") => claude_home(),
-        Some("codex") => None,
+        Some("codex") | Some("antigravity") | Some("opencode") | Some("cursor") => None,
         Some(path) => Some(PathBuf::from(path)),
     }
 }
@@ -68,7 +103,15 @@ pub fn claude_home_for(account: Option<&str>) -> Option<PathBuf> {
 /// `CLAUDE_CONFIG_DIR`. `Some(dir)` pins a variant account.
 pub fn account_config_dir(account: Option<&str>) -> Option<PathBuf> {
     match account {
-        Some(path) if path != "default" && path != "codex" => Some(PathBuf::from(path)),
+        Some(path)
+            if path != "default"
+                && path != "codex"
+                && path != "antigravity"
+                && path != "opencode"
+                && path != "cursor" =>
+        {
+            Some(PathBuf::from(path))
+        }
         _ => None,
     }
 }
@@ -403,6 +446,288 @@ pub fn scan(
         // do not read the real home to enumerate accounts.
         accounts: Vec::new(),
         account: String::new(),
+    }
+}
+
+/// Scans Antigravity's real extension/skill environment:
+/// - User skills from `~/.gemini/config/skills` and `~/.gemini/skills`
+/// - Project skills from `<repo>/.gemini/skills`, `<repo>/.gemini/config/skills`, `<repo>/.agents/skills`
+/// - User plugins from `~/.gemini/config/plugins` and `~/.gemini/plugins`
+pub fn scan_antigravity(repo_root: Option<&Path>) -> ExtSnapshot {
+    let mut skills = Vec::new();
+    let mut plugins = Vec::new();
+
+    if let Some(dirs) = directories::BaseDirs::new() {
+        let home = dirs.home_dir();
+        let gemini = home.join(".gemini");
+
+        skills.extend(scan_skills(&gemini.join("config/skills"), SkillSource::User));
+        skills.extend(scan_skills(&gemini.join("skills"), SkillSource::User));
+
+        for plugins_dir in [gemini.join("config/plugins"), gemini.join("plugins")] {
+            if let Ok(entries) = fs::read_dir(plugins_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let provides = Some(PluginProvides {
+                            skills: count_dir(&path.join("skills")),
+                            commands: count_dir(&path.join("commands")),
+                            agents: count_dir(&path.join("agents")),
+                        });
+                        plugins.push(PluginInfo {
+                            id: format!("{name}@antigravity"),
+                            name: name.clone(),
+                            marketplace: "antigravity".to_string(),
+                            version: None,
+                            enabled: true,
+                            enabled_source: EnabledSource::Global,
+                            provides,
+                            installed: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(repo) = repo_root {
+        skills.extend(scan_skills(&repo.join(".gemini/skills"), SkillSource::Project));
+        skills.extend(scan_skills(&repo.join(".gemini/config/skills"), SkillSource::Project));
+        skills.extend(scan_skills(&repo.join(".agents/skills"), SkillSource::Project));
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.dedup_by(|a, b| a.path == b.path);
+
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins.dedup_by(|a, b| a.id == b.id);
+
+    ExtSnapshot {
+        cli_version: None,
+        marketplaces: Vec::new(),
+        plugins,
+        skills,
+        accounts: Vec::new(),
+        account: "antigravity".to_string(),
+    }
+}
+
+/// Scans OpenAI Codex extension environment:
+/// - User skills from `~/.codex/skills`
+/// - Project skills from `<repo>/.codex/skills`
+/// - User plugins from `~/.codex/plugins`
+pub fn scan_codex(repo_root: Option<&Path>) -> ExtSnapshot {
+    let mut skills = Vec::new();
+    let mut plugins = Vec::new();
+
+    if let Some(dirs) = directories::BaseDirs::new() {
+        let home = dirs.home_dir();
+        let codex = home.join(".codex");
+
+        skills.extend(scan_skills(&codex.join("skills"), SkillSource::User));
+
+        let plugins_dir = codex.join("plugins");
+        if let Ok(entries) = fs::read_dir(plugins_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    plugins.push(PluginInfo {
+                        id: format!("{name}@codex"),
+                        name: name.clone(),
+                        marketplace: "codex".to_string(),
+                        version: None,
+                        enabled: true,
+                        enabled_source: EnabledSource::Global,
+                        provides: None,
+                        installed: true,
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(repo) = repo_root {
+        skills.extend(scan_skills(&repo.join(".codex/skills"), SkillSource::Project));
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+
+    ExtSnapshot {
+        cli_version: None,
+        marketplaces: Vec::new(),
+        plugins,
+        skills,
+        accounts: Vec::new(),
+        account: "codex".to_string(),
+    }
+}
+
+/// Scans OpenCode extension environment:
+/// - Global plugin[] array from `~/.config/opencode/opencode.json`
+/// - Project plugin[] array from `<repo>/opencode.json` or `<repo>/.opencode/opencode.json`
+/// - User & Project skills from `skills/` directories
+pub fn scan_opencode(repo_root: Option<&Path>) -> ExtSnapshot {
+    let mut skills = Vec::new();
+    let mut plugins = Vec::new();
+
+    if let Some(dirs) = directories::BaseDirs::new() {
+        let home = dirs.home_dir();
+        let opencode_dir = home.join(".config/opencode");
+
+        skills.extend(scan_skills(&opencode_dir.join("skills"), SkillSource::User));
+
+        let cfg_path = opencode_dir.join("opencode.json");
+        if let Some(root) = read_json(&cfg_path) {
+            if let Some(arr) = root.get("plugin").and_then(Value::as_array) {
+                for item in arr {
+                    if let Some(raw) = item.as_str() {
+                        let (name, ver) = match raw.split_once('@') {
+                            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                            None => (raw.to_string(), None),
+                        };
+                        plugins.push(PluginInfo {
+                            id: raw.to_string(),
+                            name,
+                            marketplace: "opencode".to_string(),
+                            version: ver,
+                            enabled: true,
+                            enabled_source: EnabledSource::Global,
+                            provides: None,
+                            installed: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(repo) = repo_root {
+        skills.extend(scan_skills(&repo.join(".opencode/skills"), SkillSource::Project));
+
+        for cfg_path in [repo.join("opencode.json"), repo.join(".opencode/opencode.json")] {
+            if let Some(root) = read_json(&cfg_path) {
+                if let Some(arr) = root.get("plugin").and_then(Value::as_array) {
+                    for item in arr {
+                        if let Some(raw) = item.as_str() {
+                            let (name, ver) = match raw.split_once('@') {
+                                Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                                None => (raw.to_string(), None),
+                            };
+                            plugins.push(PluginInfo {
+                                id: raw.to_string(),
+                                name,
+                                marketplace: "opencode".to_string(),
+                                version: ver,
+                                enabled: true,
+                                enabled_source: EnabledSource::Repo,
+                                provides: None,
+                                installed: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins.dedup_by(|a, b| a.id == b.id);
+
+    ExtSnapshot {
+        cli_version: None,
+        marketplaces: Vec::new(),
+        plugins,
+        skills,
+        accounts: Vec::new(),
+        account: "opencode".to_string(),
+    }
+}
+
+/// Scans Cursor extension environment:
+/// - Installed extensions from `~/.cursor/extensions/extensions.json`
+/// - Skills from `~/.cursor/skills` and `<repo>/.cursor/skills`
+pub fn scan_cursor(repo_root: Option<&Path>) -> ExtSnapshot {
+    let mut skills = Vec::new();
+    let mut plugins = Vec::new();
+
+    if let Some(dirs) = directories::BaseDirs::new() {
+        let home = dirs.home_dir();
+        let cursor_dir = home.join(".cursor");
+
+        skills.extend(scan_skills(&cursor_dir.join("skills"), SkillSource::User));
+
+        let ext_json_path = cursor_dir.join("extensions/extensions.json");
+        if let Some(root) = read_json(&ext_json_path) {
+            if let Some(arr) = root.as_array() {
+                for item in arr {
+                    let id = item.get("identifier")
+                        .and_then(|id_obj| id_obj.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let version = item.get("version").and_then(Value::as_str).map(String::from);
+                    let name = item.get("metadata")
+                        .and_then(|m| m.get("publisherDisplayName"))
+                        .and_then(Value::as_str)
+                        .map(|p| format!("{p}/{id}"))
+                        .unwrap_or_else(|| id.clone());
+
+                    plugins.push(PluginInfo {
+                        id: id.clone(),
+                        name,
+                        marketplace: "cursor".to_string(),
+                        version,
+                        enabled: true,
+                        enabled_source: EnabledSource::Global,
+                        provides: None,
+                        installed: true,
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(repo) = repo_root {
+        skills.extend(scan_skills(&repo.join(".cursor/skills"), SkillSource::Project));
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins.dedup_by(|a, b| a.id == b.id);
+
+    ExtSnapshot {
+        cli_version: None,
+        marketplaces: Vec::new(),
+        plugins,
+        skills,
+        accounts: Vec::new(),
+        account: "cursor".to_string(),
+    }
+}
+
+/// Unified entry point to scan extensions for any account / agent ecosystem.
+pub fn scan_for_account(
+    account_key: &str,
+    repo_root: Option<&Path>,
+    cli_version: Option<String>,
+) -> ExtSnapshot {
+    match account_key {
+        "antigravity" => scan_antigravity(repo_root),
+        "codex" => scan_codex(repo_root),
+        "opencode" => scan_opencode(repo_root),
+        "cursor" => scan_cursor(repo_root),
+        other => {
+            let home = claude_home_for(Some(other))
+                .unwrap_or_else(|| claude_home().unwrap_or_default());
+            scan(&home, repo_root, cli_version)
+        }
     }
 }
 
@@ -1082,5 +1407,69 @@ mod tests {
         assert_eq!(summary.synced_lanes.len(), 1);
         assert!(wt.join(".claude/skills/keep/SKILL.md").is_file());
         assert!(!wt.join(".claude/skills/drop").exists());
+    }
+
+    #[test]
+    fn test_scan_for_account_antigravity() {
+        let repo = tempfile::tempdir().unwrap();
+        let skill_dir = repo.path().join(".gemini/skills/demo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: A demo antigravity skill\n---\n# Body\n",
+        )
+        .unwrap();
+
+        let snap = scan_for_account("antigravity", Some(repo.path()), None);
+        assert_eq!(snap.account, "antigravity");
+        let found = snap.skills.iter().find(|s| s.name == "demo-skill");
+        assert!(found.is_some());
+        assert_eq!(
+            found.unwrap().description.as_deref(),
+            Some("A demo antigravity skill")
+        );
+        assert_eq!(found.unwrap().source, SkillSource::Project);
+    }
+
+    #[test]
+    fn test_scan_for_account_opencode() {
+        let repo = tempfile::tempdir().unwrap();
+        let cfg_path = repo.path().join("opencode.json");
+        std::fs::write(
+            &cfg_path,
+            r#"{"plugin":["oh-my-openagent@latest","helper-tool@2.0.0"]}"#,
+        )
+        .unwrap();
+
+        let snap = scan_for_account("opencode", Some(repo.path()), None);
+        assert_eq!(snap.account, "opencode");
+        assert_eq!(snap.plugins.len(), 2);
+        let p0 = &snap.plugins[0];
+        assert_eq!(p0.name, "helper-tool");
+        assert_eq!(p0.version.as_deref(), Some("2.0.0"));
+        let p1 = &snap.plugins[1];
+        assert_eq!(p1.name, "oh-my-openagent");
+        assert_eq!(p1.version.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn test_scan_for_account_cursor() {
+        let repo = tempfile::tempdir().unwrap();
+        let skill_dir = repo.path().join(".cursor/skills/cursor-analysis");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: cursor-analysis\ndescription: Analysis tools for Cursor\n---\n",
+        )
+        .unwrap();
+
+        let snap = scan_for_account("cursor", Some(repo.path()), None);
+        assert_eq!(snap.account, "cursor");
+        let found = snap.skills.iter().find(|s| s.name == "cursor-analysis");
+        assert!(found.is_some());
+        assert_eq!(
+            found.unwrap().description.as_deref(),
+            Some("Analysis tools for Cursor")
+        );
     }
 }

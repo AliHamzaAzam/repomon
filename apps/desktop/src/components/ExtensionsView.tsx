@@ -1,17 +1,15 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { FleetStore } from "../stores/fleet";
 import type { ExtensionsStore, ExtFilter, ExtRow } from "../stores/extensions";
 import ExtensionDrawer from "./ExtensionDrawer";
-import { IconPlus, IconSearch } from "./icons";
+import { AgentIcon, IconPlus, IconSearch } from "./icons";
 import SkillEditorModal from "./SkillEditorModal";
 
 interface ExtensionsViewProps {
   store: ExtensionsStore;
   fleet: FleetStore;
 }
-
-const filters: ExtFilter[] = ["all", "plugins", "skills", "marketplaces"];
 
 const skillNamePattern = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -30,6 +28,14 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
   const [editorPath, setEditorPath] = createSignal<string | null>(null);
   const selected = () => props.store.rows().find((row) => rowKey(row) === selectedKey()) ?? null;
   const newSkillNameValid = () => skillNamePattern.test(newSkillName().trim());
+  const currentAccount = createMemo(
+    () => props.store.accounts().find((a) => a.key === props.store.account())
+  );
+  const availableFilters = createMemo<ExtFilter[]>(() =>
+    currentAccount()?.claude !== false
+      ? ["all", "plugins", "skills", "marketplaces"]
+      : ["all", "plugins", "skills"]
+  );
   const scopeIsRepo = (repoId: number) => {
     const scope = props.store.scope();
     return scope.scope === "repo" && scope.repo_id === repoId;
@@ -80,29 +86,34 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
   return (
     <div class="flex h-full min-h-0 bg-background">
       <div class="flex min-w-0 flex-1 flex-col gap-3 p-4">
-        <Show when={props.store.accounts().length > 1}>
+        <Show when={props.store.accounts().length > 0}>
           <div class="flex flex-wrap items-center gap-1.5">
-            <span class="section-label mr-1">Account:</span>
+            <span class="section-label mr-1">Agent Ecosystem:</span>
             <For each={props.store.accounts()}>
-              {(acct) => (
-                <button
-                  type="button"
-                  class={`focus-ring rounded-lg border px-2.5 py-1 font-mono text-xs transition-colors ${
-                    props.store.account() === acct.key
-                      ? "border-signal/50 bg-signal/10 text-signal font-semibold"
-                      : "border-line bg-surface text-muted hover:text-foreground"
-                  }`}
-                  onClick={() => props.store.setAccount(acct.key)}
-                  title={acct.claude ? undefined : "Codex uses a different extension model"}
-                >{acct.label}</button>
-              )}
+              {(acct) => {
+                const isSelected = () => props.store.account() === acct.key;
+                return (
+                  <button
+                    type="button"
+                    class={`focus-ring inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                      isSelected()
+                        ? "border-signal/50 bg-signal/10 text-signal font-semibold shadow-xs"
+                        : "border-line bg-surface text-muted hover:border-line hover:bg-raised hover:text-foreground"
+                    }`}
+                    onClick={() => {
+                      props.store.setAccount(acct.key);
+                      if (acct.claude === false && props.store.filter() === "marketplaces") {
+                        props.store.setFilter("all");
+                      }
+                    }}
+                  >
+                    <AgentIcon agent={acct.agent_kind ?? acct.key} size={14} />
+                    <span>{acct.label}</span>
+                  </button>
+                );
+              }}
             </For>
           </div>
-        </Show>
-        <Show when={props.store.accounts().find((a) => a.key === props.store.account())?.claude === false}>
-          <p class="font-mono text-xs leading-relaxed text-muted">
-            Codex uses a different extension model. Claude marketplaces, plugins, and skills do not apply here.
-          </p>
         </Show>
         <div class="flex flex-wrap items-center gap-1.5">
           <span class="section-label mr-1">Scope:</span>
@@ -133,7 +144,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
           <div class="relative min-w-0 flex-1">
             <input
               class="focus-ring h-8 w-full rounded-lg border border-line bg-surface pl-8 pr-3 text-xs text-foreground outline-none placeholder:text-muted/60"
-              placeholder="Search extensions…"
+              placeholder="Search extensions & skills…"
               value={props.store.query()}
               onInput={(event) => props.store.setQuery(event.currentTarget.value)}
             />
@@ -142,7 +153,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             </span>
           </div>
           <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5" role="group" aria-label="Extension filters">
-            <For each={filters}>
+            <For each={availableFilters()}>
               {(filter) => (
                 <button
                   type="button"
@@ -156,16 +167,18 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
               )}
             </For>
           </div>
-          <button
-            type="button"
-            class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-3 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
-            disabled={props.store.busy() || !props.store.cliAvailable()}
-            title={cliTitle()}
-            onClick={() => setInstallOpen((open) => !open)}
-          >
-            <IconPlus size={12} />
-            <span>Install</span>
-          </button>
+          <Show when={currentAccount()?.claude !== false}>
+            <button
+              type="button"
+              class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-3 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
+              disabled={props.store.busy() || !props.store.cliAvailable()}
+              title={cliTitle()}
+              onClick={() => setInstallOpen((open) => !open)}
+            >
+              <IconPlus size={12} />
+              <span>Install</span>
+            </button>
+          </Show>
           <button
             type="button"
             class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-3 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"

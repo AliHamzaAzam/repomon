@@ -329,7 +329,7 @@ function App(props: AppProps) {
           tabIndex={0}
           onKeyDown={navigateFleet}
         >
-          <div class="flex items-center justify-between border-b border-line px-3 py-2.5">
+          <div class="flex h-10 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5">
             <span class="section-label">Fleet</span>
             <span class="font-mono text-[10px] text-muted">
               {fleet.visibleRepos().length} repos · {fleet.unhiddenLanes().length} lanes
