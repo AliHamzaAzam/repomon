@@ -2349,8 +2349,10 @@ pub async fn dispatch(
             }
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
+            let kind_str = kind.as_str().into_owned();
             let spawned = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
                 let window = tmux.spawn(lane, &spec)?;
+                let _ = tmux.set_window_agent_kind(&window, &kind_str);
                 // Best-effort: set the effort level and type the task once the TUI is up. Operators
                 // do exactly this by hand; a short settle lets claude start reading input.
                 if let Some(eff) = inject {
@@ -2509,9 +2511,14 @@ pub async fn dispatch(
             configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
-            let spawned = tokio::task::spawn_blocking(move || tmux.spawn(lane, &spec))
-                .await
-                .map_err(internal)?;
+            let kind_str = kind.as_str().into_owned();
+            let spawned = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
+                let window = tmux.spawn(lane, &spec)?;
+                let _ = tmux.set_window_agent_kind(&window, &kind_str);
+                Ok(window)
+            })
+            .await
+            .map_err(internal)?;
             let window = match spawned {
                 Ok(window) if window == expected_window => window,
                 Ok(window) => {
@@ -2539,9 +2546,13 @@ pub async fn dispatch(
             if let Some(sid) = p.session_id.clone() {
                 let tmux = ctx.backend.clone();
                 let w = window.clone();
+                let k = kind.as_str().into_owned();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = tmux.set_window_session(&w, &sid) {
                         tracing::warn!("failed to stamp adopted session on {w}: {e}");
+                    }
+                    if let Err(e) = tmux.set_window_agent_kind(&w, &k) {
+                        tracing::warn!("failed to stamp adopted agent kind on {w}: {e}");
                     }
                 })
                 .await;
@@ -3880,18 +3891,23 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // unpaired live window as a window-only placeholder right away — a lane can hold
             // several transcript-less agents at once, and hiding all but one made them
             // invisible and uninteractable until an older agent exited.
-            let kind = lane_meta_kind(&metas, lane.id);
             for window in pairing.unpaired {
+                let kind = window_meta_kind(&lane_windows, &window)
+                    .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
                 lane.agent_sessions
-                    .push(window_placeholder_session(lane, kind.clone(), window));
+                    .push(window_placeholder_session(lane, kind, window));
             }
         } else if managed_n > 0 {
             // No parseable transcript at all: surface every live repomon-spawned window.
-            let kind = lane_meta_kind(&metas, lane.id);
             for window in &lane_windows {
+                let kind = window
+                    .agent_kind
+                    .as_deref()
+                    .map(AgentKind::from_kind_str)
+                    .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
                 lane.agent_sessions.push(window_placeholder_session(
                     lane,
-                    kind.clone(),
+                    kind,
                     window.name.clone(),
                 ));
             }
@@ -3995,9 +4011,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         (wid, name, normalize_fingerprint(&text))
                     })
                     .collect();
-                for (wid, name, sid) in confirmed_stamps(&cands, &panes) {
+                for (wid, name, sid, kind) in confirmed_stamps(&cands, &panes) {
                     if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
                         tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
+                    }
+                    if let Err(e) = tmux.set_window_agent_kind_by_id(wid, kind.as_str().as_ref()) {
+                        tracing::warn!("failed to stamp @repomon_agent_kind on {name} (@{wid}): {e}");
                     }
                 }
             }
@@ -4215,6 +4234,8 @@ struct BindingCandidate {
     /// `None` (no message yet / too short) means no evidence — the candidate simply returns
     /// next tick.
     needle: Option<String>,
+    /// The agent kind parsed from the transcript.
+    kind: AgentKind,
 }
 
 /// One lane's binding candidates plus the probe-window pool they may stamp onto.
@@ -4268,11 +4289,11 @@ fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
 /// Which stamps the pane evidence supports: each candidate with a fingerprint is stamped on
 /// the single probe window whose (normalized) pane contains it. No match, several matching
 /// panes, or several candidates matching the same pane → no stamp for those involved; the
-/// candidates return next tick once the screens disambiguate. Returns `(wid, name, sid)`.
+/// candidates return next tick once the screens disambiguate. Returns `(wid, name, sid, kind)`.
 fn confirmed_stamps(
     cands: &[BindingCandidate],
     panes: &[(u64, String, String)],
-) -> Vec<(u64, String, String)> {
+) -> Vec<(u64, String, String, AgentKind)> {
     // Every needle↔pane hit, as (candidate index, pane index).
     let mut hits: Vec<(usize, usize)> = Vec::new();
     for (ci, c) in cands.iter().enumerate() {
@@ -4292,7 +4313,12 @@ fn confirmed_stamps(
         })
         .map(|&(ci, pi)| {
             let (wid, name, _) = &panes[pi];
-            (*wid, name.clone(), cands[ci].sid.clone())
+            (
+                *wid,
+                name.clone(),
+                cands[ci].sid.clone(),
+                cands[ci].kind.clone(),
+            )
         })
         .collect()
 }
@@ -4406,6 +4432,7 @@ fn pair_transcripts_to_windows(
                 new_bindings.push(BindingCandidate {
                     sid: sid.clone(),
                     needle,
+                    kind: summaries[si].kind.clone(),
                 });
             }
         }
@@ -4876,8 +4903,20 @@ fn program_of(command: &str) -> Option<&str> {
     toks.find(|t| !is_env_assignment(t))
 }
 
-/// The agent kind repomon last spawned in a lane (from its persisted meta), defaulting to Claude
-/// when nothing was recorded — used to label a window-only placeholder session.
+/// Look up an agent kind recorded on a specific window, if present.
+fn window_meta_kind(
+    lane_windows: &[repomon_core::agent::WindowMeta],
+    window_name: &str,
+) -> Option<AgentKind> {
+    lane_windows
+        .iter()
+        .find(|w| w.name == window_name)
+        .and_then(|w| w.agent_kind.as_deref())
+        .map(AgentKind::from_kind_str)
+}
+
+/// The agent kind repomon last spawned in a lane (from its persisted meta), defaulting to "unknown"
+/// when nothing was recorded — used as fallback to label a window-only placeholder session.
 fn lane_meta_kind(
     metas: &[repomon_core::model::LaneMeta],
     lane_id: repomon_core::model::LaneId,
@@ -4887,7 +4926,7 @@ fn lane_meta_kind(
         .find(|m| m.id == lane_id)
         .and_then(|m| m.agent_kind.clone())
         .map(|k| AgentKind::from_kind_str(&k))
-        .unwrap_or(AgentKind::ClaudeCode)
+        .unwrap_or_else(|| AgentKind::from_kind_str("unknown"))
 }
 
 /// A window-only placeholder agent: a repomon-spawned session whose tmux window is alive but
@@ -6057,6 +6096,80 @@ mod tests {
         }
     }
 
+    fn mail_lane_with_agents(id: i64, agents: &[(Option<&str>, AgentKind)]) -> Lane {
+        let now = chrono::Utc::now();
+        let repo = repomon_core::model::Repo {
+            id,
+            path: PathBuf::from(format!("/repo-{id}")),
+            name: format!("repo-{id}"),
+            added_at: now,
+            worktree_root_template: None,
+            hidden: false,
+        };
+        let worktree = repomon_core::model::Worktree {
+            id,
+            repo_id: id,
+            path: repo.path.clone(),
+            branch: Some("main".into()),
+            head: "0000000000000000000000000000000000000000".parse().unwrap(),
+            is_main: true,
+            name: "main".into(),
+        };
+        let state = repomon_core::model::WorktreeState {
+            worktree_id: id,
+            head: worktree.head,
+            branch: worktree.branch.clone(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            dirty: Default::default(),
+            last_commit_at: None,
+            locked: false,
+            prunable: false,
+            last_change_at: None,
+        };
+        let agent_sessions = agents
+            .iter()
+            .enumerate()
+            .map(|(index, (label, kind))| AgentSession {
+                id: index as i64 + 1,
+                agent: kind.clone(),
+                repo_id: id,
+                worktree_id: Some(id),
+                started_at: now,
+                last_activity_at: now,
+                ended_at: None,
+                manifest_path: PathBuf::from(format!("/session-{id}-{index}.jsonl")),
+                tool_call_count: 0,
+                title: None,
+                status: AgentStatus::Waiting,
+                external: false,
+                session_id: Some(format!("session-{id}-{index}")),
+                resume_at: None,
+                inferred: false,
+                tmux_window: Some(repomon_core::TmuxRuntime::slot_name(id, index + 1)),
+                last_message: None,
+                pending_prompt: None,
+                pending_dialog: None,
+                stale: false,
+                stalled_since: None,
+                ended_turn: true,
+                gate: None,
+                config_dir: None,
+                custom_label: label.map(str::to_string),
+            })
+            .collect();
+        Lane {
+            id,
+            repo,
+            worktree,
+            state,
+            agent_sessions,
+            last_activity_at: now,
+            pinned: false,
+        }
+    }
+
     #[test]
     fn message_addresses_route_lane_slots_and_exact_labels() {
         let lanes = vec![mail_lane(7, &[Some("first"), Some("reviewer")])];
@@ -6069,6 +6182,26 @@ mod tests {
         let label = resolve_agent_message_address(&lanes, "@reviewer").unwrap();
         assert_eq!(label.address.as_str(), "lane-7/2");
         assert!(resolve_agent_message_address(&lanes, "lane-7/0").is_err());
+    }
+
+    #[test]
+    fn message_addresses_route_lane_slots_with_heterogeneous_agents() {
+        let lanes = vec![mail_lane_with_agents(
+            7,
+            &[
+                (Some("first"), AgentKind::ClaudeCode),
+                (Some("antigravity-worker"), AgentKind::Antigravity),
+            ],
+        )];
+        let first = resolve_agent_message_address(&lanes, "lane-7/1").unwrap();
+        assert_eq!(first.slot, Some(1));
+        assert_eq!(first.agent_kind.as_deref(), Some("claude-code"));
+        let second = resolve_agent_message_address(&lanes, "lane-7/2").unwrap();
+        assert_eq!(second.slot, Some(2));
+        assert_eq!(second.agent_kind.as_deref(), Some("antigravity"));
+        let label = resolve_agent_message_address(&lanes, "@antigravity-worker").unwrap();
+        assert_eq!(label.slot, Some(2));
+        assert_eq!(label.agent_kind.as_deref(), Some("antigravity"));
     }
 
     #[test]
@@ -6319,6 +6452,21 @@ mod tests {
             name: name.into(),
             wid,
             session: sid.map(str::to_string),
+            agent_kind: None,
+        }
+    }
+
+    fn wm_kind(
+        name: &str,
+        wid: u64,
+        sid: Option<&str>,
+        kind: Option<&str>,
+    ) -> agent::WindowMeta {
+        agent::WindowMeta {
+            name: name.into(),
+            wid,
+            session: sid.map(str::to_string),
+            agent_kind: kind.map(str::to_string),
         }
     }
 
@@ -6522,8 +6670,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (1, "lane-7".to_string(), "a".to_string()),
-                (2, "lane-7-2".to_string(), "b".to_string()),
+                (1, "lane-7".to_string(), "a".to_string(), AgentKind::ClaudeCode),
+                (2, "lane-7-2".to_string(), "b".to_string(), AgentKind::ClaudeCode),
             ]
         );
     }
@@ -6693,6 +6841,7 @@ mod tests {
         let cand = |sid: &str, msg: &str| BindingCandidate {
             sid: sid.into(),
             needle: message_fingerprint(Some(msg)),
+            kind: AgentKind::ClaudeCode,
         };
         let a = cand("a", "fingerprint marker for agent alpha pane evidence");
         let b = cand("b", "fingerprint marker for agent bravo pane evidence");
@@ -6715,8 +6864,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (1, "lane-7".to_string(), "b".to_string()),
-                (2, "lane-7-2".to_string(), "a".to_string())
+                (1, "lane-7".to_string(), "b".to_string(), AgentKind::ClaudeCode),
+                (2, "lane-7-2".to_string(), "a".to_string(), AgentKind::ClaudeCode),
             ]
         );
     }
@@ -6726,6 +6875,7 @@ mod tests {
         let cand = |sid: &str, msg: Option<&str>| BindingCandidate {
             sid: sid.into(),
             needle: message_fingerprint(msg),
+            kind: AgentKind::ClaudeCode,
         };
         let marker = "identical rotation continuation marker text";
         // Two panes showing the same text: ambiguous for a matching candidate.
@@ -7439,6 +7589,80 @@ mod tests {
                 .as_deref(),
             Some("unrelated-session-id"),
             "None (adopted, unknown id) must keep the existing newest-wins behavior"
+        );
+    }
+
+    #[test]
+    fn heterogeneous_window_placeholders_track_individual_agent_kinds() {
+        let lane = mail_lane(7, &[]);
+        let metas = vec![repomon_core::model::LaneMeta {
+            id: 7,
+            repo_id: 7,
+            worktree_path: PathBuf::from("/repo-7"),
+            pinned: false,
+            tmux_window: Some("lane-7".into()),
+            agent_kind: Some("claude-code".into()),
+        }];
+        let lane_windows = vec![
+            wm_kind("lane-7", 1, None, Some("claude-code")),
+            wm_kind("lane-7-2", 2, None, Some("antigravity")),
+        ];
+        let kind1 = window_meta_kind(&lane_windows, "lane-7")
+            .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
+        let kind2 = window_meta_kind(&lane_windows, "lane-7-2")
+            .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
+        let s1 = window_placeholder_session(&lane, kind1, "lane-7".into());
+        let s2 = window_placeholder_session(&lane, kind2, "lane-7-2".into());
+        assert_eq!(s1.agent, AgentKind::ClaudeCode);
+        assert_eq!(s2.agent, AgentKind::Antigravity);
+    }
+
+    #[test]
+    fn unpaired_window_with_no_meta_defaults_to_unknown() {
+        let lane = mail_lane(7, &[]);
+        let metas: Vec<repomon_core::model::LaneMeta> = vec![];
+        let lane_windows = vec![wm("lane-7", 1, None)];
+        let kind = window_meta_kind(&lane_windows, "lane-7")
+            .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
+        let s = window_placeholder_session(&lane, kind, "lane-7".into());
+        assert_eq!(s.agent, AgentKind::from_kind_str("unknown"));
+        assert_eq!(s.agent.as_str(), "unknown");
+    }
+
+    #[test]
+    fn confirmed_pairing_stamps_and_updates_agent_kind() {
+        let msg = "distinctive antigravity turn message evidence";
+        let windows = vec![wm_kind("lane-7", 1, None, Some("claude-code"))];
+        let summary = agent::TranscriptSummary {
+            kind: AgentKind::Antigravity,
+            manifest_path: PathBuf::from("/tmp/agy.jsonl"),
+            cwd: None,
+            last_activity: t(0),
+            tool_call_count: 0,
+            status: AgentStatus::Idle,
+            title: None,
+            last_message: Some(msg.to_string()),
+            config_dir: None,
+            session_id: Some("agy-1".to_string()),
+            ended_turn: false,
+        };
+        let p = pair_transcripts_to_windows(&[summary], &windows, t(100));
+        assert_eq!(p.assignment, vec![None]);
+        assert_eq!(candidate_sids(&p), vec!["agy-1"]);
+        let panes = vec![(
+            1,
+            "lane-7".to_string(),
+            normalize_fingerprint(&format!("✻ {msg}\n❯")),
+        )];
+        let confirmed = confirmed_stamps(&p.new_bindings, &panes);
+        assert_eq!(
+            confirmed,
+            vec![(
+                1,
+                "lane-7".to_string(),
+                "agy-1".to_string(),
+                AgentKind::Antigravity
+            )]
         );
     }
 }

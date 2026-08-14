@@ -334,7 +334,7 @@ pub struct ApprovalRule {
 }
 
 /// The kind of coding agent backing a session. An open enum from day one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AgentKind {
     ClaudeCode,
     Cursor,
