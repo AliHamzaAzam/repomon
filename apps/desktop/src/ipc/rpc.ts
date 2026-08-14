@@ -83,6 +83,7 @@ export interface ConfigView {
   embedded_pty: boolean;
   orchestrator_agent?: string | null;
   orchestrator_model?: string | null;
+  agent_icons?: Record<string, string>;
   [key: string]: unknown;
 }
 

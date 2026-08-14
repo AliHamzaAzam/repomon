@@ -158,6 +158,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
+        "agent_icons": cfg.agent_icons,
     })
 }
 
@@ -711,6 +712,8 @@ struct ConfigSet {
     orchestrator_agent: Option<String>,
     #[serde(default)]
     orchestrator_model: Option<String>,
+    #[serde(default)]
+    agent_icons: Option<HashMap<String, String>>,
 }
 #[derive(Deserialize)]
 struct PushDevice {
@@ -2244,6 +2247,9 @@ pub async fn dispatch(
                 }
                 if let Some(m) = p.orchestrator_model {
                     cfg.orchestrator_model = (!m.is_empty()).then_some(m);
+                }
+                if let Some(icons) = p.agent_icons {
+                    cfg.agent_icons = icons;
                 }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;

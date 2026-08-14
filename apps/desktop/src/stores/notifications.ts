@@ -8,6 +8,7 @@ import { createSignal } from "solid-js";
 
 import type { PendingDialog } from "../bindings";
 import { desktopSoundPlayer, type SoundCue, type SoundPlayer } from "../audio/sound";
+import { setAgentIconOverrides } from "../components/icons";
 import { daemonCall, subscribeDaemon, type ConfigView, type DaemonEvent } from "../ipc/rpc";
 
 export interface FleetNotification {
@@ -181,6 +182,9 @@ export function createNotificationStore(
 
   function setConfig(config: Partial<ConfigView>) {
     preferences = { ...preferences, ...config };
+    if (config.agent_icons) {
+      setAgentIconOverrides(config.agent_icons);
+    }
     configLoaded = true;
   }
 

@@ -10,8 +10,19 @@ import Select from "./controls/Select";
 import Switch from "./controls/Switch";
 import KeyboardHelp from "./KeyboardHelp";
 import Modal from "./Modal";
+import {
+  AGENT_ICON_CATALOG,
+  AgentIcon,
+  resolveAgentIconKey,
+  setAgentIconOverrides,
+  IconCheck,
+  IconClose,
+  IconPlus,
+  IconRefresh,
+  IconSearch,
+} from "./icons";
 
-export type SettingsTab = "general" | "notifications" | "appearance" | "keyboard";
+export type SettingsTab = "general" | "agents" | "notifications" | "appearance" | "keyboard";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -23,6 +34,7 @@ interface SettingsModalProps {
 
 const TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "General" },
+  { id: "agents", label: "Agents & Icons" },
   { id: "notifications", label: "Notifications" },
   { id: "appearance", label: "Appearance" },
   { id: "keyboard", label: "Keyboard" },
@@ -105,8 +117,16 @@ export default function SettingsModal(props: SettingsModalProps) {
   const [progress, setProgress] = createSignal<UpdateProgress | null>(null);
   const [availableUpdate, setAvailableUpdate] = createSignal<AvailableUpdate | null>(null);
 
+  // Icon customization state
+  const [pickerAgent, setPickerAgent] = createSignal<string | null>(null);
+  const [iconFilter, setIconFilter] = createSignal("");
+  const [newAgentName, setNewAgentName] = createSignal("");
+
   onMount(() => {
-    void daemonCall("config.get").then(setConfig).catch((cause: unknown) => {
+    void daemonCall("config.get").then((cfg) => {
+      setConfig(cfg);
+      if (cfg.agent_icons) setAgentIconOverrides(cfg.agent_icons);
+    }).catch((cause: unknown) => {
       setError(cause instanceof Error ? cause.message : String(cause));
     });
     void daemonCall("agent.detect").then(setAgents).catch(() => undefined);
@@ -116,6 +136,73 @@ export default function SettingsModal(props: SettingsModalProps) {
     const current = config();
     if (current) setConfig({ ...current, ...next });
   }
+
+  function updateAgentIcon(agentName: string, iconId: string | null) {
+    const current = config();
+    if (!current) return;
+    const lower = agentName.toLowerCase().trim();
+    const nextIcons: Record<string, string> = { ...(current.agent_icons ?? {}) };
+    if (iconId === null) {
+      delete nextIcons[lower];
+      delete nextIcons[agentName];
+    } else {
+      nextIcons[lower] = iconId;
+    }
+    patch({ agent_icons: nextIcons });
+    setAgentIconOverrides(nextIcons);
+  }
+
+  const knownAgentsList = () => {
+    const cfg = config();
+    const set = new Map<string, { name: string; custom: boolean; command?: string }>();
+
+    const BUILTINS = [
+      "claude-code",
+      "cursor",
+      "aider",
+      "codex",
+      "antigravity",
+      "opencode",
+    ];
+    for (const b of BUILTINS) {
+      set.set(b, { name: b, custom: false });
+    }
+
+    for (const a of agents()) {
+      const lower = a.name.toLowerCase().trim();
+      if (!set.has(lower)) {
+        set.set(lower, { name: a.name, custom: a.custom, command: a.command });
+      }
+    }
+
+    if (cfg?.agents && typeof cfg.agents === "object") {
+      for (const [name, cmd] of Object.entries(cfg.agents as Record<string, string>)) {
+        const lower = name.toLowerCase().trim();
+        if (!set.has(lower)) {
+          set.set(lower, { name, custom: true, command: cmd });
+        }
+      }
+    }
+
+    if (cfg?.agent_icons && typeof cfg.agent_icons === "object") {
+      for (const name of Object.keys(cfg.agent_icons)) {
+        const lower = name.toLowerCase().trim();
+        if (!set.has(lower)) {
+          set.set(lower, { name, custom: true });
+        }
+      }
+    }
+
+    return Array.from(set.values());
+  };
+
+  const filteredIcons = () => {
+    const q = iconFilter().toLowerCase().trim();
+    if (!q) return AGENT_ICON_CATALOG;
+    return AGENT_ICON_CATALOG.filter(
+      (entry) => entry.id.toLowerCase().includes(q) || entry.label.toLowerCase().includes(q) || entry.category.toLowerCase().includes(q)
+    );
+  };
 
   async function save() {
     const current = config();
@@ -128,6 +215,7 @@ export default function SettingsModal(props: SettingsModalProps) {
       setConfig(saved);
       props.onConfigSaved?.(saved);
       applyAccent(saved.accent);
+      if (saved.agent_icons) setAgentIconOverrides(saved.agent_icons);
       setStatus("Settings saved.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -197,7 +285,7 @@ export default function SettingsModal(props: SettingsModalProps) {
   );
 
   return (
-    <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width="min(44rem, 95vw)" onClose={props.onClose} footer={footer()}>
+    <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width="min(46rem, 95vw)" onClose={props.onClose} footer={footer()}>
       <div class="sticky -top-4 z-10 -mx-5 -mt-4 mb-5 border-b border-line bg-surface/95 px-5 pt-3 pb-2.5 backdrop-blur">
         <div class="flex items-center gap-1 rounded-lg border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Settings sections">
           <For each={TABS}>
@@ -209,7 +297,10 @@ export default function SettingsModal(props: SettingsModalProps) {
                 class={`focus-ring flex-1 rounded-md py-1 text-center text-xs font-medium transition-colors ${
                   tab() === item.id ? "bg-surface text-foreground shadow-xs font-semibold" : "text-muted hover:text-foreground"
                 }`}
-                onClick={() => setTab(item.id)}
+                onClick={() => {
+                  setTab(item.id);
+                  setPickerAgent(null);
+                }}
               >
                 {item.label}
               </button>
@@ -268,6 +359,127 @@ export default function SettingsModal(props: SettingsModalProps) {
                   <Show when={progress()?.total}>
                     <progress class="h-1.5 flex-1 accent-signal" max={progress()!.total} value={progress()!.downloaded} />
                   </Show>
+                </div>
+              </section>
+            </Show>
+
+            <Show when={tab() === "agents"}>
+              <section class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <p class="section-label">Agent Icon Library & Overrides</p>
+                    <p class="mt-0.5 text-xs text-muted">
+                      Assign distinct geometric icons from Repomon's curated library to built-in runtimes or custom CLI agents.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="rounded-xl border border-line bg-surface/40 p-3.5">
+                  <div class="flex items-center gap-2">
+                    <input
+                      type="text"
+                      class="focus-ring h-8 flex-1 rounded-lg border border-line bg-surface px-3 text-xs text-foreground outline-none placeholder:text-muted/60"
+                      placeholder="Add custom agent name (e.g. 'my-agent', 'gemini-cli', 'devin')"
+                      value={newAgentName()}
+                      onInput={(e) => setNewAgentName(e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && newAgentName().trim()) {
+                          const name = newAgentName().trim();
+                          setPickerAgent(name);
+                          setNewAgentName("");
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-raised disabled:opacity-50"
+                      disabled={!newAgentName().trim()}
+                      onClick={() => {
+                        const name = newAgentName().trim();
+                        if (!name) return;
+                        setPickerAgent(name);
+                        setNewAgentName("");
+                      }}
+                    >
+                      <IconPlus size={13} />
+                      <span>Configure Icon</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="space-y-2">
+                  <For each={knownAgentsList()}>
+                    {(agent) => {
+                      const currentKey = () =>
+                        settings().agent_icons?.[agent.name.toLowerCase()] ??
+                        settings().agent_icons?.[agent.name] ??
+                        resolveAgentIconKey(agent.name);
+                      const hasOverride = () =>
+                        Boolean(
+                          settings().agent_icons?.[agent.name.toLowerCase()] ||
+                            settings().agent_icons?.[agent.name]
+                        );
+                      const currentEntry = () =>
+                        AGENT_ICON_CATALOG.find((c) => c.id === currentKey());
+
+                      return (
+                        <div class="flex items-center justify-between rounded-xl border border-line/80 bg-surface/50 p-3 transition-colors hover:bg-surface/80">
+                          <div class="flex items-center gap-3 min-w-0">
+                            <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/70 text-foreground">
+                              <AgentIcon agent={agent.name} iconKey={currentKey()} size={18} />
+                            </div>
+                            <div class="min-w-0">
+                              <div class="flex items-center gap-2">
+                                <span class="truncate font-medium text-xs text-foreground">{agent.name}</span>
+                                <span
+                                  class={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider ${
+                                    agent.custom
+                                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                                      : "bg-surface text-muted border border-line"
+                                  }`}
+                                >
+                                  {agent.custom ? "Custom" : "Built-in"}
+                                </span>
+                              </div>
+                              <p class="truncate text-[11px] text-muted">
+                                {hasOverride() ? (
+                                  <span class="text-signal font-medium">
+                                    Custom icon: {currentEntry()?.label ?? currentKey()}
+                                  </span>
+                                ) : (
+                                  <span>Default: {currentEntry()?.label ?? currentKey()}</span>
+                                )}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div class="flex items-center gap-2 shrink-0">
+                            <Show when={hasOverride()}>
+                              <button
+                                type="button"
+                                class="focus-ring inline-flex items-center gap-1 rounded-lg border border-line/60 bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-foreground"
+                                onClick={() => updateAgentIcon(agent.name, null)}
+                                title="Reset to default icon"
+                              >
+                                <IconRefresh size={12} />
+                                <span>Reset</span>
+                              </button>
+                            </Show>
+                            <button
+                              type="button"
+                              class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-raised"
+                              onClick={() => {
+                                setPickerAgent(agent.name);
+                                setIconFilter("");
+                              }}
+                            >
+                              <span>Change Icon…</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  </For>
                 </div>
               </section>
             </Show>
@@ -365,6 +577,131 @@ export default function SettingsModal(props: SettingsModalProps) {
             </Show>
           </div>
         )}
+      </Show>
+
+      {/* Interactive Icon Picker Modal */}
+      <Show when={pickerAgent()}>
+        {(targetAgent) => {
+          const currentKey = () =>
+            config()?.agent_icons?.[targetAgent().toLowerCase()] ??
+            config()?.agent_icons?.[targetAgent()] ??
+            resolveAgentIconKey(targetAgent());
+
+          return (
+            <div
+              class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-xs"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setPickerAgent(null);
+              }}
+            >
+              <div class="focus-ring flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl border border-line bg-surface shadow-2xl overflow-hidden">
+                <div class="flex items-center justify-between border-b border-line px-5 py-3.5">
+                  <div class="flex items-center gap-2.5">
+                    <div class="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-raised text-foreground">
+                      <AgentIcon agent={targetAgent()} iconKey={currentKey()} size={16} />
+                    </div>
+                    <div>
+                      <h3 class="text-xs font-semibold text-foreground">
+                        Icon for <span class="text-signal">{targetAgent()}</span>
+                      </h3>
+                      <p class="text-[11px] text-muted">Choose any abstract geometric symbol from the library.</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="focus-ring rounded-lg p-1.5 text-muted transition-colors hover:bg-raised hover:text-foreground"
+                    onClick={() => setPickerAgent(null)}
+                    aria-label="Close icon picker"
+                  >
+                    <IconClose size={14} />
+                  </button>
+                </div>
+
+                <div class="border-b border-line bg-raised/30 px-4 py-2.5">
+                  <div class="flex items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs">
+                    <IconSearch size={13} class="text-muted" />
+                    <input
+                      type="text"
+                      placeholder="Search 26 geometric icons…"
+                      class="w-full bg-transparent text-xs text-foreground outline-none placeholder:text-muted/60"
+                      value={iconFilter()}
+                      onInput={(e) => setIconFilter(e.currentTarget.value)}
+                    />
+                    <Show when={iconFilter()}>
+                      <button
+                        type="button"
+                        class="text-muted hover:text-foreground"
+                        onClick={() => setIconFilter("")}
+                      >
+                        <IconClose size={12} />
+                      </button>
+                    </Show>
+                  </div>
+                </div>
+
+                <div class="flex-1 overflow-y-auto p-4">
+                  <div class="grid grid-cols-3 gap-2.5 sm:grid-cols-4 md:grid-cols-6">
+                    <For each={filteredIcons()}>
+                      {(entry) => {
+                        const isSelected = () => currentKey() === entry.id;
+                        const EntryIcon = entry.Icon;
+                        return (
+                          <button
+                            type="button"
+                            class={`focus-ring flex flex-col items-center justify-center rounded-xl border p-2.5 text-center transition-all ${
+                              isSelected()
+                                ? "border-signal bg-signal/10 text-signal shadow-xs"
+                                : "border-line bg-surface/70 text-muted hover:border-line hover:bg-raised hover:text-foreground"
+                            }`}
+                            onClick={() => {
+                              updateAgentIcon(targetAgent(), entry.id);
+                              setPickerAgent(null);
+                            }}
+                          >
+                            <div class="mb-1.5 flex h-8 w-8 items-center justify-center">
+                              <EntryIcon size={20} />
+                            </div>
+                            <span class="line-clamp-1 w-full text-[10px] font-medium leading-tight">
+                              {entry.label}
+                            </span>
+                            <Show when={isSelected()}>
+                              <span class="mt-1 inline-flex items-center gap-0.5 text-[9px] font-semibold text-signal">
+                                <IconCheck size={10} /> Active
+                              </span>
+                            </Show>
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+                  <Show when={!filteredIcons().length}>
+                    <p class="py-8 text-center text-xs text-muted">No matching icons found.</p>
+                  </Show>
+                </div>
+
+                <div class="flex items-center justify-between border-t border-line bg-raised/40 px-4 py-3">
+                  <button
+                    type="button"
+                    class="focus-ring rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-muted transition-colors hover:bg-raised hover:text-foreground"
+                    onClick={() => {
+                      updateAgentIcon(targetAgent(), null);
+                      setPickerAgent(null);
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                  <button
+                    type="button"
+                    class="focus-ring rounded-lg bg-surface border border-line px-4 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-raised"
+                    onClick={() => setPickerAgent(null)}
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        }}
       </Show>
     </Modal>
   );

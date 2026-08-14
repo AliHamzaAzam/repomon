@@ -52,6 +52,9 @@ pub struct Config {
     /// New Lane picker alongside the auto-detected built-ins, e.g.:
     /// `[agents]` then `claude-yolo = "claude --dangerously-skip-permissions"`.
     pub agents: HashMap<String, String>,
+    /// Custom icon assignment for agent kinds or custom agent names, mapping agent name -> icon key
+    /// (e.g. "my-agent" -> "compass", "codex" -> "bolt").
+    pub agent_icons: HashMap<String, String>,
     /// Auto-continue managed agents that pause on a usage limit (resume at the reset time).
     /// On by default; a per-lane key (`C`) can disable it for a single lane this session.
     pub auto_continue: bool,
@@ -171,6 +174,7 @@ impl Default for Config {
             accent: None,
             default_agent: None,
             agents: HashMap::new(),
+            agent_icons: HashMap::new(),
             auto_continue: true,
             auto_continue_message: "continue".to_string(),
             spawn_prompt: true,
@@ -502,6 +506,7 @@ mod tests {
             "claude-yolo".into(),
             "claude --dangerously-skip-permissions".into(),
         );
+        c.agent_icons.insert("codex".into(), "bolt".into());
         c.save_to(&path).unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
@@ -509,6 +514,10 @@ mod tests {
         assert_eq!(
             loaded.agents.get("claude-yolo").map(String::as_str),
             Some("claude --dangerously-skip-permissions")
+        );
+        assert_eq!(
+            loaded.agent_icons.get("codex").map(String::as_str),
+            Some("bolt")
         );
         // Unrelated scalar fields survive the round-trip.
         assert_eq!(loaded.tmux_session, "work");

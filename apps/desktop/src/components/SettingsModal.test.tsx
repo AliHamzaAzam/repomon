@@ -87,4 +87,36 @@ describe("Settings sound persistence", () => {
     });
     await waitFor(() => expect(focusOnly).toHaveAttribute("aria-checked", "false"));
   });
+
+  it("configures and saves custom agent icon overrides", async () => {
+    state.config = { ...config, agent_icons: {} };
+    render(() => (
+      <SettingsModal
+        initialTab="agents"
+        onClose={() => undefined}
+      />
+    ));
+
+    // Find the change icon button for codex
+    await screen.findByText("Agent Icon Library & Overrides");
+    const changeButtons = screen.getAllByRole("button", { name: "Change Icon…" });
+    expect(changeButtons.length).toBeGreaterThan(0);
+
+    // Open icon picker for the fourth agent (codex)
+    fireEvent.click(changeButtons[3]);
+
+    // Icon picker modal should open
+    await screen.findByText("Icon for");
+    const lightningButton = screen.getByRole("button", { name: /Lightning Bolt/i });
+    fireEvent.click(lightningButton);
+
+    // Save changes
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Settings saved.");
+
+    expect(calls.saved).toHaveLength(1);
+    expect(calls.saved[0].agent_icons).toMatchObject({
+      codex: "bolt",
+    });
+  });
 });

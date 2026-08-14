@@ -19,6 +19,7 @@ import {
 import { daemonCall } from "./ipc/rpc";
 import { matchChord } from "./keymap";
 import BrandMark from "./components/BrandMark";
+import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
@@ -83,7 +84,12 @@ function App(props: AppProps) {
     if (connection().phase === "connected" && !fleetStarted) {
       fleetStarted = true;
       fleet.start();
-      void daemonCall("config.get").then((config) => applyAccent(config.accent)).catch(() => undefined);
+      void daemonCall("config.get")
+        .then((config) => {
+          applyAccent(config.accent);
+          if (config.agent_icons) setAgentIconOverrides(config.agent_icons);
+        })
+        .catch(() => undefined);
     } else if (connection().phase !== "connected" && fleetStarted) {
       fleetStarted = false;
       fleet.stop();
