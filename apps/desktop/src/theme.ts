@@ -198,3 +198,51 @@ export function applyAccent(accent?: string | null): void {
       : ACCENTS[value ?? "cyan"] ?? ACCENTS.cyan;
   document.documentElement.style.setProperty("--signal", color);
 }
+
+export interface TerminalAppearance {
+  tintEnabled: boolean;
+  tintOpacity: number; // 0.01 to 0.30
+  fontFamily: string;
+  fontSize: number; // 10 to 18
+}
+
+const terminalAppearanceStorageKey = "repomon-terminal-appearance";
+
+export const DEFAULT_TERMINAL_APPEARANCE: TerminalAppearance = {
+  tintEnabled: false,
+  tintOpacity: 0.08,
+  fontFamily: "Berkeley Mono",
+  fontSize: 12,
+};
+
+export const TERMINAL_FONT_FAMILIES = [
+  { id: "Berkeley Mono", label: "Berkeley Mono" },
+  { id: "JetBrains Mono", label: "JetBrains Mono" },
+  { id: "Fira Code", label: "Fira Code" },
+  { id: "SF Mono", label: "SF Mono" },
+  { id: "Menlo", label: "Menlo" },
+  { id: "monospace", label: "System Monospace" },
+];
+
+export function readTerminalAppearance(): TerminalAppearance {
+  if (typeof window === "undefined") return DEFAULT_TERMINAL_APPEARANCE;
+  try {
+    const raw = window.localStorage.getItem(terminalAppearanceStorageKey);
+    if (!raw) return DEFAULT_TERMINAL_APPEARANCE;
+    const parsed = JSON.parse(raw);
+    return {
+      tintEnabled: typeof parsed.tintEnabled === "boolean" ? parsed.tintEnabled : DEFAULT_TERMINAL_APPEARANCE.tintEnabled,
+      tintOpacity: typeof parsed.tintOpacity === "number" ? Math.max(0.01, Math.min(0.3, parsed.tintOpacity)) : DEFAULT_TERMINAL_APPEARANCE.tintOpacity,
+      fontFamily: typeof parsed.fontFamily === "string" ? parsed.fontFamily : DEFAULT_TERMINAL_APPEARANCE.fontFamily,
+      fontSize: typeof parsed.fontSize === "number" ? Math.max(10, Math.min(18, parsed.fontSize)) : DEFAULT_TERMINAL_APPEARANCE.fontSize,
+    };
+  } catch {
+    return DEFAULT_TERMINAL_APPEARANCE;
+  }
+}
+
+export function saveTerminalAppearance(appearance: TerminalAppearance): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(terminalAppearanceStorageKey, JSON.stringify(appearance));
+  window.dispatchEvent(new CustomEvent("repomon:terminal-appearance-changed", { detail: appearance }));
+}

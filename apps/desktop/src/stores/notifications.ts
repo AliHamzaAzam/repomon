@@ -7,7 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createSignal } from "solid-js";
 
 import type { PendingDialog } from "../bindings";
-import { desktopSoundPlayer, type SoundCue, type SoundPlayer } from "../audio/sound";
+import { desktopSoundPlayer, type SoundCue, type SoundPlayer, type SoundProfile } from "../audio/sound";
 import { setAgentIconOverrides } from "../components/icons";
 import { daemonCall, subscribeDaemon, type ConfigView, type DaemonEvent } from "../ipc/rpc";
 
@@ -313,8 +313,8 @@ export function createNotificationStore(
     return true;
   }
 
-  function preview(cue: SoundCue, volume = preferences.notify_sound_volume) {
-    return sound.play(cue, volume);
+  function preview(cue: SoundCue, volume = preferences.notify_sound_volume, profile?: SoundProfile) {
+    return sound.play(cue, volume, profile);
   }
 
   function markAllRead() {

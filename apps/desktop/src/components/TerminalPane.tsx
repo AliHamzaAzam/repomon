@@ -19,6 +19,7 @@ import {
   type TerminalRenderer,
   type TerminalTarget,
 } from "../ipc/term";
+import { readTerminalAppearance, type TerminalAppearance } from "../theme";
 import AgentHistory from "./AgentHistory";
 import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
 
@@ -34,7 +35,7 @@ interface TerminalPaneProps extends TerminalTarget {
 
 type PaneView = "live" | "history";
 
-function terminalTheme(element: HTMLElement) {
+function terminalTheme(element: HTMLElement, appearance?: TerminalAppearance) {
   // The theme vars hold modern color syntax (space-separated hsl()) that xterm's color
   // parser rejects — it then silently falls back to its defaults (pure-black background,
   // visibly darker than the app's). Resolve each var through the browser to plain rgb().
@@ -50,8 +51,16 @@ function terminalTheme(element: HTMLElement) {
   const varColor = (name: string) => resolve(style.getPropertyValue(name).trim());
   const signal = varColor("--signal");
   const [r, g, b] = signal.match(/\d+(?:\.\d+)?/g) ?? ["100", "196", "187"];
+  const app = appearance ?? readTerminalAppearance();
+
+  let bg = varColor("--background");
+  if (app.tintEnabled) {
+    const pct = Math.round(app.tintOpacity * 100);
+    bg = resolve(`color-mix(in srgb, var(--signal) ${pct}%, var(--background))`);
+  }
+
   return {
-    background: varColor("--background"),
+    background: bg,
     foreground: varColor("--foreground"),
     cursor: signal,
     selectionBackground: `rgba(${r}, ${g}, ${b}, 0.24)`,
@@ -183,6 +192,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       if (disposed) return;
 
       input = createInputCoalescer(target, (error) => setTransportError(errorMessage(error)));
+      const initialApp = readTerminalAppearance();
       terminal = new Terminal({
         allowProposedApi: true,
         cursorBlink: true,
@@ -195,12 +205,12 @@ export default function TerminalPane(props: TerminalPaneProps) {
             void openUrl(uri).catch((error: unknown) => setTransportError(errorMessage(error)));
           },
         },
-        fontFamily: '"Berkeley Mono", "SFMono-Regular", "Cascadia Code", monospace',
-        fontSize: 12,
+        fontFamily: `"${initialApp.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`,
+        fontSize: initialApp.fontSize,
         lineHeight: 1.18,
         scrollback: 10_000,
         smoothScrollDuration: 60,
-        theme: terminalTheme(container),
+        theme: terminalTheme(container, initialApp),
       });
       fit = new FitAddon();
       search = new SearchAddon();
@@ -369,6 +379,20 @@ export default function TerminalPane(props: TerminalPaneProps) {
       await syncSize?.();
       setReady(true);
 
+      const applyAppearance = (app?: TerminalAppearance) => {
+        if (!terminal) return;
+        const conf = app ?? readTerminalAppearance();
+        terminal.options.theme = terminalTheme(container, conf);
+        terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
+        terminal.options.fontSize = conf.fontSize;
+        fit?.fit();
+      };
+
+      const onAppearanceChanged = (e: Event) => {
+        applyAppearance((e as CustomEvent<TerminalAppearance>).detail);
+      };
+      window.addEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+
       try {
         const watch = await watchTerminal(
           target,
@@ -376,10 +400,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
           (ack) => applyGrid(ack.cols, ack.rows),
         );
         if (disposed) {
+          window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
           await watch.stop();
           return;
         }
-        stopWatch = watch.stop;
+        stopWatch = async () => {
+          window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+          await watch.stop();
+        };
         setTransportError(null);
         if (props.focused && view() === "live") terminal.focus();
       } catch (error) {

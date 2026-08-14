@@ -1,10 +1,28 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
 import type { AgentChoice } from "../bindings";
-import type { SoundCue } from "../audio/sound";
+import {
+  SOUND_PROFILES,
+  readSoundProfile,
+  saveSoundProfile,
+  type SoundCue,
+  type SoundProfile,
+} from "../audio/sound";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
-import { applyAccent, applyTheme, readTheme, ACCENT_SWATCHES, THEME_PRESETS, type Theme } from "../theme";
+import {
+  applyAccent,
+  applyTheme,
+  readTheme,
+  readTerminalAppearance,
+  saveTerminalAppearance,
+  ACCENT_SWATCHES,
+  DEFAULT_TERMINAL_APPEARANCE,
+  TERMINAL_FONT_FAMILIES,
+  THEME_PRESETS,
+  type Theme,
+  type TerminalAppearance,
+} from "../theme";
 import AutomationSettings from "./AutomationSettings";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
@@ -29,7 +47,7 @@ interface SettingsModalProps {
   onClose: () => void;
   initialTab?: SettingsTab;
   onConfigSaved?: (config: ConfigView) => void;
-  onPreviewSound?: (cue: SoundCue, volume: number) => boolean;
+  onPreviewSound?: (cue: SoundCue, volume: number, profile?: SoundProfile) => boolean;
   onUpdateAvailable?: (version: string) => void;
 }
 
@@ -161,6 +179,8 @@ export default function SettingsModal(props: SettingsModalProps) {
   }
 
   const [currentTheme, setCurrentTheme] = createSignal<Theme>(readTheme());
+  const [activeSoundProfile, setActiveSoundProfile] = createSignal<SoundProfile>(readSoundProfile());
+  const [terminalApp, setTerminalApp] = createSignal<TerminalAppearance>(readTerminalAppearance());
 
   function selectTheme(themeId: Theme) {
     setCurrentTheme(themeId);
@@ -579,6 +599,45 @@ export default function SettingsModal(props: SettingsModalProps) {
                       onChange={(event) => patch({ notify_sound_volume: Number(event.currentTarget.value) })}
                     />
                   </label>
+                  <div class="space-y-2 border-t border-line/70 pt-4">
+                    <div>
+                      <p class="section-label">Sound Profile</p>
+                      <p class="mt-0.5 text-xs text-muted">
+                        Select the acoustic personality and synthesizer contour for all notification sound cues.
+                      </p>
+                    </div>
+                    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      <For each={SOUND_PROFILES}>
+                        {(prof) => {
+                          const isSelected = () => activeSoundProfile() === prof.id;
+                          return (
+                            <button
+                              type="button"
+                              class={`focus-ring flex flex-col rounded-xl border p-2.5 text-left transition-all ${
+                                isSelected()
+                                  ? "border-signal bg-signal/5 ring-1 ring-signal/30"
+                                  : "border-line bg-surface hover:bg-raised/50"
+                              }`}
+                              onClick={() => {
+                                setActiveSoundProfile(prof.id);
+                                saveSoundProfile(prof.id);
+                                props.onPreviewSound?.("agent-finished", settings().notify_sound_volume, prof.id);
+                              }}
+                            >
+                              <div class="flex items-center justify-between">
+                                <span class="text-xs font-semibold text-foreground">{prof.name}</span>
+                                <Show when={isSelected()}>
+                                  <span class="text-signal"><IconCheck size={13} /></span>
+                                </Show>
+                              </div>
+                              <span class="mt-1 text-[11px] text-muted leading-snug">{prof.description}</span>
+                            </button>
+                          );
+                        }}
+                      </For>
+                    </div>
+                  </div>
+
                   <div class="grid gap-2 sm:grid-cols-2">
                     <For each={SOUND_CUE_CONTROLS}>
                       {(item) => (
@@ -595,7 +654,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                             type="button"
                             class="focus-ring rounded-md border border-line bg-surface px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
                             aria-label={`Preview ${item.label}`}
-                            onClick={() => props.onPreviewSound?.(item.cue, settings().notify_sound_volume)}
+                            onClick={() => props.onPreviewSound?.(item.cue, settings().notify_sound_volume, activeSoundProfile())}
                           >
                             Play
                           </button>
@@ -728,7 +787,82 @@ export default function SettingsModal(props: SettingsModalProps) {
                   </div>
                 </section>
 
-                {/* 3. Layout & Visual Preferences */}
+                {/* 3. Terminal Pane Customization & Background Tint */}
+                <section class="space-y-3 border-t border-line/70 pt-5">
+                  <div>
+                    <p class="section-label">Terminal Pane Appearance</p>
+                    <p class="mt-0.5 text-xs text-muted">
+                      Optionally tint agent terminal backgrounds using the theme accent, and configure font styling.
+                    </p>
+                  </div>
+
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <Switch
+                      label="Tint terminal background with accent"
+                      checked={terminalApp().tintEnabled}
+                      onChange={(value) => {
+                        const next = { ...terminalApp(), tintEnabled: value };
+                        setTerminalApp(next);
+                        saveTerminalAppearance(next);
+                      }}
+                    />
+                    <label class="block">
+                      <span class="text-xs text-muted">Tint Intensity ({Math.round(terminalApp().tintOpacity * 100)}%)</span>
+                      <input
+                        class="mt-1.5 w-full accent-signal"
+                        type="range"
+                        min="0.01"
+                        max="0.25"
+                        step="0.01"
+                        value={terminalApp().tintOpacity}
+                        disabled={!terminalApp().tintEnabled}
+                        onInput={(e) => {
+                          const next = { ...terminalApp(), tintOpacity: Number(e.currentTarget.value) };
+                          setTerminalApp(next);
+                          saveTerminalAppearance(next);
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <label class="block">
+                      <span class="text-xs text-muted">Terminal Font Family</span>
+                      <select
+                        class="mt-1 w-full rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-foreground focus:border-signal outline-none"
+                        value={terminalApp().fontFamily}
+                        onChange={(e) => {
+                          const next = { ...terminalApp(), fontFamily: e.currentTarget.value };
+                          setTerminalApp(next);
+                          saveTerminalAppearance(next);
+                        }}
+                      >
+                        <For each={TERMINAL_FONT_FAMILIES}>
+                          {(font) => <option value={font.id}>{font.label}</option>}
+                        </For>
+                      </select>
+                    </label>
+
+                    <label class="block">
+                      <span class="text-xs text-muted">Terminal Font Size ({terminalApp().fontSize}px)</span>
+                      <input
+                        class="mt-1.5 w-full accent-signal"
+                        type="range"
+                        min="10"
+                        max="18"
+                        step="1"
+                        value={terminalApp().fontSize}
+                        onInput={(e) => {
+                          const next = { ...terminalApp(), fontSize: Number(e.currentTarget.value) };
+                          setTerminalApp(next);
+                          saveTerminalAppearance(next);
+                        }}
+                      />
+                    </label>
+                  </div>
+                </section>
+
+                {/* 4. Layout & Visual Preferences */}
                 <section class="space-y-3 border-t border-line/70 pt-5">
                   <p class="section-label">Sidebar & Layout</p>
                   <Switch
