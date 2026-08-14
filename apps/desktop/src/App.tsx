@@ -379,23 +379,28 @@ function App(props: AppProps) {
       <footer
         role="status"
         aria-label="Daemon connection"
-        class="connection-rail grid grid-cols-[auto_minmax(10rem,1fr)_auto_auto_auto] items-center gap-4 border-t border-line bg-surface px-3.5 font-mono text-[11px] text-muted"
+        class="connection-rail flex items-center justify-between border-t border-line bg-surface px-3.5 py-1.5 font-mono text-[11px] text-muted"
       >
-        <div class="flex items-center gap-2 text-foreground font-medium">
-          <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
-          <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
+        <div class="flex items-center gap-2 min-w-0">
+          <div
+            class="flex items-center gap-1.5 text-foreground font-medium cursor-default"
+            title={`Daemon socket: ${connection().endpoint}`}
+          >
+            <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
+            <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
+          </div>
+          <Show when={connection().message}>
+            {(msg) => <span class="truncate text-fault ml-2 font-sans text-xs">{msg()}</span>}
+          </Show>
         </div>
-        <span class="flex min-w-0 items-center gap-2 truncate">
-          <span class="truncate">{connection().endpoint}</span>
-          {connection().message ? (
-            <span class="truncate text-fault">{connection().message}</span>
-          ) : null}
-        </span>
-        <span>App {appVersion() || "--"} · daemon {connection().daemon?.version ?? "--"}</span>
-        <span>
-          {connection().daemon?.repos ?? 0} repos / {connection().daemon?.lanes ?? 0} lanes
-        </span>
-        <span>Uptime {formatUptime(connection().daemon?.uptime_secs)}</span>
+
+        <div class="flex items-center gap-4 text-muted shrink-0">
+          <span>
+            {connection().daemon?.repos ?? 0} repos / {connection().daemon?.lanes ?? 0} lanes
+          </span>
+          <span>Uptime {formatUptime(connection().daemon?.uptime_secs)}</span>
+          <span>App {appVersion() || "--"} · daemon {connection().daemon?.version ?? "--"}</span>
+        </div>
       </footer>
 
       <ActionModals actions={actions} notifications={notifications} />

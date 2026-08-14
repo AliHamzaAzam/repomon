@@ -80,4 +80,72 @@ describe("fleet sidebar hiding", () => {
     expect(screen.queryByText("No repositories yet.")).not.toBeInTheDocument();
     expect(screen.getByText(/Every project is hidden/)).toBeInTheDocument();
   });
+
+  it("renders consistent lane row anatomy and telemetry", () => {
+    const alpha = repo(1, "alpha");
+    const testLane: Lane = {
+      ...lane(10, alpha),
+      state: {
+        ...lane(10, alpha).state,
+        ahead: 2,
+        behind: 1,
+        dirty: { staged: 1, unstaged: 2, untracked: 0 },
+      },
+      agent_sessions: [
+        {
+          id: 1,
+          agent: "claude-code",
+          repo_id: 1,
+          worktree_id: 10,
+          started_at: "2026-07-20T00:00:00Z",
+          last_activity_at: "2026-07-20T00:00:00Z",
+          ended_at: null,
+          manifest_path: "/tmp/manifest",
+          tool_call_count: 0,
+          title: null,
+          status: "running",
+          external: false,
+          session_id: null,
+          resume_at: null,
+          inferred: false,
+          tmux_window: "lane-1",
+          last_message: null,
+          pending_prompt: null,
+          stale: false,
+          config_dir: null,
+          custom_label: "Alpha Worker",
+        },
+      ],
+    };
+    const { fleet, actions } = stubs([alpha], [testLane]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText("Alpha Worker")).toBeInTheDocument();
+    expect(screen.getByText("main")).toBeInTheDocument();
+    expect(screen.getByTitle(/3 uncommitted files/)).toBeInTheDocument();
+    expect(screen.getByTitle(/2 ahead, 1 behind upstream/)).toBeInTheDocument();
+  });
+
+  it("renders structured usage rate limits card with clear labels", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({
+      label: "claude-3-5-sonnet",
+      age_secs: 15,
+      report: {
+        windows: [
+          { label: "5h", pct_used: 12 },
+          { label: "wk", pct_used: 85 },
+        ],
+      },
+    });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText(/Rate Limits/)).toBeInTheDocument();
+    expect(screen.getByText("5-Hour Quota")).toBeInTheDocument();
+    expect(screen.getByText("12%")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Quota")).toBeInTheDocument();
+    expect(screen.getByText("85%")).toBeInTheDocument();
+  });
 });

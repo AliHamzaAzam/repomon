@@ -89,11 +89,11 @@
 .mission-grid {
   display: grid;
   min-height: 0;
-  grid-template-columns: 15rem minmax(0, 1fr) 0;
+  grid-template-columns: 18rem minmax(0, 1fr) 0;
 }
 
 .mission-grid.is-repomind-open {
-  grid-template-columns: 15rem minmax(0, 1fr) 19rem;
+  grid-template-columns: 18rem minmax(0, 1fr) 20rem;
 }
 
 .repomind-panel {

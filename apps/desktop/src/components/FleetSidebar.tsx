@@ -10,6 +10,7 @@ import {
   IconArrowDown,
   IconArrowUp,
   IconClose,
+  IconCpu,
   IconGitBranch,
   IconHide,
   IconLayers,
@@ -30,10 +31,28 @@ function dirtyCount(lane: Lane): number {
   return dirty.staged + dirty.unstaged + dirty.untracked;
 }
 
+function formatUsageWindow(label: string): string {
+  const lower = label.toLowerCase();
+  if (lower === "5h" || lower.includes("5h") || lower.includes("5-hour")) return "5-Hour Quota";
+  if (lower === "wk" || lower.includes("week") || lower === "7d") return "Weekly Quota";
+  if (lower === "day" || lower === "24h" || lower === "1d") return "Daily Limit";
+  if (lower === "fable") return "Model Quota";
+  return label;
+}
+
+function usageTone(pct: number): string {
+  if (pct >= 95) return "text-fault font-semibold";
+  if (pct >= 75) return "text-attention font-semibold";
+  return "text-foreground";
+}
+
 function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
   const indicator = () => laneIndicator(props.lane);
   const primary = () => primarySession(props.lane.agent_sessions);
   const title = () => primary()?.custom_label ?? props.lane.worktree.name;
+  const branchName = () => props.lane.worktree.branch ?? "detached";
+  const dirty = () => dirtyCount(props.lane);
+  const sessionCount = () => props.lane.agent_sessions.length;
 
   return (
     <button
@@ -41,52 +60,117 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
       class={`fleet-row focus-ring ${props.selected ? "is-selected" : ""}`}
       onClick={props.select}
       aria-current={props.selected ? "true" : undefined}
+      title={`${title()} (${branchName()})`}
     >
-      <span class={`lane-pulse is-${indicator().tone}`} aria-hidden="true" />
-      <span class="min-w-0 flex-1 text-left">
-        <span class="flex items-center gap-1.5">
-          <Show when={primary()}>
-            <span class="shrink-0 text-muted/80">
-              <AgentIcon agent={primary()?.agent} size={12} />
-            </span>
-          </Show>
-          <span class="truncate text-xs font-medium text-foreground">{title()}</span>
-          <Show when={props.lane.agent_sessions.length > 1}>
-            <span
-              class="inline-flex shrink-0 items-center gap-0.5 rounded border border-line bg-raised px-1 py-0.5 font-mono text-[10px] leading-none text-muted"
-              title={`${props.lane.agent_sessions.length} agents open in this lane`}
-              aria-label={`${props.lane.agent_sessions.length} agents open`}
-            >
-              <IconLayers size={10} />
-              <span>{props.lane.agent_sessions.length}</span>
-            </span>
-          </Show>
-          <Show when={props.lane.pinned}>
-            <span class="text-signal" aria-label="Pinned">
-              <IconPin size={11} />
-            </span>
-          </Show>
-        </span>
-        <span class="mt-0.5 flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-muted">
-          <span class="flex items-center gap-1 truncate">
-            <IconGitBranch size={11} />
-            <span class="truncate">{props.lane.worktree.branch ?? "detached"}</span>
+      {/* 1. Leading Icon Slot (Fixed Width with Corner Status Pulse) */}
+      <div class="relative flex size-6 shrink-0 items-center justify-center rounded-md bg-raised/60">
+        <Show
+          when={primary()}
+          fallback={<AgentIcon shell size={13} class="text-muted/60" />}
+        >
+          {(agentSession) => (
+            <AgentIcon
+              agent={agentSession().agent}
+              size={13}
+              class={
+                indicator().tone === "signal"
+                  ? "text-signal"
+                  : indicator().tone === "attention"
+                  ? "text-attention"
+                  : indicator().tone === "fault"
+                  ? "text-fault"
+                  : props.selected
+                  ? "text-foreground"
+                  : "text-muted"
+              }
+            />
+          )}
+        </Show>
+        <span
+          class={`absolute -top-0.5 -right-0.5 size-2 rounded-full border-2 border-surface ${
+            indicator().tone === "signal"
+              ? "bg-signal ring-1 ring-signal/30"
+              : indicator().tone === "attention"
+              ? "bg-attention ring-1 ring-attention/30 animate-pulse"
+              : indicator().tone === "fault"
+              ? "bg-fault ring-1 ring-fault/30"
+              : "bg-muted/40"
+          }`}
+          aria-hidden="true"
+        />
+      </div>
+
+      {/* 2. Middle Content Area (Title & Branch Name) */}
+      <div class="min-w-0 flex-1 text-left">
+        <div class="flex items-center gap-1">
+          <span
+            class={`truncate text-xs font-medium ${
+              props.selected ? "text-foreground font-semibold" : "text-foreground/90"
+            }`}
+            title={title()}
+          >
+            {title()}
           </span>
+          <Show when={props.lane.pinned}>
+            <span class="shrink-0 text-signal" title="Pinned lane" aria-label="Pinned">
+              <IconPin size={10} />
+            </span>
+          </Show>
+        </div>
+
+        <div class="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted">
+          <IconGitBranch size={10} class="shrink-0 text-muted/60" />
+          <span class="truncate" title={`Branch: ${branchName()}`}>
+            {branchName()}
+          </span>
+        </div>
+      </div>
+
+      {/* 3. Trailing Metadata & Badges Column (Fixed Right Alignment) */}
+      <div class="shrink-0 flex flex-col items-end justify-center gap-0.5 text-right font-mono">
+        {/* Top slot: Multi-session badge + Status indicator */}
+        <div class="flex items-center gap-1">
+          <Show when={sessionCount() > 1}>
+            <span
+              class="inline-flex items-center gap-0.5 rounded border border-line bg-raised px-1 py-0.5 text-[9px] leading-none text-muted"
+              title={`${sessionCount()} agents open in this lane`}
+              aria-label={`${sessionCount()} agents open`}
+            >
+              <IconLayers size={9} />
+              <span>{sessionCount()}</span>
+            </span>
+          </Show>
+          <span class={`lane-badge is-${indicator().tone}`}>
+            {indicator().label}
+          </span>
+        </div>
+
+        {/* Bottom slot: Telemetry in fixed order: Divergence (ahead/behind), Dirty count */}
+        <div class="flex items-center gap-1.5 text-[10px] text-muted min-h-[14px]">
           <Show when={props.lane.state.ahead || props.lane.state.behind}>
-            <span class="inline-flex items-center gap-0.5 text-[10px]">
-              <Show when={props.lane.state.ahead}><IconArrowUp size={10} />{props.lane.state.ahead}</Show>
-              <Show when={props.lane.state.behind}><IconArrowDown size={10} />{props.lane.state.behind}</Show>
+            <span
+              class="inline-flex items-center gap-0.5 leading-none"
+              title={`Git tracking: ${props.lane.state.ahead} ahead, ${props.lane.state.behind} behind upstream`}
+            >
+              <Show when={props.lane.state.ahead}>
+                <span class="text-signal inline-flex items-center"><IconArrowUp size={9} />{props.lane.state.ahead}</span>
+              </Show>
+              <Show when={props.lane.state.behind}>
+                <span class="text-muted inline-flex items-center"><IconArrowDown size={9} />{props.lane.state.behind}</span>
+              </Show>
             </span>
           </Show>
-          <Show when={dirtyCount(props.lane) > 0}>
-            <span class="inline-flex items-center gap-1 text-[10px] text-attention font-semibold">
+          <Show when={dirty() > 0}>
+            <span
+              class="inline-flex items-center gap-0.5 leading-none text-attention font-semibold"
+              title={`${dirty()} uncommitted file${dirty() === 1 ? "" : "s"} (${props.lane.state.dirty.staged} staged, ${props.lane.state.dirty.unstaged} unstaged, ${props.lane.state.dirty.untracked} untracked)`}
+            >
               <span class="size-1.5 rounded-full bg-attention" />
-              <span>{dirtyCount(props.lane)}</span>
+              <span>{dirty()}</span>
             </span>
           </Show>
-        </span>
-      </span>
-      <span class={`lane-badge is-${indicator().tone}`}>{indicator().label}</span>
+        </div>
+      </div>
     </button>
   );
 }
@@ -144,46 +228,56 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               );
               return (
                 <Show when={laneList().length > 0 || !props.fleet.query()}>
-                  <section class="group/repo mb-2.5" aria-label={repo.name}>
+                  <section class="mb-2.5" aria-label={repo.name}>
                     <div
-                      class="flex items-center justify-between px-2 py-1"
+                      class="group/repo-header flex items-center justify-between rounded px-2 py-1 text-muted transition-colors hover:bg-raised/40"
                       onContextMenu={(event) => {
                         event.preventDefault();
                         setExtMenu({ repoId: repo.id, x: event.clientX, y: event.clientY });
                       }}
                     >
-                      <span class="truncate font-mono text-[11px] font-semibold uppercase tracking-wider text-muted">
+                      <span
+                        class="truncate font-mono text-[11px] font-semibold uppercase tracking-wider text-muted hover:text-foreground transition-colors cursor-default"
+                        title={`Repository: ${repo.name} (${repo.path})`}
+                      >
                         {repo.name}
                       </span>
-                      <span class="flex items-center gap-1">
-                        <button
-                          type="button"
-                          class="focus-ring flex size-5 items-center justify-center rounded text-muted opacity-0 transition-opacity hover:bg-raised hover:text-signal focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
-                          onClick={() => props.actions.newLane(repo.id)}
-                          title={`New lane in ${repo.name}`}
-                          aria-label={`New lane in ${repo.name}`}
+                      <span class="flex items-center gap-1 shrink-0">
+                        <div class="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/repo-header:opacity-100 focus-within:opacity-100">
+                          <button
+                            type="button"
+                            class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-signal"
+                            onClick={() => props.actions.newLane(repo.id)}
+                            title={`New lane in ${repo.name}`}
+                            aria-label={`New lane in ${repo.name}`}
+                          >
+                            <IconPlus size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                            onClick={() => void props.actions.setRepoHidden(repo, true)}
+                            title={`Hide ${repo.name} (stays registered)`}
+                            aria-label={`Hide ${repo.name}`}
+                          >
+                            <IconHide size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-fault"
+                            onClick={() => props.actions.removeRepo(repo)}
+                            title={`Remove ${repo.name}`}
+                            aria-label={`Remove ${repo.name}`}
+                          >
+                            <IconClose size={12} />
+                          </button>
+                        </div>
+                        <span
+                          class="ml-0.5 rounded bg-raised px-1 font-mono text-[10px] text-muted"
+                          title={`${laneList().length} active lane${laneList().length === 1 ? "" : "s"}`}
                         >
-                          <IconPlus size={12} />
-                        </button>
-                        <button
-                          type="button"
-                          class="focus-ring flex size-5 items-center justify-center rounded text-muted opacity-0 transition-opacity hover:bg-raised hover:text-foreground focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
-                          onClick={() => void props.actions.setRepoHidden(repo, true)}
-                          title={`Hide ${repo.name} (stays registered)`}
-                          aria-label={`Hide ${repo.name}`}
-                        >
-                          <IconHide size={12} />
-                        </button>
-                        <button
-                          type="button"
-                          class="focus-ring flex size-5 items-center justify-center rounded text-muted opacity-0 transition-opacity hover:bg-raised hover:text-fault focus-visible:opacity-100 group-focus-within/repo:opacity-100 group-hover/repo:opacity-100"
-                          onClick={() => props.actions.removeRepo(repo)}
-                          title={`Remove ${repo.name}`}
-                          aria-label={`Remove ${repo.name}`}
-                        >
-                          <IconClose size={12} />
-                        </button>
-                        <span class="ml-0.5 rounded bg-raised px-1 font-mono text-[10px] text-muted">{laneList().length}</span>
+                          {laneList().length}
+                        </span>
                       </span>
                     </div>
                     <div class="space-y-0.5">
@@ -271,8 +365,9 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         )}
       </Show>
 
-      <div class="border-t border-line bg-surface/50 p-3">
-        <div class="grid grid-cols-2 gap-2 text-xs text-muted">
+      <div class="border-t border-line bg-surface/50 p-2.5 space-y-2">
+        {/* Fleet Summary Counters */}
+        <div class="grid grid-cols-2 gap-1.5 text-xs text-muted">
           <span class="flex items-center justify-between rounded-md bg-raised/50 px-2 py-1 font-mono text-[11px]">
             <span>Needs you</span>
             <b class="text-attention">{props.fleet.counts().urgent}</b>
@@ -282,19 +377,32 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             <b class="text-signal">{props.fleet.counts().running}</b>
           </span>
         </div>
+
+        {/* Rate Limits & Usage Quota */}
         <Show when={props.fleet.focusedUsage()}>
           {(usage) => (
-            <div class="mt-2.5 border-t border-line/60 pt-2">
+            <div class="rounded-lg border border-line/60 bg-raised/30 p-2">
               <div class="mb-1.5 flex items-center justify-between font-mono text-[10px] text-muted">
-                <span class="font-medium text-foreground">{usage().label}</span>
-                <span>{usage().age_secs}s ago</span>
+                <span class="font-semibold uppercase tracking-wider text-muted/90 flex items-center gap-1">
+                  <IconCpu size={11} class="text-muted/70" />
+                  <span>Rate Limits ({usage().label})</span>
+                </span>
+                <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
+                  {usage().age_secs < 60 ? "just now" : `${Math.floor(usage().age_secs / 60)}m ago`}
+                </span>
               </div>
-              <div class="flex flex-wrap gap-1">
+              <div class="space-y-1">
                 <For each={usage().report.windows}>
                   {(window) => (
-                    <span class="rounded border border-line bg-raised px-1.5 py-0.5 font-mono text-[10px] text-muted">
-                      {window.label} {window.pct_used}%
-                    </span>
+                    <div
+                      class="flex items-center justify-between font-mono text-[10px] text-muted py-0.5"
+                      title={`${formatUsageWindow(window.label)}: ${window.pct_used}% used`}
+                    >
+                      <span class="text-muted/80">{formatUsageWindow(window.label)}</span>
+                      <span class={`rounded bg-raised px-1.5 py-0.2 ${usageTone(window.pct_used)}`}>
+                        {window.pct_used}%
+                      </span>
+                    </div>
                   )}
                 </For>
               </div>
