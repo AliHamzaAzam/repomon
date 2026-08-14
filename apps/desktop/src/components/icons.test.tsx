@@ -26,15 +26,17 @@ describe("Agent icon resolution and catalog", () => {
     }
   });
 
-  it("resolves default icons for known built-in agents", () => {
-    expect(resolveAgentIconKey("claude-code")).toBe("sparkle");
-    expect(resolveAgentIconKey("claude")).toBe("sparkle");
+  it("resolves official brand marks as defaults for Claude, Antigravity, Codex, OpenCode", () => {
+    expect(resolveAgentIconKey("claude-code")).toBe("brand-claude");
+    expect(resolveAgentIconKey("claude")).toBe("brand-claude");
+    expect(resolveAgentIconKey("antigravity")).toBe("brand-antigravity");
+    expect(resolveAgentIconKey("agy")).toBe("brand-antigravity");
+    expect(resolveAgentIconKey("codex")).toBe("brand-openai");
+    expect(resolveAgentIconKey("opencode")).toBe("brand-opencode");
+
+    // Cursor and Aider keep their abstract defaults
     expect(resolveAgentIconKey("cursor")).toBe("cursor");
     expect(resolveAgentIconKey("aider")).toBe("binary-orbit");
-    expect(resolveAgentIconKey("codex")).toBe("code-brackets");
-    expect(resolveAgentIconKey("antigravity")).toBe("antigravity");
-    expect(resolveAgentIconKey("agy")).toBe("antigravity");
-    expect(resolveAgentIconKey("opencode")).toBe("brackets");
   });
 
   it("falls back to bot for unknown custom agents without overrides", () => {
@@ -49,24 +51,35 @@ describe("Agent icon resolution and catalog", () => {
       "custom-cli-tool": "bolt",
       "data-analyzer": "radar",
       codex: "compass",
+      "claude-code": "sparkle",
     });
 
     expect(agentIconOverrides()["custom-cli-tool"]).toBe("bolt");
     expect(resolveAgentIconKey("custom-cli-tool")).toBe("bolt");
     expect(resolveAgentIconKey("data-analyzer")).toBe("radar");
     expect(resolveAgentIconKey("codex")).toBe("compass");
-    // Other built-ins remain default
     expect(resolveAgentIconKey("claude-code")).toBe("sparkle");
+    // Non-overridden brand remains default
+    expect(resolveAgentIconKey("antigravity")).toBe("brand-antigravity");
   });
 
-  it("renders AgentIcon with custom key or shell", () => {
+  it("renders AgentIcon with brand marks, custom key or shell", () => {
     const { container: c1 } = render(() => <AgentIcon shell />);
     expect(c1.querySelector("svg")).toBeTruthy();
 
-    const { container: c2 } = render(() => <AgentIcon agent="codex" />);
+    const { container: c2 } = render(() => <AgentIcon agent="claude-code" />);
     expect(c2.querySelector("svg")).toBeTruthy();
 
-    const { container: c3 } = render(() => <AgentIcon agent="my-bot" iconKey="shield" />);
+    const { container: c3 } = render(() => <AgentIcon agent="antigravity" />);
     expect(c3.querySelector("svg")).toBeTruthy();
+
+    const { container: c4 } = render(() => <AgentIcon agent="codex" />);
+    expect(c4.querySelector("svg")).toBeTruthy();
+
+    const { container: c5 } = render(() => <AgentIcon agent="opencode" />);
+    expect(c5.querySelector("svg")).toBeTruthy();
+
+    const { container: c6 } = render(() => <AgentIcon agent="my-bot" iconKey="brand-claude" />);
+    expect(c6.querySelector("svg")).toBeTruthy();
   });
 });
