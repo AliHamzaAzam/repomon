@@ -56,8 +56,8 @@ afterEach(() => {
   state.config = { ...config };
 });
 
-describe("Settings sound persistence", () => {
-  it("sends every edited sound preference and keeps the saved response", async () => {
+describe("Settings auto-save persistence", () => {
+  it("automatically saves sound preferences immediately on change", async () => {
     state.config = { ...config };
     render(() => (
       <SettingsModal
@@ -68,13 +68,16 @@ describe("Settings sound persistence", () => {
 
     const focusOnly = await screen.findByRole("switch", { name: "Only while unfocused" });
     fireEvent.click(focusOnly);
-    fireEvent.click(screen.getByRole("switch", { name: "Agent needs you" }));
-    fireEvent.input(screen.getByRole("slider"), { target: { value: "0.6" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.saved.length).toBe(1));
 
-    await screen.findByText("Settings saved.");
-    expect(calls.saved).toHaveLength(1);
-    expect(calls.saved[0]).toMatchObject({
+    fireEvent.click(screen.getByRole("switch", { name: "Agent needs you" }));
+    await waitFor(() => expect(calls.saved.length).toBe(2));
+
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "0.6" } });
+    await waitFor(() => expect(calls.saved.length).toBe(3));
+
+    await screen.findByText("Saved");
+    expect(calls.saved[calls.saved.length - 1]).toMatchObject({
       notify_sound: true,
       notify_sound_volume: 0.6,
       notify_sound_unfocused_only: false,
@@ -88,7 +91,7 @@ describe("Settings sound persistence", () => {
     await waitFor(() => expect(focusOnly).toHaveAttribute("aria-checked", "false"));
   });
 
-  it("configures and saves custom agent icon overrides", async () => {
+  it("automatically saves custom agent icon overrides immediately on selection", async () => {
     state.config = { ...config, agent_icons: {} };
     render(() => (
       <SettingsModal
@@ -110,12 +113,10 @@ describe("Settings sound persistence", () => {
     const lightningButton = screen.getByRole("button", { name: /Lightning Bolt/i });
     fireEvent.click(lightningButton);
 
-    // Save changes
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await screen.findByText("Settings saved.");
+    await waitFor(() => expect(calls.saved.length).toBeGreaterThan(0));
+    await screen.findByText("Saved");
 
-    expect(calls.saved).toHaveLength(1);
-    expect(calls.saved[0].agent_icons).toMatchObject({
+    expect(calls.saved[calls.saved.length - 1].agent_icons).toMatchObject({
       codex: "bolt",
     });
   });

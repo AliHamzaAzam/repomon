@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
 import type { AgentChoice } from "../bindings";
 import type { SoundCue } from "../audio/sound";
@@ -112,7 +112,6 @@ export default function SettingsModal(props: SettingsModalProps) {
   const [agents, setAgents] = createSignal<AgentChoice[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<string | null>(null);
-  const [saving, setSaving] = createSignal(false);
   const [checking, setChecking] = createSignal(false);
   const [progress, setProgress] = createSignal<UpdateProgress | null>(null);
   const [availableUpdate, setAvailableUpdate] = createSignal<AvailableUpdate | null>(null);
@@ -132,9 +131,51 @@ export default function SettingsModal(props: SettingsModalProps) {
     void daemonCall("agent.detect").then(setAgents).catch(() => undefined);
   });
 
-  function patch(next: Partial<ConfigView>) {
+  const [saveStatus, setSaveStatus] = createSignal<"idle" | "saving" | "saved" | "error">("idle");
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  onCleanup(() => {
+    if (saveTimer) clearTimeout(saveTimer);
+    if (debounceTimer) clearTimeout(debounceTimer);
+  });
+
+  async function persistConfig(nextConfig: ConfigView) {
+    setSaveStatus("saving");
+    setError(null);
+    try {
+      const saved = await daemonCall("config.set", nextConfig);
+      setConfig(saved);
+      props.onConfigSaved?.(saved);
+      if (saved.accent) applyAccent(saved.accent);
+      if (saved.agent_icons) setAgentIconOverrides(saved.agent_icons);
+      setSaveStatus("saved");
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => setSaveStatus("idle"), 2000);
+    } catch (cause) {
+      setSaveStatus("error");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function patch(next: Partial<ConfigView>, debounce = false) {
     const current = config();
-    if (current) setConfig({ ...current, ...next });
+    if (!current) return;
+    const merged = { ...current, ...next };
+    setConfig(merged);
+    if (next.accent) applyAccent(next.accent);
+    if (next.agent_icons) setAgentIconOverrides(next.agent_icons);
+
+    if (debounce) {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      setSaveStatus("saving");
+      debounceTimer = setTimeout(() => {
+        void persistConfig(merged);
+      }, 400);
+    } else {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      void persistConfig(merged);
+    }
   }
 
   function updateAgentIcon(agentName: string, iconId: string | null) {
@@ -149,7 +190,6 @@ export default function SettingsModal(props: SettingsModalProps) {
       nextIcons[lower] = iconId;
     }
     patch({ agent_icons: nextIcons });
-    setAgentIconOverrides(nextIcons);
   }
 
   const knownAgentsList = () => {
@@ -204,26 +244,6 @@ export default function SettingsModal(props: SettingsModalProps) {
     );
   };
 
-  async function save() {
-    const current = config();
-    if (!current) return;
-    setSaving(true);
-    setError(null);
-    setStatus(null);
-    try {
-      const saved = await daemonCall("config.set", current);
-      setConfig(saved);
-      props.onConfigSaved?.(saved);
-      applyAccent(saved.accent);
-      if (saved.agent_icons) setAgentIconOverrides(saved.agent_icons);
-      setStatus("Settings saved.");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function checkForUpdates() {
     setChecking(true);
     setError(null);
@@ -263,23 +283,29 @@ export default function SettingsModal(props: SettingsModalProps) {
 
   const footer = (): JSX.Element => (
     <>
-      <Show when={status()}>
-        <span class="mr-auto text-xs text-muted">{status()}</span>
-      </Show>
+      <div class="mr-auto flex items-center gap-2">
+        <Show when={saveStatus() === "saving"}>
+          <span class="flex items-center gap-1.5 font-mono text-[11px] text-muted">
+            <IconRefresh size={11} class="animate-spin text-signal" />
+            <span>Saving…</span>
+          </span>
+        </Show>
+        <Show when={saveStatus() === "saved"}>
+          <span class="flex items-center gap-1.5 font-mono text-[11px] text-signal transition-opacity">
+            <IconCheck size={12} strokeWidth={2.5} />
+            <span>Saved</span>
+          </span>
+        </Show>
+        <Show when={status()}>
+          <span class="text-xs text-muted">{status()}</span>
+        </Show>
+      </div>
       <button
         type="button"
-        class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+        class="focus-ring rounded-lg border border-line bg-surface px-4 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-raised"
         onClick={props.onClose}
       >
-        Close
-      </button>
-      <button
-        type="button"
-        class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
-        disabled={saving() || !config()}
-        onClick={() => void save()}
-      >
-        {saving() ? "Saving…" : "Save"}
+        Done
       </button>
     </>
   );
@@ -324,8 +350,8 @@ export default function SettingsModal(props: SettingsModalProps) {
                   options={agentSelectOptions(agents(), settings().default_agent)}
                   onChange={(value) => patch({ default_agent: value || null })}
                 />
-                <TextField label="Worktree Template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value })} />
-                <TextField label="Auto-continue Message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value })} />
+                <TextField label="Worktree Template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value }, true)} />
+                <TextField label="Auto-continue Message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value }, true)} />
                 <div class="grid gap-2 sm:grid-cols-2">
                   <For each={GENERAL_TOGGLES}>
                     {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
@@ -520,6 +546,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                       value={settings().notify_sound_volume}
                       disabled={!settings().notify_enabled || !settings().notify_sound}
                       onInput={(event) => patch({ notify_sound_volume: Number(event.currentTarget.value) })}
+                      onChange={(event) => patch({ notify_sound_volume: Number(event.currentTarget.value) })}
                     />
                   </label>
                   <div class="grid gap-2 sm:grid-cols-2">
@@ -565,7 +592,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                   options={agentSelectOptions(agents(), settings().orchestrator_agent)}
                   onChange={(value) => patch({ orchestrator_agent: value || null })}
                 />
-                <TextField label="Repomind Model" value={String(settings().orchestrator_model ?? "")} placeholder="opus / sonnet" onInput={(value) => patch({ orchestrator_model: value || null })} />
+                <TextField label="Repomind Model" value={String(settings().orchestrator_model ?? "")} placeholder="opus / sonnet" onInput={(value) => patch({ orchestrator_model: value || null }, true)} />
               </section>
             </Show>
 
