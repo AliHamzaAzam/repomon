@@ -408,13 +408,16 @@
   background: var(--surface);
 }
 
-.terminal-host .xterm,
-.terminal-host .xterm-viewport,
-.terminal-host .xterm-screen {
+.terminal-host {
+  background: var(--background);
+}
+
+.terminal-host .xterm {
   height: 100%;
 }
 
 .terminal-host .xterm-viewport {
+  height: 100%;
   scrollbar-color: var(--line) transparent;
   scrollbar-width: thin;
 }

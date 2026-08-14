@@ -107,6 +107,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   const [finding, setFinding] = createSignal(false);
   const [query, setQuery] = createSignal("");
   const [view, setView] = createSignal<PaneView>("live");
+  const [paneBg, setPaneBg] = createSignal<string>("");
 
   function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error);
@@ -193,6 +194,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       input = createInputCoalescer(target, (error) => setTransportError(errorMessage(error)));
       const initialApp = readTerminalAppearance();
+      const initialTheme = terminalTheme(container, initialApp);
+      setPaneBg(initialTheme.background);
       terminal = new Terminal({
         allowProposedApi: true,
         cursorBlink: true,
@@ -210,7 +213,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         lineHeight: 1.18,
         scrollback: 10_000,
         smoothScrollDuration: 60,
-        theme: terminalTheme(container, initialApp),
+        theme: initialTheme,
       });
       fit = new FitAddon();
       search = new SearchAddon();
@@ -382,7 +385,9 @@ export default function TerminalPane(props: TerminalPaneProps) {
       const applyAppearance = (app?: TerminalAppearance) => {
         if (!terminal) return;
         const conf = app ?? readTerminalAppearance();
-        terminal.options.theme = terminalTheme(container, conf);
+        const theme = terminalTheme(container, conf);
+        setPaneBg(theme.background);
+        terminal.options.theme = theme;
         terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
         terminal.options.fontSize = conf.fontSize;
         fit?.fit();
@@ -431,13 +436,15 @@ export default function TerminalPane(props: TerminalPaneProps) {
   });
 
   return (
-    <section class="relative h-full min-h-0 overflow-hidden bg-background" aria-label={props.label}>
-      {/* Insets, not padding: FitAddon measures this element's full box and only subtracts
-          xterm's own padding, so container padding would overshoot the fit by its size —
-          the bottom rows would then render past the pane (hidden under the status bar). */}
+    <section
+      class="relative h-full min-h-0 overflow-hidden bg-background"
+      style={{ "background-color": paneBg() || undefined }}
+      aria-label={props.label}
+    >
       <div
         ref={container}
-        class={`terminal-host absolute inset-x-2 bottom-2 top-7 ${view() === "live" ? "" : "invisible pointer-events-none"}`}
+        class={`terminal-host absolute inset-x-2 bottom-0 top-7 ${view() === "live" ? "" : "invisible pointer-events-none"}`}
+        style={{ "background-color": paneBg() || undefined }}
         aria-hidden={view() !== "live"}
       />
       <Show when={props.sessionId}>
