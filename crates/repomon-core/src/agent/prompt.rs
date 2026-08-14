@@ -108,6 +108,12 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
         let numbered = block.iter().filter(|(_, n, _)| n.is_some()).count();
         let has_cursor = block.iter().any(|(c, _, _)| *c);
         if numbered >= 2 && has_cursor {
+            // If there is subsequent content below this option block (e.g. the dialog was answered
+            // and the agent proceeded or finished), this dialog is dead scrollback, not an active prompt.
+            if has_trailing_content(&cleaned, block_end) {
+                return None;
+            }
+
             // The usage-limit menu is handled by the auto-continue watcher, not as a prompt.
             if block
                 .iter()
@@ -244,6 +250,33 @@ fn has_confirm_footer(cleaned: &[String], block_end: usize) -> bool {
     cleaned[block_end + 1..end]
         .iter()
         .any(|l| l.to_lowercase().contains("enter to confirm"))
+}
+
+/// Whether content exists below `block_end` indicating this dialog is historical scrollback
+/// rather than the active prompt at the tail of the pane.
+fn has_trailing_content(cleaned: &[String], block_end: usize) -> bool {
+    let is_footer_or_border = |line: &str| {
+        let t = line.trim();
+        if t.is_empty() {
+            return true;
+        }
+        let lower = t.to_lowercase();
+        if lower.contains("enter to confirm")
+            || lower.contains("enter to submit")
+            || lower.contains("esc to cancel")
+            || lower.contains("type a number")
+            || lower.contains("use arrow keys")
+            || lower.contains("for shortcuts")
+            || t == "❯"
+            || t == ">"
+            || t.chars().all(|c| "╰╯─━│┌┐└┘├┤┼_╭╮·| ".contains(c))
+        {
+            return true;
+        }
+        false
+    };
+
+    cleaned[block_end + 1..].iter().any(|l| !is_footer_or_border(l))
 }
 
 /// How a pending prompt should be handled by an orchestrator: a routine **permission** ask the
@@ -481,6 +514,18 @@ mod tests {
             detect_pending_prompt(pane).as_deref(),
             Some("Do you want to apply the patch?")
         );
+    }
+
+    #[test]
+    fn answered_dialog_with_trailing_prose_is_not_a_pending_prompt() {
+        let pane = "╭───────────────────────────────╮\n\
+            │ Do you want to proceed?       │\n\
+            │ ❯ 1. Yes                      │\n\
+            │   2. No                       │\n\
+            ╰───────────────────────────────╯\n\
+            ● ran the tool\n\
+            I have completed the task and all tests pass.";
+        assert_eq!(detect_pending_prompt(pane), None);
     }
 
     #[test]

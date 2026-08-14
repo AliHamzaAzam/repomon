@@ -180,7 +180,7 @@ export default function RepomindPanel(props: RepomindPanelProps) {
         )}
       </Show>
 
-      <div class="flex items-center justify-between border-b border-line px-3 py-2" role="tablist" aria-label="Repomind views">
+      <div class="flex h-10 shrink-0 items-center justify-between border-b border-line px-3.5" role="tablist" aria-label="Repomind views">
         <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5">
           <button
             type="button"
