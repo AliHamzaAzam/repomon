@@ -5,6 +5,7 @@ import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import type { WorkspaceStore } from "../stores/workspace";
+import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
 import {
   warmTargetWindows,
@@ -12,7 +13,6 @@ import {
 } from "./terminalTargets";
 import {
   AgentIcon,
-  IconChevronDown,
   IconClose,
   IconFocus,
   IconGrid,
@@ -225,21 +225,17 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             </button>
           </div>
 
-          <div class="relative">
-            <select
-              aria-label="Terminal renderer"
-              class="focus-ring h-7 appearance-none rounded-lg border border-line bg-surface pl-2 pr-6 font-mono text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-muted/50 focus:text-foreground"
-              value={renderer()}
-              onChange={(event) => chooseRenderer(event.currentTarget.value as TerminalRenderer)}
-            >
-              <option value="auto">auto</option>
-              <option value="webgl">webgl</option>
-              <option value="dom">dom</option>
-            </select>
-            <span class="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted">
-              <IconChevronDown size={10} strokeWidth={2} />
-            </span>
-          </div>
+          <Select
+            size="sm"
+            ariaLabel="Terminal renderer"
+            value={renderer()}
+            options={[
+              { value: "auto", label: "auto" },
+              { value: "webgl", label: "webgl" },
+              { value: "dom", label: "dom" },
+            ]}
+            onChange={(val) => chooseRenderer(val as TerminalRenderer)}
+          />
         </div>
       </div>
 
