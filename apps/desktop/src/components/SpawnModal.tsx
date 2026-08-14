@@ -2,7 +2,7 @@ import { For, Show, createSignal, onMount } from "solid-js";
 
 import type { AgentChoice, Lane } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
-import { IconBot } from "./icons";
+import { AgentIcon } from "./icons";
 import Modal from "./Modal";
 
 export default function SpawnModal(props: { lane: Lane; onClose: () => void; onDone: () => Promise<void> }) {
@@ -83,7 +83,7 @@ export default function SpawnModal(props: { lane: Lane; onClose: () => void; onD
                 >
                   <div class="flex items-center gap-2">
                     <span class={agent() === choice.name ? "text-signal" : "text-muted"}>
-                      <IconBot size={15} />
+                      <AgentIcon agent={choice.name} size={15} />
                     </span>
                     <span class="text-xs font-medium">{choice.name}</span>
                   </div>

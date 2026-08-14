@@ -522,3 +522,170 @@ export function IconFocus(props: IconProps): JSX.Element {
     </svg>
   );
 }
+
+export function IconAgentClaudeCode(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <line x1="12" y1="2" x2="12" y2="22" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+      <line x1="19.07" y1="4.93" x2="4.93" y2="19.07" />
+      <circle cx="12" cy="12" r="2.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function IconAgentCursor(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <polygon points="4 4 11 20 14 13 21 10 4 4" />
+      <line x1="13.5" y1="13.5" x2="19" y2="19" />
+    </svg>
+  );
+}
+
+export function IconAgentAider(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="12" r="3" />
+      <path d="M9 12h6" />
+      <path d="M12 9l3 3-3 3" />
+      <path d="M6 9a6 6 0 0 1 12 0" stroke-dasharray="2 2" />
+    </svg>
+  );
+}
+
+export function IconAgentCodex(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <polyline points="7 8 3 12 7 16" />
+      <polyline points="17 8 21 12 17 16" />
+      <line x1="14" y1="4" x2="10" y2="20" />
+    </svg>
+  );
+}
+
+export function IconAgentAntigravity(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M12 3L4 17h16L12 3z" />
+      <circle cx="12" cy="12" r="2" fill="currentColor" />
+      <ellipse cx="12" cy="17" rx="9" ry="3" stroke-dasharray="2 2" />
+    </svg>
+  );
+}
+
+export function IconAgentOpenCode(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M7 4a3 3 0 0 0-3 3v2a3 3 0 0 1-3 3 3 3 0 0 1 3 3v2a3 3 0 0 0 3 3" />
+      <path d="M17 4a3 3 0 0 1 3 3v2a3 3 0 0 0 3 3 3 3 0 0 0-3 3v2a3 3 0 0 1-3 3" />
+      <polyline points="10 9 13 12 10 15" />
+    </svg>
+  );
+}
+
+export interface AgentIconProps extends IconProps {
+  agent?: string | null;
+  shell?: boolean;
+}
+
+export function AgentIcon(props: AgentIconProps): JSX.Element {
+  if (props.shell) {
+    return <IconTerminal {...props} />;
+  }
+
+  const raw = props.agent?.toLowerCase().trim() ?? "";
+  if (raw === "claude-code" || raw === "claude") {
+    return <IconAgentClaudeCode {...props} />;
+  }
+  if (raw === "cursor") {
+    return <IconAgentCursor {...props} />;
+  }
+  if (raw === "aider") {
+    return <IconAgentAider {...props} />;
+  }
+  if (raw === "codex") {
+    return <IconAgentCodex {...props} />;
+  }
+  if (raw === "antigravity" || raw === "agy") {
+    return <IconAgentAntigravity {...props} />;
+  }
+  if (raw === "opencode") {
+    return <IconAgentOpenCode {...props} />;
+  }
+  return <IconBot {...props} />;
+}

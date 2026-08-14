@@ -4,6 +4,7 @@ export interface PaneTarget {
   label: string;
   shell: boolean;
   sessionId: string | null;
+  agent?: string | null;
 }
 
 export function dedupe(targets: PaneTarget[]): PaneTarget[] {
@@ -58,6 +59,7 @@ export function stabilizeTargets(
     prev.label = target.label;
     prev.shell = target.shell;
     prev.sessionId = target.sessionId;
+    prev.agent = target.agent;
     return prev;
   });
   for (const window of [...cache.keys()]) {

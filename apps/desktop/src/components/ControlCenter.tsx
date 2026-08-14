@@ -9,6 +9,7 @@ import type { NotificationStore } from "../stores/notifications";
 import type { MessageStore } from "../stores/messages";
 import type { ActionsStore } from "../stores/actions";
 import {
+  AgentIcon,
   IconBot,
   IconCheck,
   IconClose,
@@ -514,11 +515,12 @@ export default function ControlCenter(props: ControlCenterProps) {
                           {(agent, index) => (
                             <button
                               type="button"
-                              class={`focus-ring rounded border px-2 py-1 text-xs ${selectedAgent() === agent ? "border-signal/40 bg-signal/10 text-signal" : "border-line text-muted"}`}
+                              class={`focus-ring inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${selectedAgent() === agent ? "border-signal/40 bg-signal/10 text-signal" : "border-line text-muted"}`}
                               aria-pressed={selectedAgent() === agent}
                               onClick={() => setSelectedAgentKey(agentKey(agent, index()))}
                             >
-                              {agentLabel(agent)}
+                              <AgentIcon agent={agent.agent} size={12} />
+                              <span>{agentLabel(agent)}</span>
                             </button>
                           )}
                         </For>

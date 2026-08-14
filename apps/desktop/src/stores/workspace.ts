@@ -57,6 +57,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
       label: agentLabel(agent),
       shell: false,
       sessionId: agent.session_id,
+      agent: agent.agent,
     }] : []),
     ...terminals()
       .filter((terminal) => terminal.lane_id === lane.id)
@@ -66,6 +67,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
         label: `shell ${terminal.id.split("-").slice(-1)[0]}`,
         shell: true,
         sessionId: null,
+        agent: null,
       })),
   ]))), undefined, { equals: sameTargets });
 

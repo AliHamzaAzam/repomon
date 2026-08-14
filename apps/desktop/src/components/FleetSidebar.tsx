@@ -6,6 +6,7 @@ import type { ActionsStore } from "../stores/actions";
 import { primarySession } from "./agentLabel";
 import RepoExtMenu from "./RepoExtMenu";
 import {
+  AgentIcon,
   IconArrowDown,
   IconArrowUp,
   IconClose,
@@ -44,6 +45,11 @@ function LaneRow(props: { lane: Lane; selected: boolean; select: () => void }) {
       <span class={`lane-pulse is-${indicator().tone}`} aria-hidden="true" />
       <span class="min-w-0 flex-1 text-left">
         <span class="flex items-center gap-1.5">
+          <Show when={primary()}>
+            <span class="shrink-0 text-muted/80">
+              <AgentIcon agent={primary()?.agent} size={12} />
+            </span>
+          </Show>
           <span class="truncate text-xs font-medium text-foreground">{title()}</span>
           <Show when={props.lane.agent_sessions.length > 1}>
             <span

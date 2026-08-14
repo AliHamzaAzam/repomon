@@ -11,7 +11,7 @@ import {
   type PaneTarget,
 } from "./terminalTargets";
 import {
-  IconBot,
+  AgentIcon,
   IconChevronDown,
   IconClose,
   IconFocus,
@@ -150,7 +150,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                   onClick={() => setActiveWindow(target.window)}
                 >
                   <span class={target.shell ? "text-attention" : "text-signal"}>
-                    {target.shell ? <IconTerminal size={13} /> : <IconBot size={13} />}
+                    <AgentIcon agent={target.agent} shell={target.shell} size={13} />
                   </span>
                   <span class="max-w-44 truncate">{labelOf(target)}</span>
                 </button>
