@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use repomon_core::SessionBackend;
 use repomon_core::agent::backend::{CaptureOpts, SpawnSpec};
-use repomon_core::agent::{self, UsageReport, parse_codex_status, parse_usage};
+use repomon_core::agent::{
+    self, UsageReport, parse_antigravity_usage, parse_codex_status, parse_usage,
+};
 
 use crate::Ctx;
 
@@ -193,9 +195,25 @@ fn codex_spec() -> ProbeSpec {
     }
 }
 
-/// Enumerate accounts worth probing: each used Claude config dir, plus Codex if it's installed
-/// (its config dir exists). A never-run Claude account is skipped so first-run onboarding can't
-/// trap the probe.
+fn antigravity_spec() -> ProbeSpec {
+    ProbeSpec {
+        command: "agy".to_string(),
+        slash: "/usage",
+        parse: parse_antigravity_usage,
+        ready: &[
+            "antigravity cli",
+            "models & quota",
+            "gemini 3.7",
+            "gemini 2.5",
+            "gemini 3.5",
+            "for shortcuts",
+        ],
+        trust: &["trust this folder", "do you trust"],
+    }
+}
+
+/// Enumerate accounts worth probing: each used Claude config dir, plus Codex and Antigravity if
+/// installed. A never-run Claude account is skipped so first-run onboarding can't trap the probe.
 fn accounts() -> Vec<Account> {
     let default = agent::claude::default_config_base();
     let mut out: Vec<Account> = agent::claude::config_bases()
@@ -216,11 +234,19 @@ fn accounts() -> Vec<Account> {
             }
         })
         .collect();
-    if probe_cwd().join(".codex").is_dir() {
+    let home = probe_cwd();
+    if home.join(".codex").is_dir() {
         out.push(Account {
             key: "codex".to_string(),
             label: "codex".to_string(),
             spec: codex_spec(),
+        });
+    }
+    if home.join(".gemini").is_dir() || home.join(".config/gemini").is_dir() {
+        out.push(Account {
+            key: "antigravity".to_string(),
+            label: "antigravity".to_string(),
+            spec: antigravity_spec(),
         });
     }
     out

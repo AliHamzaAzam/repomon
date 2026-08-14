@@ -51,9 +51,9 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Parse a `NN%` percentage: the integer immediately preceding a `%`. Returns the first such
-/// value (≤ 100; a larger number is treated as a mis-parse and skipped). Lenient about whatever
-/// precedes the digits (bar glyphs, spaces).
+/// Parse a `NN%` or `NN.NN%` percentage immediately preceding a `%`. Returns the rounded
+/// integer value (≤ 100; a larger number is treated as a mis-parse and skipped). Lenient about
+/// whatever precedes the digits (bar glyphs, spaces).
 pub(crate) fn parse_pct(s: &str) -> Option<u8> {
     let b = s.as_bytes();
     for (i, &c) in b.iter().enumerate() {
@@ -64,10 +64,19 @@ pub(crate) fn parse_pct(s: &str) -> Option<u8> {
         while j > 0 && b[j - 1].is_ascii_digit() {
             j -= 1;
         }
+        if j > 0 && b[j - 1] == b'.' {
+            let mut k = j - 1;
+            while k > 0 && b[k - 1].is_ascii_digit() {
+                k -= 1;
+            }
+            if k < j - 1 {
+                j = k;
+            }
+        }
         if j < i {
-            if let Ok(n) = s[j..i].parse::<u32>() {
-                if n <= 100 {
-                    return Some(n as u8);
+            if let Ok(f) = s[j..i].parse::<f64>() {
+                if (0.0..=100.0).contains(&f) {
+                    return Some(f.round() as u8);
                 }
             }
         }
@@ -75,12 +84,63 @@ pub(crate) fn parse_pct(s: &str) -> Option<u8> {
     None
 }
 
-/// Resolve a reset moment from text that may carry a date (`"jun 21 at 7:59pm"`) or just a clock
-/// time (`"resets 11:59pm"`). Date-bearing strings resolve to that calendar day (this year, or
-/// next year if already well past); bare times use [`parse_reset_at`]'s today/tomorrow logic.
+/// Resolve a reset moment from text that may carry a date (`"jun 21 at 7:59pm"`), a clock
+/// time (`"resets 11:59pm"`), or a relative duration (`"refreshes in 4h 18m"`). Date-bearing strings
+/// resolve to that calendar day (this year, or next year if already well past); bare times use
+/// [`parse_reset_at`]'s today/tomorrow logic; relative durations add hours and minutes to `now`.
 /// Input should be lowercased.
 pub(crate) fn parse_reset_datetime(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
-    parse_dated(lower, now).or_else(|| parse_reset_at(lower, now))
+    parse_dated(lower, now)
+        .or_else(|| parse_reset_at(lower, now))
+        .or_else(|| parse_relative_duration(lower, now))
+}
+
+/// Parse relative refresh durations like "refreshes in 4h 18m" or "refreshes in 106h 14m" or "in 2h".
+pub(crate) fn parse_relative_duration(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
+    let target = if let Some(idx) = lower.find("refreshes in") {
+        &lower[idx + "refreshes in".len()..]
+    } else if let Some(idx) = lower.find("in ") {
+        &lower[idx + "in ".len()..]
+    } else {
+        lower
+    };
+
+    let mut total_mins: i64 = 0;
+    let mut found = false;
+
+    // Look for hours: (\d+)h
+    if let Some(h_idx) = target.find('h') {
+        let mut start = h_idx;
+        while start > 0 && target.as_bytes()[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        if start < h_idx {
+            if let Ok(hours) = target[start..h_idx].parse::<i64>() {
+                total_mins += hours * 60;
+                found = true;
+            }
+        }
+    }
+
+    // Look for minutes: (\d+)m (must not be part of month name)
+    if let Some(m_idx) = target.find('m') {
+        let mut start = m_idx;
+        while start > 0 && target.as_bytes()[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        if start < m_idx {
+            if let Ok(mins) = target[start..m_idx].parse::<i64>() {
+                total_mins += mins;
+                found = true;
+            }
+        }
+    }
+
+    if found && total_mins > 0 {
+        Some((now + Duration::minutes(total_mins)).with_timezone(&Utc))
+    } else {
+        None
+    }
 }
 
 const MONTHS: [&str; 12] = [

@@ -33,8 +33,20 @@ function dirtyCount(lane: Lane): number {
 
 function formatUsageWindow(label: string): string {
   const lower = label.toLowerCase();
-  if (lower === "5h" || lower.includes("5h") || lower.includes("5-hour")) return "5-Hour Quota";
-  if (lower === "wk" || lower.includes("week") || lower === "7d") return "Weekly Quota";
+  if (lower === "5h" || lower.includes("5h") || lower.includes("5-hour")) {
+    if (lower.startsWith("claude") || lower.startsWith("gemini") || lower.startsWith("gpt")) {
+      const prefix = lower.split(/[-_]/)[0];
+      return `${prefix.charAt(0).toUpperCase() + prefix.slice(1)} 5h Quota`;
+    }
+    return "5-Hour Quota";
+  }
+  if (lower === "wk" || lower.includes("wk") || lower.includes("week") || lower === "7d") {
+    if (lower.startsWith("claude") || lower.startsWith("gemini") || lower.startsWith("gpt")) {
+      const prefix = lower.split(/[-_]/)[0];
+      return `${prefix.charAt(0).toUpperCase() + prefix.slice(1)} Weekly Quota`;
+    }
+    return "Weekly Quota";
+  }
   if (lower === "mo" || lower.includes("month") || lower === "30d") return "Monthly Quota";
   if (lower === "day" || lower === "24h" || lower === "1d") return "Daily Limit";
   if (lower === "fable") return "Model Quota";

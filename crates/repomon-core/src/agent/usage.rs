@@ -113,6 +113,80 @@ pub fn parse_codex_status(pane: &str) -> Option<UsageReport> {
     (!windows.is_empty()).then_some(UsageReport { windows })
 }
 
+/// Parse Antigravity's (`agy`) `/usage` screen.
+///
+/// Antigravity renders a "Models & Quota" screen with model groups (e.g. "GEMINI MODELS",
+/// "CLAUDE AND GPT MODELS"), displaying "Five Hour Limit Remaining" and "Weekly Limit Remaining"
+/// with percentage bars (reporting **% remaining**, converted to **% used**) and relative reset
+/// times (e.g. "Refreshes in 4h 18m").
+pub fn parse_antigravity_usage(pane: &str) -> Option<UsageReport> {
+    let now = Local::now();
+    let mut windows = Vec::new();
+    let lines: Vec<String> = pane.lines().map(strip_ansi).collect();
+
+    let mut current_prefix = "";
+
+    for (i, line) in lines.iter().enumerate() {
+        let low = line.to_lowercase();
+        if low.contains("gemini models") {
+            current_prefix = "";
+        } else if low.contains("claude") && low.contains("models") {
+            current_prefix = "claude-";
+        } else if low.contains("gpt") && low.contains("models") {
+            current_prefix = "gpt-";
+        }
+
+        let is_5h = (low.contains("five hour") || low.contains("5-hour") || low.contains("5 hour"))
+            && low.contains("limit");
+        let is_wk = low.contains("weekly") && low.contains("limit");
+
+        if is_5h || is_wk {
+            let label = if is_5h {
+                format!("{current_prefix}5h")
+            } else {
+                format!("{current_prefix}wk")
+            };
+
+            let mut pct_left = None;
+            let mut reset = None;
+            for next_line in lines.iter().skip(i + 1).take(4) {
+                let next_low = next_line.to_lowercase();
+                if (next_low.contains("limit remaining") || next_low.contains("models"))
+                    && !next_low.contains("within this group")
+                {
+                    break;
+                }
+                if pct_left.is_none() {
+                    pct_left = parse_pct(next_line);
+                }
+                if reset.is_none() && next_low.contains("refresh") {
+                    reset = parse_reset_datetime(&next_low, now);
+                }
+            }
+
+            if let Some(left) = pct_left {
+                let pct_used = 100u8.saturating_sub(left);
+                windows.push(window(&label, pct_used, reset));
+            }
+        }
+    }
+
+    if windows.is_empty() {
+        return None;
+    }
+
+    // Sort to place 5h before wk for each group
+    windows.sort_by_key(|w| match w.label.as_str() {
+        "5h" => 0,
+        "wk" => 1,
+        "claude-5h" => 2,
+        "claude-wk" => 3,
+        _ => 4,
+    });
+
+    Some(UsageReport { windows })
+}
+
 fn window(label: &str, pct_used: u8, reset_at: Option<DateTime<Utc>>) -> UsageWindow {
     UsageWindow {
         label: label.to_string(),
@@ -257,5 +331,44 @@ mod tests {
         let r = parse_codex_status(pane).expect("paid parse");
         assert_eq!(win(&r, "5h").pct_used, 68); // 100 - 32
         assert_eq!(win(&r, "wk").pct_used, 12); // 100 - 88
+    }
+
+    #[test]
+    fn parses_antigravity_models_quota_capture() {
+        let pane = r#"
+└ Models & Quota
+
+  Account: user@example.com
+
+GEMINI MODELS
+  Models within this group: Gemini Flash, Gemini Pro
+
+  Weekly Limit Remaining
+    [███████████████████████████████████░░░░░░░░░░░░░░░] 70.80%
+    71% remaining · Refreshes in 106h 14m
+
+  Five Hour Limit Remaining
+    [██████████████████████████████████████████████░░░░] 92.36%
+    92% remaining · Refreshes in 4h 18m
+
+
+CLAUDE AND GPT MODELS
+  Models within this group: Claude Opus, Claude Sonnet, GPT-OSS
+
+  Weekly Limit Remaining
+    [██████████████████████████████████████████████████] 100.00%
+    Quota available
+
+  Five Hour Limit Remaining
+    [██████████████████████████████████████████████████] 100.00%
+    Quota available
+"#;
+        let r = parse_antigravity_usage(pane).expect("antigravity usage parsed");
+        assert_eq!(win(&r, "5h").pct_used, 8); // 100 - 92
+        assert_eq!(win(&r, "wk").pct_used, 29); // 100 - 71
+        assert_eq!(win(&r, "claude-5h").pct_used, 0); // 100 - 100
+        assert_eq!(win(&r, "claude-wk").pct_used, 0); // 100 - 100
+        assert!(win(&r, "5h").reset_at.is_some());
+        assert!(win(&r, "wk").reset_at.is_some());
     }
 }

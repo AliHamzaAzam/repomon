@@ -171,4 +171,31 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("Monthly Quota")).toBeInTheDocument();
     expect(screen.getByText("65%")).toBeInTheDocument();
   });
+
+  it("renders antigravity usage with model groups correctly", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({
+      label: "antigravity",
+      age_secs: 10,
+      report: {
+        windows: [
+          { label: "5h", pct_used: 8 },
+          { label: "wk", pct_used: 29 },
+          { label: "claude-5h", pct_used: 0 },
+          { label: "claude-wk", pct_used: 0 },
+        ],
+      },
+    });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText("Rate Limits (antigravity)")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour Quota")).toBeInTheDocument();
+    expect(screen.getByText("8%")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Quota")).toBeInTheDocument();
+    expect(screen.getByText("29%")).toBeInTheDocument();
+    expect(screen.getByText("Claude 5h Quota")).toBeInTheDocument();
+    expect(screen.getByText("Claude Weekly Quota")).toBeInTheDocument();
+  });
 });

@@ -34,7 +34,10 @@ pub use backend::{
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
 pub use tmux::{TmuxRuntime, WindowMeta, shell_quote};
-pub use usage::{AccountUsage, UsageReport, UsageWindow, parse_codex_status, parse_usage};
+pub use usage::{
+    AccountUsage, UsageReport, UsageWindow, parse_antigravity_usage, parse_codex_status,
+    parse_usage,
+};
 #[cfg(windows)]
 pub use windows::WindowsBackend;
 

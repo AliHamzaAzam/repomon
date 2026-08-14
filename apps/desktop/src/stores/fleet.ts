@@ -87,6 +87,7 @@ export function laneIndicator(lane: Lane): LaneIndicator {
 /// lanes to `"default"` and showed them Claude's numbers.
 export function accountKeyOf(session: AgentSession): string {
   if (session.agent === "codex") return "codex";
+  if (session.agent === "antigravity" || session.agent === "agy") return "antigravity";
   return session.config_dir ?? "default";
 }
 
