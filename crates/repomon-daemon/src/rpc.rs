@@ -4358,11 +4358,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 /// sessions are writing right now (`fresh`).
 ///
 /// With the reliable `ps`-based probe, `alive` is trustworthy: a count of 0 means no live agent,
-/// so a `/exit`ed session's lingering transcript is dropped rather than shown. `fresh` is a
-/// backstop — a session writing right now is kept regardless of the probe — and a probe failure
-/// (`None`) doesn't filter at all.
+/// so a `/exit`ed or stopped session's lingering transcript is dropped immediately rather than
+/// lingering as a phantom external session. When `alive > 0` or `managed_n > 0`, `fresh` acts as a
+/// backstop, and a probe failure (`None`) doesn't filter.
 fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh: usize) -> usize {
     match alive {
+        Some(0) if managed_n == 0 => 0,
         Some(n) => n.max(managed_n).max(fresh).min(total),
         None => total, // probe unavailable: don't filter
     }
@@ -5206,7 +5207,7 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
         .filter_map(|line| {
             let (pid, comm) = line.trim_start().split_once(char::is_whitespace)?;
             let base = comm.trim().rsplit('/').next().unwrap_or("");
-            matches!(base, "claude" | "opencode" | "agy").then(|| pid.to_string())
+            matches!(base, "claude" | "opencode" | "agy" | "codex" | "cursor").then(|| pid.to_string())
         })
         .collect();
     let mut counts: HashMap<PathBuf, usize> = HashMap::new();
@@ -5234,7 +5235,7 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
 #[cfg(target_os = "linux")]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     let mut combined = HashMap::new();
-    for name in ["claude", "opencode", "agy"] {
+    for name in ["claude", "opencode", "agy", "codex", "cursor"] {
         for (path, count) in live_cwds_by_name(name)? {
             *combined.entry(path).or_insert(0) += count;
         }
@@ -6452,12 +6453,12 @@ mod tests {
         // total, alive, managed_n, fresh
         // A live agent (alive>=1) is kept; with several stale transcripts, only the live one(s).
         assert_eq!(sessions_to_keep(5, Some(1), 0, 0), 1);
-        // No live process and nothing writing -> a /exit'ed session is dropped (the user's ask).
+        // No live process and no managed window -> a /exit'ed session is dropped immediately without lingering.
         assert_eq!(sessions_to_keep(5, Some(0), 0, 0), 0);
-        // A session writing right now is kept even if the probe momentarily reads 0 (backstop).
-        assert_eq!(sessions_to_keep(5, Some(0), 0, 1), 1);
+        assert_eq!(sessions_to_keep(5, Some(0), 0, 1), 0);
         // A managed lane keeps its window count.
         assert_eq!(sessions_to_keep(3, Some(0), 1, 0), 1);
+        assert_eq!(sessions_to_keep(3, Some(0), 1, 1), 1);
         // keep = max(alive, managed_n, fresh), capped at the number that exist.
         assert_eq!(sessions_to_keep(5, Some(2), 1, 3), 3);
         assert_eq!(sessions_to_keep(1, Some(5), 0, 0), 1);
