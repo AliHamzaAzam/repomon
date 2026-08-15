@@ -221,15 +221,15 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         {/* Scrollable Tab Strip Container with Edge Masks and Overflow Controls */}
         <div class="relative flex min-w-0 flex-1 items-center">
           <Show when={canScrollLeft()}>
-            <div class="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex items-center pr-3 bg-gradient-to-r from-surface via-surface/85 to-transparent">
+            <div class="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-16 items-center bg-gradient-to-r from-surface from-40% via-surface/70 to-transparent pl-0.5">
               <button
                 type="button"
-                class="pointer-events-auto focus-ring flex size-5 items-center justify-center rounded-md bg-raised/90 text-muted shadow-xs hover:bg-raised hover:text-foreground transition-colors"
+                class="pointer-events-auto focus-ring flex size-5.5 items-center justify-center rounded-md border border-line/70 bg-surface text-muted shadow-sm hover:border-line hover:bg-raised hover:text-foreground transition-colors"
                 onClick={() => scrollByDelta(-140)}
                 aria-label="Scroll tabs left"
                 title="Scroll left"
               >
-                <IconChevronLeft size={11} />
+                <IconChevronLeft size={12} />
               </button>
             </div>
           </Show>
@@ -316,15 +316,15 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </div>
 
           <Show when={canScrollRight()}>
-            <div class="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex items-center pl-3 bg-gradient-to-l from-surface via-surface/85 to-transparent">
+            <div class="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-16 items-center justify-end bg-gradient-to-l from-surface from-40% via-surface/70 to-transparent pr-0.5">
               <button
                 type="button"
-                class="pointer-events-auto focus-ring flex size-5 items-center justify-center rounded-md bg-raised/90 text-muted shadow-xs hover:bg-raised hover:text-foreground transition-colors"
+                class="pointer-events-auto focus-ring flex size-5.5 items-center justify-center rounded-md border border-line/70 bg-surface text-muted shadow-sm hover:border-line hover:bg-raised hover:text-foreground transition-colors"
                 onClick={() => scrollByDelta(140)}
                 aria-label="Scroll tabs right"
                 title="Scroll right"
               >
-                <IconChevronRight size={11} />
+                <IconChevronRight size={12} />
               </button>
             </div>
           </Show>
