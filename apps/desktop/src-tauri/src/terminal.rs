@@ -152,10 +152,9 @@ fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
     channel.send(InvokeResponseBody::Raw(bytes)).is_ok()
 }
 
-/// Assemble a resync repaint: clear the screen + scrollback and home, then the captured screen.
-/// tmux joins captured lines with a bare LF, which only moves the cursor DOWN in a raw stream, so
-/// re-anchor each line to column 0 (`\r\n`) — otherwise the repaint staircases to the right (the
-/// same reason the TUI's `Emu::seed_capture` rewrites newlines).
+/// Assemble a resync repaint: clear the visible screen and position each captured row explicitly.
+/// Explicit row positioning ensures that wrapped lines or grid-edge newlines never shift the
+/// viewport or desynchronize cursor coordinates.
 fn resync_frame(content: &str, alternate: bool, cursor: Option<(u16, u16)>) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(content.len() + 64);
     bytes.extend_from_slice(if alternate {
@@ -163,18 +162,10 @@ fn resync_frame(content: &str, alternate: bool, cursor: Option<(u16, u16)>) -> V
     } else {
         b"\x1b[?1049l"
     });
-    bytes.extend_from_slice(b"\x1b[?25l\x1b[?7h\x1b[H\x1b[2J\x1b[3J");
-    if alternate {
-        // A full-screen capture represents cells, not a raw terminal transcript. Position each
-        // row explicitly so wrapping or a grid-edge newline cannot shift the repaint.
-        for (row, line) in content.lines().enumerate() {
-            bytes.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
-            bytes.extend_from_slice(line.as_bytes());
-        }
-    } else {
-        // Normal-screen captures may include shell history. Replaying rows sequentially seeds
-        // xterm's local scrollback while CR anchors tmux's bare LF line separators.
-        bytes.extend_from_slice(content.replace('\n', "\r\n").as_bytes());
+    bytes.extend_from_slice(b"\x1b[?25l\x1b[?7h\x1b[H\x1b[2J");
+    for (row, line) in content.lines().enumerate() {
+        bytes.extend_from_slice(format!("\x1b[{};1H\x1b[2K", row + 1).as_bytes());
+        bytes.extend_from_slice(line.as_bytes());
     }
     if let Some((col, row)) = cursor {
         bytes.extend_from_slice(format!("\x1b[{};{}H\x1b[?25h", row + 1, col + 1).as_bytes());
@@ -198,7 +189,6 @@ async fn capture_resync(
             Some(json!({
                 "lane_id": lane_id,
                 "window": window,
-                "lines": 500,
                 "include_state": true
             })),
         )
@@ -420,19 +410,19 @@ mod tests {
     use super::{MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, resync_frame};
 
     #[test]
-    fn resync_frame_reanchors_bare_newlines() {
+    fn resync_frame_positions_rows_explicitly() {
         let frame = resync_frame("line1\nline2", true, Some((3, 4)));
         let text = String::from_utf8(frame).unwrap();
-        assert!(text.starts_with("\x1b[?1049h\x1b[?25l\x1b[?7h\x1b[H\x1b[2J\x1b[3J"));
-        assert!(text.contains("\x1b[1;1Hline1\x1b[2;1Hline2"));
+        assert!(text.starts_with("\x1b[?1049h\x1b[?25l\x1b[?7h\x1b[H\x1b[2J"));
+        assert!(text.contains("\x1b[1;1H\x1b[2Kline1\x1b[2;1H\x1b[2Kline2"));
         assert!(text.ends_with("\x1b[5;4H\x1b[?25h"));
     }
 
     #[test]
     fn resync_frame_restores_normal_screen_mode() {
         let frame = String::from_utf8(resync_frame("shell\nprompt", false, None)).unwrap();
-        assert!(frame.starts_with("\x1b[?1049l\x1b[?25l\x1b[?7h\x1b[H\x1b[2J\x1b[3J"));
-        assert!(frame.contains("shell\r\nprompt"));
+        assert!(frame.starts_with("\x1b[?1049l\x1b[?25l\x1b[?7h\x1b[H\x1b[2J"));
+        assert!(frame.contains("\x1b[1;1H\x1b[2Kshell\x1b[2;1H\x1b[2Kprompt"));
     }
 
     #[test]
