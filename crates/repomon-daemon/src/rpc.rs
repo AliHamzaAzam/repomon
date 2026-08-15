@@ -3984,6 +3984,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             if !pairing.new_bindings.is_empty() {
                 stamp_batches.push((pairing.new_bindings, pairing.probe));
             }
+            let mut ext_slots_remaining = alive.map(|a| a.saturating_sub(managed_n));
             for (s, win) in summaries.into_iter().zip(pairing.assignment) {
                 let is_fresh = (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
                 if s.last_activity > lane.last_activity_at {
@@ -4041,11 +4042,21 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         lane.agent_sessions.push(session);
                     }
                     None => {
-                        // An unbound summary is ONLY a real external session if it is actively writing
-                        // or supported by external live processes. An older closed transcript that did
-                        // not pair with any window must NOT be presented as an adoptable external session.
-                        let has_ext_proc = alive.map_or(false, |a| a > managed_n);
-                        if is_fresh || has_ext_proc {
+                        // An unbound summary is ONLY a real external session if there are actual external
+                        // processes running outside tmux (alive > managed_n), or if the process probe was
+                        // unavailable (alive == None) and the transcript is actively fresh.
+                        let is_ext = match ext_slots_remaining.as_mut() {
+                            Some(slots) => {
+                                if *slots > 0 {
+                                    *slots -= 1;
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            None => is_fresh,
+                        };
+                        if is_ext {
                             session.external = true;
                             lane.agent_sessions.push(session);
                         }
@@ -4380,8 +4391,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh: usize) -> usize {
     match alive {
         Some(0) if managed_n == 0 => 0,
-        Some(n) => n.max(managed_n).max(fresh).min(total),
-        None => total, // probe unavailable: don't filter
+        Some(n) => n.max(managed_n).min(total),
+        None => managed_n.max(fresh).min(total),
     }
 }
 
@@ -6478,11 +6489,12 @@ mod tests {
         // A managed lane keeps its window count.
         assert_eq!(sessions_to_keep(3, Some(0), 1, 0), 1);
         assert_eq!(sessions_to_keep(3, Some(0), 1, 1), 1);
-        // keep = max(alive, managed_n, fresh), capped at the number that exist.
-        assert_eq!(sessions_to_keep(5, Some(2), 1, 3), 3);
+        // When alive is known, keep = max(alive, managed_n) capped at total, without inflating on stale fresh transcripts.
+        assert_eq!(sessions_to_keep(5, Some(2), 1, 3), 2);
         assert_eq!(sessions_to_keep(1, Some(5), 0, 0), 1);
-        // A probe failure doesn't filter.
-        assert_eq!(sessions_to_keep(2, None, 0, 0), 2);
+        // When probe is unavailable (None), fresh acts as backstop.
+        assert_eq!(sessions_to_keep(5, None, 1, 3), 3);
+        assert_eq!(sessions_to_keep(2, None, 0, 0), 0);
         assert_eq!(sessions_to_keep(0, Some(0), 0, 0), 0);
     }
 
