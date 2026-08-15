@@ -387,10 +387,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             type="button"
             class={`focus-ring flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
               props.fleet.urgentOnly()
-                ? "border-attention/50 bg-attention/10 text-attention font-semibold"
+                ? "border-attention/50 bg-attention/15 text-attention font-semibold shadow-xs"
                 : props.fleet.counts().urgent > 0
-                  ? "border-attention/30 bg-attention/5 text-attention hover:bg-attention/10"
-                  : "border-line bg-raised/70 text-muted hover:text-foreground hover:bg-raised"
+                  ? "border-attention/30 bg-attention/5 text-attention hover:border-attention/50 hover:bg-attention/10"
+                  : "border-line bg-raised/70 text-muted hover:border-line hover:bg-raised hover:text-foreground"
             }`}
             onClick={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
             aria-pressed={props.fleet.urgentOnly()}
@@ -403,10 +403,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             type="button"
             class={`focus-ring flex h-7 shrink-0 items-center gap-1.5 rounded-lg border px-2 font-mono text-[11px] transition-colors ${
               props.fleet.runningOnly()
-                ? "border-signal/50 bg-signal/10 text-signal font-semibold"
+                ? "border-signal/50 bg-signal/15 text-signal font-semibold shadow-xs"
                 : props.fleet.counts().running > 0
-                  ? "border-line bg-raised/70 text-signal hover:bg-raised"
-                  : "border-line bg-raised/70 text-muted hover:text-foreground hover:bg-raised"
+                  ? "border-signal/30 bg-signal/5 text-signal hover:border-signal/50 hover:bg-signal/10"
+                  : "border-line bg-raised/70 text-muted hover:border-line hover:bg-raised hover:text-foreground"
             }`}
             onClick={() => props.fleet.setRunningOnly(!props.fleet.runningOnly())}
             aria-pressed={props.fleet.runningOnly()}
@@ -419,12 +419,12 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </button>
           <button
             type="button"
-            class="focus-ring flex h-7 shrink-0 items-center gap-1 rounded-lg border border-line bg-raised/70 px-2 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+            class="focus-ring flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/70 text-muted transition-colors hover:border-line hover:bg-raised hover:text-foreground"
             onClick={() => void props.actions.addRepo()}
             title="Add a repository"
+            aria-label="Add a repository"
           >
-            <IconPlus size={12} />
-            <span>Repo</span>
+            <IconPlus size={13} />
           </button>
         </div>
       </div>
