@@ -318,7 +318,7 @@ function App(props: AppProps) {
     <div class="grid h-screen min-h-[36rem] grid-rows-[35px_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
       <header
         data-tauri-drag-region
-        class={`flex h-[35px] items-center justify-between border-b border-line bg-surface/95 pr-3.5 backdrop-blur select-none ${
+        class={`flex h-[35px] items-center justify-between border-b border-line bg-surface/95 pr-1.5 backdrop-blur select-none ${
           isMac() ? "pl-[78px]" : "px-3.5"
         }`}
       >
