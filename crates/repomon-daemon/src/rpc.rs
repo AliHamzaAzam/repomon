@@ -2759,6 +2759,7 @@ pub async fn dispatch(
             // exchange, so the binder could otherwise pair a newer external transcript onto
             // the adopted window and the stamp would wedge it there.
             if let Some(sid) = p.session_id.clone() {
+                ctx.known_managed_sessions.lock().await.insert(sid.clone());
                 let tmux = ctx.backend.clone();
                 let w = window.clone();
                 let k = kind.as_str().into_owned();
@@ -4019,24 +4020,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         .collect();
     {
         let mut prev = ctx.last_managed_windows.lock().await;
-        let vanished: Vec<String> = prev.difference(&managed_now).cloned().collect();
-        if !vanished.is_empty() {
+        if prev.difference(&managed_now).next().is_some() {
             *ctx.live_cwds.lock().await = None;
             // Also drop the sticky-high counts so a `/exit`ed managed agent disappears within one
             // refresh instead of being held for the grace (tmux closes the window as its process
             // dies, so this is the genuine-exit signal — see `live_cwds_cached`).
             ctx.cwds_sticky.lock().await.clear();
-
-            let last_good = ctx.last_good_windows.lock().await;
-            let mut dead = ctx.dead_managed_sessions.lock().await;
-            for v in &vanished {
-                if let Some(sid) = last_good.iter().find(|w| &w.name == v).and_then(|w| w.session.clone()) {
-                    dead.insert(sid);
-                }
-            }
-            if dead.len() > 500 {
-                dead.clear();
-            }
         }
         *prev = managed_now;
     }
@@ -4050,7 +4039,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let rate_limits = ctx.rate_limits.lock().await.clone();
     let auto_off = ctx.auto_continue_off.lock().await.clone();
     let global_auto = ctx.config.read().await.auto_continue;
-    let dead_sessions = ctx.dead_managed_sessions.lock().await.clone();
+    let known_managed = ctx.known_managed_sessions.lock().await.clone();
 
     // Per-lane binding candidates + their probe-window pools, resolved against pane
     // evidence and stamped as `@repomon_session` after the loop.
@@ -4155,7 +4144,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         session.external = false;
                         session.tmux_window = Some(w);
                         if let Some(sid) = &session.session_id {
-                            ctx.dead_managed_sessions.lock().await.remove(sid);
+                            ctx.known_managed_sessions.lock().await.insert(sid.clone());
                         }
                         lane.agent_sessions.push(session);
                     }
@@ -4165,11 +4154,11 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         // unavailable (alive == None) and the transcript is actively fresh.
                         // Furthermore, a session that was previously managed and whose window died is an
                         // exited managed agent, NOT an external session.
-                        let is_dead_managed = session
+                        let was_managed = session
                             .session_id
                             .as_deref()
-                            .map_or(false, |sid| dead_sessions.contains(sid));
-                        let is_ext = if is_dead_managed {
+                            .map_or(false, |sid| known_managed.contains(sid));
+                        let is_ext = if was_managed {
                             false
                         } else {
                             match ext_slots_remaining.as_mut() {
@@ -8063,15 +8052,15 @@ mod tests {
     }
 
     #[test]
-    fn dead_managed_session_is_not_promoted_to_external() {
-        let dead: std::collections::HashSet<String> = ["dead-session-1".to_string()].into_iter().collect();
-        let sid = "dead-session-1";
-        let is_dead_managed = dead.contains(sid);
-        assert!(is_dead_managed);
+    fn managed_session_is_never_promoted_to_external() {
+        let known_managed: std::collections::HashSet<String> = ["managed-session-1".to_string()].into_iter().collect();
+        let sid = "managed-session-1";
+        let was_managed = known_managed.contains(sid);
+        assert!(was_managed);
 
-        // Even with available ext slots (alive=1, managed=0), a dead managed session is suppressed
+        // Even with available ext slots (alive=1, managed=0), an ended managed session is suppressed
         let mut ext_slots_remaining = Some(1usize);
-        let is_ext = if is_dead_managed {
+        let is_ext = if was_managed {
             false
         } else {
             match ext_slots_remaining.as_mut() {
@@ -8090,10 +8079,10 @@ mod tests {
         // Slot count remained untouched
         assert_eq!(ext_slots_remaining, Some(1));
 
-        // A genuine external session (not in dead set) claims the slot
+        // A genuine external session (not in known_managed) claims the slot
         let live_ext_sid = "live-external-session";
-        let is_dead_managed_live = dead.contains(live_ext_sid);
-        let is_ext_live = if is_dead_managed_live {
+        let was_managed_live = known_managed.contains(live_ext_sid);
+        let is_ext_live = if was_managed_live {
             false
         } else {
             match ext_slots_remaining.as_mut() {
