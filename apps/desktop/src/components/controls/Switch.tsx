@@ -16,7 +16,7 @@ export default function Switch(props: {
         aria-checked={props.checked}
         aria-label={props.label}
         disabled={props.disabled}
-        class="focus-ring relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors duration-150 ease-in-out"
+        class="focus-ring relative h-5 w-9 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-150 ease-in-out"
         classList={{
           "bg-signal": props.checked,
           "bg-raised border-line": !props.checked,
@@ -24,10 +24,10 @@ export default function Switch(props: {
         onClick={() => props.onChange(!props.checked)}
       >
         <span
-          class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform duration-150 ease-in-out"
+          class="pointer-events-none absolute left-0.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full bg-white shadow-sm ring-0 transition-transform duration-150 ease-in-out"
           classList={{
-            "translate-x-5": props.checked,
-            "translate-x-0.5 bg-foreground/80": !props.checked,
+            "translate-x-[18px]": props.checked,
+            "translate-x-0 bg-foreground/80": !props.checked,
           }}
         />
       </button>
