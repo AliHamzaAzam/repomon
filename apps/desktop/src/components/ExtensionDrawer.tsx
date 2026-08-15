@@ -1,4 +1,4 @@
-import { Show, createSignal } from "solid-js";
+import { Show, createMemo, createSignal } from "solid-js";
 
 import type { ExtensionsStore, ExtRow } from "../stores/extensions";
 import ConfirmDialog from "./ConfirmDialog";
@@ -13,6 +13,9 @@ interface ExtensionDrawerProps {
 
 export default function ExtensionDrawer(props: ExtensionDrawerProps) {
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const currentAccount = createMemo(() =>
+    props.store.accounts().find((a) => a.key === props.store.account())
+  );
 
   return (
     <aside class="flex w-80 shrink-0 flex-col gap-3.5 border-l border-line bg-surface p-4 text-xs">
@@ -31,7 +34,14 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
         {(row) => {
           const plugin = () => row.plugin;
           const details = () => props.store.detailsFor(plugin().id);
-          const cliTitle = () => (props.store.cliAvailable() ? undefined : "Requires the claude CLI");
+          const cliTitle = () => {
+            if (props.store.cliAvailable()) return undefined;
+            const acc = currentAccount();
+            if (acc && !acc.claude) {
+              return `Requires ${acc.label}`;
+            }
+            return "Requires the claude CLI";
+          };
 
           return (
             <>

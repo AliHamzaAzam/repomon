@@ -1639,8 +1639,13 @@ pub async fn dispatch(
                     Some(ctx.store.get_repo(repo_id).await.map_err(internal)?.path)
                 }
             };
-            // A missing CLI is fine for listing: just leave cli_version unset.
-            let cli_version = claude_cli().await.ok().map(|c| c.version.clone());
+            let cli_version = match account.as_str() {
+                "antigravity" => Some("antigravity".to_string()),
+                "codex" => Some("codex".to_string()),
+                "opencode" => Some("opencode".to_string()),
+                "cursor" => Some("cursor".to_string()),
+                _ => claude_cli().await.ok().map(|c| c.version.clone()),
+            };
             let accounts = crate::ext::ext_accounts();
             let snap = tokio::task::spawn_blocking(move || {
                 let mut snap = crate::ext::scan_for_account(&account, repo_root.as_deref(), cli_version);
@@ -1665,16 +1670,71 @@ pub async fn dispatch(
                         ExtScope::Global => None,
                     };
                     if enabled {
-                        crate::ext::add_opencode_plugin(&p.id, repo_path.as_deref())
+                        crate::ext::enable_opencode_plugin(&p.id, repo_path.as_deref())
                             .map_err(internal)?;
                     } else {
-                        crate::ext::remove_opencode_plugin(&p.id, repo_path.as_deref())
+                        crate::ext::disable_opencode_plugin(&p.id, repo_path.as_deref())
                             .map_err(internal)?;
                     }
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
-                Some("antigravity") | Some("codex") | Some("cursor") => {
+                Some("antigravity") => {
+                    let settings_path = match &p.scope {
+                        ExtScope::Global => {
+                            let dirs = directories::BaseDirs::new()
+                                .ok_or_else(|| internal("no home directory"))?;
+                            dirs.home_dir().join(".gemini/settings.json")
+                        }
+                        ExtScope::Repo { repo_id } => {
+                            let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                            repo.path.join(".gemini/settings.json")
+                        }
+                    };
+                    let raw_name = p.id.split('@').next().unwrap_or(&p.id);
+                    crate::ext::set_plugin_enabled(&settings_path, &p.id, Some(enabled))
+                        .map_err(internal)?;
+                    if raw_name != p.id {
+                        let _ = crate::ext::set_plugin_enabled(&settings_path, raw_name, Some(enabled));
+                    }
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("codex") => {
+                    let settings_path = match &p.scope {
+                        ExtScope::Global => {
+                            let dirs = directories::BaseDirs::new()
+                                .ok_or_else(|| internal("no home directory"))?;
+                            dirs.home_dir().join(".codex/settings.json")
+                        }
+                        ExtScope::Repo { repo_id } => {
+                            let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                            repo.path.join(".codex/settings.json")
+                        }
+                    };
+                    let raw_name = p.id.split('@').next().unwrap_or(&p.id);
+                    crate::ext::set_plugin_enabled(&settings_path, &p.id, Some(enabled))
+                        .map_err(internal)?;
+                    if raw_name != p.id {
+                        let _ = crate::ext::set_plugin_enabled(&settings_path, raw_name, Some(enabled));
+                    }
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("cursor") => {
+                    let settings_path = match &p.scope {
+                        ExtScope::Global => {
+                            let dirs = directories::BaseDirs::new()
+                                .ok_or_else(|| internal("no home directory"))?;
+                            dirs.home_dir().join(".cursor/settings.json")
+                        }
+                        ExtScope::Repo { repo_id } => {
+                            let repo = ctx.store.get_repo(*repo_id).await.map_err(internal)?;
+                            repo.path.join(".cursor/settings.json")
+                        }
+                    };
+                    crate::ext::set_plugin_enabled(&settings_path, &p.id, Some(enabled))
+                        .map_err(internal)?;
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
@@ -1709,20 +1769,34 @@ pub async fn dispatch(
         "plugin.install" => {
             let p: PluginInstall = parse(params)?;
             let account = p.account.as_deref();
+            let repo_path = match &p.scope {
+                ExtScope::Repo { repo_id } => {
+                    Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?.path)
+                }
+                ExtScope::Global => None,
+            };
             match account {
                 Some("opencode") => {
-                    let repo_path = match &p.scope {
-                        ExtScope::Repo { repo_id } => {
-                            Some(ctx.store.get_repo(*repo_id).await.map_err(internal)?.path)
-                        }
-                        ExtScope::Global => None,
-                    };
                     crate::ext::add_opencode_plugin(&p.r#ref, repo_path.as_deref())
                         .map_err(internal)?;
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
-                Some("antigravity") | Some("codex") | Some("cursor") => {
+                Some("antigravity") => {
+                    crate::ext::install_antigravity_plugin(&p.r#ref, repo_path.as_deref())
+                        .map_err(internal)?;
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("codex") => {
+                    crate::ext::install_codex_plugin(&p.r#ref, repo_path.as_deref())
+                        .map_err(internal)?;
+                    ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
+                    Ok(json!({ "ok": true }))
+                }
+                Some("cursor") => {
+                    crate::ext::install_cursor_extension(&p.r#ref, repo_path.as_deref())
+                        .map_err(internal)?;
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
@@ -1784,31 +1858,20 @@ pub async fn dispatch(
                     Ok(json!({ "ok": true }))
                 }
                 Some("antigravity") => {
-                    let plugin_name = p.id.split('@').next().unwrap_or(&p.id);
-                    if let Some(dirs) = directories::BaseDirs::new() {
-                        let gemini = dirs.home_dir().join(".gemini");
-                        for dir in [gemini.join("plugins").join(plugin_name), gemini.join("config/plugins").join(plugin_name)] {
-                            if dir.is_dir() {
-                                let _ = std::fs::remove_dir_all(dir);
-                            }
-                        }
-                    }
+                    crate::ext::remove_antigravity_plugin(&p.id, repo_path.as_deref())
+                        .map_err(internal)?;
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
                 Some("codex") => {
-                    let plugin_name = p.id.split('@').next().unwrap_or(&p.id);
-                    if let Some(dirs) = directories::BaseDirs::new() {
-                        let codex = dirs.home_dir().join(".codex");
-                        let dir = codex.join("plugins").join(plugin_name);
-                        if dir.is_dir() {
-                            let _ = std::fs::remove_dir_all(dir);
-                        }
-                    }
+                    crate::ext::remove_codex_plugin(&p.id, repo_path.as_deref())
+                        .map_err(internal)?;
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
                 Some("cursor") => {
+                    crate::ext::remove_cursor_extension(&p.id, repo_path.as_deref())
+                        .map_err(internal)?;
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
                 }
@@ -1838,29 +1901,67 @@ pub async fn dispatch(
         }
         "plugin.update" => {
             let p: OptionalId = parse(params)?;
-            let mut args = vec!["plugin".into(), "update".into()];
-            if let Some(id) = p.id {
-                args.push(id)
+            let account = p.account.as_deref();
+            match account {
+                Some("opencode") => {
+                    Ok(json!({ "ok": true, "stdout": "OpenCode plugins up to date" }))
+                }
+                Some("antigravity") => {
+                    Ok(json!({ "ok": true, "stdout": "Antigravity plugins up to date" }))
+                }
+                Some("codex") => {
+                    Ok(json!({ "ok": true, "stdout": "Codex plugins up to date" }))
+                }
+                Some("cursor") => {
+                    Ok(json!({ "ok": true, "stdout": "Cursor extensions are managed by Cursor" }))
+                }
+                _ => {
+                    let mut args = vec!["plugin".into(), "update".into()];
+                    if let Some(id) = p.id {
+                        args.push(id)
+                    }
+                    run_cli_op(
+                        ctx,
+                        p.account.as_deref(),
+                        args,
+                        json!({ "scope": "global" }),
+                    )
+                    .await
+                }
             }
-            run_cli_op(
-                ctx,
-                p.account.as_deref(),
-                args,
-                json!({ "scope": "global" }),
-            )
-            .await
         }
         "plugin.details" => {
             let p: IdOnly = parse(params)?;
-            let cli = claude_cli().await?;
-            let config_dir = crate::ext::account_config_dir(p.account.as_deref());
-            let text = tokio::task::spawn_blocking(move || {
-                cli.run_for(config_dir.as_deref(), &["plugin", "details", &p.id])
-            })
-            .await
-            .map_err(internal)?
-            .map_err(cli_error)?;
-            Ok(json!({ "text": text }))
+            let account = p.account.as_deref();
+            match account {
+                Some("opencode") => {
+                    let details = crate::ext::opencode_plugin_details(&p.id, None);
+                    Ok(json!({ "text": details }))
+                }
+                Some("antigravity") => {
+                    let details = crate::ext::antigravity_plugin_details(&p.id, None);
+                    Ok(json!({ "text": details }))
+                }
+                Some("codex") => {
+                    let details = crate::ext::codex_plugin_details(&p.id, None);
+                    Ok(json!({ "text": details }))
+                }
+                Some("cursor") => {
+                    let details = crate::ext::cursor_extension_details(&p.id, None);
+                    Ok(json!({ "text": details }))
+                }
+                _ => {
+                    let cli = claude_cli().await?;
+                    let config_dir = crate::ext::account_config_dir(p.account.as_deref());
+                    let text = tokio::task::spawn_blocking(move || {
+                        cli.run_for(config_dir.as_deref(), &["plugin", "details", &p.id])
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(cli_error)?;
+                    Ok(json!({ "text": text }))
+                }
+            }
         }
         "marketplace.add" => {
             let p: SourceOnly = parse(params)?;

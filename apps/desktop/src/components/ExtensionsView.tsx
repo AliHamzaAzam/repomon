@@ -40,7 +40,21 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
     const scope = props.store.scope();
     return scope.scope === "repo" && scope.repo_id === repoId;
   };
-  const cliTitle = () => (props.store.cliAvailable() ? undefined : "Requires the claude CLI");
+  const cliTitle = () => {
+    if (props.store.cliAvailable()) return undefined;
+    const acc = currentAccount();
+    if (acc && !acc.claude) {
+      return `Requires ${acc.label}`;
+    }
+    return "Requires the claude CLI";
+  };
+  const installPlaceholder = () => {
+    const acc = currentAccount();
+    if (acc?.key === "antigravity" || acc?.key === "codex") return "plugin-name or /path/to/plugin";
+    if (acc?.key === "opencode") return "plugin-name@version";
+    if (acc?.key === "cursor") return "publisher.extension-name";
+    return "plugin@marketplace";
+  };
 
   onMount(() => {
     void props.store.refresh();
@@ -193,7 +207,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
           <form class="flex items-center gap-2 rounded-xl border border-line bg-surface p-2" onSubmit={submitInstall}>
             <input
               class="focus-ring h-8 min-w-0 flex-1 rounded-lg border border-line bg-background px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted/60"
-              placeholder="plugin@marketplace"
+              placeholder={installPlaceholder()}
               value={installRef()}
               onInput={(event) => setInstallRef(event.currentTarget.value)}
             />
