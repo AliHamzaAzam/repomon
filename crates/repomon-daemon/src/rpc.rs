@@ -3985,6 +3985,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 stamp_batches.push((pairing.new_bindings, pairing.probe));
             }
             for (s, win) in summaries.into_iter().zip(pairing.assignment) {
+                let is_fresh = (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
                 if s.last_activity > lane.last_activity_at {
                     lane.last_activity_at = s.last_activity;
                 }
@@ -4037,10 +4038,19 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     Some(w) => {
                         session.external = false;
                         session.tmux_window = Some(w);
+                        lane.agent_sessions.push(session);
                     }
-                    None => session.external = true,
+                    None => {
+                        // An unbound summary is ONLY a real external session if it is actively writing
+                        // or supported by external live processes. An older closed transcript that did
+                        // not pair with any window must NOT be presented as an adoptable external session.
+                        let has_ext_proc = alive.map_or(false, |a| a > managed_n);
+                        if is_fresh || has_ext_proc {
+                            session.external = true;
+                            lane.agent_sessions.push(session);
+                        }
+                    }
                 }
-                lane.agent_sessions.push(session);
             }
             // Agents spawned into this worktree get their own windows but haven't written a
             // transcript yet (claude creates the .jsonl a beat after launch). Surface EVERY

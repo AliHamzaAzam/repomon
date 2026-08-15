@@ -32,7 +32,23 @@ pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
         let path = PathBuf::from(recorded);
         path.canonicalize().unwrap_or(path) == wanted
     })?;
-    let mut summary = activity_summary(AgentKind::Antigravity, &cache)?;
+    let base_dir = cache.parent().and_then(|p| p.parent());
+    let target = base_dir.and_then(|b| {
+        let wal = b.join("conversations").join(format!("{session_id}.db-wal"));
+        if wal.exists() {
+            return Some(wal);
+        }
+        let db = b.join("conversations").join(format!("{session_id}.db"));
+        if db.exists() {
+            return Some(db);
+        }
+        let brain = b.join("brain").join(&session_id);
+        if brain.exists() {
+            return Some(brain);
+        }
+        None
+    }).unwrap_or_else(|| cache.clone());
+    let mut summary = activity_summary(AgentKind::Antigravity, &target)?;
     summary.cwd = Some(PathBuf::from(recorded));
     summary.session_id = Some(session_id);
     Some(summary)
