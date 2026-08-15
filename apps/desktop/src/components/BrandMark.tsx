@@ -3,6 +3,7 @@ interface BrandMarkProps {
   /// 20px the bars fall under 1.5 device pixels and turn to mush. Keep it 24 or larger.
   size?: number;
   title?: string;
+  class?: string;
 }
 
 /// The Repomon mark, the same geometry as the app icon
@@ -21,6 +22,7 @@ export default function BrandMark(props: BrandMarkProps) {
       width={size()}
       height={size()}
       viewBox="0 0 1254 1254"
+      class={props.class}
       role={props.title ? "img" : "presentation"}
       aria-label={props.title}
       aria-hidden={props.title ? undefined : "true"}

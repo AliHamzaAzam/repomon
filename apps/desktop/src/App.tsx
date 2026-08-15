@@ -307,7 +307,7 @@ function App(props: AppProps) {
         }`}
       >
         <div class="flex items-center gap-2.5" data-tauri-drag-region>
-          <BrandMark size={20} />
+          <BrandMark size={24} class="mt-[2px]" />
           <h1 class="text-xs font-semibold tracking-tight text-foreground pointer-events-none select-none">Repomon</h1>
         </div>
 
