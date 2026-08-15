@@ -17,11 +17,13 @@ export function slotOf(window: string | null | undefined): number | null {
 /// 2. Auto-generated concise slug from local LLM (`session.generated_label`) if available.
 /// 3. Stable identifier based on agent kind and window slot (e.g. `claude-code 1`, `antigravity 2`).
 export function agentLabel(session: AgentSession): string {
-  return (
-    session.custom_label ??
-    session.generated_label ??
-    `${session.agent} ${slotOf(session.tmux_window) ?? 1}`
-  );
+  if (session.custom_label) return session.custom_label;
+  if (session.generated_label) return session.generated_label;
+  const slot = slotOf(session.tmux_window) ?? 1;
+  if (session.agent === "agent" || session.agent === "unknown") {
+    return `agent ${slot}`;
+  }
+  return `${session.agent} ${slot}`;
 }
 
 /// The session that names a lane: the one in the lowest window slot, i.e. the lane's first-spawned

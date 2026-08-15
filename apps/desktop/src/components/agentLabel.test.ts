@@ -87,6 +87,11 @@ describe("agentLabel", () => {
     expect(agentLabel(agent({ agent: "codex", tmux_window: null }))).toBe("codex 1");
   });
 
+  it("formats unknown or generic agent sessions as neutral agent {slot}", () => {
+    expect(agentLabel(agent({ agent: "agent", tmux_window: "lane-7" }))).toBe("agent 1");
+    expect(agentLabel(agent({ agent: "unknown", tmux_window: "lane-7-3" }))).toBe("agent 3");
+  });
+
   // The regression: the daemon hands sessions over newest-transcript-first, so the array reorders
   // itself whenever the lane's agents take turns. A label must depend only on the session.
   it("gives a window the same label regardless of array order", () => {
