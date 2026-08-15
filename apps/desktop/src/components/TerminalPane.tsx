@@ -305,20 +305,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
       syncSize = async () => {
         if (disposed || !terminal || !fit || props.visible === false || view() !== "live") return;
         if (!container || !container.isConnected || container.clientWidth === 0 || container.clientHeight === 0) return;
+        let proposed: { cols: number; rows: number } | undefined;
         try {
-          fit.fit();
+          proposed = fit.proposeDimensions();
         } catch {
           return;
         }
-        if (disposed || !terminal) return;
-        try {
-          terminal.refresh(0, Math.max(0, terminal.rows - 1));
-        } catch {
-          return;
-        }
-        const cols = terminal.cols;
-        const rows = terminal.rows;
-        if (!cols || !rows || disposed || !terminal) return;
+        if (!proposed || !proposed.cols || !proposed.rows || disposed || !terminal) return;
+        const { cols, rows } = proposed;
 
         // Skip firing a redundant resize RPC if the backend is already aligned on this exact geometry.
         if (confirmedGrid && confirmedGrid.cols === cols && confirmedGrid.rows === rows) {
@@ -336,19 +330,12 @@ export default function TerminalPane(props: TerminalPaneProps) {
           if (props.shell) {
             // A GUI-owned shell has no other viewer, so our own resize is the authoritative one.
             await daemonCall("agent.resize", args).catch(() => undefined);
-            if (!disposed) confirmedGrid = { cols, rows };
+            if (!disposed) applyGrid(cols, rows);
           } else {
-            const pinned = confirmedGrid;
             const grid = await daemonCall("agent.fit", args).catch(() => null);
             if (disposed || !terminal) return;
             if (grid?.cols && grid?.rows) {
               applyGrid(grid.cols, grid.rows);
-            } else if (pinned) {
-              // Arbitration came back without a grid: the call failed, or the pane size query
-              // returned nothing. `fit()` already resized xterm locally, and keeping that unilateral
-              // size would leave us wrapping differently from the real pane, so pin back to the last
-              // size the backend confirmed rather than trusting the local guess.
-              applyGrid(pinned.cols, pinned.rows);
             }
           }
         } finally {

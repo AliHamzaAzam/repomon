@@ -350,6 +350,12 @@ pub async fn term_watch(
                             if chunk.cursor.generation == stream_cursor.generation
                                 && chunk.cursor.sequence <= stream_cursor.sequence
                             {
+                                log_term_trace(
+                                    "DROPPED_STALE_CHUNK",
+                                    &task_window,
+                                    Some(chunk.cursor.sequence),
+                                    &chunk.bytes,
+                                );
                                 continue;
                             }
                             let contiguous = chunk.cursor.generation == stream_cursor.generation
