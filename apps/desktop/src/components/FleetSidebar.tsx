@@ -359,7 +359,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         <div class="flex items-center gap-1.5">
           <button
             type="button"
-            class={`focus-ring flex h-7 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+            class={`focus-ring flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
               props.fleet.urgentOnly()
                 ? "border-attention/50 bg-attention/10 text-attention font-semibold"
                 : props.fleet.counts().urgent > 0
