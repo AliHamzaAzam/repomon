@@ -71,6 +71,8 @@ fn event_chunk(event: &Notification) -> Option<(String, ByteChunk)> {
     let generation = event.params.get("generation").and_then(Value::as_u64)?;
     let sequence = event.params.get("sequence").and_then(Value::as_u64)?;
     let encoded = event.params.get("data").and_then(Value::as_str)?;
+    let bytes = STANDARD.decode(encoded).ok()?;
+    log_term_trace("DAEMON_CHUNK", window, Some(sequence), &bytes);
     Some((
         window.to_string(),
         ByteChunk {
@@ -78,7 +80,7 @@ fn event_chunk(event: &Notification) -> Option<(String, ByteChunk)> {
                 generation,
                 sequence,
             },
-            bytes: STANDARD.decode(encoded).ok()?,
+            bytes,
         },
     ))
 }
@@ -143,12 +145,36 @@ fn append_pending(pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
     true
 }
 
+fn log_term_trace(tag: &str, window: &str, seq: Option<u64>, bytes: &[u8]) {
+    use std::io::Write;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/repomon-terminal-trace.log") else { return };
+    let preview: String = bytes.iter().take(128).map(|&b| {
+        match b {
+            0x1b => "\\e".to_string(),
+            b'\r' => "\\r".to_string(),
+            b'\n' => "\\n".to_string(),
+            b'\t' => "\\t".to_string(),
+            32..=126 => (b as char).to_string(),
+            _ => format!("\\x{:02x}", b),
+        }
+    }).collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let _ = writeln!(file, "[{ts}] [{tag}] win={window} seq={seq:?} len={} preview={preview}", bytes.len());
+}
+
 fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
     if pending.is_empty() {
         return true;
     }
     // Swap in a pre-sized buffer: `mem::take` would leave capacity 0 and re-grow every tick.
     let bytes = std::mem::replace(pending, Vec::with_capacity(FLUSH_BYTES));
+    log_term_trace("FLUSH_TO_TAURI", "term", None, &bytes);
     channel.send(InvokeResponseBody::Raw(bytes)).is_ok()
 }
 
@@ -206,10 +232,10 @@ async fn capture_resync(
         generation: value.get("generation").and_then(Value::as_u64)?,
         sequence: value.get("sequence").and_then(Value::as_u64)?,
     };
+    let frame_bytes = resync_frame(content, alternate, cursor);
+    log_term_trace("RESYNC_FRAME", window, Some(repaint_cursor.sequence), &frame_bytes);
     channel
-        .send(InvokeResponseBody::Raw(resync_frame(
-            content, alternate, cursor,
-        )))
+        .send(InvokeResponseBody::Raw(frame_bytes))
         .is_ok()
         .then_some(Resync {
             cursor: repaint_cursor,

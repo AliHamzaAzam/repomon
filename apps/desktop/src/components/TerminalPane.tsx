@@ -11,6 +11,7 @@ import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
   isTerminalReleaseChord,
+  recordTrace,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
@@ -261,8 +262,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
       function writeIncoming(bytes: string | Uint8Array) {
         if (disposed || !terminal) return;
         if (syncInFlight) {
+          recordTrace("BUFFERED_WRITE", props.window, bytes);
           bufferedWrites.push(bytes);
         } else {
+          recordTrace("XTERM_DIRECT_WRITE", props.window, bytes);
           terminal.write(bytes);
         }
       }
@@ -272,6 +275,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         while (bufferedWrites.length > 0) {
           const chunk = bufferedWrites.shift();
           if (chunk && !disposed && terminal) {
+            recordTrace("XTERM_FLUSHED_WRITE", props.window, chunk);
             terminal.write(chunk);
           }
         }

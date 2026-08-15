@@ -112,6 +112,46 @@ export function asTransportError(error: unknown): Error {
   return new Error(typeof error === "string" ? error : "terminal transport unavailable");
 }
 
+export interface TermTraceItem {
+  ts: number;
+  type: string;
+  window?: string;
+  len: number;
+  preview: string;
+}
+
+declare global {
+  interface Window {
+    __REPOMON_TERM_TRACE__?: TermTraceItem[];
+  }
+}
+
+export function recordTrace(type: string, windowName: string | undefined, bytes: Uint8Array | string) {
+  if (typeof window === "undefined") return;
+  if (!window.__REPOMON_TERM_TRACE__) window.__REPOMON_TERM_TRACE__ = [];
+  const raw = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
+  let preview = "";
+  for (let i = 0; i < Math.min(raw.length, 128); i++) {
+    const b = raw[i];
+    if (b === 0x1b) preview += "\\e";
+    else if (b === 0x0d) preview += "\\r";
+    else if (b === 0x0a) preview += "\\n";
+    else if (b === 0x09) preview += "\\t";
+    else if (b >= 32 && b <= 126) preview += String.fromCharCode(b);
+    else preview += `\\x${b.toString(16).padStart(2, "0")}`;
+  }
+  window.__REPOMON_TERM_TRACE__.push({
+    ts: Date.now(),
+    type,
+    window: windowName,
+    len: raw.length,
+    preview,
+  });
+  if (window.__REPOMON_TERM_TRACE__.length > 4000) {
+    window.__REPOMON_TERM_TRACE__.splice(0, 1000);
+  }
+}
+
 export function createTerminalFrameGate(onBytes: (bytes: Uint8Array) => void) {
   let active = true;
   let streaming = false;
@@ -144,7 +184,9 @@ export async function watchTerminal(
   const channel = new Channel<ArrayBuffer>();
   const gate = createTerminalFrameGate(onBytes);
   channel.onmessage = (buffer) => {
-    gate.push(new Uint8Array(buffer));
+    const bytes = new Uint8Array(buffer);
+    recordTrace("CHANNEL_ONMESSAGE", target.window, bytes);
+    gate.push(bytes);
   };
   let ack: TermWatchAck;
   try {
