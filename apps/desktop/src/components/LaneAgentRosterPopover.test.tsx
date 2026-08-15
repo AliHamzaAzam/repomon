@@ -36,7 +36,7 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
     pending_dialog: null,
     stale: false,
     stalled_since: null,
-    ended_turn: true,
+    subagent_running: null,
     gate: null,
     config_dir: null,
     custom_label: null,
@@ -101,6 +101,9 @@ describe("LaneAgentRosterPopover", () => {
     const sPrompt = session({ pending_prompt: "Allow command?" });
     expect(getSessionStatusDetails(sPrompt).label).toBe("Decision");
 
+    const sSubagent = session({ subagent_running: "Drafting 2026-08-api-contract.md (3m 16s)" });
+    expect(getSessionStatusDetails(sSubagent).label).toBe("Subagent running");
+
     const sWaiting = session({ status: "waiting" });
     expect(getSessionStatusDetails(sWaiting).label).toBe("Needs attention");
 
@@ -111,7 +114,7 @@ describe("LaneAgentRosterPopover", () => {
     expect(getSessionStatusDetails(sExt).label).toBe("External");
   });
 
-  it("renders a structured roster card with multiple agents on hover", () => {
+  it("renders a structured roster card with multiple agents and subagents on hover", () => {
     const s1 = session({
       id: 1,
       agent: "antigravity",
@@ -123,11 +126,18 @@ describe("LaneAgentRosterPopover", () => {
       id: 2,
       agent: "claude-code",
       tmux_window: "lane-10-2",
+      status: "running",
+      subagent_running: "Editing interruption defaults in main.py (6m 54s) + 1 more",
+    });
+    const s3 = session({
+      id: 3,
+      agent: "claude-code",
+      tmux_window: "lane-10-3",
       status: "waiting",
       last_message: "Should I proceed with the refactor?",
     });
 
-    const lane = createLane([s1, s2]);
+    const lane = createLane([s1, s2, s3]);
     const mockRect = { top: 100, right: 250, bottom: 140, left: 10, width: 240, height: 40, x: 10, y: 100, toJSON: () => ({}) } as DOMRect;
 
     render(() => (
@@ -136,14 +146,17 @@ describe("LaneAgentRosterPopover", () => {
 
     expect(screen.getByText("feature-roster-lane")).toBeInTheDocument();
     expect(screen.getByText("feat-roster-branch")).toBeInTheDocument();
-    expect(screen.getByText("2 agents")).toBeInTheDocument();
+    expect(screen.getByText("3 agents")).toBeInTheDocument();
 
     expect(screen.getByText("Architect")).toBeInTheDocument();
     expect(screen.getByText("Antigravity")).toBeInTheDocument();
     expect(screen.getByText("Running")).toBeInTheDocument();
 
     expect(screen.getByText("Claude Code #2")).toBeInTheDocument();
-    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("Subagent running")).toBeInTheDocument();
+    expect(screen.getByText("Editing interruption defaults in main.py (6m 54s) + 1 more")).toBeInTheDocument();
+
+    expect(screen.getByText("Claude Code #3")).toBeInTheDocument();
     expect(screen.getByText("Needs attention")).toBeInTheDocument();
     expect(screen.getByText('"Should I proceed with the refactor?"')).toBeInTheDocument();
   });

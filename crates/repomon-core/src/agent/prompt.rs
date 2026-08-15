@@ -346,6 +346,179 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Detect running background subagents from pane text.
+/// Returns a concise description if subagent(s) are actively running.
+pub fn detect_subagent_running(pane: &str) -> Option<String> {
+    let stripped: Vec<String> = pane.lines().map(strip_ansi).collect();
+    let mut waiting_count: Option<usize> = None;
+    let mut active_tasks: Vec<(String, Option<String>)> = Vec::new();
+
+    for line in stripped.iter() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let lower = t.to_lowercase();
+
+        // 1. Match "Waiting for N background agent(s)/task(s) to finish"
+        if (lower.contains("waiting for")
+            && (lower.contains("background agent")
+                || lower.contains("background task")
+                || lower.contains("subagent")))
+            || (lower.contains("background agent") && lower.contains("running"))
+        {
+            // Update to latest count if present
+            let count = t
+                .split_whitespace()
+                .find_map(|w| w.parse::<usize>().ok())
+                .unwrap_or(1);
+            waiting_count = Some(count);
+        }
+
+        // 2. Match active subagent row: `◯ <kind> <description> <timer> ...`
+        // Ensure it is not a finished log (e.g. `⏺ Agent "..." finished · 14m 22s`)
+        if (t.contains('◯') || t.contains('○') || t.starts_with("◯") || t.starts_with("○"))
+            && !lower.contains("finished")
+        {
+            if let Some((desc, timer)) = parse_subagent_row(t) {
+                if !active_tasks.iter().any(|(d, _)| d == &desc) {
+                    active_tasks.push((desc, timer));
+                }
+            }
+        }
+    }
+
+    if active_tasks.is_empty() && waiting_count.is_none() {
+        return None;
+    }
+
+    if let Some((desc, timer)) = active_tasks.first() {
+        let timer_str = timer.as_deref().map(|t| format!(" ({t})")).unwrap_or_default();
+        if active_tasks.len() > 1 {
+            Some(format!("{desc}{timer_str} +{} more", active_tasks.len() - 1))
+        } else if let Some(count) = waiting_count {
+            if count > 1 {
+                Some(format!("{desc}{timer_str} +{} more", count - 1))
+            } else {
+                Some(format!("{desc}{timer_str}"))
+            }
+        } else {
+            Some(format!("{desc}{timer_str}"))
+        }
+    } else if let Some(count) = waiting_count {
+        if count == 1 {
+            Some("Waiting for 1 background agent to finish".to_string())
+        } else {
+            Some(format!("Waiting for {count} background agents to finish"))
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse an individual subagent row (e.g. `◯ general-purpose  Editing interruption defaults in main.py  6m 54s · ↓ 134.9k tokens`)
+fn parse_subagent_row(line: &str) -> Option<(String, Option<String>)> {
+    let clean = line.trim();
+    let circle_idx = clean.find(|c| c == '◯' || c == '○')?;
+    let rest = clean[circle_idx + '◯'.len_utf8()..].trim();
+    if rest.is_empty() || rest.starts_with("main") || rest.eq_ignore_ascii_case("main") {
+        return None;
+    }
+    if rest.to_lowercase().contains("finished") {
+        return None;
+    }
+
+    if let Some((timer, timer_start, _)) = extract_timer(rest) {
+        let before_timer = rest[..timer_start].trim();
+        if before_timer.is_empty() {
+            return None;
+        }
+        // If there is a double space separating agent kind and task description:
+        let desc = if let Some(idx) = before_timer.find("  ") {
+            let task = before_timer[idx..].trim();
+            if !task.is_empty() {
+                task
+            } else {
+                before_timer
+            }
+        } else {
+            before_timer
+        };
+        Some((truncate(desc, 60), Some(timer)))
+    } else {
+        let desc = if let Some(idx) = rest.find("  ") {
+            let task = rest[idx..].trim();
+            if !task.is_empty() {
+                task
+            } else {
+                rest
+            }
+        } else {
+            rest
+        };
+        Some((truncate(desc, 60), None))
+    }
+}
+
+/// Extract timer pattern from text (e.g. "6m 54s", "14s", "3m 16s", "1h 12m", "45s")
+fn extract_timer(s: &str) -> Option<(String, usize, usize)> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    for i in 0..len {
+        if !bytes[i].is_ascii_digit() {
+            continue;
+        }
+        if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'-') {
+            continue;
+        }
+        let mut curr = i;
+        let mut found_unit = false;
+        let mut has_h = false;
+        let mut has_m = false;
+        let mut has_s = false;
+
+        while curr < len {
+            let start_digits = curr;
+            while curr < len && bytes[curr].is_ascii_digit() {
+                curr += 1;
+            }
+            if curr == start_digits {
+                break;
+            }
+            while curr < len && bytes[curr] == b' ' {
+                curr += 1;
+            }
+            if curr < len && (bytes[curr] == b'h' || bytes[curr] == b'm' || bytes[curr] == b's') {
+                let u = bytes[curr];
+                curr += 1;
+                found_unit = true;
+                if u == b'h' { has_h = true; }
+                if u == b'm' { has_m = true; }
+                if u == b's' { has_s = true; }
+
+                while curr < len && bytes[curr] == b' ' {
+                    curr += 1;
+                }
+                if curr < len && bytes[curr].is_ascii_digit() {
+                    if (u == b'h' && (has_m || has_s)) || (u == b'm' && has_s) || u == b's' {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+
+        if found_unit && (has_h || has_m || has_s) {
+            let timer_str = s[i..curr].trim().to_string();
+            return Some((timer_str, i, curr));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +917,60 @@ Do you want to proceed?
         assert_eq!(dialog.question, "Do you want to proceed?");
         assert_eq!(dialog.selected, Some(0));
         assert_eq!(dialog.options.len(), 4);
+    }
+
+    #[test]
+    fn detects_claude_code_subagent_with_timer_and_tokens() {
+        let pane = r#"
+✻ Waiting for 1 background agent to finish
+
+  ◯ general-purpose  Drafting 2026-08-api-contract.md  3m 16s . down 85.1k tokens
+"#;
+        let sub = detect_subagent_running(pane);
+        assert_eq!(
+            sub.as_deref(),
+            Some("Drafting 2026-08-api-contract.md (3m 16s)")
+        );
+    }
+
+    #[test]
+    fn detects_multiple_claude_code_subagents() {
+        let pane = r#"
+✻ Waiting for 2 background agents to finish
+
+───────────────────────────────────────────────────────────────────────────── voice-ai ──
+❯ status update
+─────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents · ↓ to manage                     /rc
+
+  ⏺ main
+  ◯ general-purpose  Editing interruption defaults in main.py                  6m 54s · ↓ 134.9k tokens
+  ◯ general-purpose  P9: widget design overhaul                                    14s · ↓ 37.6k tokens
+"#;
+        let sub = detect_subagent_running(pane);
+        assert_eq!(
+            sub.as_deref(),
+            Some("Editing interruption defaults in main.py (6m 54s) +1 more")
+        );
+    }
+
+    #[test]
+    fn detects_waiting_for_background_agent_header_alone() {
+        let pane = "✻ Waiting for 1 background agent to finish\n❯ idle prompt";
+        let sub = detect_subagent_running(pane);
+        assert_eq!(
+            sub.as_deref(),
+            Some("Waiting for 1 background agent to finish")
+        );
+    }
+
+    #[test]
+    fn ignores_finished_subagents() {
+        let pane = r#"
+⏺ Agent "P7: site content ingestion packet" finished · 14m 22s
+⏺ All tasks completed
+❯ 
+"#;
+        assert_eq!(detect_subagent_running(pane), None);
     }
 }

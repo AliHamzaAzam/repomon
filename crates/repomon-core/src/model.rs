@@ -518,6 +518,11 @@ pub struct AgentSession {
     /// When the stall began (the last time the pane changed), for "stalled 7m" display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_since: Option<DateTime<Utc>>,
+    /// Set when background subagent(s) are actively running in the session's pane (e.g.
+    /// "Drafting 2026-08-api-contract.md (3m 16s)" or "Waiting for 1 background agent to finish").
+    /// Overlaid at list time; not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_running: Option<String>,
     /// Whether the transcript's last entry is the agent speaking with no tool call — i.e. it
     /// finished its turn — independent of the Idle time-decay that hides this in `status`.
     /// Daemon-internal (feeds the stall detector); never serialized.
@@ -822,6 +827,7 @@ pub struct ExtAccount {
     pub claude: bool,
     /// The agent kind this extension scope belongs to (e.g. ClaudeCode, Antigravity, Codex, OpenCode, Cursor).
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub agent_kind: Option<AgentKind>,
 }
 

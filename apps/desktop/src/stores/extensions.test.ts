@@ -12,7 +12,7 @@ const snapshot: ExtSnapshot = {
     { id: "github@official", name: "github", marketplace: "official", version: null, enabled: false, enabled_source: "default", provides: null, installed: true },
   ],
   skills: [{ name: "verify", description: "checks things", source: "project", path: "/r/.claude/skills/verify" }],
-  accounts: [{ key: "default", label: "main", claude: true }],
+  accounts: [{ key: "default", label: "main", claude: true, agent_kind: null }],
   account: "default",
 };
 

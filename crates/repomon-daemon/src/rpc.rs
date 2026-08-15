@@ -2979,10 +2979,9 @@ pub async fn dispatch(
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             let win = window.clone();
-            // A fresh capture, not the sniff cache: the popup must show what's on the pane NOW.
-            let dialog = tokio::task::spawn_blocking(move || {
+            let (dialog, sub) = tokio::task::spawn_blocking(move || {
                 tmux.capture_named(&win, CaptureOpts::last(45))
-                    .map(|pane| agent::prompt::detect_dialog(&pane))
+                    .map(|pane| (agent::prompt::detect_dialog(&pane), agent::prompt::detect_subagent_running(&pane)))
             })
             .await
             .map_err(internal)?
@@ -2990,7 +2989,7 @@ pub async fn dispatch(
             ctx.prompt_cache
                 .lock()
                 .await
-                .insert(window, (std::time::Instant::now(), dialog.clone()));
+                .insert(window, (std::time::Instant::now(), dialog.clone(), sub));
             Ok(json!({ "dialog": dialog }))
         }
         "agent.answer" => {
@@ -3016,7 +3015,7 @@ pub async fn dispatch(
                 ctx.prompt_cache
                     .lock()
                     .await
-                    .insert(window, (std::time::Instant::now(), None));
+                    .insert(window, (std::time::Instant::now(), None, None));
                 return Err(RpcError {
                     code: DIALOG_CHANGED,
                     message: "no pending dialog".into(),
@@ -3028,7 +3027,7 @@ pub async fn dispatch(
                     ctx.prompt_cache
                         .lock()
                         .await
-                        .insert(window, (std::time::Instant::now(), Some(dialog.clone())));
+                        .insert(window, (std::time::Instant::now(), Some(dialog.clone()), None));
                     return Err(RpcError {
                         code: DIALOG_CHANGED,
                         message: "dialog changed".into(),
@@ -4239,6 +4238,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     pending_dialog: None,
                     stale: false,
                     stalled_since: None,
+                    subagent_running: None,
                     ended_turn: false,
                     gate: None,
                     config_dir: None,
@@ -4397,7 +4397,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // sees), so a NeedsYou can be up to SNIFF_TTL late. Re-capture those on a short 1.5s TTL
         // so status updates and decision prompts appear almost instantly.
         const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
-        let mut prompts: Vec<Option<agent::prompt::PendingDialog>> =
+        let mut sniffs: Vec<(Option<agent::prompt::PendingDialog>, Option<String>)> =
             Vec::with_capacity(candidates.len());
         let mut misses: Vec<usize> = Vec::new();
         {
@@ -4409,9 +4409,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     SNIFF_TTL
                 };
                 match cache.get(w) {
-                    Some((t, p)) if t.elapsed() < ttl => prompts.push(p.clone()),
+                    Some((t, p, sub)) if t.elapsed() < ttl => sniffs.push((p.clone(), sub.clone())),
                     _ => {
-                        prompts.push(None);
+                        sniffs.push((None, None));
                         misses.push(idx);
                     }
                 }
@@ -4421,9 +4421,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let tmux = ctx.backend.clone();
             let miss_windows: Vec<String> =
                 misses.iter().map(|&i| candidates[i].2.clone()).collect();
-            // Each fresh capture yields the parsed dialog AND a content hash — the hash feeds
-            // the stall detector's "when did this pane last change?" clock.
-            let fresh: Vec<(Option<agent::prompt::PendingDialog>, Option<u64>)> =
+            // Each fresh capture yields the parsed dialog, running subagents, AND a content hash —
+            // the hash feeds the stall detector's "when did this pane last change?" clock.
+            let fresh: Vec<(Option<agent::prompt::PendingDialog>, Option<String>, Option<u64>)> =
                 tokio::task::spawn_blocking(move || {
                     miss_windows
                         .iter()
@@ -4432,9 +4432,13 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                                 use std::hash::{Hash, Hasher};
                                 let mut h = std::collections::hash_map::DefaultHasher::new();
                                 pane.hash(&mut h);
-                                (agent::prompt::detect_dialog(&pane), Some(h.finish()))
+                                (
+                                    agent::prompt::detect_dialog(&pane),
+                                    agent::prompt::detect_subagent_running(&pane),
+                                    Some(h.finish()),
+                                )
                             }
-                            Err(_) => (None, None),
+                            Err(_) => (None, None, None),
                         })
                         .collect::<Vec<_>>()
                 })
@@ -4443,9 +4447,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let now_utc = chrono::Utc::now();
             let mut cache = ctx.prompt_cache.lock().await;
             let mut seen = ctx.pane_seen.lock().await;
-            for (&i, (p, hash)) in misses.iter().zip(fresh) {
+            for (&i, (p, sub, hash)) in misses.iter().zip(fresh) {
                 let window = &candidates[i].2;
-                cache.insert(window.clone(), (std::time::Instant::now(), p.clone()));
+                cache.insert(window.clone(), (std::time::Instant::now(), p.clone(), sub.clone()));
                 // Stamp the pane's last-change time only when the content actually differs.
                 if let Some(h) = hash {
                     match seen.get(window) {
@@ -4455,7 +4459,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         }
                     }
                 }
-                prompts[i] = p;
+                sniffs[i] = (p, sub);
             }
         }
         // Prune the sniff caches so they can't grow without bound — every window name ever
@@ -4466,15 +4470,19 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let live: std::collections::HashSet<&str> =
                 windows.iter().map(|w| w.name.as_str()).collect();
             let mut cache = ctx.prompt_cache.lock().await;
-            cache.retain(|w, (t, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
+            cache.retain(|w, (t, _, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
             let mut seen = ctx.pane_seen.lock().await;
             seen.retain(|w, _| live.contains(w.as_str()));
         }
         let now_utc = chrono::Utc::now();
         let seen = ctx.pane_seen.lock().await;
-        for ((li, si, w, _), found) in candidates.into_iter().zip(prompts) {
+        for ((li, si, w, _), (found_dialog, found_subagent)) in candidates.into_iter().zip(sniffs) {
             let s = &mut lanes[li].agent_sessions[si];
-            match found {
+            s.subagent_running = found_subagent;
+            if s.subagent_running.is_some() && s.status == AgentStatus::Idle {
+                s.status = AgentStatus::Running;
+            }
+            match found_dialog {
                 Some(dialog) => {
                     s.status = AgentStatus::Waiting;
                     let summary = dialog.summary();
@@ -5284,6 +5292,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         pending_dialog: None,
         stale: false,
         stalled_since: None,
+        subagent_running: None,
         ended_turn: true,
         gate: None,
         config_dir: None,
@@ -6412,6 +6421,7 @@ mod tests {
                 pending_dialog: None,
                 stale: false,
                 stalled_since: None,
+                subagent_running: None,
                 ended_turn: true,
                 gate: None,
                 config_dir: None,
@@ -6487,6 +6497,7 @@ mod tests {
                 pending_dialog: None,
                 stale: false,
                 stalled_since: None,
+                subagent_running: None,
                 ended_turn: true,
                 gate: None,
                 config_dir: None,

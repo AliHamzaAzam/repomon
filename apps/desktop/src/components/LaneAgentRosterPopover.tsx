@@ -45,6 +45,14 @@ export function getSessionStatusDetails(session: AgentSession): AgentStatusDetai
       badgeClass: "bg-attention/15 text-attention border border-attention/30",
     };
   }
+  if (session.subagent_running) {
+    return {
+      label: "Subagent running",
+      toneClass: "text-signal",
+      dotClass: "bg-signal animate-pulse ring-1 ring-signal/40",
+      badgeClass: "bg-signal/15 text-signal border border-signal/30 font-medium",
+    };
+  }
   if (session.external) {
     return {
       label: "External",
@@ -215,6 +223,14 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                           <span class="text-attention/90">external</span>
                         </Show>
                       </div>
+
+                      {/* Subagent running preview */}
+                      <Show when={agent.subagent_running}>
+                        <div class="mt-1.5 flex items-center gap-1.5 rounded-md border border-signal/30 bg-signal/10 px-2 py-1 text-[10px] text-signal font-mono">
+                          <span class="inline-block size-1.5 rounded-full bg-signal animate-pulse shrink-0 ring-1 ring-signal/40" />
+                          <span class="truncate font-medium">{agent.subagent_running}</span>
+                        </div>
+                      </Show>
 
                       {/* Pending prompt or message preview */}
                       <Show when={agent.pending_prompt}>

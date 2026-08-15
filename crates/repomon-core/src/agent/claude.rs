@@ -73,6 +73,7 @@ impl TranscriptSummary {
             inferred: false,
             stale: false, // overlaid by the daemon's stall detector
             stalled_since: None,
+            subagent_running: None,
             ended_turn: self.ended_turn,
             gate: None,
             config_dir: self.config_dir,

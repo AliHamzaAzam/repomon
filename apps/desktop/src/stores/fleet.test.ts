@@ -182,6 +182,14 @@ describe("fleet presentation", () => {
       ],
     });
     expect(laneIndicator(twoRunning)).toEqual({ label: "2 running", tone: "signal", urgent: false });
+
+    const subRunning = lane({
+      agent_sessions: [
+        agent({ status: "running", subagent_running: "Drafting contract (3m 16s)" }),
+        agent({ status: "idle" }),
+      ],
+    });
+    expect(laneIndicator(subRunning)).toEqual({ label: "subagent running", tone: "signal", urgent: false });
   });
 
   it("fuzzy matches repo, branch, and agent text", () => {

@@ -67,6 +67,12 @@ stale: boolean,
  */
 stalled_since?: string | null, 
 /**
+ * Set when background subagent(s) are actively running in the session's pane (e.g.
+ * "Drafting 2026-08-api-contract.md (3m 16s)" or "Waiting for 1 background agent to finish").
+ * Overlaid at list time; not persisted.
+ */
+subagent_running?: string | null, 
+/**
  * The latest dxkit stop-gate verdict from the worktree's `.dxkit/loop/ledger.jsonl`,
  * when the lane uses dxkit. Overlaid at list time; not persisted. A fresh `allowed`
  * grants done-candidate, a fresh block vetoes it (see `agent_attention_in`).
@@ -89,4 +95,4 @@ custom_label: string | null,
  * An auto-generated concise summary slug from the local LLM subsystem (e.g. "fix-auth-tokens"),
  * overlaid at list time from the persisted `session_generated_labels` store.
  */
-generated_label?: string | null, };
+generated_label: string | null, };

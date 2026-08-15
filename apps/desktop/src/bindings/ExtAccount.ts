@@ -4,21 +4,20 @@
  * One account or agent ecosystem scope the extensions view can target.
  */
 export type ExtAccount = { 
-  /**
-   * Stable key: `"default"` for `~/.claude`, the config-dir path for a variant
-   * (e.g. `~/.claude-work`), `"antigravity"`, `"codex"`, `"opencode"`, `"cursor"`.
-   */
-  key: string; 
-  /**
-   * Short human label: `"Claude (main)"`, `"Claude (work)"`, `"Antigravity"`, `"Codex"`, `"OpenCode"`, `"Cursor"`.
-   */
-  label: string; 
-  /**
-   * Whether repomon manages Claude-style extensions (marketplaces/plugins/skills) for this account.
-   */
-  claude: boolean;
-  /**
-   * The agent kind this extension scope belongs to.
-   */
-  agent_kind?: string;
-};
+/**
+ * Stable key: `"default"` for `~/.claude`, the config-dir path for a variant
+ * (e.g. `~/.claude-work`), `"antigravity"`, `"codex"`, `"opencode"`, `"cursor"`.
+ */
+key: string, 
+/**
+ * Short human label: `"Claude (main)"`, `"Claude (work)"`, `"Antigravity"`, `"Codex"`, `"OpenCode"`, `"Cursor"`.
+ */
+label: string, 
+/**
+ * Whether repomon manages Claude-style extensions (marketplaces/plugins/skills) for this account.
+ */
+claude: boolean, 
+/**
+ * The agent kind this extension scope belongs to (e.g. ClaudeCode, Antigravity, Codex, OpenCode, Cursor).
+ */
+agent_kind: string | null, };

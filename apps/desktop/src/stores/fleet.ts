@@ -71,9 +71,12 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   if (agents.some((agent) => agent.external)) {
     return { label: "external", tone: "muted", urgent: false };
   }
-  const runningCount = agents.filter((agent) => !agent.inferred && agent.status === "running").length;
+  const runningAgents = agents.filter((agent) => !agent.inferred && agent.status === "running");
+  const runningCount = runningAgents.length;
   if (runningCount > 0) {
-    return { label: `${runningCount > 1 ? `${runningCount} running` : "running"}${gate}`, tone: "signal", urgent: false };
+    const onlySubagents = runningAgents.every((agent) => Boolean(agent.subagent_running));
+    const label = onlySubagents && runningCount === 1 ? "subagent running" : runningCount > 1 ? `${runningCount} running` : "running";
+    return { label: `${label}${gate}`, tone: "signal", urgent: false };
   }
   if (agents.some((agent) => agent.inferred)) {
     return { label: "active · inferred", tone: "signal", urgent: false };

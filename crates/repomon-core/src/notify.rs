@@ -693,6 +693,7 @@ mod tests {
             pending_dialog: None,
             stale: false,
             stalled_since: None,
+            subagent_running: None,
             ended_turn: false,
             gate: None,
             config_dir: None,

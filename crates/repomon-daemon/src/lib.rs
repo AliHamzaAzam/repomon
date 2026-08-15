@@ -215,7 +215,7 @@ pub struct Ctx {
     /// within it; until then the session reads as it last did. Keyed by window name. Any input sent
     /// to a window drops its entry, so an answered dialog can't ride out the TTL as a ghost.
     pub prompt_cache:
-        Mutex<HashMap<String, (Instant, Option<repomon_core::agent::prompt::PendingDialog>)>>,
+        Mutex<HashMap<String, (Instant, Option<repomon_core::agent::prompt::PendingDialog>, Option<String>)>>,
     /// Per window: the last sniffed pane-content hash and when it last CHANGED — the stall
     /// detector's clock. Never TTL-pruned (its point is remembering how long a pane has sat
     /// still); entries drop only when their window vanishes.
