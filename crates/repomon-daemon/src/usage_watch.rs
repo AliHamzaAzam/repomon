@@ -169,10 +169,16 @@ fn claude_spec(command: String) -> ProbeSpec {
         slash: "/usage",
         parse: parse_usage,
         ready: &[
+            "claude code",
+            "/model",
+            "auto mode on",
+            "shift+tab to cycle",
             "? for shortcuts",
             "welcome back",
             "welcome to claude",
             "/help for help",
+            "try \"",
+            "❯",
         ],
         trust: &[
             "trust this folder",
@@ -187,10 +193,12 @@ fn codex_spec() -> ProbeSpec {
         command: "codex".to_string(),
         slash: "/status",
         parse: parse_codex_status,
-        ready: &["openai codex"],
+        ready: &["openai codex", "codex", "model:", "for shortcuts"],
         trust: &[
             "do you trust the contents",
             "trust the contents of this directory",
+            "trust this folder",
+            "do you trust",
         ],
     }
 }
@@ -207,8 +215,13 @@ fn antigravity_spec() -> ProbeSpec {
             "gemini 2.5",
             "gemini 3.5",
             "for shortcuts",
+            "antigravity",
         ],
-        trust: &["trust this folder", "do you trust"],
+        trust: &[
+            "trust this folder",
+            "do you trust",
+            "project you created or one you trust",
+        ],
     }
 }
 
@@ -386,6 +399,10 @@ mod tests {
             ProbeState::Trust
         );
         assert_eq!(
+            probe_state("Claude Code v2.1.233\n auto mode on", &claude),
+            ProbeState::Ready
+        );
+        assert_eq!(
             probe_state("Welcome back!\n ? for shortcuts", &claude),
             ProbeState::Ready
         );
@@ -398,6 +415,12 @@ mod tests {
         );
         assert_eq!(
             probe_state(">_ OpenAI Codex (v0.141.0)", &codex),
+            ProbeState::Ready
+        );
+
+        let agy = antigravity_spec();
+        assert_eq!(
+            probe_state("Antigravity CLI\n Models & Quota", &agy),
             ProbeState::Ready
         );
     }
