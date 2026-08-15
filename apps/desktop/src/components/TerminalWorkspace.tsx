@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, lazy } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
@@ -15,6 +15,8 @@ import {
 import {
   AgentIcon,
   IconBot,
+  IconChevronLeft,
+  IconChevronRight,
   IconClose,
   IconFocus,
   IconGrid,
@@ -32,11 +34,36 @@ interface TerminalWorkspaceProps {
 }
 
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
+  let tabStripRef: HTMLDivElement | undefined;
+  const [canScrollLeft, setCanScrollLeft] = createSignal(false);
+  const [canScrollRight, setCanScrollRight] = createSignal(false);
   const [openingShell, setOpeningShell] = createSignal(false);
   const [adopting, setAdopting] = createSignal(false);
   const [closingShell, setClosingShell] = createSignal<string | null>(null);
   const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
   const [warmWindows, setWarmWindows] = createSignal<string[]>([]);
+
+  const updateScrollIndicators = () => {
+    if (!tabStripRef) return;
+    const { scrollLeft, scrollWidth, clientWidth } = tabStripRef;
+    const maxScroll = scrollWidth - clientWidth;
+    setCanScrollLeft(scrollLeft > 2);
+    setCanScrollRight(maxScroll > 2 && scrollLeft < maxScroll - 2);
+  };
+
+  const scrollByDelta = (delta: number) => {
+    if (!tabStripRef) return;
+    tabStripRef.scrollBy({ left: delta, behavior: "smooth" });
+  };
+
+  const onTabStripWheel = (event: WheelEvent) => {
+    if (!tabStripRef) return;
+    if (Math.abs(event.deltaY) > Math.abs(event.deltaX) && tabStripRef.scrollWidth > tabStripRef.clientWidth) {
+      event.preventDefault();
+      tabStripRef.scrollLeft += event.deltaY;
+      updateScrollIndicators();
+    }
+  };
 
   const layout = () => props.workspace.layout();
   const renderer = () => props.workspace.renderer();
@@ -163,82 +190,144 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     }
   }
 
+  createEffect(() => {
+    laneTargets();
+    activeWindow();
+    requestAnimationFrame(() => {
+      updateScrollIndicators();
+      if (!tabStripRef) return;
+      const activeEl = tabStripRef.querySelector<HTMLElement>('[aria-pressed="true"]');
+      activeEl?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    });
+  });
+
+  onMount(() => {
+    if (!tabStripRef) return;
+    tabStripRef.addEventListener("wheel", onTabStripWheel, { passive: false });
+    let resizeObserver: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(() => updateScrollIndicators());
+      resizeObserver.observe(tabStripRef);
+    }
+    onCleanup(() => {
+      tabStripRef?.removeEventListener("wheel", onTabStripWheel);
+      resizeObserver?.disconnect();
+    });
+  });
+
   return (
     <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)] bg-background">
       <div class="flex h-10 shrink-0 min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
-        <div class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto" role="group" aria-label="Lane terminals and actions">
-          <For each={laneTargets()}>
-            {(target) => (
-              <div
-                class={`group/tab flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all ${
-                  activeWindow() === target.window
-                    ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
-                    : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
-                }`}
+        {/* Scrollable Tab Strip Container with Edge Masks and Overflow Controls */}
+        <div class="relative flex min-w-0 flex-1 items-center">
+          <Show when={canScrollLeft()}>
+            <div class="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex items-center pr-3 bg-gradient-to-r from-surface via-surface/85 to-transparent">
+              <button
+                type="button"
+                class="pointer-events-auto focus-ring flex size-5 items-center justify-center rounded-md bg-raised/90 text-muted shadow-xs hover:bg-raised hover:text-foreground transition-colors"
+                onClick={() => scrollByDelta(-140)}
+                aria-label="Scroll tabs left"
+                title="Scroll left"
               >
-                <button
-                  type="button"
-                  aria-pressed={activeWindow() === target.window}
-                  class="focus-ring flex min-w-[7.5rem] max-w-[13rem] items-center gap-1.5 px-2.5 py-1 text-left"
-                  onClick={() => setActiveWindow(target.window)}
+                <IconChevronLeft size={11} />
+              </button>
+            </div>
+          </Show>
+
+          <div
+            ref={tabStripRef}
+            class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto no-scrollbar scroll-smooth py-0.5"
+            onScroll={updateScrollIndicators}
+            role="group"
+            aria-label="Lane terminals and actions"
+          >
+            <For each={laneTargets()}>
+              {(target) => (
+                <div
+                  class={`group/tab flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all ${
+                    activeWindow() === target.window
+                      ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
+                      : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
+                  }`}
                 >
-                  <span class={`shrink-0 ${target.shell ? "text-attention" : "text-signal"}`}>
-                    <AgentIcon agent={target.agent} shell={target.shell} size={13} />
-                  </span>
-                  <span class="truncate flex-1 min-w-0">{labelOf(target)}</span>
-                </button>
-                <Show when={target.shell}>
                   <button
                     type="button"
-                    class="focus-ring mr-1 flex size-5 items-center justify-center rounded text-muted opacity-60 transition-opacity hover:bg-fault/10 hover:text-fault hover:opacity-100 disabled:opacity-30"
-                    aria-label={`Close ${target.label}`}
-                    disabled={closingShell() === target.window}
-                    onClick={() => void closeShell(target)}
+                    aria-pressed={activeWindow() === target.window}
+                    class="focus-ring flex min-w-[7.5rem] max-w-[13rem] items-center gap-1.5 px-2.5 py-1 text-left"
+                    onClick={() => setActiveWindow(target.window)}
                   >
-                    <IconClose size={11} />
+                    <span class={`shrink-0 ${target.shell ? "text-attention" : "text-signal"}`}>
+                      <AgentIcon agent={target.agent} shell={target.shell} size={13} />
+                    </span>
+                    <span class="truncate flex-1 min-w-0">{labelOf(target)}</span>
                   </button>
-                </Show>
-              </div>
-            )}
-          </For>
-          <div class="ml-2 flex items-center gap-2 border-l border-line/60 pl-2">
-            <Show when={props.fleet.selectedLane()?.agent_sessions.find((s) => s.external)}>
-              {(extSess) => (
-                <button
-                  type="button"
-                  class="focus-ring flex h-6 items-center gap-1 rounded-md border border-signal/40 bg-signal/15 px-2 text-[11px] font-medium text-signal transition-colors hover:bg-signal/25 disabled:opacity-40"
-                  onClick={() => void handleAdopt(props.fleet.selectedLane()!, extSess())}
-                  disabled={adopting()}
-                  title={`Adopt external ${extSess().agent} session into repomon tmux management`}
-                >
-                  <IconBot size={11} />
-                  <span>{adopting() ? "Adopting…" : "Adopt External"}</span>
-                </button>
+                  <Show when={target.shell}>
+                    <button
+                      type="button"
+                      class="focus-ring mr-1 flex size-5 items-center justify-center rounded text-muted opacity-60 transition-opacity hover:bg-fault/10 hover:text-fault hover:opacity-100 disabled:opacity-30"
+                      aria-label={`Close ${target.label}`}
+                      disabled={closingShell() === target.window}
+                      onClick={() => void closeShell(target)}
+                    >
+                      <IconClose size={11} />
+                    </button>
+                  </Show>
+                </div>
               )}
-            </Show>
-            <button
-              type="button"
-              class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
-              onClick={() => {
-                const lane = props.fleet.selectedLane();
-                if (lane) props.actions.spawn(lane);
-              }}
-              disabled={!props.fleet.selectedLane()}
-              title="Spawn an agent in this lane"
-            >
-              <IconPlus size={11} />
-              <span>Agent</span>
-            </button>
-            <button
-              type="button"
-              class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
-              onClick={() => void openShell()}
-              disabled={props.fleet.selectedLaneId() === null || openingShell()}
-            >
-              <IconPlus size={11} />
-              <span>{openingShell() ? "Opening…" : "Shell"}</span>
-            </button>
+            </For>
+            <div class="ml-2 flex shrink-0 items-center gap-2 border-l border-line/60 pl-2">
+              <Show when={props.fleet.selectedLane()?.agent_sessions.find((s) => s.external)}>
+                {(extSess) => (
+                  <button
+                    type="button"
+                    class="focus-ring flex h-6 items-center gap-1 rounded-md border border-signal/40 bg-signal/15 px-2 text-[11px] font-medium text-signal transition-colors hover:bg-signal/25 disabled:opacity-40"
+                    onClick={() => void handleAdopt(props.fleet.selectedLane()!, extSess())}
+                    disabled={adopting()}
+                    title={`Adopt external ${extSess().agent} session into repomon tmux management`}
+                  >
+                    <IconBot size={11} />
+                    <span>{adopting() ? "Adopting…" : "Adopt External"}</span>
+                  </button>
+                )}
+              </Show>
+              <button
+                type="button"
+                class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
+                onClick={() => {
+                  const lane = props.fleet.selectedLane();
+                  if (lane) props.actions.spawn(lane);
+                }}
+                disabled={!props.fleet.selectedLane()}
+                title="Spawn an agent in this lane"
+              >
+                <IconPlus size={11} />
+                <span>Agent</span>
+              </button>
+              <button
+                type="button"
+                class="focus-ring flex h-6 items-center gap-1 rounded-md border border-line bg-raised/50 px-2 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
+                onClick={() => void openShell()}
+                disabled={props.fleet.selectedLaneId() === null || openingShell()}
+              >
+                <IconPlus size={11} />
+                <span>{openingShell() ? "Opening…" : "Shell"}</span>
+              </button>
+            </div>
           </div>
+
+          <Show when={canScrollRight()}>
+            <div class="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex items-center pl-3 bg-gradient-to-l from-surface via-surface/85 to-transparent">
+              <button
+                type="button"
+                class="pointer-events-auto focus-ring flex size-5 items-center justify-center rounded-md bg-raised/90 text-muted shadow-xs hover:bg-raised hover:text-foreground transition-colors"
+                onClick={() => scrollByDelta(140)}
+                aria-label="Scroll tabs right"
+                title="Scroll right"
+              >
+                <IconChevronRight size={11} />
+              </button>
+            </div>
+          </Show>
         </div>
 
         <div class="ml-3 flex shrink-0 items-center">

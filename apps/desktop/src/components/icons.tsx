@@ -417,6 +417,26 @@ export function IconChevronRight(props: IconProps): JSX.Element {
   );
 }
 
+export function IconChevronLeft(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 12;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 2}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+
 export function IconCheck(props: IconProps): JSX.Element {
   const s = () => props.size ?? 14;
   return (

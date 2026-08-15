@@ -428,6 +428,14 @@
   scrollbar-width: thin;
 }
 
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 .status-light {
   display: block;
   width: 0.45rem;
