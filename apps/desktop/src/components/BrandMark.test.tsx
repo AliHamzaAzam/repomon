@@ -14,11 +14,16 @@ describe("brand mark", () => {
     const { container } = render(() => <BrandMark />);
     const svg = container.querySelector("svg")!;
 
-    expect(svg.innerHTML).toContain("var(--background)");
     expect(svg.innerHTML).toContain("var(--signal)");
     expect(svg.innerHTML).toContain("var(--attention)");
     expect(svg.innerHTML).not.toMatch(/#[0-9a-f]{3,6}/i);
     expect(svg.innerHTML).not.toContain("rgb(");
+  });
+
+  it("renders on a transparent background, no backing rect", () => {
+    const { container } = render(() => <BrandMark />);
+    const svg = container.querySelector("svg")!;
+    expect(svg.innerHTML).not.toContain("var(--background)");
   });
 
   it("is decorative unless given a title", () => {
@@ -33,10 +38,10 @@ describe("brand mark", () => {
     expect(svg.getAttribute("aria-hidden")).toBeNull();
   });
 
-  it("scales its corner radius with the requested size", () => {
+  it("scales with the requested size", () => {
     const { container } = render(() => <BrandMark size={48} />);
     const svg = container.querySelector("svg")!;
     expect(svg.getAttribute("width")).toBe("48");
-    expect(svg.style.borderRadius).toBe("11px");
+    expect(svg.getAttribute("height")).toBe("48");
   });
 });

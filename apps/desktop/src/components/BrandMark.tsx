@@ -12,8 +12,8 @@ interface BrandMarkProps {
 ///
 /// It is drawn from theme tokens rather than the source file's fixed palette, so it follows the
 /// selected theme (and the accent) instead of staying locked to the dark-mode colors. The mapping
-/// is exact: the source's teal is `--signal`, its amber pip is `--attention`, and its background
-/// `rgb(17,21,28)` is the dark theme's `--background` to the value.
+/// is exact: the source's teal is `--signal`, its amber pip is `--attention`. Unlike the app icon,
+/// this mark renders on a transparent background so it sits directly on the title bar.
 export default function BrandMark(props: BrandMarkProps) {
   const size = () => props.size ?? 26;
   return (
@@ -24,9 +24,7 @@ export default function BrandMark(props: BrandMarkProps) {
       role={props.title ? "img" : "presentation"}
       aria-label={props.title}
       aria-hidden={props.title ? undefined : "true"}
-      style={{ "border-radius": `${Math.round(size() * 0.22)}px` }}
     >
-      <rect x="0" y="0" width="1254" height="1254" fill="var(--background)" />
       <g fill="var(--signal)">
         <rect x="300" y="280" width="304" height="97" />
         <rect x="650" y="280" width="305" height="97" />
