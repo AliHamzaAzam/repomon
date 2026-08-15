@@ -4019,12 +4019,24 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         .collect();
     {
         let mut prev = ctx.last_managed_windows.lock().await;
-        if prev.difference(&managed_now).next().is_some() {
+        let vanished: Vec<String> = prev.difference(&managed_now).cloned().collect();
+        if !vanished.is_empty() {
             *ctx.live_cwds.lock().await = None;
             // Also drop the sticky-high counts so a `/exit`ed managed agent disappears within one
             // refresh instead of being held for the grace (tmux closes the window as its process
             // dies, so this is the genuine-exit signal — see `live_cwds_cached`).
             ctx.cwds_sticky.lock().await.clear();
+
+            let last_good = ctx.last_good_windows.lock().await;
+            let mut dead = ctx.dead_managed_sessions.lock().await;
+            for v in &vanished {
+                if let Some(sid) = last_good.iter().find(|w| &w.name == v).and_then(|w| w.session.clone()) {
+                    dead.insert(sid);
+                }
+            }
+            if dead.len() > 500 {
+                dead.clear();
+            }
         }
         *prev = managed_now;
     }
@@ -4038,6 +4050,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let rate_limits = ctx.rate_limits.lock().await.clone();
     let auto_off = ctx.auto_continue_off.lock().await.clone();
     let global_auto = ctx.config.read().await.auto_continue;
+    let dead_sessions = ctx.dead_managed_sessions.lock().await.clone();
 
     // Per-lane binding candidates + their probe-window pools, resolved against pane
     // evidence and stamped as `@repomon_session` after the loop.
@@ -4141,22 +4154,35 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     Some(w) => {
                         session.external = false;
                         session.tmux_window = Some(w);
+                        if let Some(sid) = &session.session_id {
+                            ctx.dead_managed_sessions.lock().await.remove(sid);
+                        }
                         lane.agent_sessions.push(session);
                     }
                     None => {
                         // An unbound summary is ONLY a real external session if there are actual external
                         // processes running outside tmux (alive > managed_n), or if the process probe was
                         // unavailable (alive == None) and the transcript is actively fresh.
-                        let is_ext = match ext_slots_remaining.as_mut() {
-                            Some(slots) => {
-                                if *slots > 0 {
-                                    *slots -= 1;
-                                    true
-                                } else {
-                                    false
+                        // Furthermore, a session that was previously managed and whose window died is an
+                        // exited managed agent, NOT an external session.
+                        let is_dead_managed = session
+                            .session_id
+                            .as_deref()
+                            .map_or(false, |sid| dead_sessions.contains(sid));
+                        let is_ext = if is_dead_managed {
+                            false
+                        } else {
+                            match ext_slots_remaining.as_mut() {
+                                Some(slots) => {
+                                    if *slots > 0 {
+                                        *slots -= 1;
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 }
+                                None => is_fresh,
                             }
-                            None => is_fresh,
                         };
                         if is_ext {
                             session.external = true;
@@ -8034,5 +8060,55 @@ mod tests {
                 AgentKind::Antigravity
             )]
         );
+    }
+
+    #[test]
+    fn dead_managed_session_is_not_promoted_to_external() {
+        let dead: std::collections::HashSet<String> = ["dead-session-1".to_string()].into_iter().collect();
+        let sid = "dead-session-1";
+        let is_dead_managed = dead.contains(sid);
+        assert!(is_dead_managed);
+
+        // Even with available ext slots (alive=1, managed=0), a dead managed session is suppressed
+        let mut ext_slots_remaining = Some(1usize);
+        let is_ext = if is_dead_managed {
+            false
+        } else {
+            match ext_slots_remaining.as_mut() {
+                Some(slots) => {
+                    if *slots > 0 {
+                        *slots -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            }
+        };
+        assert!(!is_ext);
+        // Slot count remained untouched
+        assert_eq!(ext_slots_remaining, Some(1));
+
+        // A genuine external session (not in dead set) claims the slot
+        let live_ext_sid = "live-external-session";
+        let is_dead_managed_live = dead.contains(live_ext_sid);
+        let is_ext_live = if is_dead_managed_live {
+            false
+        } else {
+            match ext_slots_remaining.as_mut() {
+                Some(slots) => {
+                    if *slots > 0 {
+                        *slots -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            }
+        };
+        assert!(is_ext_live);
+        assert_eq!(ext_slots_remaining, Some(0));
     }
 }

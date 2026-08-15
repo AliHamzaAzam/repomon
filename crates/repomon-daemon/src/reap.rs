@@ -77,28 +77,36 @@ fn canonical(p: &Path) -> PathBuf {
 /// performed on purpose, so it holds the stale (now-dead) window in `last_good_windows` for one
 /// extra tick — long enough for an immediately-following `lane.get` (e.g. `delete_lane`'s impact
 /// summary) to read the just-stopped agent back as still live.
-///
 /// Since we already know this exact window is gone — we're the one who killed it — drop it from
 /// the caches proactively instead of waiting for the next probe to (eventually) notice:
 /// - `last_good_windows`, so `resolve_windows` can't mistake our kill for a bounce and reuse it.
 /// - `prompt_cache`, so a future window reusing this name never inherits a stale pane sniff.
-///
-/// `last_managed_windows` is deliberately left untouched: `overlay_agents`'s next-tick diff
-/// against it is what detects "a managed window vanished" and drops the stale
-/// `live_cwds`/`cwds_sticky` process counts — pre-updating it here would erase that signal.
+/// - `dead_managed_sessions`, so the stopped session is never misclassified as external.
+/// - `live_cwds` and `cwds_sticky`, so process-accounting caches drop immediately on stop.
 ///
 /// Shared by the orphan sweep below (killing a stale `lane-<id>` window left by a renumbered
 /// worktree) and `rpc::agent.stop` (killing a live one on request) — same window-death
-/// bookkeeping either way, so a stopped agent's session can never be read back as still live.
+/// bookkeeping either way, so a stopped agent's session can never be read back as still live or
+/// reappear as an external ghost session.
 pub(crate) async fn kill_and_forget(ctx: &Ctx, window: &str) {
     let tmux = ctx.backend.clone();
     let w = window.to_string();
     let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&w)).await;
-    ctx.last_good_windows
-        .lock()
-        .await
-        .retain(|w| w.name != window);
+    {
+        let mut last_good = ctx.last_good_windows.lock().await;
+        if let Some(sid) = last_good.iter().find(|w| w.name == window).and_then(|w| w.session.clone()) {
+            let mut dead = ctx.dead_managed_sessions.lock().await;
+            dead.insert(sid);
+            if dead.len() > 500 {
+                dead.clear();
+            }
+        }
+        last_good.retain(|w| w.name != window);
+    }
+    ctx.last_managed_windows.lock().await.remove(window);
     ctx.prompt_cache.lock().await.remove(window);
+    *ctx.live_cwds.lock().await = None;
+    ctx.cwds_sticky.lock().await.clear();
     ctx.invalidate_overlay().await;
 }
 

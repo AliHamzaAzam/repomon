@@ -255,6 +255,9 @@ pub struct Ctx {
     /// count immediately so the vanished agent drops from the `×N` count without waiting out the
     /// `live_cwds` cache TTL.
     pub last_managed_windows: Mutex<HashSet<String>>,
+    /// Session IDs of managed agents that have stopped or exited, so their transcripts are never
+    /// misclassified as external sessions on process-probe lag.
+    pub dead_managed_sessions: Mutex<HashSet<String>>,
     /// Last tmux window list a probe returned successfully (names + window ids +
     /// `@repomon_session` bindings). Reused for one overlay tick when `list_windows_meta`
     /// fails transiently (fork/connection fault under load), so a single bad snapshot doesn't
@@ -393,6 +396,7 @@ impl Ctx {
             local_watcher_seen: Mutex::new(None),
             input_seen: Mutex::new(HashMap::new()),
             last_managed_windows: Mutex::new(HashSet::new()),
+            dead_managed_sessions: Mutex::new(HashSet::new()),
             last_good_windows: Mutex::new(Vec::new()),
             window_empty_misses: Mutex::new(0),
             last_good_sessions: Mutex::new(HashMap::new()),
