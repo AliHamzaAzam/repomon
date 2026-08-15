@@ -10,11 +10,11 @@ import {
 } from "../components/terminalTargets";
 import type { FleetStore } from "./fleet";
 
-export type WorkspaceLayout = "focused" | "split" | "grid";
+export type WorkspaceLayout = "auto" | "focused" | "split" | "grid";
 
 function readLayout(): WorkspaceLayout {
   const value = localStorage.getItem("repomon.workspace.layout");
-  return value === "split" || value === "grid" ? value : "focused";
+  return value === "auto" || value === "split" || value === "grid" || value === "focused" ? value : "auto";
 }
 
 function readRenderer(): TerminalRenderer {

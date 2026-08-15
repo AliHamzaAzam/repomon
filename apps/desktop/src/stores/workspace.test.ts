@@ -59,9 +59,13 @@ describe("workspace store", () => {
   it("layout persists to localStorage", () => {
     createRoot((dispose) => {
       const ws = createWorkspaceStore(fleetStub());
+      expect(ws.layout()).toBe("auto");
       ws.chooseLayout("grid");
       expect(ws.layout()).toBe("grid");
       expect(localStorage.getItem("repomon.workspace.layout")).toBe("grid");
+      ws.chooseLayout("auto");
+      expect(ws.layout()).toBe("auto");
+      expect(localStorage.getItem("repomon.workspace.layout")).toBe("auto");
       dispose();
     });
   });

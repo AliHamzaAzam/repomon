@@ -101,19 +101,41 @@ describe("Select custom dropdown", () => {
     render(() => (
       <Select
         size="sm"
-        ariaLabel="Terminal renderer"
-        value="webgl"
+        ariaLabel="Layout mode"
+        value="auto"
         options={[
           { value: "auto", label: "auto" },
-          { value: "webgl", label: "webgl" },
-          { value: "dom", label: "dom" },
+          { value: "focused", label: "focused" },
+          { value: "split", label: "split" },
+          { value: "grid", label: "grid" },
         ]}
         onChange={() => undefined}
       />
     ));
 
-    const trigger = screen.getByRole("combobox", { name: "Terminal renderer" });
+    const trigger = screen.getByRole("combobox", { name: "Layout mode" });
     expect(trigger).toBeInTheDocument();
-    expect(trigger).toHaveTextContent("webgl");
+    expect(trigger).toHaveTextContent("auto");
+  });
+
+  it("applies right alignment class when align='right' is specified", async () => {
+    render(() => (
+      <Select
+        size="sm"
+        align="right"
+        ariaLabel="Layout mode"
+        value="auto"
+        options={[
+          { value: "auto", label: "auto" },
+          { value: "grid", label: "grid" },
+        ]}
+        onChange={() => undefined}
+      />
+    ));
+
+    const trigger = screen.getByRole("combobox", { name: "Layout mode" });
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole("listbox");
+    expect(listbox).toHaveClass("right-0");
   });
 });

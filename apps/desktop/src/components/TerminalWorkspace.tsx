@@ -64,12 +64,22 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     }
   });
 
+  const effectiveLayout = createMemo(() => {
+    const l = layout();
+    if (l !== "auto") return l;
+    const count = laneTargets().length;
+    if (count <= 1) return "focused";
+    if (count === 2) return "split";
+    return "grid";
+  });
+
   const visibleTargets = createMemo(() => {
     const all = targets();
     const active = all.find((target) => target.window === activeWindow()) ?? laneTargets()[0];
     if (!active) return [];
-    if (layout() === "focused") return [active];
-    if (layout() === "split") {
+    const eff = effectiveLayout();
+    if (eff === "focused") return [active];
+    if (eff === "split") {
       const peer = laneTargets().find((target) => target.window !== active.window)
         ?? all.find((target) => target.window !== active.window);
       return peer ? [active, peer] : [active];
@@ -226,7 +236,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5" role="group" aria-label="Layout view mode">
             <button
               type="button"
-              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${layout() === "focused" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${effectiveLayout() === "focused" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
               onClick={() => chooseLayout("focused")}
               title="Focused layout"
               aria-label="Focused layout"
@@ -235,7 +245,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             </button>
             <button
               type="button"
-              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${layout() === "split" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${effectiveLayout() === "split" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
               onClick={() => chooseLayout("split")}
               title="Split layout"
               aria-label="Split layout"
@@ -244,7 +254,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             </button>
             <button
               type="button"
-              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${layout() === "grid" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${effectiveLayout() === "grid" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
               onClick={() => chooseLayout("grid")}
               title="Grid layout"
               aria-label="Grid layout"
@@ -255,14 +265,16 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
 
           <Select
             size="sm"
-            ariaLabel="Terminal renderer"
-            value={renderer()}
+            align="right"
+            ariaLabel="Layout mode"
+            value={layout()}
             options={[
               { value: "auto", label: "auto" },
-              { value: "webgl", label: "webgl" },
-              { value: "dom", label: "dom" },
+              { value: "focused", label: "focused" },
+              { value: "split", label: "split" },
+              { value: "grid", label: "grid" },
             ]}
-            onChange={(val) => chooseRenderer(val as TerminalRenderer)}
+            onChange={(val) => chooseLayout(val as WorkspaceLayout)}
           />
         </div>
       </div>
@@ -354,7 +366,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </div>
         }
       >
-        <div class={`terminal-layout is-${layout()} count-${visibleTargets().length}`}>
+        <div class={`terminal-layout is-${effectiveLayout()} count-${visibleTargets().length}`}>
           <For each={mountedTargets()}>
             {(target) => {
               const visibleIndex = createMemo(() => visibleTargets().findIndex((item) => item.window === target.window));

@@ -14,6 +14,7 @@ export interface SelectProps {
   options: SelectOption[];
   onChange: (value: string) => void;
   size?: "sm" | "md";
+  align?: "left" | "right";
   disabled?: boolean;
   class?: string;
 }
@@ -146,7 +147,9 @@ export default function Select(props: SelectProps) {
           aria-labelledby={props.label ? labelId : undefined}
           aria-label={props.label ? undefined : (props.ariaLabel ?? "Options")}
           tabIndex={-1}
-          class="absolute left-0 right-0 z-50 mt-1 max-h-60 min-w-[8rem] overflow-y-auto rounded-xl border border-line bg-surface p-1 shadow-[0_12px_36px_var(--shadow)] outline-none backdrop-blur-md"
+          class={`absolute z-50 mt-1 max-h-60 min-w-[8rem] overflow-y-auto rounded-xl border border-line bg-surface p-1 shadow-[0_12px_36px_var(--shadow)] outline-none backdrop-blur-md ${
+            props.align === "right" ? "right-0" : "left-0"
+          }`}
         >
           <For each={props.options}>
             {(option, index) => {
