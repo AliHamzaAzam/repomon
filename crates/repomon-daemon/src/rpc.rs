@@ -3882,9 +3882,10 @@ const RECENTLY_ACTIVE_SECS: i64 = 60;
 /// TTL for the cached lane overlay. The notify watcher recomputes a fresh overlay every ~2s
 /// (and every state-transition event it emits is preceded by that fresh recompute, so
 /// event-triggered client refreshes always read current data). Keeping the TTL just under
-/// that cadence lets the GUI's 2s heartbeat poll ride the watcher's scan instead of running
-/// its own — halving overlay recomputes — while transition-less drift stays ≤ one watcher tick.
-const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(1900);
+/// Recomputing the overlay from scratch takes ~10-30ms depending on lane and window counts. A 500ms
+/// TTL ensures frequent client polls (1-2s heartbeat) always receive fresh status updates while
+/// coalescing sub-second burst requests into a single recomputation.
+const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The full lane list with live agent sessions overlaid — what `lane.list` serves — from a
 /// short-TTL cache so a stream of per-second client polls collapses into ~1 scan per TTL. Stale
@@ -4375,15 +4376,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // The sniff is a `capture-pane` per Running/Waiting session — the bulk of the overlay's
         // subprocess cost. Reuse a recent result per window and only re-capture stale ones, so
         // rapid overlays (notify_watch + client polls) share one sniff per window per TTL.
-        const SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+        const SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(4);
         // A Running session is the one that can *newly* raise a dialog (its transcript ends in a
         // tool call, but the pane may be on a permission/plan/menu prompt that only the sniff
-        // sees), so a NeedsYou can be up to SNIFF_TTL late. Re-capture those on a much shorter TTL
-        // to cut that latency; a session already classified Waiting has its dialog confirmed, so
-        // let its result ride the full TTL. The extra captures are bounded — only while a session
-        // is actively Running — and the notification engine's activity latch absorbs any added
-        // flap from sniffing more often.
-        const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+        // sees), so a NeedsYou can be up to SNIFF_TTL late. Re-capture those on a short 1.5s TTL
+        // so status updates and decision prompts appear almost instantly.
+        const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
         let mut prompts: Vec<Option<agent::prompt::PendingDialog>> =
             Vec::with_capacity(candidates.len());
         let mut misses: Vec<usize> = Vec::new();

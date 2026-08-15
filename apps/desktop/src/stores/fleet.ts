@@ -289,11 +289,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     if (active) return;
     active = true;
     void refresh();
-    // Heartbeat poll. Kept at 2s (not 1s) because pushed event.* notifications already trigger a
-    // coalesced refresh between beats; this is the fallback/reconciler. Each poll is a full
-    // lane.list, which drives the daemon's expensive per-lane overlay, so a second client (the TUI)
-    // polling in parallel doubles that cost — halving our cadence keeps the daemon load down.
-    interval = setInterval(() => void refresh(), 2000);
+    // Heartbeat poll at 1.2s cadence to ensure fast UI updates without excessive overhead.
+    interval = setInterval(() => void refresh(), 1200);
     void source
       .subscribe(queueRefresh)
       .then((stop) => {
