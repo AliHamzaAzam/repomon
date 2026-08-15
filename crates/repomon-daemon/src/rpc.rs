@@ -4545,48 +4545,65 @@ fn pair_transcripts_to_windows(
             }
         }
     }
-    // Supersession: a claude process rotates its transcript id in place (`/clear`, a
-    // fork-on-resume), leaving its window bound to a dead transcript while the live
-    // continuation has no window. When more FRESH unclaimed transcripts exist than free
-    // windows to receive them, release claims whose transcript has gone quiet — WARMEST
-    // first: the transcript that stopped writing most recently is the one that just rotated
-    // into the newcomer, while a long-cold one is simply an idle agent whose window must not
-    // be given away. A claim on a fresh transcript is never released, so an idle fleet
-    // can't be shuffled.
-    let fresh_unclaimed = summaries
-        .iter()
-        .enumerate()
-        .filter(|(i, s)| !claimed[*i] && is_fresh(s))
-        .count();
-    let mut free_n = claim.iter().filter(|c| c.is_none()).count();
-    if fresh_unclaimed > free_n {
-        let mut stale_wis: Vec<usize> = (0..windows.len())
-            .filter(|&wi| claim[wi].is_some_and(|si| !is_fresh(&summaries[si])))
-            .collect();
-        stale_wis.sort_by_key(|&wi| std::cmp::Reverse(summaries[claim[wi].unwrap()].last_activity));
-        for wi in stale_wis {
-            if fresh_unclaimed <= free_n {
-                break;
-            }
-            claimed[claim[wi].unwrap()] = false;
-            claim[wi] = None;
-            free_n += 1;
-        }
-    }
-    // Honor the surviving claims.
+    // Honor pass 1's claims for DISPLAY. A window's `@repomon_session` stamp is durable
+    // ground truth — going idle is not going dead, so a valid claim is never un-displayed
+    // just because its transcript stopped writing for a moment.
     let mut assignment: Vec<Option<String>> = vec![None; summaries.len()];
-    let mut taken = vec![false; windows.len()];
+    let mut has_display = vec![false; windows.len()];
     for (wi, c) in claim.iter().enumerate() {
         if let Some(si) = c {
             assignment[*si] = Some(windows[wi].name.clone());
-            taken[wi] = true;
+            has_display[wi] = true;
         }
     }
-    // Pass 2 — first contact. Unclaimed transcripts are candidates for the free-window pool,
-    // but remain external for this response. The free windows stay placeholders until pane
-    // evidence writes a durable stamp; a positional display guess is precisely what showed an
-    // old transcript over a just-spawned pane.
-    let mut free: Vec<usize> = (0..windows.len()).filter(|&i| !taken[i]).collect();
+    // Supersession: a claude process rotates its transcript id in place (`/clear`, a
+    // fork-on-resume), leaving its window bound to a dead transcript while the live
+    // continuation has no window. When more FRESH unclaimed transcripts exist than free
+    // windows to receive them, OFFER claims whose transcript has gone quiet to pass 2's
+    // evidence probe — WARMEST first: the transcript that stopped writing most recently is
+    // the one that just rotated into the newcomer, while a long-cold one is simply an idle
+    // agent whose window must not be given away. A claim on a fresh transcript is never
+    // released, so an idle fleet can't be shuffled.
+    //
+    // Offering a window to the probe does NOT change what's displayed for it this tick —
+    // only `confirmed_stamps` writing a durable `@repomon_session` stamp (proven by real pane
+    // text) can actually move it. Flipping `assignment` here on headcount alone previously
+    // made ANY idle-but-still-valid session (in a lane that simply holds more live
+    // transcripts than tmux windows, e.g. one companion window per external session) flicker
+    // to "external" every single tick it lost this footrace to an unrelated fresh transcript
+    // — most visibly, a lane containing the operator's own always-fresh, never-window-bound
+    // session permanently stole the idle-but-legitimately-bound window out from under another
+    // session's display, tick after tick, forever.
+    let mut released: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    {
+        let fresh_unclaimed = summaries
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| !claimed[*i] && is_fresh(s))
+            .count();
+        let mut free_n = claim.iter().filter(|c| c.is_none()).count();
+        if fresh_unclaimed > free_n {
+            let mut stale_wis: Vec<usize> = (0..windows.len())
+                .filter(|&wi| claim[wi].is_some_and(|si| !is_fresh(&summaries[si])))
+                .collect();
+            stale_wis
+                .sort_by_key(|&wi| std::cmp::Reverse(summaries[claim[wi].unwrap()].last_activity));
+            for wi in stale_wis {
+                if fresh_unclaimed <= free_n {
+                    break;
+                }
+                released.insert(wi);
+                free_n += 1;
+            }
+        }
+    }
+    // Pass 2 — first contact plus supersession offers. Unclaimed transcripts (and any window
+    // offered above) are candidates for the free-window pool. A never-claimed window remains
+    // a placeholder until pane evidence writes a durable stamp; a released-but-still-displayed
+    // window keeps showing its current binding until that evidence arrives.
+    let mut free: Vec<usize> = (0..windows.len())
+        .filter(|&i| !has_display[i] || released.contains(&i))
+        .collect();
     free.sort_by_key(|&i| (windows[i].session.is_some(), windows[i].wid));
     let probe: Vec<(u64, String)> = free
         .iter()
@@ -4630,10 +4647,12 @@ fn pair_transcripts_to_windows(
             }
         }
     }
+    // A released-but-displayed window is NOT unpaired — it already has a real, still-shown
+    // binding above and must not also render as a placeholder tab.
     let mut unpaired: Vec<&agent::WindowMeta> = windows
         .iter()
-        .zip(&taken)
-        .filter(|(_, t)| !**t)
+        .zip(&has_display)
+        .filter(|(_, d)| !**d)
         .map(|(w, _)| w)
         .collect();
     unpaired.sort_by_key(|w| std::cmp::Reverse(w.wid));
@@ -6909,16 +6928,19 @@ mod tests {
     #[test]
     fn clear_rotation_rebinds_window_to_the_live_transcript() {
         // `/clear` (or a fork-on-resume) rotates the session id in place: the window stays
-        // bound to the dead transcript e while the live continuation x has no window. The
-        // stale binding must be superseded — released, then re-stamped only after pane evidence
-        // identifies the transcript that is actually writing.
+        // bound to the dead transcript e while the live continuation x has no window. e's
+        // claim is offered to pass 2's evidence probe but keeps showing on the window until
+        // that evidence actually arrives — a durable tmux stamp is real ground truth right up
+        // until pane evidence proves otherwise, so nothing should un-display it on headcount
+        // alone. Once `confirmed_stamps` proves x is the one actually writing there, the next
+        // overlay's pass 1 exposes the durable pairing and e falls to external on its own.
         let windows = vec![wm("lane-7", 1, Some("e"))];
         let p =
             pair_transcripts_to_windows(&[tsum("x", t(100)), tsum("e", t(0))], &windows, t(100));
         assert_eq!(
             p.assignment,
-            vec![None, None],
-            "the live transcript awaits evidence; the dead one goes external"
+            vec![None, Some("lane-7".into())],
+            "the live transcript awaits evidence; the stale-but-still-bound one keeps its display"
         );
         assert_eq!(candidate_sids(&p), vec!["x"]);
         assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
@@ -6927,9 +6949,10 @@ mod tests {
     #[test]
     fn clear_rotation_releases_the_rotated_window_not_the_coldest() {
         // Two bound agents, both currently quiet: a rotated its session id a moment ago
-        // (`/clear` → continuation c), b has been idle for much longer. The window released
-        // for c must be a's — the transcript that went quiet MOST recently is the one that
-        // just rotated; sacrificing the long-idle b would route c's keys into b's pane.
+        // (`/clear` → continuation c), b has been idle for much longer. The window offered
+        // to c's evidence probe must be a's — the transcript that went quiet MOST recently is
+        // the one that just rotated; offering b's would route c's keys into b's pane once
+        // confirmed. a's window keeps displaying a until evidence actually reassigns it.
         let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
         let p = pair_transcripts_to_windows(
             &[tsum("c", t(100)), tsum("a", t(50)), tsum("b", t(0))],
@@ -6938,11 +6961,51 @@ mod tests {
         );
         assert_eq!(
             p.assignment,
-            vec![None, None, Some("lane-7-2".into())],
-            "c awaits evidence for a's released window; b keeps its own; dead a goes external"
+            vec![None, Some("lane-7".into()), Some("lane-7-2".into())],
+            "c awaits evidence for a's offered window; a and b both keep their own displays"
         );
         assert_eq!(candidate_sids(&p), vec!["c"]);
         assert_eq!(p.probe, vec![(1, "lane-7".to_string())]);
+    }
+
+    #[test]
+    fn permanently_unbound_fresh_transcript_never_displaces_an_idle_valid_binding() {
+        // A lane can legitimately hold more transcripts than tmux windows — e.g. one external,
+        // never-window-bound session (like the operator's own always-fresh live conversation)
+        // alongside agents that genuinely were adopted into windows. That extra fresh transcript
+        // is NOT a `/clear` continuation of anything here — it was never claimed by any window
+        // to begin with — so it must never repeatedly steal an idle-but-still-validly-bound
+        // window's DISPLAY on pure headcount (`fresh_unclaimed > free_n`), tick after tick,
+        // forever. It's fine to offer that window to the evidence probe (it wins nothing, since
+        // pane evidence never confirms an unrelated transcript there), but the display must stay
+        // put every single tick, not just the first.
+        let windows = vec![wm("lane-81", 1, Some("bound")), wm("lane-81-2", 2, Some("other"))];
+        let p = pair_transcripts_to_windows(
+            &[
+                tsum("operator", t(100)),
+                tsum("bound", t(10)),
+                tsum("other", t(0)),
+            ],
+            &windows,
+            t(100),
+        );
+        assert_eq!(
+            p.assignment,
+            vec![None, Some("lane-81".into()), Some("lane-81-2".into())],
+            "both idle-but-bound sessions keep their real windows; the unrelated fresh one stays external"
+        );
+        // Re-running against the exact same input (simulating the next poll tick, nothing
+        // resolved) must be identical — no flip-flopping.
+        let p2 = pair_transcripts_to_windows(
+            &[
+                tsum("operator", t(100)),
+                tsum("bound", t(10)),
+                tsum("other", t(0)),
+            ],
+            &windows,
+            t(100),
+        );
+        assert_eq!(p.assignment, p2.assignment, "must not flip-flop tick to tick");
     }
 
     #[test]
