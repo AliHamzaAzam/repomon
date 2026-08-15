@@ -4163,7 +4163,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         } else {
                             match ext_slots_remaining.as_mut() {
                                 Some(slots) => {
-                                    if *slots > 0 {
+                                    if *slots > 0 && is_fresh {
                                         *slots -= 1;
                                         true
                                     } else {
@@ -5534,12 +5534,16 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
         // Refresh a worktree's held high only when this sample meets or exceeds it — an under-read
         // leaves the high's timestamp untouched so it can age out (real exits eventually decay).
         for (k, &c) in &map {
-            let refresh = sticky.get(k).map(|(hi, _)| c >= *hi).unwrap_or(true);
-            if refresh {
-                sticky.insert(k.clone(), (c, now));
+            if c == 0 {
+                sticky.remove(k);
+            } else {
+                let refresh = sticky.get(k).map(|(hi, _)| c >= *hi).unwrap_or(true);
+                if refresh {
+                    sticky.insert(k.clone(), (c, now));
+                }
             }
         }
-        sticky.retain(|_, (_, seen)| seen.elapsed() < STICKY_GRACE);
+        sticky.retain(|k, (_, seen)| map.get(k).copied().unwrap_or(0) > 0 && seen.elapsed() < STICKY_GRACE);
         // Lift the fresh count to the surviving held high (covers worktrees missing from `map`).
         for (k, (hi, _)) in sticky.iter() {
             let e = effective.entry(k.clone()).or_insert(0);
@@ -8059,27 +8063,45 @@ mod tests {
         assert!(was_managed);
 
         // Even with available ext slots (alive=1, managed=0), an ended managed session is suppressed
+        let is_fresh = true;
         let mut ext_slots_remaining = Some(1usize);
         let is_ext = if was_managed {
             false
         } else {
             match ext_slots_remaining.as_mut() {
                 Some(slots) => {
-                    if *slots > 0 {
+                    if *slots > 0 && is_fresh {
                         *slots -= 1;
                         true
                     } else {
                         false
                     }
                 }
-                None => true,
+                None => is_fresh,
             }
         };
         assert!(!is_ext);
         // Slot count remained untouched
         assert_eq!(ext_slots_remaining, Some(1));
 
-        // A genuine external session (not in known_managed) claims the slot
+        // A stale unbound session is also never promoted even if slots > 0
+        let _stale_sid = "stale-session";
+        let is_fresh_stale = false;
+        let is_ext_stale = match ext_slots_remaining.as_mut() {
+            Some(slots) => {
+                if *slots > 0 && is_fresh_stale {
+                    *slots -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => is_fresh_stale,
+        };
+        assert!(!is_ext_stale);
+        assert_eq!(ext_slots_remaining, Some(1));
+
+        // A genuine fresh external session (not in known_managed) claims the slot
         let live_ext_sid = "live-external-session";
         let was_managed_live = known_managed.contains(live_ext_sid);
         let is_ext_live = if was_managed_live {
@@ -8087,14 +8109,14 @@ mod tests {
         } else {
             match ext_slots_remaining.as_mut() {
                 Some(slots) => {
-                    if *slots > 0 {
+                    if *slots > 0 && is_fresh {
                         *slots -= 1;
                         true
                     } else {
                         false
                     }
                 }
-                None => true,
+                None => is_fresh,
             }
         };
         assert!(is_ext_live);

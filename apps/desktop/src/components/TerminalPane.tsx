@@ -98,6 +98,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let unsubLayout: (() => void) | undefined;
   let onAppearanceChanged: ((e: Event) => void) | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  let syncTimer: ReturnType<typeof setTimeout> | undefined;
   let wheelListener: ((event: WheelEvent) => void) | undefined;
   let wheelFrame: number | undefined;
   let visibilityFrame: number | undefined;
@@ -106,6 +107,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let rendererEpoch = 0;
   let disposed = false;
   let scrollRequestInFlight = false;
+  let syncInFlight = false;
+  let pendingSync = false;
   const [transportError, setTransportError] = createSignal<string | null>(null);
   const [ready, setReady] = createSignal(false);
   const [finding, setFinding] = createSignal(false);
@@ -292,35 +295,71 @@ export default function TerminalPane(props: TerminalPaneProps) {
         const cols = terminal.cols;
         const rows = terminal.rows;
         if (!cols || !rows || disposed || !terminal) return;
-        const args = { lane_id: props.laneId, window: props.window, cols, rows };
-        if (props.shell) {
-          // A GUI-owned shell has no other viewer, so our own resize is the authoritative one.
-          await daemonCall("agent.resize", args).catch(() => undefined);
-          if (!disposed) confirmedGrid = { cols, rows };
-        } else {
-          const pinned = confirmedGrid;
-          const grid = await daemonCall("agent.fit", args).catch(() => null);
-          if (disposed || !terminal) return;
-          if (grid?.cols && grid?.rows) {
-            applyGrid(grid.cols, grid.rows);
-          } else if (pinned) {
-            // Arbitration came back without a grid: the call failed, or the pane size query
-            // returned nothing. `fit()` already resized xterm locally, and keeping that unilateral
-            // size would leave us wrapping differently from the real pane, so pin back to the last
-            // size the backend confirmed rather than trusting the local guess.
-            applyGrid(pinned.cols, pinned.rows);
+
+        // Skip firing a redundant resize RPC if the backend is already aligned on this exact geometry.
+        if (confirmedGrid && confirmedGrid.cols === cols && confirmedGrid.rows === rows) {
+          return;
+        }
+
+        if (syncInFlight) {
+          pendingSync = true;
+          return;
+        }
+        syncInFlight = true;
+
+        try {
+          const args = { lane_id: props.laneId, window: props.window, cols, rows };
+          if (props.shell) {
+            // A GUI-owned shell has no other viewer, so our own resize is the authoritative one.
+            await daemonCall("agent.resize", args).catch(() => undefined);
+            if (!disposed) confirmedGrid = { cols, rows };
+          } else {
+            const pinned = confirmedGrid;
+            const grid = await daemonCall("agent.fit", args).catch(() => null);
+            if (disposed || !terminal) return;
+            if (grid?.cols && grid?.rows) {
+              applyGrid(grid.cols, grid.rows);
+            } else if (pinned) {
+              // Arbitration came back without a grid: the call failed, or the pane size query
+              // returned nothing. `fit()` already resized xterm locally, and keeping that unilateral
+              // size would leave us wrapping differently from the real pane, so pin back to the last
+              // size the backend confirmed rather than trusting the local guess.
+              applyGrid(pinned.cols, pinned.rows);
+            }
+          }
+        } finally {
+          syncInFlight = false;
+          if (pendingSync && !disposed) {
+            pendingSync = false;
+            requestSyncSize(true);
           }
         }
       };
 
-      const requestSyncSize = () => {
+      const requestSyncSize = (immediate = false) => {
         if (disposed || !terminal || !container?.isConnected) return;
-        if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
-        visibilityFrame = requestAnimationFrame(() => {
+        if (visibilityFrame !== undefined) {
+          cancelAnimationFrame(visibilityFrame);
           visibilityFrame = undefined;
-          if (disposed || !terminal || !container?.isConnected) return;
-          void syncSize?.();
-        });
+        }
+        if (syncTimer !== undefined) {
+          clearTimeout(syncTimer);
+          syncTimer = undefined;
+        }
+
+        if (immediate) {
+          visibilityFrame = requestAnimationFrame(() => {
+            visibilityFrame = undefined;
+            if (disposed || !terminal || !container?.isConnected) return;
+            void syncSize?.();
+          });
+        } else {
+          syncTimer = setTimeout(() => {
+            syncTimer = undefined;
+            if (disposed || !terminal || !container?.isConnected) return;
+            void syncSize?.();
+          }, 60);
+        }
       };
 
       // Accumulate fractional movement and issue at most one remote scroll at a time. New movement
@@ -522,6 +561,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
     if (resizeTimer) {
       clearTimeout(resizeTimer);
       resizeTimer = undefined;
+    }
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = undefined;
     }
     input?.dispose();
     input = undefined;
