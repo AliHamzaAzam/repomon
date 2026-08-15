@@ -387,39 +387,77 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             type="button"
             class={`focus-ring flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
               props.fleet.urgentOnly()
-                ? "border-attention/50 bg-attention/15 text-attention font-semibold shadow-xs"
+                ? "border-attention/60 bg-attention/20 text-attention font-semibold shadow-xs ring-1 ring-attention/25"
                 : props.fleet.counts().urgent > 0
-                  ? "border-attention/30 bg-attention/5 text-attention hover:border-attention/50 hover:bg-attention/10"
-                  : "border-line bg-raised/70 text-muted hover:border-line hover:bg-raised hover:text-foreground"
+                  ? "border-attention/30 bg-attention/6 hover:border-attention/50 hover:bg-attention/12"
+                  : "border-line bg-raised/60 text-muted hover:border-line hover:bg-raised hover:text-foreground"
             }`}
             onClick={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
             aria-pressed={props.fleet.urgentOnly()}
             title={props.fleet.urgentOnly() ? "Show all lanes" : "Filter to lanes needing attention"}
           >
-            <span class="truncate">Needs attention</span>
-            <span class="font-mono text-[11px] font-semibold">{props.fleet.counts().urgent}</span>
+            <span
+              class={`truncate ${
+                props.fleet.urgentOnly()
+                  ? "text-attention font-semibold"
+                  : props.fleet.counts().urgent > 0
+                    ? "text-foreground/85"
+                    : "text-muted"
+              }`}
+            >
+              Needs attention
+            </span>
+            <span
+              class={`font-mono text-[11px] ${
+                props.fleet.urgentOnly()
+                  ? "text-attention font-bold"
+                  : props.fleet.counts().urgent > 0
+                    ? "text-attention font-semibold"
+                    : "text-muted/70 font-medium"
+              }`}
+            >
+              {props.fleet.counts().urgent}
+            </span>
           </button>
           <button
             type="button"
-            class={`focus-ring flex h-7 shrink-0 items-center gap-1.5 rounded-lg border px-2 font-mono text-[11px] transition-colors ${
+            class={`focus-ring flex h-7 shrink-0 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
               props.fleet.runningOnly()
-                ? "border-signal/50 bg-signal/15 text-signal font-semibold shadow-xs"
+                ? "border-signal/60 bg-signal/20 text-signal font-semibold shadow-xs ring-1 ring-signal/25"
                 : props.fleet.counts().running > 0
-                  ? "border-signal/30 bg-signal/5 text-signal hover:border-signal/50 hover:bg-signal/10"
-                  : "border-line bg-raised/70 text-muted hover:border-line hover:bg-raised hover:text-foreground"
+                  ? "border-signal/30 bg-signal/6 hover:border-signal/50 hover:bg-signal/12"
+                  : "border-line bg-raised/60 text-muted hover:border-line hover:bg-raised hover:text-foreground"
             }`}
             onClick={() => props.fleet.setRunningOnly(!props.fleet.runningOnly())}
             aria-pressed={props.fleet.runningOnly()}
             title={props.fleet.runningOnly() ? "Show all lanes" : "Filter to lanes with a running agent"}
           >
-            <span class="text-[10px] font-sans font-medium text-muted/70">Running</span>
-            <b class={props.fleet.counts().running > 0 || props.fleet.runningOnly() ? "text-signal font-semibold" : "text-muted"}>
+            <span
+              class={`truncate ${
+                props.fleet.runningOnly()
+                  ? "text-signal font-semibold"
+                  : props.fleet.counts().running > 0
+                    ? "text-foreground/85"
+                    : "text-muted"
+              }`}
+            >
+              Running
+            </span>
+            <span
+              class={`font-mono text-[11px] ${
+                props.fleet.runningOnly()
+                  ? "text-signal font-bold"
+                  : props.fleet.counts().running > 0
+                    ? "text-signal font-semibold"
+                    : "text-muted/70 font-medium"
+              }`}
+            >
               {props.fleet.counts().running}
-            </b>
+            </span>
           </button>
           <button
             type="button"
-            class="focus-ring flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/70 text-muted transition-colors hover:border-line hover:bg-raised hover:text-foreground"
+            class="focus-ring flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/60 text-muted transition-colors hover:border-line hover:bg-raised hover:text-foreground"
             onClick={() => void props.actions.addRepo()}
             title="Add a repository"
             aria-label="Add a repository"
