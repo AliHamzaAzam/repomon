@@ -184,7 +184,6 @@ fn resync_frame(content: &str, alternate: bool, cursor: Option<(u16, u16)>) -> V
 
 struct Resync {
     cursor: StreamCursor,
-    stable: bool,
 }
 
 async fn capture_resync(
@@ -224,10 +223,6 @@ async fn capture_resync(
         .is_ok()
         .then_some(Resync {
             cursor: repaint_cursor,
-            stable: value
-                .get("stable")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
         })
 }
 
@@ -304,7 +299,7 @@ pub async fn term_watch(
         });
     };
     let mut stream_cursor = repaint.cursor;
-    let initial_resync = !repaint.stable;
+    let initial_resync = false;
 
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<oneshot::Sender<()>>();
     state
@@ -348,6 +343,7 @@ pub async fn term_watch(
                                 resync = true;
                                 continue;
                             }
+                            resync = false;
                             stream_cursor = chunk.cursor;
                             let was_idle = pending.is_empty();
                             if !append_pending(&mut pending, &chunk.bytes) {
@@ -378,10 +374,7 @@ pub async fn term_watch(
                             break;
                         };
                         stream_cursor = repaint.cursor;
-                        // A continuously mutating pane may not yield a quiet checkpoint on the
-                        // first pass. Render the latest complete frame now and verify it again on
-                        // the next tick instead of mixing its bytes with an uncertain cursor.
-                        resync = !repaint.stable;
+                        resync = false;
                     } else if !flush(&on_bytes, &mut pending) {
                         break;
                     }
