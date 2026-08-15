@@ -26,7 +26,7 @@ export default function Switch(props: {
         <span
           class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform duration-150 ease-in-out"
           classList={{
-            "translate-x-4": props.checked,
+            "translate-x-5": props.checked,
             "translate-x-0.5 bg-foreground/80": !props.checked,
           }}
         />
