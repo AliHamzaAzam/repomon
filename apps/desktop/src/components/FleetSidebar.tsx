@@ -286,11 +286,33 @@ function loadCollapsedLanes(): Set<number> {
   }
 }
 
+function loadHiddenSectionCollapsed(): boolean {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem("repomon:collapsed-hidden-repos") : null;
+    return raw !== null ? JSON.parse(raw) : true;
+  } catch {
+    return true;
+  }
+}
+
 export default function FleetSidebar(props: FleetSidebarProps) {
   const [extMenu, setExtMenu] = createSignal<{ repoId: number; x: number; y: number } | null>(null);
   const [autoCollapse, setAutoCollapse] = createSignal<boolean>(readAutoCollapseEmptyLanes());
   const [manuallyExpandedLanes, setManuallyExpandedLanes] = createSignal<Set<number>>(new Set());
   const [manuallyCollapsedLanes, setManuallyCollapsedLanes] = createSignal<Set<number>>(loadCollapsedLanes());
+  const [hiddenCollapsed, setHiddenCollapsed] = createSignal<boolean>(loadHiddenSectionCollapsed());
+
+  const toggleHiddenCollapsed = () => {
+    setHiddenCollapsed((prev) => {
+      const next = !prev;
+      try {
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("repomon:collapsed-hidden-repos", JSON.stringify(next));
+        }
+      } catch {}
+      return next;
+    });
+  };
 
   onMount(() => {
     const unsub = onAutoCollapseChanged((enabled) => {
@@ -476,24 +498,44 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </For>
           <Show when={props.fleet.hiddenRepos().length}>
             <section class="mt-2 border-t border-line pt-2" aria-label="Hidden projects">
-              <p class="px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-                Hidden ({props.fleet.hiddenRepos().length})
-              </p>
-              <For each={props.fleet.hiddenRepos()}>
-                {(repo) => (
-                  <button
-                    type="button"
-                    class="focus-ring flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-raised"
-                    onClick={() => void props.actions.setRepoHidden(repo, false)}
-                    title={`Show ${repo.name} again`}
-                  >
-                    <span class="truncate font-mono text-[11px] uppercase tracking-wider text-muted">
-                      {repo.name}
-                    </span>
-                    <span class="ml-2 shrink-0 text-xs text-signal font-medium">Unhide</span>
-                  </button>
-                )}
-              </For>
+              <button
+                type="button"
+                class="group/hidden-header focus-ring flex w-full items-center justify-between rounded px-2 py-1 text-muted transition-colors hover:bg-raised/40 cursor-pointer"
+                onClick={toggleHiddenCollapsed}
+                aria-expanded={!hiddenCollapsed()}
+                aria-label={hiddenCollapsed() ? `Expand Hidden (${props.fleet.hiddenRepos().length})` : `Collapse Hidden (${props.fleet.hiddenRepos().length})`}
+                title={hiddenCollapsed() ? `Expand Hidden (${props.fleet.hiddenRepos().length})` : `Collapse Hidden (${props.fleet.hiddenRepos().length})`}
+              >
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="flex size-4 shrink-0 items-center justify-center rounded text-muted group-hover/hidden-header:text-foreground">
+                    <Show when={hiddenCollapsed()} fallback={<IconChevronDown size={10} strokeWidth={2} />}>
+                      <IconChevronRight size={10} strokeWidth={2} />
+                    </Show>
+                  </span>
+                  <span class="truncate font-mono text-[10px] font-semibold uppercase tracking-wider text-muted group-hover/hidden-header:text-foreground">
+                    Hidden ({props.fleet.hiddenRepos().length})
+                  </span>
+                </div>
+              </button>
+              <Show when={!hiddenCollapsed()}>
+                <div class="mt-1 space-y-0.5">
+                  <For each={props.fleet.hiddenRepos()}>
+                    {(repo) => (
+                      <button
+                        type="button"
+                        class="focus-ring flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-raised"
+                        onClick={() => void props.actions.setRepoHidden(repo, false)}
+                        title={`Show ${repo.name} again`}
+                      >
+                        <span class="truncate font-mono text-[11px] uppercase tracking-wider text-muted">
+                          {repo.name}
+                        </span>
+                        <span class="ml-2 shrink-0 text-xs text-signal font-medium">Unhide</span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
             </section>
           </Show>
           <Show when={!props.fleet.visibleLanes().length}>

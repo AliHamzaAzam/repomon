@@ -91,17 +91,27 @@ describe("fleet sidebar hiding", () => {
     expect(setRepoHidden).toHaveBeenCalledWith(alpha, true);
   });
 
-  it("offers hidden projects a way back", () => {
+  it("offers hidden projects a way back via expandable disclosure section", () => {
     const alpha = repo(1, "alpha");
     const beta = repo(2, "beta", true);
     const { fleet, actions, setRepoHidden } = stubs([alpha, beta], [lane(10, alpha), lane(20, beta)]);
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
-    // The hidden repo is out of the main list but reachable from the reveal section, which is the
-    // only route back: the TUI honors the flag and has no unhide view of its own.
+    // The hidden repo section is collapsed by default showing the summary label
     expect(screen.getByText("Hidden (1)")).toBeInTheDocument();
+    expect(screen.queryByTitle("Show beta again")).not.toBeInTheDocument();
+
+    // Click to expand hidden section
+    fireEvent.click(screen.getByRole("button", { name: /Hidden \(1\)/i }));
+    expect(screen.getByTitle("Show beta again")).toBeInTheDocument();
+
+    // Click unhide button
     fireEvent.click(screen.getByTitle("Show beta again"));
     expect(setRepoHidden).toHaveBeenCalledWith(beta, false);
+
+    // Click to re-collapse hidden section
+    fireEvent.click(screen.getByRole("button", { name: /Hidden \(1\)/i }));
+    expect(screen.queryByTitle("Show beta again")).not.toBeInTheDocument();
   });
 
   it("does not claim there are no repositories when they are merely hidden", () => {
