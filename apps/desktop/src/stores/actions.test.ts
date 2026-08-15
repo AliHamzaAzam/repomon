@@ -112,6 +112,12 @@ describe("lane operations", () => {
       await actions.confirmOptions()?.onConfirm();
       expect(markClosing).toHaveBeenCalledWith("lane-7");
       expect(calls.list[0]).toEqual({ method: "agent.stop", params: { lane_id: 7, window: "lane-7" } });
+
+      // Explicit targetWindow override (e.g. from tab target)
+      actions.stopAgent(lane(), null, "lane-7-3");
+      await actions.confirmOptions()?.onConfirm();
+      expect(markClosing).toHaveBeenCalledWith("lane-7-3");
+      expect(calls.list[1]).toEqual({ method: "agent.stop", params: { lane_id: 7, window: "lane-7-3" } });
       dispose();
     });
   });

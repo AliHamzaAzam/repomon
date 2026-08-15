@@ -127,9 +127,9 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     });
   }
 
-  function stopAgent(lane: Lane, agent: AgentSession | null) {
+  function stopAgent(lane: Lane, agent: AgentSession | null, targetWindow?: string) {
     const name = agent?.custom_label ?? agent?.title ?? agent?.agent;
-    const window = agent?.tmux_window;
+    const window = targetWindow ?? agent?.tmux_window ?? undefined;
     setConfirmOptions({
       title: "Stop agent?",
       message: name ? `Stop ${name}. Its terminal session ends.` : "Stop this managed agent. Its terminal session ends.",
@@ -138,7 +138,7 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
       onConfirm: async () => {
         if (window) workspace?.markClosing(window);
         try {
-          await daemonCall("agent.stop", { lane_id: lane.id, window: window ?? undefined });
+          await daemonCall("agent.stop", { lane_id: lane.id, window });
           await fleet.refresh();
         } catch (cause) {
           if (window) workspace?.unmarkClosing(window);

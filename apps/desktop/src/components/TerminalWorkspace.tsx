@@ -289,7 +289,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                         const lane = props.fleet.selectedLane();
                         if (lane) {
                           const sess = lane.agent_sessions.find((s) => s.tmux_window === target.window) ?? null;
-                          props.actions.stopAgent(lane, sess);
+                          props.actions.stopAgent(lane, sess, target.window);
                         }
                       }}
                     >
