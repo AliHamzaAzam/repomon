@@ -263,4 +263,18 @@ describe("fleet presentation", () => {
     // A persisted (non-zero) id passes through untouched.
     expect(withSessionKeys([lane({ agent_sessions: [agent({ id: 42 })] })])[0].agent_sessions[0].id).toBe(42);
   });
+
+  it("laneIndicator respects running status for stalled indicators", () => {
+    // Running + stale -> stalled (tone: fault)
+    const runningStale = lane({ agent_sessions: [agent({ status: "running", stale: true })] });
+    expect(laneIndicator(runningStale)).toEqual({ label: "stalled", tone: "fault", urgent: true });
+
+    // Idle + stale -> idle (not stalled)
+    const idleStale = lane({ agent_sessions: [agent({ status: "idle", stale: true })] });
+    expect(laneIndicator(idleStale)).toEqual({ label: "idle", tone: "muted", urgent: false });
+
+    // External + stale -> external (not stalled)
+    const extStale = lane({ agent_sessions: [agent({ status: "running", external: true, stale: true })] });
+    expect(laneIndicator(extStale)).toEqual({ label: "external", tone: "muted", urgent: false });
+  });
 });

@@ -169,7 +169,7 @@ fn activity_summary(kind: AgentKind, manifest: &Path) -> Option<TranscriptSummar
         last_message: None,
         config_dir: None,
         session_id: None,
-        ended_turn: false, // mtime-only monitors can't see turn boundaries
+        ended_turn: true, // mtime-only monitors can't see turn boundaries; treat as finished turn to prevent false stalls
     })
 }
 
