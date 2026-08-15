@@ -93,6 +93,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let fit: FitAddon | undefined;
   let input: ReturnType<typeof createInputCoalescer> | undefined;
   let resize: ResizeObserver | undefined;
+  let intersection: IntersectionObserver | undefined;
+  let onWindowResize: (() => void) | undefined;
+  let unsubLayout: (() => void) | undefined;
+  let onAppearanceChanged: ((e: Event) => void) | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   let wheelListener: ((event: WheelEvent) => void) | undefined;
   let wheelFrame: number | undefined;
@@ -169,12 +173,13 @@ export default function TerminalPane(props: TerminalPaneProps) {
   createEffect(() => {
     const visible = ready() && props.visible !== false;
     const focused = props.focused;
-    if (!visible || view() !== "live") return;
+    if (!visible || view() !== "live" || disposed) return;
     if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
     visibilityFrame = requestAnimationFrame(() => {
       visibilityFrame = undefined;
+      if (disposed || !terminal || !container?.isConnected) return;
       void syncSize?.();
-      if (focused) terminal?.focus();
+      if (focused && !disposed && terminal) terminal.focus();
     });
   });
 
@@ -248,43 +253,54 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // lines wrap, so an agent's relative-cursor redraw (cursor-up, carriage return, erase-line)
       // lands in the wrong columns and weaves fresh text through stale text.
       let confirmedGrid: { cols: number; rows: number } | null = null;
-      let intersection: IntersectionObserver | undefined;
-      let unsubLayout: (() => void) | undefined;
-      let onWindowResize: (() => void) | undefined;
 
       function applyGrid(cols?: number | null, rows?: number | null) {
-        if (!terminal || !cols || !rows) return;
+        if (disposed || !terminal || !cols || !rows) return;
         confirmedGrid = { cols, rows };
         if (cols !== terminal.cols || rows !== terminal.rows) {
-          terminal.resize(cols, rows);
+          try {
+            terminal.resize(cols, rows);
+          } catch {
+            return;
+          }
         }
-        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        if (disposed || !terminal) return;
+        try {
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        } catch {
+          // ignore
+        }
       }
 
       // Keep xterm and the backend pane on one authoritative grid. GUI-owned shells can be
       // resized directly. Shared agent panes use the arbitrated fit call so the TUI and desktop
       // never fight over dimensions.
       syncSize = async () => {
-        if (!terminal || props.visible === false || view() !== "live" || disposed) return;
-        // Don't attempt to fit when the container is detached or has zero client dimension
-        if (container.clientWidth === 0 || container.clientHeight === 0) return;
+        if (disposed || !terminal || !fit || props.visible === false || view() !== "live") return;
+        if (!container || !container.isConnected || container.clientWidth === 0 || container.clientHeight === 0) return;
         try {
-          fit?.fit();
+          fit.fit();
         } catch {
           return;
         }
-        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        if (disposed || !terminal) return;
+        try {
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        } catch {
+          return;
+        }
         const cols = terminal.cols;
         const rows = terminal.rows;
-        if (!cols || !rows) return;
+        if (!cols || !rows || disposed || !terminal) return;
         const args = { lane_id: props.laneId, window: props.window, cols, rows };
         if (props.shell) {
           // A GUI-owned shell has no other viewer, so our own resize is the authoritative one.
           await daemonCall("agent.resize", args).catch(() => undefined);
-          confirmedGrid = { cols, rows };
+          if (!disposed) confirmedGrid = { cols, rows };
         } else {
           const pinned = confirmedGrid;
           const grid = await daemonCall("agent.fit", args).catch(() => null);
+          if (disposed || !terminal) return;
           if (grid?.cols && grid?.rows) {
             applyGrid(grid.cols, grid.rows);
           } else if (pinned) {
@@ -298,10 +314,11 @@ export default function TerminalPane(props: TerminalPaneProps) {
       };
 
       const requestSyncSize = () => {
-        if (disposed || !terminal) return;
+        if (disposed || !terminal || !container?.isConnected) return;
         if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
         visibilityFrame = requestAnimationFrame(() => {
           visibilityFrame = undefined;
+          if (disposed || !terminal || !container?.isConnected) return;
           void syncSize?.();
         });
       };
@@ -318,7 +335,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       const flushWheel = () => {
         wheelFrame = undefined;
-        if (!terminal || scrollRequestInFlight) return;
+        if (!terminal || scrollRequestInFlight || disposed) return;
         const batch = takeWheelBatch(wheelAccum);
         if (batch.ticks === 0) return;
         wheelAccum = batch.remainder;
@@ -347,12 +364,12 @@ export default function TerminalPane(props: TerminalPaneProps) {
           })
           .finally(() => {
             scrollRequestInFlight = false;
-            if (Math.abs(wheelAccum) >= 1) scheduleWheelFlush();
+            if (Math.abs(wheelAccum) >= 1 && !disposed) scheduleWheelFlush();
           });
       };
 
       wheelListener = (event: WheelEvent) => {
-        if (!terminal) return;
+        if (!terminal || disposed) return;
         event.preventDefault();
         event.stopPropagation();
         const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
@@ -384,24 +401,34 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       container.addEventListener("wheel", wheelListener, { capture: true, passive: false });
       resize = new ResizeObserver(() => {
+        if (disposed || !container?.isConnected) return;
         requestSyncSize();
       });
       resize.observe(container);
 
       if (typeof IntersectionObserver !== "undefined") {
         intersection = new IntersectionObserver((entries) => {
+          if (disposed || !container?.isConnected) return;
           for (const entry of entries) {
             if (entry.isIntersecting && entry.intersectionRatio > 0) {
               requestSyncSize();
             }
           }
         });
-        intersection.observe(container);
+        if (container?.isConnected) {
+          intersection.observe(container);
+        }
       }
 
-      onWindowResize = () => requestSyncSize();
+      onWindowResize = () => {
+        if (disposed || !container?.isConnected) return;
+        requestSyncSize();
+      };
       window.addEventListener("resize", onWindowResize);
-      unsubLayout = onLayoutChanged(() => requestSyncSize());
+      unsubLayout = onLayoutChanged(() => {
+        if (disposed || !container?.isConnected) return;
+        requestSyncSize();
+      });
 
       if (props.visible !== false) fit.fit();
       // Establish the pane's authoritative grid before the first checkpoint is painted. Painting
@@ -410,18 +437,22 @@ export default function TerminalPane(props: TerminalPaneProps) {
       setReady(true);
 
       const applyAppearance = (app?: TerminalAppearance) => {
-        if (!terminal) return;
+        if (!terminal || disposed || !container?.isConnected) return;
         const conf = app ?? readTerminalAppearance();
         const theme = terminalTheme(container, conf);
         setPaneBg(theme.background);
         terminal.options.theme = theme;
         terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
         terminal.options.fontSize = conf.fontSize;
-        fit?.fit();
-        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        try {
+          fit?.fit();
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        } catch {
+          // ignore
+        }
       };
 
-      const onAppearanceChanged = (e: Event) => {
+      onAppearanceChanged = (e: Event) => {
         applyAppearance((e as CustomEvent<TerminalAppearance>).detail);
       };
       window.addEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
@@ -429,41 +460,79 @@ export default function TerminalPane(props: TerminalPaneProps) {
       try {
         const watch = await watchTerminal(
           target,
-          (bytes) => terminal?.write(bytes),
+          (bytes) => {
+            if (!disposed && terminal) terminal.write(bytes);
+          },
           (ack) => applyGrid(ack.cols, ack.rows),
         );
         if (disposed) {
-          window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+          if (onAppearanceChanged) {
+            window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+            onAppearanceChanged = undefined;
+          }
           await watch.stop();
           return;
         }
         stopWatch = async () => {
-          window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+          if (onAppearanceChanged) {
+            window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+            onAppearanceChanged = undefined;
+          }
           await watch.stop();
         };
         setTransportError(null);
-        if (props.focused && view() === "live") terminal.focus();
+        if (props.focused && view() === "live" && !disposed && terminal) terminal.focus();
       } catch (error) {
-        setTransportError(errorMessage(error));
+        if (!disposed) setTransportError(errorMessage(error));
       }
-    })().catch((error: unknown) => setTransportError(errorMessage(error)));
+    })().catch((error: unknown) => {
+      if (!disposed) setTransportError(errorMessage(error));
+    });
   });
 
   onCleanup(() => {
     disposed = true;
     rendererEpoch += 1;
+    if (visibilityFrame !== undefined) {
+      cancelAnimationFrame(visibilityFrame);
+      visibilityFrame = undefined;
+    }
+    if (wheelFrame !== undefined) {
+      cancelAnimationFrame(wheelFrame);
+      wheelFrame = undefined;
+    }
     resize?.disconnect();
+    resize = undefined;
     intersection?.disconnect();
-    if (onWindowResize) window.removeEventListener("resize", onWindowResize);
+    intersection = undefined;
+    if (onWindowResize) {
+      window.removeEventListener("resize", onWindowResize);
+      onWindowResize = undefined;
+    }
     unsubLayout?.();
-    if (wheelListener) container.removeEventListener("wheel", wheelListener, true);
-    if (resizeTimer) clearTimeout(resizeTimer);
-    if (wheelFrame !== undefined) cancelAnimationFrame(wheelFrame);
-    if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
+    unsubLayout = undefined;
+    if (onAppearanceChanged) {
+      window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+      onAppearanceChanged = undefined;
+    }
+    if (wheelListener && container) {
+      container.removeEventListener("wheel", wheelListener, true);
+      wheelListener = undefined;
+    }
+    if (resizeTimer) {
+      clearTimeout(resizeTimer);
+      resizeTimer = undefined;
+    }
     input?.dispose();
+    input = undefined;
     void stopWatch?.();
+    stopWatch = undefined;
     webgl?.dispose();
+    webgl = undefined;
+    fit = undefined;
+    search = undefined;
     terminal?.dispose();
+    terminal = undefined;
   });
 
   return (
