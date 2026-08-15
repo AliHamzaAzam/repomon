@@ -1,8 +1,9 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { Lane } from "../bindings";
+import type { AgentSession, Lane } from "../bindings";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
+import type { WorkspaceStore } from "../stores/workspace";
 import {
   readAutoCollapseEmptyLanes,
   onAutoCollapseChanged,
@@ -25,12 +26,15 @@ import {
   IconPlus,
   IconSearch,
 } from "./icons";
+import { LaneAgentRosterPopover } from "./LaneAgentRosterPopover";
 
 interface FleetSidebarProps {
   fleet: FleetStore;
   actions: ActionsStore;
+  workspace?: WorkspaceStore;
   searchRef?: (element: HTMLInputElement) => void;
   onOpenExtensions?: (repoId: number) => void;
+  onSelectAgent?: (lane: Lane, session: AgentSession) => void;
 }
 
 function dirtyCount(lane: Lane): number {
@@ -74,7 +78,25 @@ function LaneRow(props: {
   select: () => void;
   collapsed?: boolean;
   toggleCollapse?: () => void;
+  onSelectAgent?: (lane: Lane, session: AgentSession) => void;
 }) {
+  let rowRef: HTMLButtonElement | undefined;
+  const [isHovered, setIsHovered] = createSignal(false);
+  const [anchorRect, setAnchorRect] = createSignal<DOMRect | null>(null);
+  let showTimer: number | undefined;
+  let hideTimer: number | undefined;
+
+  const clearTimers = () => {
+    if (showTimer) {
+      clearTimeout(showTimer);
+      showTimer = undefined;
+    }
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = undefined;
+    }
+  };
+
   const indicator = () => laneIndicator(props.lane);
   const primary = () => primarySession(props.lane.agent_sessions);
   const title = () => primary()?.custom_label ?? props.lane.worktree.name;
@@ -82,156 +104,212 @@ function LaneRow(props: {
   const dirty = () => dirtyCount(props.lane);
   const sessionCount = () => props.lane.agent_sessions.length;
 
+  const onRowMouseEnter = () => {
+    clearTimers();
+    if (sessionCount() === 0) return;
+    if (isHovered()) return;
+    showTimer = window.setTimeout(() => {
+      if (rowRef) {
+        setAnchorRect(rowRef.getBoundingClientRect());
+        setIsHovered(true);
+      }
+    }, 250);
+  };
+
+  const onRowMouseLeave = () => {
+    clearTimers();
+    hideTimer = window.setTimeout(() => {
+      setIsHovered(false);
+      setAnchorRect(null);
+    }, 200);
+  };
+
+  const onPopoverMouseEnter = () => {
+    clearTimers();
+  };
+
+  const onPopoverMouseLeave = () => {
+    clearTimers();
+    hideTimer = window.setTimeout(() => {
+      setIsHovered(false);
+      setAnchorRect(null);
+    }, 200);
+  };
+
+  const onClick = () => {
+    clearTimers();
+    setIsHovered(false);
+    setAnchorRect(null);
+    props.select();
+  };
+
+  const handleSelectAgent = (lane: Lane, session: AgentSession) => {
+    clearTimers();
+    setIsHovered(false);
+    setAnchorRect(null);
+    props.onSelectAgent?.(lane, session);
+  };
+
   return (
     <Show
       when={props.collapsed}
       fallback={
-        <button
-          type="button"
-          class={`group/lane-row fleet-row focus-ring ${props.selected ? "is-selected" : ""}`}
-          onClick={props.select}
-          aria-current={props.selected ? "true" : undefined}
-          title={`${title()} (${branchName()})`}
-        >
-          {/* 1. Leading Icon Slot (Fixed Width with Corner Status Pulse or Left-Aligned Minimize Button when Empty) */}
-          <div class="relative flex size-6 shrink-0 items-center justify-center rounded-md bg-raised/60">
-            <Show
-              when={sessionCount() === 0}
-              fallback={
-                <>
-                  <Show
-                    when={primary()}
-                    fallback={<AgentIcon shell size={13} class="text-muted/60" />}
-                  >
-                    {(agentSession) => (
-                      <AgentIcon
-                        agent={agentSession().agent}
-                        size={13}
-                        class={
-                          indicator().tone === "signal"
-                            ? "text-signal"
-                            : indicator().tone === "attention"
-                            ? "text-attention"
-                            : indicator().tone === "fault"
-                            ? "text-fault"
-                            : props.selected
-                            ? "text-foreground"
-                            : "text-muted"
-                        }
-                      />
-                    )}
-                  </Show>
+        <>
+          <button
+            ref={rowRef}
+            type="button"
+            class={`group/lane-row fleet-row focus-ring ${props.selected ? "is-selected" : ""}`}
+            onClick={onClick}
+            onMouseEnter={onRowMouseEnter}
+            onMouseLeave={onRowMouseLeave}
+            aria-current={props.selected ? "true" : undefined}
+          >
+            {/* 1. Leading Icon Slot (Fixed Width with Corner Status Pulse or Left-Aligned Minimize Button when Empty) */}
+            <div class="relative flex size-6 shrink-0 items-center justify-center rounded-md bg-raised/60">
+              <Show
+                when={sessionCount() === 0}
+                fallback={
+                  <>
+                    <Show
+                      when={primary()}
+                      fallback={<AgentIcon shell size={13} class="text-muted/60" />}
+                    >
+                      {(agentSession) => (
+                        <AgentIcon
+                          agent={agentSession().agent}
+                          size={13}
+                          class={
+                            indicator().tone === "signal"
+                              ? "text-signal"
+                              : indicator().tone === "attention"
+                              ? "text-attention"
+                              : indicator().tone === "fault"
+                              ? "text-fault"
+                              : props.selected
+                              ? "text-foreground"
+                              : "text-muted"
+                          }
+                        />
+                      )}
+                    </Show>
+                    <span
+                      class={`absolute -top-0.5 -right-0.5 size-2 rounded-full border-2 border-surface ${
+                        indicator().tone === "signal"
+                          ? "bg-signal ring-1 ring-signal/30"
+                          : indicator().tone === "attention"
+                          ? "bg-attention ring-1 ring-attention/30 animate-pulse"
+                          : indicator().tone === "fault"
+                          ? "bg-fault ring-1 ring-fault/30"
+                          : "bg-muted/40"
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </>
+                }
+              >
+                <button
+                  type="button"
+                  class="focus-ring flex size-6 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-foreground transition-colors"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.toggleCollapse?.();
+                  }}
+                  title="Minimize inactive lane"
+                  aria-label={`Minimize inactive lane ${title()}`}
+                >
+                  <IconChevronDown size={11} />
+                </button>
+              </Show>
+            </div>
+
+            {/* 2. Middle Content Area (Title & Branch Name) */}
+            <div class="min-w-0 flex-1 text-left">
+              <div class="flex items-center gap-1">
+                <span
+                  class={`truncate text-xs font-medium ${
+                    props.selected ? "text-foreground font-semibold" : "text-foreground/90"
+                  }`}
+                >
+                  {title()}
+                </span>
+                <Show when={props.lane.pinned}>
+                  <span class="shrink-0 text-signal" title="Pinned lane" aria-label="Pinned">
+                    <IconPin size={10} />
+                  </span>
+                </Show>
+              </div>
+
+              <div class="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted">
+                <IconGitBranch size={10} class="shrink-0 text-muted/60" />
+                <span class="truncate">
+                  {branchName()}
+                </span>
+              </div>
+            </div>
+
+            {/* 3. Trailing Metadata & Badges Column (Fixed Right Alignment) */}
+            <div class="shrink-0 flex flex-col items-end justify-center gap-0.5 text-right font-mono">
+              {/* Top slot: Multi-session badge + Status indicator */}
+              <div class="flex items-center gap-1">
+                <Show when={sessionCount() > 1}>
                   <span
-                    class={`absolute -top-0.5 -right-0.5 size-2 rounded-full border-2 border-surface ${
-                      indicator().tone === "signal"
-                        ? "bg-signal ring-1 ring-signal/30"
-                        : indicator().tone === "attention"
-                        ? "bg-attention ring-1 ring-attention/30 animate-pulse"
-                        : indicator().tone === "fault"
-                        ? "bg-fault ring-1 ring-fault/30"
-                        : "bg-muted/40"
-                    }`}
-                    aria-hidden="true"
-                  />
-                </>
-              }
-            >
-              <button
-                type="button"
-                class="focus-ring flex size-6 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-foreground transition-colors"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  props.toggleCollapse?.();
-                }}
-                title="Minimize inactive lane"
-                aria-label={`Minimize inactive lane ${title()}`}
-              >
-                <IconChevronDown size={11} />
-              </button>
-            </Show>
-          </div>
+                    class="inline-flex items-center gap-1 rounded border border-line bg-raised/80 px-1.5 py-0.5 text-[9px] font-medium leading-none text-muted transition-colors hover:bg-raised hover:text-foreground"
+                    aria-label={`${sessionCount()} active agent sessions open`}
+                  >
+                    <IconLayers size={10} class="text-muted/80 shrink-0" />
+                    <span>{sessionCount()} agents</span>
+                  </span>
+                </Show>
+                <Show when={indicator().label}>
+                  <span
+                    class={`lane-badge is-${indicator().tone}`}
+                    title={
+                      indicator().label === "external"
+                        ? "External session running outside repomon. Select lane to adopt into tmux management."
+                        : undefined
+                    }
+                  >
+                    {indicator().label}
+                  </span>
+                </Show>
+              </div>
 
-          {/* 2. Middle Content Area (Title & Branch Name) */}
-          <div class="min-w-0 flex-1 text-left">
-            <div class="flex items-center gap-1">
-              <span
-                class={`truncate text-xs font-medium ${
-                  props.selected ? "text-foreground font-semibold" : "text-foreground/90"
-                }`}
-                title={title()}
-              >
-                {title()}
-              </span>
-              <Show when={props.lane.pinned}>
-                <span class="shrink-0 text-signal" title="Pinned lane" aria-label="Pinned">
-                  <IconPin size={10} />
-                </span>
-              </Show>
+              {/* Bottom slot: Telemetry in fixed order: Divergence (ahead/behind), Dirty count */}
+              <div class="flex items-center gap-1.5 text-[10px] text-muted min-h-[14px]">
+                <Show when={props.lane.state.ahead || props.lane.state.behind}>
+                  <span
+                    class="inline-flex items-center gap-0.5 leading-none"
+                    title={`Git tracking: ${props.lane.state.ahead} ahead, ${props.lane.state.behind} behind upstream`}
+                  >
+                    <Show when={props.lane.state.ahead}>
+                      <span class="text-signal inline-flex items-center"><IconArrowUp size={9} />{props.lane.state.ahead}</span>
+                    </Show>
+                    <Show when={props.lane.state.behind}>
+                      <span class="text-muted inline-flex items-center"><IconArrowDown size={9} />{props.lane.state.behind}</span>
+                    </Show>
+                  </span>
+                </Show>
+                <Show when={dirty() > 0}>
+                  <span
+                    class="inline-flex items-center gap-0.5 leading-none text-attention font-semibold"
+                    title={`${dirty()} uncommitted file${dirty() === 1 ? "" : "s"} (${props.lane.state.dirty.staged} staged, ${props.lane.state.dirty.unstaged} unstaged, ${props.lane.state.dirty.untracked} untracked)`}
+                  >
+                    <span class="size-1.5 rounded-full bg-attention" />
+                    <span>{dirty()}</span>
+                  </span>
+                </Show>
+              </div>
             </div>
-
-            <div class="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted">
-              <IconGitBranch size={10} class="shrink-0 text-muted/60" />
-              <span class="truncate" title={`Branch: ${branchName()}`}>
-                {branchName()}
-              </span>
-            </div>
-          </div>
-
-          {/* 3. Trailing Metadata & Badges Column (Fixed Right Alignment) */}
-          <div class="shrink-0 flex flex-col items-end justify-center gap-0.5 text-right font-mono">
-            {/* Top slot: Multi-session badge + Status indicator */}
-            <div class="flex items-center gap-1">
-              <Show when={sessionCount() > 1}>
-                <span
-                  class="inline-flex items-center gap-1 rounded border border-line bg-raised/80 px-1.5 py-0.5 text-[9px] font-medium leading-none text-muted transition-colors hover:bg-raised hover:text-foreground"
-                  title={`${sessionCount()} active agent sessions open in this lane`}
-                  aria-label={`${sessionCount()} active agent sessions open`}
-                >
-                  <IconLayers size={10} class="text-muted/80 shrink-0" />
-                  <span>{sessionCount()} agents</span>
-                </span>
-              </Show>
-              <Show when={indicator().label}>
-                <span
-                  class={`lane-badge is-${indicator().tone}`}
-                  title={
-                    indicator().label === "external"
-                      ? "External session running outside repomon. Select lane to adopt into tmux management."
-                      : undefined
-                  }
-                >
-                  {indicator().label}
-                </span>
-              </Show>
-            </div>
-
-            {/* Bottom slot: Telemetry in fixed order: Divergence (ahead/behind), Dirty count */}
-            <div class="flex items-center gap-1.5 text-[10px] text-muted min-h-[14px]">
-              <Show when={props.lane.state.ahead || props.lane.state.behind}>
-                <span
-                  class="inline-flex items-center gap-0.5 leading-none"
-                  title={`Git tracking: ${props.lane.state.ahead} ahead, ${props.lane.state.behind} behind upstream`}
-                >
-                  <Show when={props.lane.state.ahead}>
-                    <span class="text-signal inline-flex items-center"><IconArrowUp size={9} />{props.lane.state.ahead}</span>
-                  </Show>
-                  <Show when={props.lane.state.behind}>
-                    <span class="text-muted inline-flex items-center"><IconArrowDown size={9} />{props.lane.state.behind}</span>
-                  </Show>
-                </span>
-              </Show>
-              <Show when={dirty() > 0}>
-                <span
-                  class="inline-flex items-center gap-0.5 leading-none text-attention font-semibold"
-                  title={`${dirty()} uncommitted file${dirty() === 1 ? "" : "s"} (${props.lane.state.dirty.staged} staged, ${props.lane.state.dirty.unstaged} unstaged, ${props.lane.state.dirty.untracked} untracked)`}
-                >
-                  <span class="size-1.5 rounded-full bg-attention" />
-                  <span>{dirty()}</span>
-                </span>
-              </Show>
-            </div>
-          </div>
-        </button>
+          </button>
+          <LaneAgentRosterPopover
+            lane={props.lane}
+            anchorRect={anchorRect()}
+            visible={isHovered()}
+            onSelectAgent={handleSelectAgent}
+            onMouseEnter={onPopoverMouseEnter}
+            onMouseLeave={onPopoverMouseLeave}
+          />
+        </>
       }
     >
       <div
@@ -361,6 +439,14 @@ export default function FleetSidebar(props: FleetSidebarProps) {
       });
     }
     notifyLayoutChanged();
+  };
+
+  const handleSelectAgent = (lane: Lane, session: AgentSession) => {
+    props.fleet.setSelectedLaneId(lane.id);
+    if (session.tmux_window && props.workspace) {
+      props.workspace.setActiveWindow(session.tmux_window);
+    }
+    props.onSelectAgent?.(lane, session);
   };
 
   return (
@@ -537,6 +623,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             select={() => props.fleet.setSelectedLaneId(lane.id)}
                             collapsed={isLaneCollapsed(lane)}
                             toggleCollapse={() => toggleLaneCollapsed(lane.id)}
+                            onSelectAgent={handleSelectAgent}
                           />
                         )}
                       </For>

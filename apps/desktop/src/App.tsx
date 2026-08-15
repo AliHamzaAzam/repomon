@@ -392,6 +392,7 @@ function App(props: AppProps) {
           <FleetSidebar
             fleet={fleet}
             actions={actions}
+            workspace={workspace}
             searchRef={(element) => { searchInput = element; }}
             onOpenExtensions={(repoId) => {
               ext.setScope({ scope: "repo", repo_id: repoId });
