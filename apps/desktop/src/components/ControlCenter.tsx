@@ -382,14 +382,18 @@ export default function ControlCenter(props: ControlCenterProps) {
       <button
         ref={triggerRef}
         type="button"
-        class="focus-ring flex h-7 items-center gap-1.5 rounded-lg border border-line bg-raised/70 px-2.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+        class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+          isOpen()
+            ? "text-signal font-semibold"
+            : "text-muted hover:text-foreground"
+        }`}
         onClick={() => (isOpen() ? closePalette() : openPalette())}
         aria-label="Command Palette"
         title="Command Palette (⌘K)"
       >
         <IconCommand size={13} />
         <span>Control</span>
-        <kbd class="ml-0.5 rounded border border-line bg-surface px-1 py-0.2 text-[9px] font-mono text-muted/80">⌘K</kbd>
+        <kbd class="ml-0.5 rounded border border-line/60 bg-surface/60 px-1 py-0.2 text-[9px] font-mono text-muted/80">⌘K</kbd>
       </button>
 
       {/* Command Palette Modal */}

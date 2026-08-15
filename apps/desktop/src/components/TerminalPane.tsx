@@ -523,22 +523,31 @@ export default function TerminalPane(props: TerminalPaneProps) {
         </Show>
         <div class="ml-2 flex shrink-0 items-center gap-2">
           <Show when={props.sessionId && !finding()}>
-            <div class="pointer-events-auto flex items-center rounded border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Agent pane views">
+            <div class="pointer-events-auto flex items-center text-[10px]" role="tablist" aria-label="Agent pane views">
               <button
                 type="button"
                 role="tab"
                 aria-selected={view() === "live"}
-                class={`focus-ring rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${view() === "live" ? "bg-surface text-foreground shadow-xs" : "text-muted hover:text-foreground"}`}
+                class={`focus-ring px-1.5 py-0.5 font-medium transition-colors ${
+                  view() === "live"
+                    ? "text-foreground font-semibold"
+                    : "text-muted/70 hover:text-foreground"
+                }`}
                 onClick={() => {
                   setView("live");
                   queueMicrotask(() => terminal?.focus());
                 }}
               >Live</button>
+              <span class="h-2.5 w-px bg-line/60 mx-0.5" aria-hidden="true" />
               <button
                 type="button"
                 role="tab"
                 aria-selected={view() === "history"}
-                class={`focus-ring rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${view() === "history" ? "bg-surface text-foreground shadow-xs" : "text-muted hover:text-foreground"}`}
+                class={`focus-ring px-1.5 py-0.5 font-medium transition-colors ${
+                  view() === "history"
+                    ? "text-foreground font-semibold"
+                    : "text-muted/70 hover:text-foreground"
+                }`}
                 onClick={() => {
                   setFinding(false);
                   setView("history");

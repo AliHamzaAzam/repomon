@@ -311,14 +311,15 @@ function App(props: AppProps) {
           <h1 class="text-xs font-semibold tracking-tight text-foreground pointer-events-none select-none">Repomon</h1>
         </div>
 
-        <div class="flex items-center gap-1.5">
+        <div class="flex items-center">
           <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
             type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
               extensionsOpen()
-                ? "border-signal/50 bg-signal/10 text-signal font-semibold"
-                : "border-line bg-raised/70 text-muted hover:bg-raised hover:text-foreground"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
             }`}
             onClick={() => setExtensionsOpen(!extensionsOpen())}
             aria-pressed={extensionsOpen()}
@@ -327,12 +328,13 @@ function App(props: AppProps) {
             <IconExtensions size={13} />
             <span>Extensions</span>
           </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
             type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
               repomindOpen()
-                ? "border-signal/50 bg-signal/10 text-signal font-semibold"
-                : "border-line bg-raised/70 text-muted hover:bg-raised hover:text-foreground"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
             }`}
             onClick={() => {
               const next = !repomindOpen();
@@ -345,9 +347,10 @@ function App(props: AppProps) {
             <IconSparkles size={13} />
             <span>Repomind</span>
           </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
             type="button"
-            class="focus-ring flex size-7 items-center justify-center rounded-lg border border-line bg-raised/70 text-muted transition-colors hover:bg-raised hover:text-foreground"
+            class="focus-ring flex size-7 items-center justify-center text-muted transition-colors hover:text-foreground"
             onClick={() => actions.openSettings()}
             aria-label="Settings"
             title="Settings (⌘,)"
