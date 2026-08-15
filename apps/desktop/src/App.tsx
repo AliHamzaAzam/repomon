@@ -81,8 +81,8 @@ function App(props: AppProps) {
   const [appVersion, setAppVersion] = createSignal("");
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
-  const actions = createActionsStore(fleet);
   const workspace = createWorkspaceStore(fleet);
+  const actions = createActionsStore(fleet, workspace);
   const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   const messages = createMessageStore((laneId, slot) => {

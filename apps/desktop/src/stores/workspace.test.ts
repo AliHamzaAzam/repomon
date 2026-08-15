@@ -70,20 +70,32 @@ describe("workspace store", () => {
     });
   });
 
-  // The fleet store attributes usage to the agent in view, and this store owns the tab state.
-  // Asserted outside the `createRoot` callback on purpose: that callback runs inside one Solid
-  // update, so writes made in it stay batched and no effect re-runs until it returns.
-  it("mirrors the active window into the fleet store", () => {
-    const setFocusedWindow = vi.fn();
-    const [ws, dispose] = createRoot((dispose) =>
-      [createWorkspaceStore(fleetStub({ setFocusedWindow })), dispose] as const,
-    );
+  it("tracks closing windows and shifts active window away when closing active tab", () => {
+    createRoot((dispose) => {
+      const ws = createWorkspaceStore(fleetStub({
+        lanes: () => [{
+          id: 7,
+          worktree: { name: "main", branch: "main", root: "/tmp", clean: true },
+          state: "idle",
+          agent_sessions: [
+            { tmux_window: "lane-7-1", agent: "claude-code", session_id: "s1" },
+            { tmux_window: "lane-7-2", agent: "claude-code", session_id: "s2" },
+          ],
+        }] as unknown as import("../bindings").Lane[],
+      }));
 
-    ws.setActiveWindow("lane-7-2");
-    expect(setFocusedWindow).toHaveBeenLastCalledWith("lane-7-2");
+      expect(ws.isClosing("lane-7-1")).toBe(false);
+      ws.setActiveWindow("lane-7-1");
+      expect(ws.activeWindow()).toBe("lane-7-1");
 
-    ws.setActiveWindow(null);
-    expect(setFocusedWindow).toHaveBeenLastCalledWith(null);
-    dispose();
+      ws.markClosing("lane-7-1");
+      expect(ws.isClosing("lane-7-1")).toBe(true);
+      // Active window automatically switched away to the remaining sibling tab
+      expect(ws.activeWindow()).toBe("lane-7-2");
+
+      ws.unmarkClosing("lane-7-1");
+      expect(ws.isClosing("lane-7-1")).toBe(false);
+      dispose();
+    });
   });
 });

@@ -165,18 +165,18 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   }
 
   async function closeShell(target: PaneTarget) {
-    setClosingShell(target.window);
+    props.workspace.markClosing(target.window);
     setWorkspaceError(null);
     try {
       await daemonCall("terminal.close", { id: target.window });
-      if (activeWindow() === target.window) setActiveWindow(null);
       await props.fleet.refresh();
     } catch (error) {
+      props.workspace.unmarkClosing(target.window);
       setWorkspaceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setClosingShell(null);
     }
   }
+
+  const isTargetClosing = (target: PaneTarget) => props.workspace.isClosing(target.window);
 
   async function handleAdopt(lane: import("../bindings").Lane, session: import("../bindings").AgentSession) {
     setAdopting(true);
@@ -244,30 +244,54 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             <For each={laneTargets()}>
               {(target) => (
                 <div
-                  class={`group/tab flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all ${
-                    activeWindow() === target.window
-                      ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
-                      : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
+                  class={`group/tab relative flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all duration-200 ${
+                    isTargetClosing(target)
+                      ? "pointer-events-none opacity-40 scale-95 border-line/40 bg-raised/30 text-muted/60"
+                      : activeWindow() === target.window
+                        ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
+                        : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
                   }`}
                 >
                   <button
                     type="button"
                     aria-pressed={activeWindow() === target.window}
                     class="focus-ring flex min-w-[7.5rem] max-w-[13rem] items-center gap-1.5 px-2.5 py-1 text-left"
-                    onClick={() => setActiveWindow(target.window)}
+                    onClick={() => !isTargetClosing(target) && setActiveWindow(target.window)}
+                    disabled={isTargetClosing(target)}
                   >
                     <span class={`shrink-0 ${target.shell ? "text-attention" : "text-signal"}`}>
                       <AgentIcon agent={target.agent} shell={target.shell} size={13} />
                     </span>
-                    <span class="truncate flex-1 min-w-0">{labelOf(target)}</span>
+                    <span class="truncate flex-1 min-w-0">
+                      {isTargetClosing(target) ? "Closing…" : labelOf(target)}
+                    </span>
                   </button>
                   <Show when={target.shell}>
                     <button
                       type="button"
                       class="focus-ring mr-1 flex size-5 items-center justify-center rounded text-muted opacity-60 transition-opacity hover:bg-fault/10 hover:text-fault hover:opacity-100 disabled:opacity-30"
                       aria-label={`Close ${target.label}`}
-                      disabled={closingShell() === target.window}
+                      disabled={isTargetClosing(target)}
                       onClick={() => void closeShell(target)}
+                    >
+                      <IconClose size={11} />
+                    </button>
+                  </Show>
+                  <Show when={!target.shell}>
+                    <button
+                      type="button"
+                      class="focus-ring mr-1 flex size-5 items-center justify-center rounded text-muted opacity-0 group-hover/tab:opacity-60 transition-opacity hover:bg-fault/10 hover:text-fault hover:!opacity-100 disabled:opacity-30"
+                      aria-label={`Stop ${labelOf(target)}`}
+                      disabled={isTargetClosing(target)}
+                      title="Stop agent"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const lane = props.fleet.selectedLane();
+                        if (lane) {
+                          const sess = lane.agent_sessions.find((s) => s.tmux_window === target.window) ?? null;
+                          props.actions.stopAgent(lane, sess);
+                        }
+                      }}
                     >
                       <IconClose size={11} />
                     </button>
@@ -489,14 +513,17 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               const sessionId = createMemo(() => (
                 targets().find((item) => item.window === target.window)?.sessionId ?? null
               ));
+              const closing = createMemo(() => isTargetClosing(target));
               return (
                 <div
-                  class={`min-h-0 min-w-0 border-line ${visible() ? "" : "warm-terminal-hidden"}`}
+                  class={`min-h-0 min-w-0 border-line transition-all duration-200 ${
+                    visible() ? "" : "warm-terminal-hidden"
+                  } ${closing() ? "pointer-events-none opacity-0 scale-[0.98]" : ""}`}
                   style={{ order: visible() ? visibleIndex() : undefined }}
-                  aria-hidden={visible() ? undefined : "true"}
-                  inert={!visible()}
+                  aria-hidden={visible() && !closing() ? undefined : "true"}
+                  inert={!visible() || closing()}
                   onPointerDown={() => {
-                    if (!visible()) return;
+                    if (!visible() || closing()) return;
                     setActiveWindow(target.window);
                     props.fleet.setSelectedLaneId(target.laneId);
                   }}

@@ -108,6 +108,49 @@ export function createWorkspaceStore(fleet: FleetStore) {
     }
   }
 
+  const [closingWindows, setClosingWindows] = createSignal<Set<string>>(new Set());
+
+  function markClosing(window: string) {
+    setClosingWindows((prev) => {
+      const next = new Set(prev);
+      next.add(window);
+      return next;
+    });
+    if (activeWindow() === window) {
+      const remaining = laneTargets().filter((t) => t.window !== window && !closingWindows().has(t.window));
+      setActiveWindow(remaining[0]?.window ?? null);
+    }
+  }
+
+  function unmarkClosing(window: string) {
+    setClosingWindows((prev) => {
+      if (!prev.has(window)) return prev;
+      const next = new Set(prev);
+      next.delete(window);
+      return next;
+    });
+  }
+
+  function isClosing(window: string): boolean {
+    return closingWindows().has(window);
+  }
+
+  createRenderEffect(() => {
+    const activeIds = new Set(targets().map((t) => t.window));
+    setClosingWindows((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const win of prev) {
+        if (activeIds.has(win)) {
+          next.add(win);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  });
+
   return {
     layout,
     chooseLayout,
@@ -119,6 +162,10 @@ export function createWorkspaceStore(fleet: FleetStore) {
     laneTargets,
     cycleTab,
     openShell,
+    closingWindows,
+    markClosing,
+    unmarkClosing,
+    isClosing,
   };
 }
 

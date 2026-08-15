@@ -3,9 +3,9 @@ import { createSignal } from "solid-js";
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ConfirmOptions } from "../components/ConfirmDialog";
 import type { SettingsTab } from "../components/SettingsModal";
-import { pickDirectory } from "../ipc/dialog";
 import { daemonCall } from "../ipc/rpc";
 import type { FleetStore } from "./fleet";
+import type { WorkspaceStore } from "./workspace";
 
 export interface RenameTarget {
   sessionId: string;
@@ -14,7 +14,7 @@ export interface RenameTarget {
 
 /// Owns the state for every input/confirm modal so any surface (sidebar, control center,
 /// header) can open one without threading callbacks. The matching <ActionModals> renders them.
-export function createActionsStore(fleet: FleetStore) {
+export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore) {
   const [controlOpen, setControlOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general");
@@ -129,14 +129,21 @@ export function createActionsStore(fleet: FleetStore) {
 
   function stopAgent(lane: Lane, agent: AgentSession | null) {
     const name = agent?.custom_label ?? agent?.title ?? agent?.agent;
+    const window = agent?.tmux_window;
     setConfirmOptions({
       title: "Stop agent?",
       message: name ? `Stop ${name}. Its terminal session ends.` : "Stop this managed agent. Its terminal session ends.",
       confirmLabel: "Stop",
       danger: true,
       onConfirm: async () => {
-        await daemonCall("agent.stop", { lane_id: lane.id, window: agent?.tmux_window ?? undefined });
-        await fleet.refresh();
+        if (window) workspace?.markClosing(window);
+        try {
+          await daemonCall("agent.stop", { lane_id: lane.id, window: window ?? undefined });
+          await fleet.refresh();
+        } catch (cause) {
+          if (window) workspace?.unmarkClosing(window);
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
       },
     });
   }

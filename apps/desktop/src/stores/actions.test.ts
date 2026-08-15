@@ -102,12 +102,15 @@ describe("lane operations", () => {
     });
   });
 
-  it("stop targets the agent's tmux window", async () => {
+  it("stop targets the agent's tmux window and marks closing in workspace", async () => {
     await createRoot(async (dispose) => {
-      const actions = createActionsStore(fleetStub());
+      const markClosing = vi.fn();
+      const ws = { markClosing } as unknown as import("./workspace").WorkspaceStore;
+      const actions = createActionsStore(fleetStub(), ws);
       const agent = { tmux_window: "lane-7" } as AgentSession;
       actions.stopAgent(lane(), agent);
       await actions.confirmOptions()?.onConfirm();
+      expect(markClosing).toHaveBeenCalledWith("lane-7");
       expect(calls.list[0]).toEqual({ method: "agent.stop", params: { lane_id: 7, window: "lane-7" } });
       dispose();
     });
