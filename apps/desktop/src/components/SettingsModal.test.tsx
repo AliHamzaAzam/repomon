@@ -148,4 +148,21 @@ describe("Settings auto-save persistence", () => {
     await waitFor(() => expect(calls.saved.length).toBeGreaterThan(0));
     expect(calls.saved[calls.saved.length - 1].accent).toBe("green");
   });
+
+  it("renders and toggles auto-collapse empty lanes switch in general tab", async () => {
+    render(() => (
+      <SettingsModal
+        initialTab="general"
+        onClose={() => undefined}
+      />
+    ));
+
+    const toggle = await screen.findByRole("switch", { name: "Auto-collapse lanes with no active agent" });
+    expect(toggle).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(localStorage.getItem("repomon:auto-collapse-empty-lanes")).toBe("false");
+  });
 });

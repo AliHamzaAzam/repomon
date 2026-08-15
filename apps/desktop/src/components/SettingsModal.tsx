@@ -23,6 +23,10 @@ import {
   type Theme,
   type TerminalAppearance,
 } from "../theme";
+import {
+  readAutoCollapseEmptyLanes,
+  saveAutoCollapseEmptyLanes,
+} from "../stores/uiSettings";
 import AutomationSettings from "./AutomationSettings";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
@@ -181,6 +185,7 @@ export default function SettingsModal(props: SettingsModalProps) {
   const [currentTheme, setCurrentTheme] = createSignal<Theme>(readTheme());
   const [activeSoundProfile, setActiveSoundProfile] = createSignal<SoundProfile>(readSoundProfile());
   const [terminalApp, setTerminalApp] = createSignal<TerminalAppearance>(readTerminalAppearance());
+  const [autoCollapseEmpty, setAutoCollapseEmpty] = createSignal<boolean>(readAutoCollapseEmptyLanes());
 
   function selectTheme(themeId: Theme) {
     setCurrentTheme(themeId);
@@ -388,6 +393,14 @@ export default function SettingsModal(props: SettingsModalProps) {
                 <TextField label="Worktree Template" value={settings().worktree_template} onInput={(value) => patch({ worktree_template: value }, true)} />
                 <TextField label="Auto-continue Message" value={settings().auto_continue_message} onInput={(value) => patch({ auto_continue_message: value }, true)} />
                 <div class="grid gap-2 sm:grid-cols-2">
+                  <Switch
+                    label="Auto-collapse lanes with no active agent"
+                    checked={autoCollapseEmpty()}
+                    onChange={(value) => {
+                      setAutoCollapseEmpty(value);
+                      saveAutoCollapseEmptyLanes(value);
+                    }}
+                  />
                   <For each={GENERAL_TOGGLES}>
                     {([key, label]) => <Switch label={label} checked={Boolean(settings()[key])} onChange={(value) => patch({ [key]: value } as Partial<ConfigView>)} />}
                   </For>

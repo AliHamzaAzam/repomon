@@ -1,8 +1,12 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { Lane } from "../bindings";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
+import {
+  readAutoCollapseEmptyLanes,
+  onAutoCollapseChanged,
+} from "../stores/uiSettings";
 import { primarySession } from "./agentLabel";
 import RepoExtMenu from "./RepoExtMenu";
 import {
@@ -79,7 +83,7 @@ function LaneRow(props: {
 
   return (
     <Show
-      when={props.collapsed && sessionCount() === 0}
+      when={props.collapsed}
       fallback={
         <button
           type="button"
@@ -88,42 +92,62 @@ function LaneRow(props: {
           aria-current={props.selected ? "true" : undefined}
           title={`${title()} (${branchName()})`}
         >
-          {/* 1. Leading Icon Slot (Fixed Width with Corner Status Pulse) */}
+          {/* 1. Leading Icon Slot (Fixed Width with Corner Status Pulse or Left-Aligned Minimize Button when Empty) */}
           <div class="relative flex size-6 shrink-0 items-center justify-center rounded-md bg-raised/60">
             <Show
-              when={primary()}
-              fallback={<AgentIcon shell size={13} class="text-muted/60" />}
+              when={sessionCount() === 0}
+              fallback={
+                <>
+                  <Show
+                    when={primary()}
+                    fallback={<AgentIcon shell size={13} class="text-muted/60" />}
+                  >
+                    {(agentSession) => (
+                      <AgentIcon
+                        agent={agentSession().agent}
+                        size={13}
+                        class={
+                          indicator().tone === "signal"
+                            ? "text-signal"
+                            : indicator().tone === "attention"
+                            ? "text-attention"
+                            : indicator().tone === "fault"
+                            ? "text-fault"
+                            : props.selected
+                            ? "text-foreground"
+                            : "text-muted"
+                        }
+                      />
+                    )}
+                  </Show>
+                  <span
+                    class={`absolute -top-0.5 -right-0.5 size-2 rounded-full border-2 border-surface ${
+                      indicator().tone === "signal"
+                        ? "bg-signal ring-1 ring-signal/30"
+                        : indicator().tone === "attention"
+                        ? "bg-attention ring-1 ring-attention/30 animate-pulse"
+                        : indicator().tone === "fault"
+                        ? "bg-fault ring-1 ring-fault/30"
+                        : "bg-muted/40"
+                    }`}
+                    aria-hidden="true"
+                  />
+                </>
+              }
             >
-              {(agentSession) => (
-                <AgentIcon
-                  agent={agentSession().agent}
-                  size={13}
-                  class={
-                    indicator().tone === "signal"
-                      ? "text-signal"
-                      : indicator().tone === "attention"
-                      ? "text-attention"
-                      : indicator().tone === "fault"
-                      ? "text-fault"
-                      : props.selected
-                      ? "text-foreground"
-                      : "text-muted"
-                  }
-                />
-              )}
+              <button
+                type="button"
+                class="focus-ring flex size-6 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-foreground transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.toggleCollapse?.();
+                }}
+                title="Minimize inactive lane"
+                aria-label={`Minimize inactive lane ${title()}`}
+              >
+                <IconChevronDown size={11} />
+              </button>
             </Show>
-            <span
-              class={`absolute -top-0.5 -right-0.5 size-2 rounded-full border-2 border-surface ${
-                indicator().tone === "signal"
-                  ? "bg-signal ring-1 ring-signal/30"
-                  : indicator().tone === "attention"
-                  ? "bg-attention ring-1 ring-attention/30 animate-pulse"
-                  : indicator().tone === "fault"
-                  ? "bg-fault ring-1 ring-fault/30"
-                  : "bg-muted/40"
-              }`}
-              aria-hidden="true"
-            />
           </div>
 
           {/* 2. Middle Content Area (Title & Branch Name) */}
@@ -141,20 +165,6 @@ function LaneRow(props: {
                 <span class="shrink-0 text-signal" title="Pinned lane" aria-label="Pinned">
                   <IconPin size={10} />
                 </span>
-              </Show>
-              <Show when={sessionCount() === 0}>
-                <button
-                  type="button"
-                  class="focus-ring ml-auto opacity-0 group-hover/lane-row:opacity-100 flex size-4 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground transition-opacity"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.toggleCollapse?.();
-                  }}
-                  title="Minimize inactive lane"
-                  aria-label={`Minimize inactive lane ${title()}`}
-                >
-                  <IconChevronDown size={10} />
-                </button>
               </Show>
             </div>
 
@@ -261,7 +271,6 @@ function LaneRow(props: {
               <span>{dirty()}</span>
             </span>
           </Show>
-          <span class="text-[9px] uppercase tracking-wider text-muted/60">idle</span>
         </div>
       </div>
     </Show>
@@ -279,23 +288,53 @@ function loadCollapsedLanes(): Set<number> {
 
 export default function FleetSidebar(props: FleetSidebarProps) {
   const [extMenu, setExtMenu] = createSignal<{ repoId: number; x: number; y: number } | null>(null);
-  const [collapsedLanes, setCollapsedLanes] = createSignal<Set<number>>(loadCollapsedLanes());
+  const [autoCollapse, setAutoCollapse] = createSignal<boolean>(readAutoCollapseEmptyLanes());
+  const [manuallyExpandedLanes, setManuallyExpandedLanes] = createSignal<Set<number>>(new Set());
+  const [manuallyCollapsedLanes, setManuallyCollapsedLanes] = createSignal<Set<number>>(loadCollapsedLanes());
+
+  onMount(() => {
+    const unsub = onAutoCollapseChanged((enabled) => {
+      setAutoCollapse(enabled);
+    });
+    onCleanup(unsub);
+  });
+
+  const isLaneCollapsed = (lane: Lane) => {
+    const sessionCount = lane.agent_sessions.length;
+    if (sessionCount > 0) return false;
+    if (autoCollapse()) {
+      return !manuallyExpandedLanes().has(lane.id);
+    }
+    return manuallyCollapsedLanes().has(lane.id);
+  };
 
   const toggleLaneCollapsed = (laneId: number) => {
-    setCollapsedLanes((prev) => {
-      const next = new Set(prev);
-      if (next.has(laneId)) {
-        next.delete(laneId);
-      } else {
-        next.add(laneId);
-      }
-      try {
-        if (typeof localStorage !== "undefined") {
-          localStorage.setItem("repomon:collapsed-lanes", JSON.stringify(Array.from(next)));
+    if (autoCollapse()) {
+      setManuallyExpandedLanes((prev) => {
+        const next = new Set(prev);
+        if (next.has(laneId)) {
+          next.delete(laneId);
+        } else {
+          next.add(laneId);
         }
-      } catch {}
-      return next;
-    });
+        return next;
+      });
+    } else {
+      setManuallyCollapsedLanes((prev) => {
+        const next = new Set(prev);
+        if (next.has(laneId)) {
+          next.delete(laneId);
+        } else {
+          next.add(laneId);
+        }
+        try {
+          if (typeof localStorage !== "undefined") {
+            localStorage.setItem("repomon:collapsed-lanes", JSON.stringify(Array.from(next)));
+          }
+        } catch {}
+        return next;
+      });
+    }
   };
 
   return (
@@ -407,7 +446,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             lane={lane}
                             selected={props.fleet.selectedLaneId() === lane.id}
                             select={() => props.fleet.setSelectedLaneId(lane.id)}
-                            collapsed={collapsedLanes().has(lane.id)}
+                            collapsed={isLaneCollapsed(lane)}
                             toggleCollapse={() => toggleLaneCollapsed(lane.id)}
                           />
                         )}

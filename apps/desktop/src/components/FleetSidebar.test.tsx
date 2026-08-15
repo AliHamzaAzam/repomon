@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Lane, Repo } from "../bindings";
+import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import FleetSidebar from "./FleetSidebar";
@@ -14,13 +14,45 @@ function repo(id: number, name: string, hidden = false): Repo {
   return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden };
 }
 
-function lane(id: number, target: Repo): Lane {
+function session(overrides: Partial<AgentSession> = {}): AgentSession {
+  return {
+    id: 9,
+    agent: "claude-code",
+    repo_id: 1,
+    worktree_id: 1,
+    started_at: "2026-07-20T00:00:00Z",
+    last_activity_at: "2026-07-20T00:00:00Z",
+    ended_at: null,
+    manifest_path: "",
+    tool_call_count: 0,
+    title: "Ship",
+    status: "running",
+    external: false,
+    session_id: "s1",
+    resume_at: null,
+    inferred: false,
+    tmux_window: "lane-1",
+    last_message: null,
+    pending_prompt: null,
+    pending_dialog: null,
+    stale: false,
+    stalled_since: null,
+    ended_turn: true,
+    gate: null,
+    config_dir: null,
+    custom_label: null,
+    generated_label: null,
+    ...overrides,
+  };
+}
+
+function lane(id: number, target: Repo, sessions: AgentSession[] = []): Lane {
   return {
     id,
     repo: target,
     worktree: { id, repo_id: target.id, path: `/code/${target.name}-wt`, branch: "main", head: "abc", is_main: true, name: "main" },
     state: { worktree_id: id, head: "abc", branch: "main", upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
-    agent_sessions: [],
+    agent_sessions: sessions,
     last_activity_at: "2026-07-20T00:00:00Z",
     pinned: false,
   };
@@ -199,21 +231,38 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("Claude Weekly Quota")).toBeInTheDocument();
   });
 
-  it("collapses and expands an inactive lane row when toggled", () => {
+  it("auto-collapses inactive lane row by default and allows expanding/minimizing", () => {
     const alpha = repo(1, "alpha");
     const emptyLane = lane(10, alpha);
     const { fleet, actions } = stubs([alpha], [emptyLane]);
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
     expect(screen.getAllByText("main")[0]).toBeInTheDocument();
-    const minimizeBtn = screen.getByLabelText("Minimize inactive lane main");
-    fireEvent.click(minimizeBtn);
-
-    expect(screen.getByLabelText("Expand lane main")).toBeInTheDocument();
-    expect(screen.getByText("idle")).toBeInTheDocument();
-
+    // Default is auto-collapsed for empty lane
     const expandBtn = screen.getByLabelText("Expand lane main");
+    expect(expandBtn).toBeInTheDocument();
+    expect(screen.queryByText("idle")).not.toBeInTheDocument();
+
+    // Click expand
     fireEvent.click(expandBtn);
-    expect(screen.getByLabelText("Minimize inactive lane main")).toBeInTheDocument();
+    const minimizeBtn = screen.getByLabelText("Minimize inactive lane main");
+    expect(minimizeBtn).toBeInTheDocument();
+
+    // Click minimize to collapse again
+    fireEvent.click(minimizeBtn);
+    expect(screen.getByLabelText("Expand lane main")).toBeInTheDocument();
+  });
+
+  it("never collapses a lane that has active agent sessions", () => {
+    const alpha = repo(1, "alpha");
+    const activeLane = lane(10, alpha, [
+      session({ status: "running", agent: "claude-code", session_id: "s1" }),
+    ]);
+    const { fleet, actions } = stubs([alpha], [activeLane]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.queryByLabelText("Expand lane main")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Minimize inactive lane main")).not.toBeInTheDocument();
+    expect(screen.getByText("running")).toBeInTheDocument();
   });
 });
