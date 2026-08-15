@@ -138,4 +138,24 @@ describe("Select custom dropdown", () => {
     const listbox = await screen.findByRole("listbox");
     expect(listbox).toHaveClass("right-0");
   });
+
+  it("renders frameless variant without standard border/surface box", () => {
+    render(() => (
+      <Select
+        size="sm"
+        variant="frameless"
+        ariaLabel="Layout mode"
+        value="auto"
+        options={[
+          { value: "auto", label: "auto" },
+          { value: "grid", label: "grid" },
+        ]}
+        onChange={() => undefined}
+      />
+    ));
+
+    const trigger = screen.getByRole("combobox", { name: "Layout mode" });
+    expect(trigger).toHaveClass("border-none");
+    expect(trigger).toHaveClass("bg-transparent");
+  });
 });

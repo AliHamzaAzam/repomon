@@ -14,6 +14,7 @@ export interface SelectProps {
   options: SelectOption[];
   onChange: (value: string) => void;
   size?: "sm" | "md";
+  variant?: "default" | "frameless";
   align?: "left" | "right";
   disabled?: boolean;
   class?: string;
@@ -33,6 +34,7 @@ export default function Select(props: SelectProps) {
   const selectedLabel = () => selectedOption()?.label ?? props.value ?? "";
 
   const size = () => props.size ?? "md";
+  const variant = () => props.variant ?? "default";
 
   function close(restoreFocus = true) {
     setOpen(false);
@@ -122,10 +124,18 @@ export default function Select(props: SelectProps) {
           setOpen(!open());
         }}
         onKeyDown={onKeyDown}
-        class={`focus-ring flex w-full items-center justify-between gap-2 rounded-lg border border-line bg-surface text-foreground transition-colors hover:border-muted/50 focus:border-signal disabled:cursor-not-allowed disabled:opacity-50 ${
-          size() === "sm"
-            ? "h-7 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted hover:text-foreground"
-            : "h-8.5 px-3 text-xs font-medium"
+        class={`focus-ring flex w-full items-center justify-between gap-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+          variant() === "frameless"
+            ? `border-none bg-transparent ${
+                size() === "sm"
+                  ? "h-6 px-1 font-mono text-[10px] uppercase tracking-wider text-muted hover:text-foreground"
+                  : "h-8 px-1.5 text-xs font-medium text-muted hover:text-foreground"
+              }`
+            : `rounded-lg border border-line bg-surface text-foreground hover:border-muted/50 focus:border-signal ${
+                size() === "sm"
+                  ? "h-7 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted hover:text-foreground"
+                  : "h-8.5 px-3 text-xs font-medium"
+              }`
         }`}
       >
         <span class="flex min-w-0 items-center gap-2 truncate">

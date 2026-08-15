@@ -232,29 +232,43 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </div>
         </div>
 
-        <div class="ml-3 flex shrink-0 items-center gap-2">
-          <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5" role="group" aria-label="Layout view mode">
+        <div class="ml-3 flex shrink-0 items-center">
+          <div class="flex items-center" role="group" aria-label="Layout view mode">
             <button
               type="button"
-              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${effectiveLayout() === "focused" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              class={`focus-ring flex size-6 items-center justify-center transition-colors ${
+                effectiveLayout() === "focused"
+                  ? "text-signal font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
               onClick={() => chooseLayout("focused")}
               title="Focused layout"
               aria-label="Focused layout"
             >
               <IconFocus size={13} />
             </button>
+            <span class="h-2.5 w-px bg-line/60 mx-0.5" aria-hidden="true" />
             <button
               type="button"
-              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${effectiveLayout() === "split" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              class={`focus-ring flex size-6 items-center justify-center transition-colors ${
+                effectiveLayout() === "split"
+                  ? "text-signal font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
               onClick={() => chooseLayout("split")}
               title="Split layout"
               aria-label="Split layout"
             >
               <IconSplit size={13} />
             </button>
+            <span class="h-2.5 w-px bg-line/60 mx-0.5" aria-hidden="true" />
             <button
               type="button"
-              class={`focus-ring flex size-6 items-center justify-center rounded-md transition-colors ${effectiveLayout() === "grid" ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground"}`}
+              class={`focus-ring flex size-6 items-center justify-center transition-colors ${
+                effectiveLayout() === "grid"
+                  ? "text-signal font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
               onClick={() => chooseLayout("grid")}
               title="Grid layout"
               aria-label="Grid layout"
@@ -263,8 +277,11 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             </button>
           </div>
 
+          <span class="h-3.5 w-px bg-line/60 mx-1.5" aria-hidden="true" />
+
           <Select
             size="sm"
+            variant="frameless"
             align="right"
             ariaLabel="Layout mode"
             value={layout()}
