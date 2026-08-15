@@ -6,6 +6,7 @@ import type { ActionsStore } from "../stores/actions";
 import {
   readAutoCollapseEmptyLanes,
   onAutoCollapseChanged,
+  notifyLayoutChanged,
 } from "../stores/uiSettings";
 import { primarySession } from "./agentLabel";
 import RepoExtMenu from "./RepoExtMenu";
@@ -312,11 +313,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
       } catch {}
       return next;
     });
+    notifyLayoutChanged();
   };
 
   onMount(() => {
     const unsub = onAutoCollapseChanged((enabled) => {
       setAutoCollapse(enabled);
+      notifyLayoutChanged();
     });
     onCleanup(unsub);
   });
@@ -357,6 +360,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         return next;
       });
     }
+    notifyLayoutChanged();
   };
 
   return (

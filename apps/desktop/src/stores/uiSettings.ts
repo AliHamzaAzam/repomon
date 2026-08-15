@@ -41,3 +41,23 @@ export function onAutoCollapseChanged(callback: (enabled: boolean) => void): () 
   window.addEventListener(AUTO_COLLAPSE_EVENT, handler);
   return () => window.removeEventListener(AUTO_COLLAPSE_EVENT, handler);
 }
+
+export const LAYOUT_CHANGED_EVENT = "repomon:layout-changed";
+
+/**
+ * Dispatches a global layout change event so embedded viewports (such as xterm terminal panes)
+ * immediately recalculate their geometry and repaint without waiting for window resize.
+ */
+export function notifyLayoutChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(LAYOUT_CHANGED_EVENT));
+}
+
+/**
+ * Subscribes to layout changes across the app. Returns an unsubscribe function.
+ */
+export function onLayoutChanged(callback: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(LAYOUT_CHANGED_EVENT, callback);
+  return () => window.removeEventListener(LAYOUT_CHANGED_EVENT, callback);
+}

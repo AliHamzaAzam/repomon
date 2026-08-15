@@ -5,6 +5,7 @@ import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import type { WorkspaceStore } from "../stores/workspace";
+import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
 import {
@@ -94,6 +95,14 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     const available = targets();
     const visible = visibleTargets();
     setWarmWindows((previous) => warmTargetWindows(previous, visible, available));
+  });
+
+  createEffect(() => {
+    // Notify terminal panes when layout mode or visible targets change
+    effectiveLayout();
+    activeWindow();
+    visibleTargets();
+    notifyLayoutChanged();
   });
 
   const mountedTargets = createMemo(() => {

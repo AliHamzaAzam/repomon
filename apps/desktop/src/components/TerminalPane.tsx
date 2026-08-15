@@ -20,6 +20,7 @@ import {
   type TerminalTarget,
 } from "../ipc/term";
 import { readTerminalAppearance, type TerminalAppearance } from "../theme";
+import { onLayoutChanged } from "../stores/uiSettings";
 import AgentHistory from "./AgentHistory";
 import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
 
@@ -252,6 +253,9 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // lines wrap, so an agent's relative-cursor redraw (cursor-up, carriage return, erase-line)
       // lands in the wrong columns and weaves fresh text through stale text.
       let confirmedGrid: { cols: number; rows: number } | null = null;
+      let intersection: IntersectionObserver | undefined;
+      let unsubLayout: (() => void) | undefined;
+      let onWindowResize: (() => void) | undefined;
 
       function applyGrid(cols?: number | null, rows?: number | null) {
         if (!terminal || !cols || !rows) return;
@@ -259,18 +263,22 @@ export default function TerminalPane(props: TerminalPaneProps) {
         if (cols !== terminal.cols || rows !== terminal.rows) {
           terminal.resize(cols, rows);
         }
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
       }
 
       // Keep xterm and the backend pane on one authoritative grid. GUI-owned shells can be
       // resized directly. Shared agent panes use the arbitrated fit call so the TUI and desktop
       // never fight over dimensions.
       syncSize = async () => {
-        if (!terminal || props.visible === false) return;
+        if (!terminal || props.visible === false || view() !== "live" || disposed) return;
+        // Don't attempt to fit when the container is detached or has zero client dimension
+        if (container.clientWidth === 0 || container.clientHeight === 0) return;
         try {
           fit?.fit();
         } catch {
           return;
         }
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
         const cols = terminal.cols;
         const rows = terminal.rows;
         if (!cols || !rows) return;
@@ -292,6 +300,15 @@ export default function TerminalPane(props: TerminalPaneProps) {
             applyGrid(pinned.cols, pinned.rows);
           }
         }
+      };
+
+      const requestSyncSize = () => {
+        if (disposed || !terminal) return;
+        if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
+        visibilityFrame = requestAnimationFrame(() => {
+          visibilityFrame = undefined;
+          void syncSize?.();
+        });
       };
 
       // Accumulate fractional movement and issue at most one remote scroll at a time. New movement
@@ -372,10 +389,25 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       container.addEventListener("wheel", wheelListener, { capture: true, passive: false });
       resize = new ResizeObserver(() => {
-        if (resizeTimer) clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => void syncSize?.(), 100);
+        requestSyncSize();
       });
       resize.observe(container);
+
+      if (typeof IntersectionObserver !== "undefined") {
+        intersection = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting && entry.intersectionRatio > 0) {
+              requestSyncSize();
+            }
+          }
+        });
+        intersection.observe(container);
+      }
+
+      onWindowResize = () => requestSyncSize();
+      window.addEventListener("resize", onWindowResize);
+      unsubLayout = onLayoutChanged(() => requestSyncSize());
+
       if (props.visible !== false) fit.fit();
       // Establish the pane's authoritative grid before the first checkpoint is painted. Painting
       // at one width and resizing afterward corrupts cursor-relative full-screen output.
@@ -391,6 +423,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
         terminal.options.fontSize = conf.fontSize;
         fit?.fit();
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
       };
 
       const onAppearanceChanged = (e: Event) => {
@@ -425,6 +458,9 @@ export default function TerminalPane(props: TerminalPaneProps) {
     disposed = true;
     rendererEpoch += 1;
     resize?.disconnect();
+    intersection?.disconnect();
+    if (onWindowResize) window.removeEventListener("resize", onWindowResize);
+    unsubLayout?.();
     if (wheelListener) container.removeEventListener("wheel", wheelListener, true);
     if (resizeTimer) clearTimeout(resizeTimer);
     if (wheelFrame !== undefined) cancelAnimationFrame(wheelFrame);
