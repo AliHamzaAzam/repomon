@@ -299,10 +299,10 @@ function App(props: AppProps) {
   };
 
   return (
-    <div class="grid h-screen min-h-[36rem] grid-rows-[2.75rem_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
+    <div class="grid h-screen min-h-[36rem] grid-rows-[38px_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
       <header
         data-tauri-drag-region
-        class={`flex h-11 items-center justify-between border-b border-line bg-surface/95 pr-3.5 backdrop-blur select-none ${
+        class={`flex h-[38px] items-center justify-between border-b border-line bg-surface/95 pr-3.5 backdrop-blur select-none ${
           isMac() ? "pl-[78px]" : "px-3.5"
         }`}
       >
