@@ -162,6 +162,28 @@ describe("fleet presentation", () => {
     expect(laneIndicator(lane({ agent_sessions: [agent({ status: "idle" })] }))).toEqual({ label: "idle", tone: "muted", urgent: false });
   });
 
+  it("counts only the agents actually running, not the lane's whole roster", () => {
+    // A lane with 3 agents where only 1 is running must say "running", not "3 running" -
+    // the label previously used the total agent count regardless of status.
+    const mostlyIdle = lane({
+      agent_sessions: [
+        agent({ status: "running" }),
+        agent({ status: "idle" }),
+        agent({ status: "idle" }),
+      ],
+    });
+    expect(laneIndicator(mostlyIdle)).toEqual({ label: "running", tone: "signal", urgent: false });
+
+    const twoRunning = lane({
+      agent_sessions: [
+        agent({ status: "running" }),
+        agent({ status: "running" }),
+        agent({ status: "idle" }),
+      ],
+    });
+    expect(laneIndicator(twoRunning)).toEqual({ label: "2 running", tone: "signal", urgent: false });
+  });
+
   it("fuzzy matches repo, branch, and agent text", () => {
     const target = lane();
     expect(matchesLane(target, "rpmndsk")).toBe(true);

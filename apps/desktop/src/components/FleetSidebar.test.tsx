@@ -73,6 +73,8 @@ function stubs(repos: Repo[], lanes: Lane[]) {
     setQuery: vi.fn(),
     urgentOnly: () => false,
     setUrgentOnly: vi.fn(),
+    runningOnly: () => false,
+    setRunningOnly: vi.fn(),
     loading: () => false,
     counts: () => ({ urgent: 0, running: 0 }),
     focusedUsage: () => null,

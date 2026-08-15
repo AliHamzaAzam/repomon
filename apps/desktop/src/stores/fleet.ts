@@ -71,8 +71,9 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   if (agents.some((agent) => agent.external)) {
     return { label: "external", tone: "muted", urgent: false };
   }
-  if (agents.some((agent) => !agent.inferred && agent.status === "running")) {
-    return { label: `${agents.length > 1 ? `${agents.length} running` : "running"}${gate}`, tone: "signal", urgent: false };
+  const runningCount = agents.filter((agent) => !agent.inferred && agent.status === "running").length;
+  if (runningCount > 0) {
+    return { label: `${runningCount > 1 ? `${runningCount} running` : "running"}${gate}`, tone: "signal", urgent: false };
   }
   if (agents.some((agent) => agent.inferred)) {
     return { label: "active · inferred", tone: "signal", urgent: false };
@@ -207,6 +208,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [focusedWindow, setFocusedWindow] = createSignal<string | null>(null);
   const [query, setQuery] = createSignal("");
   const [urgentOnly, setUrgentOnly] = createSignal(false);
+  const [runningOnly, setRunningOnly] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -232,6 +234,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     unhiddenLanes()
       .filter((lane) => matchesLane(lane, query()))
       .filter((lane) => !urgentOnly() || laneIndicator(lane).urgent)
+      .filter((lane) => !runningOnly() || lane.agent_sessions.some((agent) => agent.status === "running"))
       .sort(byPriority),
   );
 
@@ -334,6 +337,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     setQuery,
     urgentOnly,
     setUrgentOnly,
+    runningOnly,
+    setRunningOnly,
     loading,
     error,
     dismissError: () => setError(null),

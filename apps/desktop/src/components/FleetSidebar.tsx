@@ -399,16 +399,24 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             <span class="truncate">Needs attention</span>
             <span class="font-mono text-[11px] font-semibold">{props.fleet.counts().urgent}</span>
           </button>
-          <span
-            class="flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-raised/70 px-2 font-mono text-[11px] text-muted"
-            title={`${props.fleet.counts().running} active agent session${props.fleet.counts().running === 1 ? "" : "s"} currently running`}
+          <button
+            type="button"
+            class={`focus-ring flex h-7 shrink-0 items-center gap-1.5 rounded-lg border px-2 font-mono text-[11px] transition-colors ${
+              props.fleet.runningOnly()
+                ? "border-signal/50 bg-signal/10 text-signal font-semibold"
+                : props.fleet.counts().running > 0
+                  ? "border-line bg-raised/70 text-signal hover:bg-raised"
+                  : "border-line bg-raised/70 text-muted hover:text-foreground hover:bg-raised"
+            }`}
+            onClick={() => props.fleet.setRunningOnly(!props.fleet.runningOnly())}
+            aria-pressed={props.fleet.runningOnly()}
+            title={props.fleet.runningOnly() ? "Show all lanes" : "Filter to lanes with a running agent"}
           >
-            <span class={`size-1.5 rounded-full ${props.fleet.counts().running > 0 ? "bg-signal animate-pulse" : "bg-muted/40"}`} />
             <span class="text-[10px] font-sans font-medium text-muted/70">Running</span>
-            <b class={props.fleet.counts().running > 0 ? "text-signal font-semibold" : "text-muted"}>
+            <b class={props.fleet.counts().running > 0 || props.fleet.runningOnly() ? "text-signal font-semibold" : "text-muted"}>
               {props.fleet.counts().running}
             </b>
-          </span>
+          </button>
           <button
             type="button"
             class="focus-ring flex h-7 shrink-0 items-center gap-1 rounded-lg border border-line bg-raised/70 px-2 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
