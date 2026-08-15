@@ -356,19 +356,36 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             /
           </kbd>
         </label>
-        <div class="flex gap-1.5">
+        <div class="flex items-center gap-1.5">
           <button
             type="button"
-            class={`focus-ring flex h-7 flex-1 items-center justify-between rounded-lg border px-2.5 text-xs font-medium transition-colors ${props.fleet.urgentOnly() ? "border-attention/50 bg-attention/10 text-attention" : "border-line bg-raised/70 text-muted hover:text-foreground hover:bg-raised"}`}
+            class={`focus-ring flex h-7 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+              props.fleet.urgentOnly()
+                ? "border-attention/50 bg-attention/10 text-attention font-semibold"
+                : props.fleet.counts().urgent > 0
+                  ? "border-attention/30 bg-attention/5 text-attention hover:bg-attention/10"
+                  : "border-line bg-raised/70 text-muted hover:text-foreground hover:bg-raised"
+            }`}
             onClick={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
             aria-pressed={props.fleet.urgentOnly()}
+            title={props.fleet.urgentOnly() ? "Show all lanes" : "Filter to lanes needing attention"}
           >
-            <span>Needs attention</span>
+            <span class="truncate">Needs attention</span>
             <span class="font-mono text-[11px] font-semibold">{props.fleet.counts().urgent}</span>
           </button>
+          <span
+            class="flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-raised/70 px-2 font-mono text-[11px] text-muted"
+            title={`${props.fleet.counts().running} active agent session${props.fleet.counts().running === 1 ? "" : "s"} currently running`}
+          >
+            <span class={`size-1.5 rounded-full ${props.fleet.counts().running > 0 ? "bg-signal animate-pulse" : "bg-muted/40"}`} />
+            <span class="text-[10px] font-sans font-medium text-muted/70">Running</span>
+            <b class={props.fleet.counts().running > 0 ? "text-signal font-semibold" : "text-muted"}>
+              {props.fleet.counts().running}
+            </b>
+          </span>
           <button
             type="button"
-            class="focus-ring flex h-7 items-center gap-1 rounded-lg border border-line bg-raised/70 px-2 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+            class="focus-ring flex h-7 shrink-0 items-center gap-1 rounded-lg border border-line bg-raised/70 px-2 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
             onClick={() => void props.actions.addRepo()}
             title="Add a repository"
           >
@@ -526,22 +543,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         )}
       </Show>
 
-      <div class="border-t border-line bg-surface/50 p-2.5 space-y-2">
-        {/* Fleet Summary Counters */}
-        <div class="grid grid-cols-2 gap-1.5 text-xs text-muted">
-          <span class="flex items-center justify-between rounded-md bg-raised/50 px-2 py-1 font-mono text-[11px]">
-            <span>Needs you</span>
-            <b class="text-attention">{props.fleet.counts().urgent}</b>
-          </span>
-          <span class="flex items-center justify-between rounded-md bg-raised/50 px-2 py-1 font-mono text-[11px]">
-            <span>Running</span>
-            <b class="text-signal">{props.fleet.counts().running}</b>
-          </span>
-        </div>
-
-        {/* Rate Limits & Usage Quota */}
-        <Show when={props.fleet.focusedUsage()}>
-          {(usage) => (
+      <Show when={props.fleet.focusedUsage()}>
+        {(usage) => (
+          <div class="border-t border-line bg-surface/50 p-2.5">
+            {/* Rate Limits & Usage Quota */}
             <div class="rounded-lg border border-line/60 bg-raised/30 p-2">
               <div class="mb-1.5 flex items-center justify-between font-mono text-[10px] text-muted">
                 <span class="font-semibold uppercase tracking-wider text-muted/90 flex items-center gap-1">
@@ -568,9 +573,9 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                 </For>
               </div>
             </div>
-          )}
-        </Show>
-      </div>
+          </div>
+        )}
+      </Show>
     </>
   );
 }
