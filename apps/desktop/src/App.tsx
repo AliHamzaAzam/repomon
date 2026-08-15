@@ -26,6 +26,7 @@ import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
+import { notifyLayoutChanged } from "./stores/uiSettings";
 import { IconClose, IconExtensions, IconSettings, IconSparkles } from "./components/icons";
 
 interface AppProps {
@@ -146,6 +147,21 @@ function App(props: AppProps) {
     if (connection().phase === "connected" && available) {
       void notifications.notifyUpdateReady(available.version);
     }
+  });
+
+  // Switching lanes should surface that lane's agent session, not leave the Extensions
+  // panel covering it.
+  createEffect(() => {
+    fleet.selectedLaneId();
+    setExtensionsOpen(false);
+  });
+
+  createEffect(() => {
+    // Notify terminal panes whenever sibling panels or fullscreens change dimensions
+    extensionsOpen();
+    repomindOpen();
+    repomindFull();
+    notifyLayoutChanged();
   });
 
   const onShortcut = (event: KeyboardEvent) => {
