@@ -198,4 +198,22 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("Claude 5h Quota")).toBeInTheDocument();
     expect(screen.getByText("Claude Weekly Quota")).toBeInTheDocument();
   });
+
+  it("collapses and expands an inactive lane row when toggled", () => {
+    const alpha = repo(1, "alpha");
+    const emptyLane = lane(10, alpha);
+    const { fleet, actions } = stubs([alpha], [emptyLane]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getAllByText("main")[0]).toBeInTheDocument();
+    const minimizeBtn = screen.getByLabelText("Minimize inactive lane main");
+    fireEvent.click(minimizeBtn);
+
+    expect(screen.getByLabelText("Expand lane main")).toBeInTheDocument();
+    expect(screen.getByText("idle")).toBeInTheDocument();
+
+    const expandBtn = screen.getByLabelText("Expand lane main");
+    fireEvent.click(expandBtn);
+    expect(screen.getByLabelText("Minimize inactive lane main")).toBeInTheDocument();
+  });
 });
