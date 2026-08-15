@@ -546,7 +546,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
               >History</button>
             </div>
           </Show>
-          <span class="rounded bg-raised/70 px-1.5 py-0.5 font-mono text-[9px] font-medium text-muted">
+          <span class="pointer-events-none rounded border border-line/40 bg-raised/30 px-1.5 py-0.5 font-mono text-[9px] font-normal tracking-wide text-muted/60 select-none">
             {view() === "history" ? "HISTORY" : renderer()}
           </span>
         </div>

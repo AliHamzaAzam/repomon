@@ -4177,19 +4177,26 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         let tmux = ctx.backend.clone();
         let _ = tokio::task::spawn_blocking(move || {
             for (cands, probe) in stamp_batches {
-                if cands.iter().all(|c| c.needle.is_none()) {
-                    continue;
-                }
-                let panes: Vec<(u64, String, String)> = probe
-                    .into_iter()
-                    .map(|(wid, name)| {
-                        let text = tmux
-                            .capture_named(&name, CaptureOpts::last(60))
-                            .unwrap_or_default();
-                        (wid, name, normalize_fingerprint(&text))
-                    })
-                    .collect();
-                for (wid, name, sid, kind) in confirmed_stamps(&cands, &panes) {
+                let confirmed = if cands.iter().any(|c| c.needle.is_some()) {
+                    let panes: Vec<(u64, String, String)> = probe
+                        .iter()
+                        .map(|(wid, name)| {
+                            let text = tmux
+                                .capture_named(name, CaptureOpts::last(60))
+                                .unwrap_or_default();
+                            (*wid, name.clone(), normalize_fingerprint(&text))
+                        })
+                        .collect();
+                    confirmed_stamps(&cands, &panes)
+                } else if cands.len() == 1 && probe.len() == 1 {
+                    // Exactly 1 candidate and 1 unclaimed probe window in this lane with no competing claimants:
+                    // bind them directly so agents without long text fingerprints (e.g. Antigravity) are stamped
+                    // and never surface as phantom external adoptables.
+                    vec![(probe[0].0, probe[0].1.clone(), cands[0].sid.clone(), cands[0].kind.clone())]
+                } else {
+                    Vec::new()
+                };
+                for (wid, name, sid, kind) in confirmed {
                     if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
                         tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
                     }
@@ -4592,7 +4599,7 @@ fn pair_transcripts_to_windows(
         .collect();
     let has_never_bound_window = free.iter().any(|&i| windows[i].session.is_none());
     let mut new_bindings = Vec::new();
-    for si in chosen {
+    for &si in &chosen {
         // Nominate a transcript for a durable stamp when PANE EVIDENCE could confirm it.
         // Two routes qualify:
         //  - it is actively writing (`is_fresh`): it IS some window's agent right now, so
@@ -4607,7 +4614,14 @@ fn pair_transcripts_to_windows(
         //    (`session.is_some()`) is left for a fresh claimant, never re-stamped from a guess.
         if let Some(sid) = &summaries[si].session_id {
             let needle = message_fingerprint(summaries[si].last_message.as_deref());
-            if is_fresh(&summaries[si]) || (has_never_bound_window && needle.is_some()) {
+            let nominate = if is_fresh(&summaries[si]) {
+                true
+            } else if has_never_bound_window && needle.is_some() {
+                true
+            } else {
+                false
+            };
+            if nominate {
                 new_bindings.push(BindingCandidate {
                     sid: sid.clone(),
                     needle,
@@ -5126,7 +5140,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         manifest_path: std::path::PathBuf::new(),
         tool_call_count: 0,
         title: None,
-        status: AgentStatus::Running,
+        status: AgentStatus::Idle,
         external: false,
         session_id: None,
         resume_at: None,
@@ -5137,7 +5151,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         pending_dialog: None,
         stale: false,
         stalled_since: None,
-        ended_turn: false,
+        ended_turn: true,
         gate: None,
         config_dir: None,
         custom_label: None,
