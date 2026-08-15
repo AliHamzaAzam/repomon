@@ -256,6 +256,26 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // lines wrap, so an agent's relative-cursor redraw (cursor-up, carriage return, erase-line)
       // lands in the wrong columns and weaves fresh text through stale text.
       let confirmedGrid: { cols: number; rows: number } | null = null;
+      const bufferedWrites: (string | Uint8Array)[] = [];
+
+      function writeIncoming(bytes: string | Uint8Array) {
+        if (disposed || !terminal) return;
+        if (syncInFlight) {
+          bufferedWrites.push(bytes);
+        } else {
+          terminal.write(bytes);
+        }
+      }
+
+      function flushBufferedWrites() {
+        if (disposed || !terminal || syncInFlight) return;
+        while (bufferedWrites.length > 0) {
+          const chunk = bufferedWrites.shift();
+          if (chunk && !disposed && terminal) {
+            terminal.write(chunk);
+          }
+        }
+      }
 
       function applyGrid(cols?: number | null, rows?: number | null) {
         if (disposed || !terminal || !cols || !rows) return;
@@ -329,6 +349,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
           }
         } finally {
           syncInFlight = false;
+          flushBufferedWrites();
           if (pendingSync && !disposed) {
             pendingSync = false;
             requestSyncSize(true);
@@ -475,19 +496,23 @@ export default function TerminalPane(props: TerminalPaneProps) {
       await syncSize?.();
       setReady(true);
 
+      let currentFontFamily = initialApp.fontFamily;
+      let currentFontSize = initialApp.fontSize;
+
       const applyAppearance = (app?: TerminalAppearance) => {
         if (!terminal || disposed || !container?.isConnected) return;
         const conf = app ?? readTerminalAppearance();
         const theme = terminalTheme(container, conf);
         setPaneBg(theme.background);
         terminal.options.theme = theme;
-        terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
-        terminal.options.fontSize = conf.fontSize;
-        try {
-          fit?.fit();
-          terminal.refresh(0, Math.max(0, terminal.rows - 1));
-        } catch {
-          // ignore
+
+        const fontChanged = conf.fontFamily !== currentFontFamily || conf.fontSize !== currentFontSize;
+        if (fontChanged) {
+          currentFontFamily = conf.fontFamily;
+          currentFontSize = conf.fontSize;
+          terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
+          terminal.options.fontSize = conf.fontSize;
+          requestSyncSize();
         }
       };
 
@@ -500,7 +525,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         const watch = await watchTerminal(
           target,
           (bytes) => {
-            if (!disposed && terminal) terminal.write(bytes);
+            writeIncoming(bytes);
           },
           (ack) => applyGrid(ack.cols, ack.rows),
         );
