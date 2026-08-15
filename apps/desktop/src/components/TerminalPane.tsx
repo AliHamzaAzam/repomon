@@ -103,7 +103,6 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let disposed = false;
   let scrollRequestInFlight = false;
   const [transportError, setTransportError] = createSignal<string | null>(null);
-  const [renderer, setRenderer] = createSignal("DOM");
   const [ready, setReady] = createSignal(false);
   const [finding, setFinding] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -124,7 +123,6 @@ export default function TerminalPane(props: TerminalPaneProps) {
     const epoch = ++rendererEpoch;
     webgl?.dispose();
     webgl = undefined;
-    setRenderer("DOM");
     if (requested === "dom" || !terminal) return;
 
     try {
@@ -137,17 +135,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
         return;
       }
       webgl = addon;
-      setRenderer("WEBGL");
       addon.onContextLoss(() => {
         if (webgl !== addon) return;
         addon.dispose();
         webgl = undefined;
-        setRenderer("DOM");
       });
     } catch {
       webgl?.dispose();
       webgl = undefined;
-      setRenderer("DOM");
     }
   }
 
@@ -591,9 +586,11 @@ export default function TerminalPane(props: TerminalPaneProps) {
               >History</button>
             </div>
           </Show>
-          <span class="pointer-events-none rounded border border-line/40 bg-raised/30 px-1.5 py-0.5 font-mono text-[9px] font-normal tracking-wide text-muted/60 select-none">
-            {view() === "history" ? "HISTORY" : renderer()}
-          </span>
+          <Show when={view() === "history"}>
+            <span class="pointer-events-none rounded border border-line/40 bg-raised/30 px-1.5 py-0.5 font-mono text-[9px] font-normal tracking-wide text-muted/60 select-none">
+              HISTORY
+            </span>
+          </Show>
         </div>
       </div>
       <Show when={view() === "live" && transportError()}>
