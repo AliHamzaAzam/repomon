@@ -213,6 +213,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [urgentOnly, setUrgentOnly] = createSignal(false);
   const [runningOnly, setRunningOnly] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
+  const [synced, setSynced] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
   let active = false;
@@ -264,6 +265,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setUsage(snapshot.usage);
       setTerminals(snapshot.terminals);
       if (snapshot.sortReposByActivity !== null) setSortByActivity(snapshot.sortReposByActivity);
+      setSynced(true);
       setError(null);
       const current = selectedLaneId();
       // Never auto-select into a repo the user hid, and drop the selection if the repo it lives
@@ -340,6 +342,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     runningOnly,
     setRunningOnly,
     loading,
+    synced,
     error,
     dismissError: () => setError(null),
     visibleLanes,

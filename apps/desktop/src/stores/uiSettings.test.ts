@@ -5,6 +5,9 @@ import {
   readAutoCollapseEmptyLanes,
   saveAutoCollapseEmptyLanes,
   onAutoCollapseChanged,
+  readOnboardingCompleted,
+  saveOnboardingCompleted,
+  onOnboardingCompletedChanged,
 } from "./uiSettings";
 
 describe("uiSettings layout and preferences", () => {
@@ -31,6 +34,24 @@ describe("uiSettings layout and preferences", () => {
     saveAutoCollapseEmptyLanes(true);
     expect(readAutoCollapseEmptyLanes()).toBe(true);
     expect(listener).toHaveBeenCalledWith(true);
+
+    unsub();
+  });
+
+  it("persists onboarding completed setting across storage and notifies listeners", () => {
+    localStorage.removeItem("repomon:onboarding-completed");
+    expect(readOnboardingCompleted()).toBe(false);
+
+    const listener = vi.fn();
+    const unsub = onOnboardingCompletedChanged(listener);
+
+    saveOnboardingCompleted(true);
+    expect(readOnboardingCompleted()).toBe(true);
+    expect(listener).toHaveBeenCalledWith(true);
+
+    saveOnboardingCompleted(false);
+    expect(readOnboardingCompleted()).toBe(false);
+    expect(listener).toHaveBeenCalledWith(false);
 
     unsub();
   });

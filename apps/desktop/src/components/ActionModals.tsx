@@ -10,7 +10,11 @@ import SettingsModal from "./SettingsModal";
 import SpawnModal from "./SpawnModal";
 
 /// Mounts whichever action modal the actions store currently has open.
-export default function ActionModals(props: { actions: ActionsStore; notifications: NotificationStore }) {
+export default function ActionModals(props: {
+  actions: ActionsStore;
+  notifications: NotificationStore;
+  onReplayOnboarding?: () => void;
+}) {
   const actions = props.actions;
   return (
     <>
@@ -21,6 +25,7 @@ export default function ActionModals(props: { actions: ActionsStore; notificatio
           onConfigSaved={props.notifications.setConfig}
           onPreviewSound={props.notifications.preview}
           onUpdateAvailable={(version) => void props.notifications.notifyUpdateReady(version)}
+          onReplayOnboarding={props.onReplayOnboarding}
           fleet={actions.fleet}
           actions={actions}
         />

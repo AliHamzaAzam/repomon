@@ -4,6 +4,7 @@ import ActionModals from "./components/ActionModals";
 import FleetSidebar from "./components/FleetSidebar";
 import ControlCenter from "./components/ControlCenter";
 import ExtensionsView from "./components/ExtensionsView";
+import Onboarding from "./components/Onboarding";
 import RepomindPanel from "./components/RepomindPanel";
 import TerminalWorkspace from "./components/TerminalWorkspace";
 import UpdateBanner from "./components/UpdateBanner";
@@ -26,7 +27,7 @@ import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
-import { notifyLayoutChanged } from "./stores/uiSettings";
+import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
 import { IconClose, IconExtensions, IconSettings, IconSparkles } from "./components/icons";
 
 interface AppProps {
@@ -78,6 +79,7 @@ function App(props: AppProps) {
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(readRepomindOpen());
   const [repomindFull, setRepomindFull] = createSignal(false);
+  const [onboardingOpen, setOnboardingOpen] = createSignal(false);
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const [appVersion, setAppVersion] = createSignal("");
@@ -102,6 +104,16 @@ function App(props: AppProps) {
 
   createEffect(() => {
     applyTheme(theme());
+  });
+
+  createEffect(() => {
+    if (connection().phase === "connected" && fleet.synced()) {
+      const repos = fleet.repos();
+      const completed = readOnboardingCompleted();
+      if (!completed && repos.length === 0) {
+        setOnboardingOpen(true);
+      }
+    }
   });
 
   createEffect(() => {
@@ -464,7 +476,32 @@ function App(props: AppProps) {
         </div>
       </footer>
 
-      <ActionModals actions={actions} notifications={notifications} />
+      <Show when={onboardingOpen()}>
+        <div
+          class="fixed inset-0 z-50 flex flex-col bg-background"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Welcome to Repomon"
+        >
+          <Onboarding
+            actions={actions}
+            onComplete={() => {
+              saveOnboardingCompleted(true);
+              setOnboardingOpen(false);
+            }}
+            onSkip={() => {
+              saveOnboardingCompleted(true);
+              setOnboardingOpen(false);
+            }}
+          />
+        </div>
+      </Show>
+
+      <ActionModals
+        actions={actions}
+        notifications={notifications}
+        onReplayOnboarding={() => setOnboardingOpen(true)}
+      />
       <Show when={actions.error() ?? fleet.error()}>
         {(message) => (
           <div role="alert" class="fixed right-4 top-14 z-[70] flex max-w-md items-start gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-[0_14px_40px_var(--shadow)]">

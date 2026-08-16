@@ -61,3 +61,41 @@ export function onLayoutChanged(callback: () => void): () => void {
   window.addEventListener(LAYOUT_CHANGED_EVENT, callback);
   return () => window.removeEventListener(LAYOUT_CHANGED_EVENT, callback);
 }
+
+export const ONBOARDING_COMPLETED_KEY = "repomon:onboarding-completed";
+const ONBOARDING_COMPLETED_EVENT = "repomon:onboarding-completed-changed";
+
+/**
+ * Reads whether the user has completed or skipped the first-run onboarding wizard.
+ */
+export function readOnboardingCompleted(): boolean {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return false;
+  }
+  return localStorage.getItem(ONBOARDING_COMPLETED_KEY) === "true";
+}
+
+/**
+ * Saves whether onboarding has been completed or skipped to localStorage and notifies listeners.
+ */
+export function saveOnboardingCompleted(completed: boolean): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return;
+  }
+  localStorage.setItem(ONBOARDING_COMPLETED_KEY, String(completed));
+  window.dispatchEvent(new CustomEvent(ONBOARDING_COMPLETED_EVENT, { detail: completed }));
+}
+
+/**
+ * Subscribes to onboarding completed status changes. Returns an unsubscribe function.
+ */
+export function onOnboardingCompletedChanged(callback: (completed: boolean) => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const handler = (e: Event) => {
+    const custom = e as CustomEvent<boolean>;
+    callback(typeof custom.detail === "boolean" ? custom.detail : readOnboardingCompleted());
+  };
+  window.addEventListener(ONBOARDING_COMPLETED_EVENT, handler);
+  return () => window.removeEventListener(ONBOARDING_COMPLETED_EVENT, handler);
+}
+

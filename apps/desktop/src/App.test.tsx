@@ -130,4 +130,75 @@ describe("Repomon desktop shell", () => {
     expect(systemTab).toBeInTheDocument();
     expect(systemTab).toHaveAttribute("aria-selected", "true");
   });
+
+  it("mounts first-run onboarding wizard when repos=0 and onboarding not completed", async () => {
+    localStorage.removeItem("repomon:onboarding-completed");
+    const fleetSource: FleetSource = {
+      load: async () => ({
+        repos: [],
+        lanes: [],
+        usage: [],
+        terminals: [],
+        sortReposByActivity: null,
+      }),
+      subscribe: async () => () => undefined,
+    };
+
+    const { container } = render(() => (
+      <App
+        connectionSource={sourceFor({
+          phase: "connected",
+          endpoint: "/tmp/repomon.sock",
+          message: null,
+          daemon: null,
+        })}
+        fleetSource={fleetSource}
+      />
+    ));
+
+    await waitFor(() => {
+      expect(within(container).getByTestId("onboarding-wizard")).toBeInTheDocument();
+      expect(within(container).getByText(/Orchestrate coding agents across git worktrees/i)).toBeInTheDocument();
+    });
+
+    // Skip setup sets the completed flag and closes the overlay
+    const skipBtn = within(container).getByRole("button", { name: "Skip setup wizard" });
+    fireEvent.click(skipBtn);
+
+    await waitFor(() => {
+      expect(within(container).queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
+      expect(localStorage.getItem("repomon:onboarding-completed")).toBe("true");
+    });
+  });
+
+  it("does not mount onboarding wizard if user already has repositories", async () => {
+    localStorage.removeItem("repomon:onboarding-completed");
+    const fleetSource: FleetSource = {
+      load: async () => ({
+        repos: [{ id: 1, name: "repo-1", path: "/path/to/1", main_branch: "main", hidden: false }],
+        lanes: [],
+        usage: [],
+        terminals: [],
+        sortReposByActivity: null,
+      }),
+      subscribe: async () => () => undefined,
+    };
+
+    const { container } = render(() => (
+      <App
+        connectionSource={sourceFor({
+          phase: "connected",
+          endpoint: "/tmp/repomon.sock",
+          message: null,
+          daemon: null,
+        })}
+        fleetSource={fleetSource}
+      />
+    ));
+
+    await waitFor(() => {
+      expect(within(container).getByText("Connected")).toBeInTheDocument();
+    });
+    expect(within(container).queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
+  });
 });

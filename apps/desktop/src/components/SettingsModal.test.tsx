@@ -333,4 +333,26 @@ describe("System Health tab", () => {
     fireEvent.click(refreshButton);
     await waitFor(() => expect(state.doctorCalls).toBe(2));
   });
+
+  it("triggers replay onboarding from General settings tab", async () => {
+    state.config = { ...config };
+    const onClose = vi.fn();
+    const onReplayOnboarding = vi.fn();
+
+    render(() => (
+      <SettingsModal
+        initialTab="general"
+        onClose={onClose}
+        onReplayOnboarding={onReplayOnboarding}
+      />
+    ));
+
+    await screen.findByText("General Configuration");
+    const replayBtn = screen.getByRole("button", { name: "Replay Onboarding" });
+    expect(replayBtn).toBeInTheDocument();
+    fireEvent.click(replayBtn);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onReplayOnboarding).toHaveBeenCalledTimes(1);
+  });
 });
