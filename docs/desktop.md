@@ -19,10 +19,16 @@ for macOS, Windows, and Linux:
 The app updates itself: it checks the same release on launch and from **Settings > General >
 Check for updates**, so you only download by hand once.
 
-The daemon ships inside the bundle, so the desktop app needs no separate `repomond`. It does still
-need `tmux` on macOS and Linux (`brew install tmux`, `sudo apt install tmux`). If you launch the
-app from the Dock or Finder rather than a terminal, it resolves your login shell's `PATH` at
-startup, so tools installed in `~/.local/bin` or `/opt/homebrew/bin` are found.
+The daemon ships inside the bundle, so the desktop app needs no separate `repomond`. On macOS and
+Linux it also ships its own portable `tmux` and falls back to it automatically when none is
+installed, so nothing extra needs installing there either; Windows never needed tmux, since it
+uses the built-in ConPTY host instead. If you launch the app from the Dock or Finder rather than a
+terminal, it resolves your login shell's `PATH` at startup, so tools installed in `~/.local/bin` or
+`/opt/homebrew/bin` are found.
+
+A **first-run setup wizard** walks a new install through a welcome screen, a system check (the
+same tmux/git/agent-CLI probes as Settings > System, below), adding your first repository, and a
+quick tour, so there is no empty window to figure out on first launch.
 
 ## The app icon
 
@@ -66,11 +72,19 @@ macOS** and **Ctrl elsewhere**.
 | Chord | Action |
 |---|---|
 | `mod+,` | Open settings |
+| `mod+3` | Toggle the git explorer panel |
 | `mod+4` | Toggle extensions |
 | `mod+5` | Toggle repomind |
 | `mod+shift+5` | Repomind full screen |
 | `mod+6` | Cycle theme (system, dark, light) |
+| `mod+7` | Toggle the in-app editor panel |
 | `mod+k` | Open the control center |
+
+Git, repomind, and the editor share one right-rail panel host: a resizable pane (drag its left
+edge) with one header button per tab. Pressing a tab's chord (or clicking its header button) opens
+the rail on that tab if it is closed, switches to that tab if the rail is open on another one, and
+closes the rail if it is already open on that tab. Each header button's active state is scoped to
+its own tab, so opening on Git does not light up the Repomind button.
 
 ### Layout
 
@@ -131,6 +145,16 @@ message, and the behavior toggles (auto-continue rate-limited agents, prompt on 
 account usage, expand multi-agent lanes, embedded terminal renderer). The updater lives at the
 bottom.
 
+**System** shows live checks for `tmux` (system install or the bundled sidecar), `git`, and every
+configured agent CLI, each with a one-click-copy install command when it is missing. This is the
+same check the first-run wizard runs and the footer connection pill opens when it has something to
+flag. It also holds the daemon's self-service controls: stop, start, or reset the daemon, and
+bulk-restore agent sessions left orphaned by a crash or an update.
+
+**Agents** lets you add or remove custom agent CLIs (a name plus the launch command) and set the
+default agent, without hand-editing `config.toml`. See `docs/agents.md` for the underlying
+`agent.add`/`agent.remove`/`agent.set_default` mechanism, which this tab is a UI over.
+
 **Notifications** has a master switch plus one toggle per event: needs-you, rate-limited, resumed,
 idle, sound, show-why, coalescing, click-to-focus, and whether subagents count.
 
@@ -151,10 +175,17 @@ most recent lane activity so whatever you are working in floats to the top. Only
 Lane order inside a group is deliberately left alone, because sorting lanes by activity makes them
 bubble around on every line an agent prints.
 
+**Automation** holds the standing-orchestration surfaces described below (Journal, Playbooks,
+Schedules, Approvals) as its own sub-tabs. The control center's `⌘K` search can jump straight here
+via "Open Automation & Standing Rules".
+
 **Keyboard** is the shortcut reference, with search.
 
 Settings are stored by the daemon and shared with the TUI, so a change here shows up there too.
 Nothing saves until you press **Save**.
+
+If the daemon connection drops for more than a few seconds, a banner appears rather than letting
+the UI sit silently stale; it clears as soon as the connection is restored.
 
 ## Hiding projects
 
@@ -182,7 +213,7 @@ before it is sent.
 ## The orchestration journal
 
 repomind writes every action it takes to a journal the daemon owns: what it did, which lane and
-repo it touched, and whether it worked. **Control center > Journal** (`mod+k`) shows it newest
+repo it touched, and whether it worked. **Settings > Automation > Journal** shows it newest
 first, with a search box over the history.
 
 An entry that names a lane is clickable and jumps you to that lane. Opening the tab shows the
@@ -191,8 +222,8 @@ recent tail rather than a search, so it doubles as "what happened while I was aw
 ## Playbooks
 
 When repomind finishes a multi-lane goal it drafts a playbook: the pattern, the per-repo steps,
-the worker prompts that worked, the failure modes it hit. **Control center > Playbooks** lists
-them.
+the worker prompts that worked, the failure modes it hit. **Settings > Automation > Playbooks**
+lists them.
 
 A draft is inert. repomind is only offered a playbook back once you approve it, which is
 deliberate: instructions the orchestrator wrote feeding into its own future prompts unreviewed is a
@@ -206,7 +237,7 @@ Approve is the review.
 
 ## Standing orchestrations
 
-**Control center > Schedules** runs repomind on a timer without you starting it. Add one with a
+**Settings > Automation > Schedules** runs repomind on a timer without you starting it. Add one with a
 spec, a goal, and optionally an action cap; results arrive as notifications and land in the
 journal.
 
@@ -222,7 +253,7 @@ schedule that fires and does nothing.
 
 ## Approval policy
 
-**Control center > Approvals** lists the command patterns repomind may approve on your behalf,
+**Settings > Automation > Approvals** lists the command patterns repomind may approve on your behalf,
 grouped by project. These are learned: after you approve the same pattern in the same repo enough
 times, repomind proposes a rule and you confirm it. Revoke any of them here.
 
@@ -233,9 +264,9 @@ other standing.
 
 ## Repomind
 
-The repomind panel lives in the right sidebar and opens with `mod+5`. `mod+shift+5` blows it up to
-full screen, and Escape or **Exit** brings it back; going full screen opens the panel if it was
-closed, so it has somewhere to shrink back to.
+The repomind panel is one tab of the right-rail panel host (alongside git and the editor, above)
+and opens with `mod+5`. `mod+shift+5` blows it up to full screen, and Escape or **Exit** brings it
+back; going full screen opens the panel if it was closed, so it has somewhere to shrink back to.
 
 **Answering prompts.** Repomind's agent sometimes stops on something only you can answer, like
 Claude Code's "Do you trust this folder?" trust prompt. The message box types text and presses
@@ -258,6 +289,26 @@ wraps, which is the only readable option there. Full screen keeps the true termi
 scrolls sideways instead, because there is room for it and reflowed box drawing looks worse than a
 scrollbar. The key row appears only while something is actually waiting on you; the message box is
 the input the rest of the time.
+
+## Git explorer
+
+The git panel is another tab of the right-rail panel host (`mod+3`), scoped to the lane that is
+currently focused: branch status against the repo's base branch (commits ahead, with diffstat),
+the working-tree's changed and untracked files, and commit history. Clicking a working-tree file
+opens a unified diff for it; clicking a commit in Branch or History opens that commit's detail
+(message, author, full patch) via the `commit.show` RPC. Opening a diff or a commit replaces the
+panel's list views rather than nesting a second scroll region inside them; closing it returns to
+the list.
+
+## In-app editor
+
+The editor is the third tab of the right-rail panel host (`mod+7`): a lazy file tree over the
+focused lane's worktree, multi-file tabs with dirty tracking, and a CodeMirror 6 editor themed to
+match every Repomon theme. Saving is conflict-safe: if an agent (or anything else) changed the
+file on disk since it was opened, the save is rejected and a banner offers **reload** (discard
+your edits and take the on-disk version) or **keep mine** (leave your buffer as-is, still marked
+dirty, and try again) instead of silently overwriting either side. A file deleted on disk while
+you had it open shows the same banner, offering to write your buffer back out as a fresh file.
 
 ## Extensions
 
