@@ -147,28 +147,29 @@ function getAgentInstallInfo(kind: string, command: string): { command: string; 
       guide: "Install Claude Code CLI via npm",
     };
   }
+  if (k.includes("antigravity") || k === "agy" || c === "agy") {
+    return {
+      command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+      guide: "Install Antigravity CLI via official install script",
+    };
+  }
   if (k.includes("codex") || c === "codex") {
     return {
       command: "npm install -g @openai/codex",
       guide: "Install OpenAI Codex CLI via npm",
     };
   }
-  if (k.includes("gemini") || c === "gemini") {
-    return {
-      command: "npm install -g @google/gemini-cli",
-      guide: "Install Gemini CLI via npm",
-    };
-  }
   if (k.includes("opencode") || c === "opencode") {
     return {
-      command: "npm install -g opencode",
+      command: "npm install -g opencode-ai",
       guide: "Install OpenCode CLI via npm",
     };
   }
   if (k.includes("cursor") || c === "cursor-agent") {
-    return isMac()
-      ? { command: "brew install --cask cursor", guide: "Install Cursor via Homebrew Cask or visit cursor.com" }
-      : { command: "curl https://cursor.com", guide: "Download Cursor from cursor.com" };
+    return {
+      command: "curl https://cursor.com/install -fsS | bash",
+      guide: "Install Cursor CLI agent via official install script",
+    };
   }
   if (k.includes("aider") || c === "aider") {
     return {

@@ -249,6 +249,9 @@ describe("System Health tab", () => {
       git: { available: false, version: null, path: null },
       agents: [
         { kind: "claude-code", name: "Claude Code", command: "claude", detected: false },
+        { kind: "antigravity", name: "Antigravity", command: "agy", detected: false },
+        { kind: "cursor", name: "Cursor Agent", command: "cursor-agent", detected: false },
+        { kind: "opencode", name: "OpenCode", command: "opencode", detected: false },
       ],
     };
 
@@ -282,11 +285,29 @@ describe("System Health tab", () => {
     fireEvent.click(copyGitButton);
     expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining("git"));
 
-    // Check agent copy button
-    const copyAgentButton = screen.getByRole("button", { name: /Copy install command for Claude Code/i });
-    expect(copyAgentButton).toBeInTheDocument();
-    fireEvent.click(copyAgentButton);
+    // Check Claude Code copy button
+    const copyClaudeButton = screen.getByRole("button", { name: /Copy install command for Claude Code/i });
+    expect(copyClaudeButton).toBeInTheDocument();
+    fireEvent.click(copyClaudeButton);
     expect(writeTextMock).toHaveBeenCalledWith("npm install -g @anthropic-ai/claude-code");
+
+    // Check Antigravity copy button
+    const copyAgyButton = screen.getByRole("button", { name: /Copy install command for Antigravity/i });
+    expect(copyAgyButton).toBeInTheDocument();
+    fireEvent.click(copyAgyButton);
+    expect(writeTextMock).toHaveBeenCalledWith("curl -fsSL https://antigravity.google/cli/install.sh | bash");
+
+    // Check Cursor copy button
+    const copyCursorButton = screen.getByRole("button", { name: /Copy install command for Cursor Agent/i });
+    expect(copyCursorButton).toBeInTheDocument();
+    fireEvent.click(copyCursorButton);
+    expect(writeTextMock).toHaveBeenCalledWith("curl https://cursor.com/install -fsS | bash");
+
+    // Check OpenCode copy button
+    const copyOpenCodeButton = screen.getByRole("button", { name: /Copy install command for OpenCode/i });
+    expect(copyOpenCodeButton).toBeInTheDocument();
+    fireEvent.click(copyOpenCodeButton);
+    expect(writeTextMock).toHaveBeenCalledWith("npm install -g opencode-ai");
   });
 
   it("re-runs system.doctor when refresh button is clicked", async () => {
