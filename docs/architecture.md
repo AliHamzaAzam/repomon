@@ -50,6 +50,10 @@ protocol is identical on both.
   one ConPTY child, a server-side `vt100` screen with scrollback, and a named-pipe control
   server. It is the Windows equivalent of a tmux window and survives daemon restarts. Its
   control protocol is frozen in [../crates/repomon-host/PROTOCOL.md](../crates/repomon-host/PROTOCOL.md).
+- **repomon-mcp**: the stdio MCP server library invoked as `repomond mcp` (see "repomind" below).
+  It backs both the orchestrator's full fleet tool surface and the restricted `fleet_status` /
+  `message_send` / `message_inbox` / `message_mark_read` surface managed worker agents get for
+  fleet mail (see [messaging.md](messaging.md)).
 
 ## Key flows
 
@@ -85,12 +89,13 @@ alert still reaches you when you're heads-down in an agent pane.
 **History.** On startup and after `repo.add`, the indexer walks HEAD history into SQLite, so
 `timeline`, `sessions`, and `commit.search` work over history rather than just live HEAD.
 
-**repomind.** The orchestrator is a daemon-owned agent session — Claude by default, Codex CLI
-optionally (`orchestrator.start`'s `agent` param, the `orchestrator_agent` config) — running in
-its own `orchestrator` tmux window (`orchestrator.start`/`.stop`), reachable like any other
-window (`.target`/`.send_input`/`.key`/`.resize`). Only MCP-capable CLIs qualify (aider can't
-drive the fleet tools, so it's rejected); a Codex-backed session degrades to pane-only
-monitoring — no parsed transcript chat, no end-of-turn attention, no session pinning.
+**repomind.** The orchestrator is a daemon-owned agent session — Claude by default, or Codex,
+Antigravity, or OpenCode (`orchestrator.start`'s `agent` param, the `orchestrator_agent` config)
+— running in its own `orchestrator` tmux window (`orchestrator.start`/`.stop`), reachable like any
+other window (`.target`/`.send_input`/`.key`/`.resize`). Only MCP-capable CLIs qualify (aider and
+cursor can't drive the fleet tools, so both are rejected); a Codex/Antigravity/OpenCode-backed
+session degrades to pane-only monitoring — no parsed transcript chat, no end-of-turn attention, no
+session pinning (Claude is the only backend with a parseable on-disk transcript).
 `repomon-mcp` (invoked as `repomond mcp`) is a stdio MCP server the orchestrator agent launches
 as a subprocess and wires up as a tool server; it connects back to the same daemon socket as an
 ordinary client and keeps a fleet snapshot refreshed by poll-and-diff (`lane.list` on a ~1.5s
@@ -109,9 +114,11 @@ Every place the runtime spawns, captures, sends input to, resizes, streams, or k
 goes through one trait, `SessionBackend` (`crates/repomon-core/src/agent/backend.rs`). There
 are two implementations and nothing else in the daemon knows which is live:
 
-- **Unix, `TmuxRuntime`.** Unchanged behavior. tmux owns the durable, out-of-process agent
-  runtime; the trait methods render to `tmux` subcommands (`new-window`, `capture-pane`,
-  `send-keys`, `resize-window`, `pipe-pane`, `attach`, `kill-window`).
+- **Unix, `TmuxRuntime`.** tmux owns the durable, out-of-process agent runtime; the trait
+  methods render to `tmux` subcommands (`new-window`, `capture-pane`, `send-keys`,
+  `resize-window`, `pipe-pane`, `attach`, `kill-window`). tmux itself is resolved in order: a
+  system install on `PATH`, then a portable tmux binary bundled with the app as a sidecar, so
+  macOS and Linux need no separate tmux install.
 - **Windows, `WindowsBackend`.** No tmux. Each agent runs in its own detached host process,
   `repomon-agent-host.exe`, which owns a ConPTY child plus a server-side `vt100` screen with
   50 000 lines of scrollback (parity with tmux `history-limit 50000`). The backend is a

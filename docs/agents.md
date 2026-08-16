@@ -31,7 +31,7 @@ route to the cursored one.
 ## Choosing an agent
 
 New Lane lists the **auto-detected** built-ins (claude-code / codex / opencode / antigravity /
-aider, marked ✓ if on
+aider / cursor, marked ✓ if on
 PATH) plus any **custom agents** you define — cycle them with Tab (Shift+Tab to go back). The
 **default** agent (marked ★) is preselected.
 
@@ -251,11 +251,14 @@ active within the last few hours) shows as its own entry in the lane detail — 
 move the cursor (`‣`) between them.
 
 repomon can't type into a plain terminal process, so to drive an external session press
-**`o` to adopt** the highlighted one (Fleet/Split/Focus): repomon resumes *that exact* session
-with the backend's exact resume flag in a managed tmux lane. Claude uses `--resume <id>`, OpenCode
-uses `--session <id>`, and Antigravity uses `--conversation <id>`. Without an ID, each backend's
-continue flag is used. The original terminal window is left as-is, so close it
-once you've adopted. repomon can manage several agents in the same worktree, each in its own
+**`o` to adopt** the highlighted one (Fleet/Split/Focus): repomon relaunches it in a managed tmux
+lane. Every agent kind is adoptable. Claude, OpenCode, and Antigravity resume *that exact*
+session with the backend's exact resume flag: Claude uses `--resume <id>`, OpenCode uses
+`--session <id>`, and Antigravity uses `--conversation <id>` (without an ID, each backend's
+continue flag is used instead). Codex, Cursor, Aider, and custom agents have no stable
+session-resume flag, so adopting one of those relaunches the same command fresh in the worktree
+rather than resuming the prior conversation. The original terminal window is left as-is, so close
+it once you've adopted. repomon can manage several agents in the same worktree, each in its own
 tmux window (`lane-<id>`, `lane-<id>-2`, …), so adopting an external session adds a managed
 agent alongside any already running — and you can observe every external session in the lane
 detail and choose which to adopt.
@@ -311,10 +314,13 @@ dialog detection supply live state. Antigravity's `>` selection cursor is recogn
 permission attention.
 
 The live `/usage` panel was not stable enough to fixture-test percentage and reset fields, so usage
-is degraded. Antigravity is not offered as a repomind backend because the isolated qualification
-run required workspace trust and tool approval, and could not load the temporary repomon MCP
-registration without changing the user's global registry. OpenCode is also omitted from repomind
-until its SQLite session can be pinned to the orchestrator window for unambiguous attention.
+is degraded. Antigravity and OpenCode are both valid repomind orchestrator backends alongside
+Claude and Codex (`orchestrator.start` with `agent: "antigravity"`/`"agy"` or
+`"opencode"`/`"open-code"`); neither has a parseable on-disk transcript, so both are monitored
+pane-only, the same tradeoff Codex makes (no `orchestrator.transcript` chat view, no
+`end_of_turn` attention, no `session_id`). `aider` and `cursor` have no MCP client repomon can
+drive as an orchestrator, so `orchestrator.start` rejects them with `invalid_params` rather than
+spawning a broken window.
 
 ## Adding a new agent
 
