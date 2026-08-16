@@ -34,7 +34,7 @@ import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
-import { IconClose, IconExtensions, IconSettings, IconSparkles } from "./components/icons";
+import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconSettings, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -195,6 +195,28 @@ function App(props: AppProps) {
     notifyLayoutChanged();
   });
 
+  // Shared open/switch/toggle-close behavior for the git and editor right-rail tabs, used by both
+  // the mod+3 / mod+7 shortcuts and their header icon-button counterparts (item 4) so the two entry
+  // points can never drift apart.
+  const openPanelTab = (id: "git" | "editor") => {
+    if (!repomindOpen()) {
+      // Closed → open already on the requested tab. RightPanelHost consults `requestTab.id` on its
+      // very first render, so bumping this in the same tick as opening is enough — no need to wait
+      // for the panel to mount before it takes effect.
+      setPanelTabRequest({ id, token: ++panelTabRequestToken });
+      setRepomindOpen(true);
+      persistRepomindOpen(true);
+    } else if (rightPanelTab() === id) {
+      // Already open and already on this tab: mirrors the repomind toggle's own feel — activating
+      // "the panel I'm looking at" closes it.
+      setRepomindOpen(false);
+      persistRepomindOpen(false);
+    } else {
+      // Open on some other tab: switch to the requested one without closing.
+      setPanelTabRequest({ id, token: ++panelTabRequestToken });
+    }
+  };
+
   const onShortcut = (event: KeyboardEvent) => {
     const binding = matchChord(event);
     if (!binding) return;
@@ -215,39 +237,8 @@ function App(props: AppProps) {
       case "panel.control": actions.toggleControl(); break;
       case "panel.settings": actions.openSettings(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
-      case "panel.git": {
-        if (!repomindOpen()) {
-          // Closed → open already on the git tab. RightPanelHost consults `requestTab.id` on its
-          // very first render, so bumping this in the same tick as opening is enough — no need to
-          // wait for the panel to mount before it takes effect.
-          setPanelTabRequest({ id: "git", token: ++panelTabRequestToken });
-          setRepomindOpen(true);
-          persistRepomindOpen(true);
-        } else if (rightPanelTab() === "git") {
-          // Already open and already on git: mirrors the repomind toggle's own feel — the
-          // shortcut for "the panel I'm looking at" closes it.
-          setRepomindOpen(false);
-          persistRepomindOpen(false);
-        } else {
-          // Open on some other tab (Repomind or Editor): switch to git without closing.
-          setPanelTabRequest({ id: "git", token: ++panelTabRequestToken });
-        }
-        break;
-      }
-      case "panel.editor": {
-        // D4: same open/switch/toggle-close feel as panel.git above, targeting the editor tab.
-        if (!repomindOpen()) {
-          setPanelTabRequest({ id: "editor", token: ++panelTabRequestToken });
-          setRepomindOpen(true);
-          persistRepomindOpen(true);
-        } else if (rightPanelTab() === "editor") {
-          setRepomindOpen(false);
-          persistRepomindOpen(false);
-        } else {
-          setPanelTabRequest({ id: "editor", token: ++panelTabRequestToken });
-        }
-        break;
-      }
+      case "panel.git": openPanelTab("git"); break;
+      case "panel.editor": openPanelTab("editor"); break;
       case "panel.repomind":
         setRepomindOpen((open) => {
           const next = !open;
@@ -420,6 +411,35 @@ function App(props: AppProps) {
           >
             <IconExtensions size={13} />
             <span>Extensions</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              repomindOpen() && rightPanelTab() === "git"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => openPanelTab("git")}
+            aria-pressed={repomindOpen() && rightPanelTab() === "git"}
+            title="Git (⌘3)"
+          >
+            <IconGitBranch size={13} />
+            <span>Git</span>
+          </button>
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              repomindOpen() && rightPanelTab() === "editor"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => openPanelTab("editor")}
+            aria-pressed={repomindOpen() && rightPanelTab() === "editor"}
+            title="Editor (⌘7)"
+          >
+            <IconLayers size={13} />
+            <span>Editor</span>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button

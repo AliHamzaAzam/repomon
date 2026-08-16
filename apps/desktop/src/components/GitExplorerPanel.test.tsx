@@ -545,3 +545,97 @@ describe("panel.git keybinding (App integration)", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "true");
   });
 });
+
+// Item 4: dedicated header buttons so the Git/Editor tabs don't require memorizing a shortcut or
+// going through the Repomind button first.
+describe("header Git/Editor buttons (App integration)", () => {
+  beforeEach(() => {
+    Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    document.documentElement.style.removeProperty("--right-panel-width");
+  });
+
+  function renderApp() {
+    return render(() => (
+      <App
+        connectionSource={sourceFor({
+          phase: "starting",
+          endpoint: "Resolving local daemon endpoint",
+          message: null,
+          daemon: null,
+        })}
+      />
+    ));
+  }
+
+  it("opens the rail already on the Git tab when closed, and mirrors the Repomind button's active styling", async () => {
+    const { container } = renderApp();
+    const gitButton = within(container).getByRole("button", { name: "Git" });
+    expect(gitButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(gitButton);
+
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
+    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
+    expect(within(tablist).getByRole("tab", { name: "Git" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("opens the rail already on the Editor tab when closed", async () => {
+    const { container } = renderApp();
+    const editorButton = within(container).getByRole("button", { name: "Editor" });
+    expect(editorButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(editorButton);
+
+    await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "true"));
+    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
+    expect(within(tablist).getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("closes the rail when clicking the Git header button again while already on Git", async () => {
+    const { container } = renderApp();
+    const gitButton = within(container).getByRole("button", { name: "Git" });
+
+    fireEvent.click(gitButton);
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
+
+    fireEvent.click(gitButton);
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "false"));
+  });
+
+  it("switches to the Editor tab without closing when the rail is open on Git, and updates both buttons' active state", async () => {
+    const { container } = renderApp();
+    const gitButton = within(container).getByRole("button", { name: "Git" });
+    const editorButton = within(container).getByRole("button", { name: "Editor" });
+
+    fireEvent.click(gitButton);
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
+    expect(editorButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(editorButton);
+
+    await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "true"));
+    expect(gitButton).toHaveAttribute("aria-pressed", "false");
+    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
+    expect(within(tablist).getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("keeps the header buttons in sync with the mod+3 / mod+7 shortcuts (shared openPanelTab plumbing)", async () => {
+    const { container } = renderApp();
+    const gitButton = within(container).getByRole("button", { name: "Git" });
+    const editorButton = within(container).getByRole("button", { name: "Editor" });
+
+    fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
+
+    fireEvent.keyDown(window, { key: "7", code: "Digit7", metaKey: true });
+    await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "true"));
+    expect(gitButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(editorButton);
+    await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "false"));
+  });
+});
