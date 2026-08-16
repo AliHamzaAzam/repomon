@@ -112,4 +112,22 @@ describe("Repomon desktop shell", () => {
     fireEvent.keyDown(window, { key: "4", code: "Digit4", metaKey: true });
     await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "false"));
   });
+
+  it("opens settings on the system tab when the footer connection pill is clicked", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "connected",
+      endpoint: "/tmp/repomon.sock",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const connectionButton = within(container).getByRole("button", { name: "View system health and daemon connection" });
+    expect(connectionButton).toBeInTheDocument();
+
+    fireEvent.click(connectionButton);
+
+    const systemTab = await screen.findByRole("tab", { name: "System" });
+    expect(systemTab).toBeInTheDocument();
+    expect(systemTab).toHaveAttribute("aria-selected", "true");
+  });
 });

@@ -1,16 +1,33 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { SystemDoctorResult } from "../bindings";
 import type { ConfigView } from "../ipc/rpc";
 import SettingsModal from "./SettingsModal";
 
 const calls = vi.hoisted(() => ({ saved: [] as ConfigView[] }));
-const state = vi.hoisted(() => ({ config: null as ConfigView | null }));
+const state = vi.hoisted(() => ({
+  config: null as ConfigView | null,
+  doctor: null as SystemDoctorResult | null,
+  doctorCalls: 0,
+}));
 
 vi.mock("../ipc/rpc", () => ({
   daemonCall: (method: string, params?: ConfigView) => {
     if (method === "config.get") return Promise.resolve({ ...state.config });
     if (method === "agent.detect") return Promise.resolve([]);
+    if (method === "system.doctor") {
+      state.doctorCalls++;
+      if (state.doctor) return Promise.resolve({ ...state.doctor });
+      return Promise.resolve({
+        tmux: { available: true, version: "tmux 3.4", source: "system", path: "/opt/homebrew/bin/tmux" },
+        git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+        agents: [
+          { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
+          { kind: "cursor", name: "Cursor Agent", command: "cursor-agent", detected: false },
+        ],
+      });
+    }
     if (method === "config.set" && params) {
       calls.saved.push(params);
       state.config = { ...params };
@@ -164,5 +181,135 @@ describe("Settings auto-save persistence", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(localStorage.getItem("repomon:auto-collapse-empty-lanes")).toBe("false");
+  });
+});
+
+describe("System Health tab", () => {
+  it("renders healthy system state with system tmux, git, and detected agents", async () => {
+    state.config = { ...config };
+    state.doctor = {
+      tmux: { available: true, version: "tmux 3.4", source: "system", path: "/opt/homebrew/bin/tmux" },
+      git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+      agents: [
+        { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
+        { kind: "cursor", name: "Cursor Agent", command: "cursor-agent", detected: false },
+      ],
+    };
+
+    render(() => (
+      <SettingsModal
+        initialTab="system"
+        onClose={() => undefined}
+      />
+    ));
+
+    await screen.findByText("System Health");
+    expect(screen.getByText("Core Runtime Dependencies")).toBeInTheDocument();
+    expect(screen.getByText("/opt/homebrew/bin/tmux")).toBeInTheDocument();
+    expect(screen.getByText("System PATH")).toBeInTheDocument();
+    expect(screen.getByText("tmux 3.4")).toBeInTheDocument();
+    expect(screen.getByText("/usr/bin/git")).toBeInTheDocument();
+    expect(screen.getByText("git version 2.44.0")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("✓ Detected")).toBeInTheDocument();
+    expect(screen.getByText("Cursor Agent")).toBeInTheDocument();
+    expect(screen.getByText("Not Found")).toBeInTheDocument();
+  });
+
+  it("renders reassuring badge when using bundled tmux", async () => {
+    state.config = { ...config };
+    state.doctor = {
+      tmux: {
+        available: true,
+        version: "tmux 3.4",
+        source: "bundled",
+        path: "/Applications/Repomon.app/Contents/MacOS/tmux",
+      },
+      git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+      agents: [],
+    };
+
+    render(() => (
+      <SettingsModal
+        initialTab="system"
+        onClose={() => undefined}
+      />
+    ));
+
+    await screen.findByText("Repomon Built-in");
+    expect(
+      screen.getByText(/Using Repomon's built-in standalone tmux/i),
+    ).toBeInTheDocument();
+  });
+
+  it("renders missing dependencies with actionable copy and copy buttons", async () => {
+    state.config = { ...config };
+    state.doctor = {
+      tmux: { available: false, version: null, source: null, path: null },
+      git: { available: false, version: null, path: null },
+      agents: [
+        { kind: "claude-code", name: "Claude Code", command: "claude", detected: false },
+      ],
+    };
+
+    // Mock navigator.clipboard
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: writeTextMock },
+      configurable: true,
+    });
+
+    render(() => (
+      <SettingsModal
+        initialTab="system"
+        onClose={() => undefined}
+      />
+    ));
+
+    await screen.findByText("System Health");
+    const missingBadges = screen.getAllByText("Missing");
+    expect(missingBadges.length).toBe(2);
+
+    // Check tmux copy button
+    const copyTmuxButton = screen.getByRole("button", { name: "Copy tmux install command" });
+    expect(copyTmuxButton).toBeInTheDocument();
+    fireEvent.click(copyTmuxButton);
+    expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining("tmux"));
+
+    // Check git copy button
+    const copyGitButton = screen.getByRole("button", { name: "Copy git install command" });
+    expect(copyGitButton).toBeInTheDocument();
+    fireEvent.click(copyGitButton);
+    expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining("git"));
+
+    // Check agent copy button
+    const copyAgentButton = screen.getByRole("button", { name: /Copy install command for Claude Code/i });
+    expect(copyAgentButton).toBeInTheDocument();
+    fireEvent.click(copyAgentButton);
+    expect(writeTextMock).toHaveBeenCalledWith("npm install -g @anthropic-ai/claude-code");
+  });
+
+  it("re-runs system.doctor when refresh button is clicked", async () => {
+    state.config = { ...config };
+    state.doctorCalls = 0;
+    state.doctor = {
+      tmux: { available: true, version: "tmux 3.4", source: "system", path: "/opt/homebrew/bin/tmux" },
+      git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+      agents: [],
+    };
+
+    render(() => (
+      <SettingsModal
+        initialTab="system"
+        onClose={() => undefined}
+      />
+    ));
+
+    await screen.findByText("System Health");
+    expect(state.doctorCalls).toBe(1);
+
+    const refreshButton = screen.getByRole("button", { name: "Refresh system health status" });
+    fireEvent.click(refreshButton);
+    await waitFor(() => expect(state.doctorCalls).toBe(2));
   });
 });

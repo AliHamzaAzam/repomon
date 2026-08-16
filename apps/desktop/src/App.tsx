@@ -440,13 +440,16 @@ function App(props: AppProps) {
         class="connection-rail flex items-center justify-between border-t border-line bg-surface px-3.5 py-1.5 font-mono text-[11px] text-muted"
       >
         <div class="flex items-center gap-2 min-w-0">
-          <div
-            class="flex items-center gap-1.5 text-foreground font-medium cursor-default"
-            title={`Daemon socket: ${connection().endpoint}`}
+          <button
+            type="button"
+            class="focus-ring flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -mx-1.5 text-foreground font-medium hover:bg-line/40 transition-colors cursor-pointer text-left"
+            title={`Daemon socket: ${connection().endpoint} · Click to view System Health`}
+            aria-label="View system health and daemon connection"
+            onClick={() => actions.openSettingsTab("system")}
           >
             <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
             <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
-          </div>
+          </button>
           <Show when={connection().message}>
             {(msg) => <span class="truncate text-fault ml-2 font-sans text-xs">{msg()}</span>}
           </Show>
