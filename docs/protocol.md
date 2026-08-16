@@ -43,12 +43,15 @@ restart).
   `lane.merge`, `lane.focus`, `lane.diff`), on top of everything previously allowed: reads,
   `agent.prompt`/`agent.answer` (verified dialog steering), `agent.watch_bytes`,
   `terminal.list_all`, `agent.fit`, and the orchestrator's status/transcript/send_input/key.
-  Still blocked: daemon lifecycle (`daemon.shutdown`), config/secrets (`config.get`,
-  `config.set`), host terminal + filesystem access (`terminal.open/close/target`,
-  `fs.browse`), the blind `agent.resize` (only the arbitrated `agent.fit` is reachable
-  remotely — an unconditional remote resize is exactly what squeezed the TUI's mediated
-  view), the orchestrator's `start`/`stop`/`watch`/`resize` (spawning/killing repomind and its
-  pane geometry stay local), and credential minting (`remote.*`). Anything else answers
+  Still blocked: daemon lifecycle (`daemon.shutdown`), machine diagnostics (`system.doctor`),
+  config/secrets (`config.get`, `config.set`), host terminal + filesystem access
+  (`terminal.open/close/target`, `fs.browse`), the worktree file-editor RPCs
+  (`file.list`/`file.read`/`file.write`, doubly so for `file.write` since it overwrites host
+  files), `commit.show` (a caller-chosen oid can walk the entire repo history, unlike the
+  already-allowed `lane.diff`), the blind `agent.resize` (only the arbitrated `agent.fit` is
+  reachable remotely — an unconditional remote resize is exactly what squeezed the TUI's
+  mediated view), the orchestrator's `start`/`stop`/`watch`/`resize` (spawning/killing repomind
+  and its pane geometry stay local), and credential minting (`remote.*`). Anything else answers
   `-32601` `"not permitted over remote bridge"`.
 - **Per-connection viewports and byte watches.** Each connection (Unix socket or WebSocket)
   owns its own `viewport.set` state and its own `agent.watch_bytes` windows — an iPhone, an
@@ -112,10 +115,11 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `commit.range` | `{ from_iso, to_iso, repo_ids? }` | `[Commit]` |
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
 | `commit.recent` | `{ lane_id? \| repo_id?, limit=8 }` | `[Commit]` (latest on the worktree/repo HEAD, any date) |
+| `commit.show` | `{ lane_id, oid, max_patch_chars=8000 }` | `CommitShow`, one commit's full metadata (`oid` resolved to the full 40-char hash, `author_name`, `author_email`, `time`, `summary`, `body`) plus `patch` (capped, char-boundary safe, `max_patch_chars` server-clamped to 20000) and `stat`; `patch_truncated` set when cut. Backs the git explorer's commit-detail view. Local socket only (a caller-chosen `oid` can walk the entire repo history, a broader read surface than `lane.diff`). |
 | `timeline` | `{ from_iso, to_iso, bucket_secs=3600 }` | `TimelineData` |
 | `sessions` | `{ from_iso, to_iso }` | `[WorkSession]` |
-| `agent.detect` | none | `[AgentChoice]` (one Claude entry per config dir + codex/opencode/antigravity/aider + config customs; `default` flags the configured default) |
-| `agent.adopt` | `{ lane_id, session_id?, agent? }` | `{ lane_id, window }` (take over an external session and resume its exact Claude, OpenCode, or Antigravity identity; omitted `agent` retains account-aware Claude behavior) |
+| `agent.detect` | none | `[AgentChoice]` (one Claude entry per config dir + codex/opencode/antigravity/aider/cursor + config customs; `default` flags the configured default) |
+| `agent.adopt` | `{ lane_id, session_id?, agent? }` | `{ lane_id, window }` (take over an external session; every agent kind is adoptable. Claude, OpenCode, and Antigravity resume that exact identity/session with their resume flag; Codex, Cursor, Aider, and custom agents have no session-resume flag, so adopting relaunches the same command fresh in the worktree instead. Omitted `agent` retains account-aware Claude behavior) |
 | `agent.add` | `{ name, command }` | `null` (upsert a custom agent; rejects built-in names; persists to config.toml) |
 | `agent.remove` | `{ name }` | `null` (drop a custom agent; clears it as default; rejects built-ins) |
 | `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |
@@ -142,6 +146,9 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `terminal.close` | `{ id }` | `null` |
 | `terminal.target` | `{ id }` | `{ target, available, attach? }` (`attach` as in `agent.target`) |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
+| `file.list` | `{ lane_id, path? }` | `FileListResult`: `{ entries: [FileEntry], truncated }`, one directory level of the lane's worktree (`path` relative to the worktree root, omitted lists the root); `FileEntry` = `{ name, path, is_dir, size, ignored }` (`ignored` from a batched `git check-ignore`; `.git` itself is never listed). Backs the in-app editor's lazy file tree. Local socket only, like `fs.browse`. |
+| `file.read` | `{ lane_id, path }` | `FileReadResult`: `{ content, mtime_ms, size, truncated }`; rejects (does not truncate) a file over the read cap so the editor never silently saves back a partial copy. `mtime_ms` round-trips into `file.write`'s `expected_mtime_ms`. Local socket only. |
+| `file.write` | `{ lane_id, path, content, expected_mtime_ms? }` | `FileWriteResult`: `{ mtime_ms, size }`; given `expected_mtime_ms`, rejected with a conflict error unless the on-disk mtime still matches (omitted = last-write-wins). Broadcasts `event.file.changed`. Local socket only, doubly so since it overwrites host files. |
 | `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored. Per-connection: each connection owns its own viewport and focus; the capture loop streams the union across every live connection, and `event.agent.output` is filtered to the connections whose viewport actually covers it) |
 | `subscribe` | `{ topics? }` | `null` |
 | `ping` | — | `"pong"` (remote keep-alive / connectivity probe) |
@@ -152,10 +159,11 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | - | `{ uptime_secs, repos, lanes, db_size_bytes, version, protocol_revision, capabilities }`; terminal checkpoint and stream-sequence support is advertised in `capabilities`. |
 | `daemon.shutdown` | — | `null` |
+| `system.doctor` | - | `SystemDoctorResult`: `{ tmux: TmuxDoctorInfo, git: GitDoctorInfo, agents: [AgentDoctorInfo] }`, a machine-health snapshot backing Settings > System. `TmuxDoctorInfo` = `{ available, version?, source?, path? }` with `source` one of `"system"`/`"bundled"` (the portable tmux sidecar shipped with the app); `GitDoctorInfo` = `{ available, version?, path? }`; `AgentDoctorInfo` = `{ kind, name, command, detected }` per configured/built-in agent CLI. Local socket only. |
 | `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
 | `orchestrator.status` | — | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
-| `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts. Always `[]` while `backend` is `"codex"` — codex's on-disk session format is not parsed; treat it as "no chat view for this backend" and render the `event.orchestrator.output` pane stream instead, never as an error/loading state) |
-| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window wired to the repomon MCP server; idempotent; re-spawns if the prior window died. `agent` picks the backend: a Claude account / custom agent name / `codex`; an agent with no MCP client — e.g. `aider` — is rejected with `invalid_params` instead of spawning a broken window) |
+| `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts. Always `[]` while `backend` is `"codex"`, `"antigravity"`, or `"opencode"` (none of their on-disk session formats are parsed); treat it as "no chat view for this backend" and render the `event.orchestrator.output` pane stream instead, never as an error/loading state) |
+| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window wired to the repomon MCP server; idempotent; re-spawns if the prior window died. `agent` picks the backend: a Claude account / custom agent name, `codex`, `antigravity`/`agy`, or `opencode`/`open-code`; an agent with no MCP client for orchestration (e.g. `aider` or `cursor`) is rejected with `invalid_params` instead of spawning a broken window) |
 | `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (kill the orchestrator window) |
 | `orchestrator.target` | — | `{ target, available, attach? }` (attach target for the orchestrator window; resets it to follow the attaching client's size; `attach` as in `agent.target`) |
 | `orchestrator.send_input` | `{ text, enter=true }` | `null` (type an instruction to repomind, then Enter unless `enter=false`) |
@@ -170,11 +178,13 @@ The `orchestrator` window is deliberately not a `lane-*` name, so it never appea
 `permission`/`decision` (the open dialog's question) or `end_of_turn` (a tail of repomind's
 last message, when cheaply available); always `null` when `attention` is `"none"`.
 
-`backend` is the normalized agent CLI the session runs on — `"claude"` or `"codex"` (`null`
-when not running) — and is what clients should switch rendering on (`agent` is the raw
-launch name, e.g. `claude-work`). A `"codex"` session is monitored best-effort from its pane
-only: `orchestrator.transcript` is always `[]`, `attention` never reports `"end_of_turn"`
-(pane dialogs may still surface `permission`/`decision`), and `session_id` is always `null`.
+`backend` is the normalized agent CLI the session runs on: `"claude"`, `"codex"`,
+`"antigravity"`, or `"opencode"` (`null` when not running), and is what clients should switch
+rendering on (`agent` is the raw launch name, e.g. `claude-work`). Claude is the only backend
+with a parseable on-disk transcript; a `"codex"`, `"antigravity"`, or `"opencode"` session is
+monitored best-effort from its pane only: `orchestrator.transcript` is always `[]`, `attention`
+never reports `"end_of_turn"` (pane dialogs may still surface `permission`/`decision`), and
+`session_id` is always `null`.
 
 `autonomy` is the level the running session was actually started with (the value passed to, or
 defaulted by, `orchestrator.start`). It is `null` when the daemon *adopted* a window that
@@ -187,9 +197,10 @@ end-of-turn attention check to *this* session's own transcript file — instead 
 newest `$HOME` transcript", which misattributes any other active Claude session on the machine as
 repomind's. Like `autonomy`, it is `null` when the daemon *adopted* a surviving window: the prior
 process's session id lived only in its own memory, so an adopted session falls back to the old
-newest-with-content heuristic. Always `null` for a `"codex"` backend (codex has no equivalent of
-`--session-id`, and its session files aren't parsed — the fallback heuristic is deliberately NOT
-applied there, since it would misattribute an unrelated Claude session's transcript).
+newest-with-content heuristic. Always `null` for a `"codex"`, `"antigravity"`, or `"opencode"`
+backend (none has an equivalent of `--session-id`, and none of their session files are parsed —
+the fallback heuristic is deliberately NOT applied there, since it would misattribute an
+unrelated Claude session's transcript).
 
 **Remote bridge:** of the orchestrator methods above, `status`/`transcript`/`send_input`/`key`
 are allowed over the WebSocket bridge (read + interact, like their `agent.*` equivalents);
@@ -233,6 +244,7 @@ when readable (a partial parse still returns what it could).
 | `event.agent.output` | `{ lane_id, window, content, cursor? }` (`window` names the tmux window the capture came from — a `lane-*` agent pane or a `term-*` plain terminal, so one lane can stream both without colliding; `cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused pane when its cursor is visible; `null`/absent otherwise) |
 | `event.agent.bytes` | `{ lane_id, window, data, generation, sequence }` - raw PTY bytes (base64) from the byte-watched pane. Chunks are arbitrary byte boundaries, so feed them to a terminal emulator rather than parsing them as individual UTF-8 strings. Sequence values are contiguous within one generation. |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
+| `event.file.changed` | `{ lane_id, path }`, a worktree file was saved through `file.write` (so other viewers of the same file can reload). |
 | `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt?, attention, dialog? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`, `stalled`; `prompt` is the agent's pending question verbatim). `attention` refines `needs_you`: `permission` (routine tool-call ask) / `decision` (a real question) / `done_candidate` (turn finished on a clean lane with a this-turn commit — ready to review) / `end_of_turn` (turn finished, no dialog) / `none`; `dialog` is the full `PendingDialog` when one is on screen, so an actionable client can offer its real options. `stalled` fires once when a managed agent's pane and transcript both freeze mid-work for ~5 min while its process lives (see `AgentSession.stale`/`stalled_since` on `lane.list` — additive overlay fields, with `stalled_since` marking the pane's last change). Emitted to every subscribed client. When `[remote]` is enabled, the same alert also goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
 | `event.message.stored` | `{ id, lane_id?, from, body, message }` for one newly accepted durable fleet message. Clients deduplicate only by `id`. |
 | `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
