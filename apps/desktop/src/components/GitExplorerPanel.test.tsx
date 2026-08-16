@@ -666,14 +666,16 @@ describe("panel.git keybinding (App integration)", () => {
   it("opens the right panel already on the Git tab when closed", async () => {
     const { container } = renderApp();
     const toggle = within(container).getByRole("button", { name: "Repomind" });
+    const gitButton = within(container).getByRole("button", { name: "Git" });
     expect(toggle).toHaveAttribute("aria-pressed", "false");
 
     fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
 
+    // C1 shipped a visible tab strip inside the right rail; that strip was removed once the
+    // header buttons (+ mod+3/5/7) covered the same switching job, so "on the Git tab" is now
+    // asserted via the header buttons' own aria-pressed state rather than a `role="tab"` query.
     await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
-    expect(within(tablist).getByRole("tab", { name: "Git" })).toHaveAttribute("aria-selected", "true");
-    expect(within(tablist).getByRole("tab", { name: "Repomind" })).toHaveAttribute("aria-selected", "false");
+    expect(gitButton).toHaveAttribute("aria-pressed", "true");
   });
 
   it("closes the panel when mod+3 is pressed again while already on Git", async () => {
@@ -690,16 +692,16 @@ describe("panel.git keybinding (App integration)", () => {
   it("switches to the Git tab without closing when the panel is open on another tab", async () => {
     const { container } = renderApp();
     const toggle = within(container).getByRole("button", { name: "Repomind" });
+    const gitButton = within(container).getByRole("button", { name: "Git" });
 
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
-    expect(within(tablist).getByRole("tab", { name: "Repomind" })).toHaveAttribute("aria-selected", "true");
+    expect(gitButton).toHaveAttribute("aria-pressed", "false");
 
     fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
 
-    await waitFor(() => expect(within(tablist).getByRole("tab", { name: "Git" })).toHaveAttribute("aria-selected", "true"));
-    expect(within(tablist).getByRole("tab", { name: "Repomind" })).toHaveAttribute("aria-selected", "false");
+    // Removed strip: assert the tab switch via the header buttons' own aria-pressed state.
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
     expect(toggle).toHaveAttribute("aria-pressed", "true");
   });
 });
@@ -737,8 +739,6 @@ describe("header Git/Editor buttons (App integration)", () => {
     fireEvent.click(gitButton);
 
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
-    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
-    expect(within(tablist).getByRole("tab", { name: "Git" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("opens the rail already on the Editor tab when closed", async () => {
@@ -749,8 +749,6 @@ describe("header Git/Editor buttons (App integration)", () => {
     fireEvent.click(editorButton);
 
     await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "true"));
-    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
-    expect(within(tablist).getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("closes the rail when clicking the Git header button again while already on Git", async () => {
@@ -777,8 +775,6 @@ describe("header Git/Editor buttons (App integration)", () => {
 
     await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "true"));
     expect(gitButton).toHaveAttribute("aria-pressed", "false");
-    const tablist = within(container).getByRole("tablist", { name: "Right panel" });
-    expect(within(tablist).getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("keeps the header buttons in sync with the mod+3 / mod+7 shortcuts (shared openPanelTab plumbing)", async () => {

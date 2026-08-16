@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { For, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 
 import FileEditorPanel from "./FileEditorPanel";
 import GitExplorerPanel from "./GitExplorerPanel";
@@ -26,9 +26,9 @@ export interface RightPanelHostProps {
   /** Forwarded to Repomind's own "Expand" control — unchanged from pre-F2 behavior. */
   onToggleFullscreen: () => void;
   /**
-   * Test-only escape hatch: supply a synthetic registry to exercise tab routing / strip
-   * visibility / switching without depending on RepomindPanel's daemon calls. Production never
-   * passes this — the host always builds its real registry from `buildDefaultPanels`.
+   * Test-only escape hatch: supply a synthetic registry to exercise tab routing / switching
+   * without depending on RepomindPanel's daemon calls. Production never passes this — the host
+   * always builds its real registry from `buildDefaultPanels`.
    */
   panels?: RightPanelTabDef[];
   /**
@@ -87,11 +87,6 @@ export default function RightPanelHost(props: RightPanelHostProps) {
     return list[0]?.id ?? "";
   })());
 
-  // C1 registers Git as a second tab, so the strip is live: rounded-lg border, pill buttons,
-  // matching RepomindPanel's own segmented-control vocabulary so it reads as one more row of the
-  // same chrome rather than a bolted-on control.
-  const showStrip = createMemo(() => panels().length > 1);
-
   function selectTab(id: string) {
     setActiveId(id);
     saveRightPanelActiveTab(id);
@@ -119,35 +114,6 @@ export default function RightPanelHost(props: RightPanelHostProps) {
 
   return (
     <div class="flex h-full min-h-0 flex-1 flex-col">
-      <Show when={showStrip()}>
-        <div
-          class="flex h-10 shrink-0 items-center border-b border-line bg-surface/95 px-3.5"
-          role="tablist"
-          aria-label="Right panel"
-        >
-          <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5">
-            <For each={panels()}>
-              {(panel) => (
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeId() === panel.id}
-                  class={`focus-ring flex items-center gap-1.5 rounded-md px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-                    activeId() === panel.id
-                      ? "bg-surface text-foreground shadow-xs font-semibold"
-                      : "text-muted hover:text-foreground"
-                  }`}
-                  onClick={() => selectTab(panel.id)}
-                >
-                  <panel.icon size={12} />
-                  <span>{panel.label}</span>
-                </button>
-              )}
-            </For>
-          </div>
-        </div>
-      </Show>
-
       <div class="relative min-h-0 flex-1">
         <For each={panels()}>
           {(panel) => {

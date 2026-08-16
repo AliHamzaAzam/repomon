@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import App from "../App";
@@ -40,39 +41,42 @@ function makeCountingPanel(id: string, label: string, mounts: Record<string, num
   };
 }
 
-describe("RightPanelHost", () => {
-  it("hides the tab strip when only one panel is registered", () => {
-    const mounts: Record<string, number> = {};
-    render(() => (
-      <RightPanelHost
-        onToggleFullscreen={() => {}}
-        panels={[makeCountingPanel("alpha", "Alpha", mounts)]}
-      />
-    ));
+// The visible tab strip (rounded pill row, role="tablist") was removed once the header buttons
+// (+ mod+3/5/7 shortcuts, see App.tsx's `openPanelTab`) covered the same switching job — it was
+// redundant chrome duplicating a control that already existed one level up. RightPanelHost itself
+// has no more click surface of its own, so these tests drive tab switching the same way the real
+// header buttons do: by bumping the `requestTab` prop. The registry, active-tab state, and
+// warm-keep mounting this proves are otherwise unchanged from the pre-removal behavior.
+function renderHost(panels: RightPanelTabDef[], onActiveTabChange?: (id: string) => void) {
+  const [requestTab, setRequestTab] = createSignal<{ id: string; token: number } | null>(null);
+  const utils = render(() => (
+    <RightPanelHost
+      onToggleFullscreen={() => {}}
+      panels={panels}
+      requestTab={requestTab()}
+      onActiveTabChange={onActiveTabChange}
+    />
+  ));
+  return { ...utils, setRequestTab };
+}
 
-    expect(screen.queryByRole("tablist", { name: "Right panel" })).not.toBeInTheDocument();
+describe("RightPanelHost", () => {
+  it("never renders a tab strip, even with two panels registered", () => {
+    const mounts: Record<string, number> = {};
+    renderHost([makeCountingPanel("alpha", "Alpha", mounts), makeCountingPanel("beta", "Beta", mounts)]);
+
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
     expect(screen.getByTestId("panel-alpha")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-beta")).toBeInTheDocument();
   });
 
-  it("routes to the panel matching the active tab and switches on click", () => {
+  it("routes to the panel matching the active tab and switches via requestTab", () => {
     const mounts: Record<string, number> = {};
-    render(() => (
-      <RightPanelHost
-        onToggleFullscreen={() => {}}
-        panels={[
-          makeCountingPanel("alpha", "Alpha", mounts),
-          makeCountingPanel("beta", "Beta", mounts),
-        ]}
-      />
-    ));
-
-    const tablist = screen.getByRole("tablist", { name: "Right panel" });
-    expect(tablist).toBeInTheDocument();
-
-    const alphaTab = within(tablist).getByRole("tab", { name: "Alpha" });
-    const betaTab = within(tablist).getByRole("tab", { name: "Beta" });
-    expect(alphaTab).toHaveAttribute("aria-selected", "true");
-    expect(betaTab).toHaveAttribute("aria-selected", "false");
+    const activeIds: string[] = [];
+    const { setRequestTab } = renderHost(
+      [makeCountingPanel("alpha", "Alpha", mounts), makeCountingPanel("beta", "Beta", mounts)],
+      (id) => activeIds.push(id),
+    );
 
     // jsdom does not reflect the `inert` IDL property onto an attribute, so assert via the
     // aria-hidden attribute the host sets in lockstep with it (both driven by the same
@@ -81,33 +85,28 @@ describe("RightPanelHost", () => {
     const betaPanel = screen.getByTestId("panel-beta").parentElement as HTMLElement;
     expect(alphaPanel).not.toHaveAttribute("aria-hidden");
     expect(betaPanel).toHaveAttribute("aria-hidden", "true");
+    expect(activeIds).toEqual(["alpha"]);
 
-    fireEvent.click(betaTab);
+    setRequestTab({ id: "beta", token: 1 });
 
-    expect(alphaTab).toHaveAttribute("aria-selected", "false");
-    expect(betaTab).toHaveAttribute("aria-selected", "true");
     expect(alphaPanel).toHaveAttribute("aria-hidden", "true");
     expect(betaPanel).not.toHaveAttribute("aria-hidden");
+    expect(activeIds).toEqual(["alpha", "beta"]);
   });
 
   it("keeps inactive panels mounted (warm) instead of remounting on tab switch", () => {
     const mounts: Record<string, number> = {};
-    render(() => (
-      <RightPanelHost
-        onToggleFullscreen={() => {}}
-        panels={[
-          makeCountingPanel("alpha", "Alpha", mounts),
-          makeCountingPanel("beta", "Beta", mounts),
-        ]}
-      />
-    ));
+    const { setRequestTab } = renderHost([
+      makeCountingPanel("alpha", "Alpha", mounts),
+      makeCountingPanel("beta", "Beta", mounts),
+    ]);
 
     expect(mounts.alpha).toBe(1);
     expect(mounts.beta).toBe(1);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Beta" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Alpha" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Beta" }));
+    setRequestTab({ id: "beta", token: 1 });
+    setRequestTab({ id: "alpha", token: 2 });
+    setRequestTab({ id: "beta", token: 3 });
 
     // Neither panel's component factory runs again — both stayed mounted the whole time.
     expect(mounts.alpha).toBe(1);
@@ -121,26 +120,23 @@ describe("RightPanelHost", () => {
       makeCountingPanel("beta", "Beta", mounts),
     ];
 
-    const { unmount } = render(() => <RightPanelHost onToggleFullscreen={() => {}} panels={panels()} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Beta" }));
+    const { setRequestTab, unmount } = renderHost(panels());
+    setRequestTab({ id: "beta", token: 1 });
     expect(localStorage.getItem(RIGHT_PANEL_ACTIVE_TAB_KEY)).toBe("beta");
     unmount();
 
-    render(() => <RightPanelHost onToggleFullscreen={() => {}} panels={panels()} />);
-    expect(screen.getByRole("tab", { name: "Beta" })).toHaveAttribute("aria-selected", "true");
+    renderHost(panels());
+    const betaPanel = screen.getByTestId("panel-beta").parentElement as HTMLElement;
+    expect(betaPanel).not.toHaveAttribute("aria-hidden");
   });
 
   it("falls back to the first registered tab when the persisted id no longer exists", () => {
     localStorage.setItem(RIGHT_PANEL_ACTIVE_TAB_KEY, "stale-panel-id");
     const mounts: Record<string, number> = {};
-    render(() => (
-      <RightPanelHost
-        onToggleFullscreen={() => {}}
-        panels={[makeCountingPanel("alpha", "Alpha", mounts), makeCountingPanel("beta", "Beta", mounts)]}
-      />
-    ));
+    renderHost([makeCountingPanel("alpha", "Alpha", mounts), makeCountingPanel("beta", "Beta", mounts)]);
 
-    expect(screen.getByRole("tab", { name: "Alpha" })).toHaveAttribute("aria-selected", "true");
+    const alphaPanel = screen.getByTestId("panel-alpha").parentElement as HTMLElement;
+    expect(alphaPanel).not.toHaveAttribute("aria-hidden");
   });
 });
 
@@ -173,9 +169,8 @@ describe("Right rail integration (App)", () => {
     expect(localStorage.getItem(REPOMIND_OPEN_KEY)).toBe("true");
 
     // The Repomind content (still real RepomindPanel, unchanged) is now live in the right rail.
-    // Scoped to RepomindPanel's own header span (not a bare `getByText`): C1 registers a second
-    // tab, so the tab strip's "Repomind" pill now sits alongside it in the same `aside`, and both
-    // are plain-text matches for "Repomind".
+    // Scoped to RepomindPanel's own header span (not a bare `getByText`) so this doesn't also
+    // match the header's own "Repomind" toggle button, which renders the same plain-text label.
     const aside = within(container).getByRole("complementary", { name: "Repomind" });
     expect(within(aside).getByText("Repomind", { selector: "span.text-xs.font-semibold" })).toBeInTheDocument();
 
