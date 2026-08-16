@@ -660,7 +660,10 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
 
           <Show when={openFiles().length > 0}>
             <div class="flex h-8 shrink-0 items-center border-b border-line bg-surface/95">
-              <div class="flex min-w-0 flex-1 items-center overflow-x-auto">
+              {/* min-w-0 + overflow-x-auto + no-scrollbar/scroll-smooth: same horizontal-overflow
+                  pattern as TerminalWorkspace's tab strip, so a lot of open files scrolls (each
+                  tab keeps shrink-0) instead of wrapping or squeezing tabs unreadably thin. */}
+              <div class="flex min-w-0 flex-1 items-center overflow-x-auto no-scrollbar scroll-smooth">
                 <For each={openFiles()}>
                   {(file) => {
                     const isActive = () => activePath() === file.path;

@@ -228,6 +228,39 @@ describe("FileEditorPanel open/edit/save", () => {
     const writeCall = calls.list.find((c) => c.method === "file.write");
     expect(writeCall?.params).toEqual({ lane_id: 7, path: "a.ts", content: "abcd", expected_mtime_ms: 1000 });
   });
+
+  it("item 5b: gives the open-tab strip TerminalWorkspace's horizontal-scroll chain (scroll, not wrap)", async () => {
+    mockRpc({
+      "file.list": () => ({
+        entries: [
+          entry({ name: "a.ts", path: "a.ts", is_dir: false, size: 5 }),
+          entry({ name: "b.ts", path: "b.ts", is_dir: false, size: 5 }),
+        ],
+        truncated: false,
+      }),
+      "file.read": (params) => ({ content: `// ${(params as { path: string }).path}`, mtime_ms: 1000, size: 10, truncated: false }),
+    });
+
+    const { container } = render(() => <FileEditorPanel fleet={fleetWith(lane())} />);
+    await openFileTab(container, "a.ts");
+    // Opening a file auto-collapses the tree (effectiveTreeExpanded); re-expand it to reach b.ts.
+    fireEvent.click(screen.getByRole("button", { name: "Toggle file tree" }));
+    await openFileTab(container, "b.ts");
+
+    const tabA = screen.getByTitle("a.ts");
+    const tabB = screen.getByTitle("b.ts");
+    const strip = tabA.closest(".overflow-x-auto");
+    expect(strip).not.toBeNull();
+    expect(strip).toContainElement(tabB);
+    // Same scrolling ergonomics as TerminalWorkspace's tab strip: overflow-x-auto with a hidden
+    // scrollbar and smooth scrolling, not flex-wrap.
+    expect(strip).toHaveClass("no-scrollbar");
+    expect(strip).toHaveClass("scroll-smooth");
+    expect(strip).not.toHaveClass("flex-wrap");
+    // Each tab keeps shrink-0 so the strip overflows (and scrolls) instead of squeezing tabs.
+    expect(tabA.closest(".group")).toHaveClass("shrink-0");
+    expect(tabB.closest(".group")).toHaveClass("shrink-0");
+  });
 });
 
 describe("FileEditorPanel conflict handling", () => {

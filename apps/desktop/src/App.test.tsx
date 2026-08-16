@@ -201,4 +201,29 @@ describe("Repomon desktop shell", () => {
     });
     expect(within(container).queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
   });
+
+  it("item 5a: keeps min-w-0 on the right-rail pane so long content scrolls instead of blowing out the rail", async () => {
+    // Regression guard for a flexbox "automatic minimum size" bug: this row-flex pane
+    // (ResizableSplit handle + this div) previously had no min-w-0, so a deeply nested
+    // no-wrap element's min-content width (e.g. an unwrapped long code line in CodeMirror)
+    // won this div's width instead of the resizable rail's actual pixel width, and the
+    // `aside` ancestor's overflow:hidden silently clipped the excess instead of letting the
+    // editor's own `.cm-scroller` handle horizontal scrolling. Without min-w-0 here, the fix
+    // has no effect regardless of what CodeEditor/CM6 itself does.
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const repomindToggle = within(container).getByRole("button", { name: "Repomind" });
+    fireEvent.click(repomindToggle);
+    await waitFor(() => expect(repomindToggle).toHaveAttribute("aria-pressed", "true"));
+
+    const pane = container.querySelector(".border-l.border-line");
+    expect(pane).not.toBeNull();
+    expect(pane).toHaveClass("min-w-0");
+    expect(pane).toHaveClass("flex-1");
+  });
 });

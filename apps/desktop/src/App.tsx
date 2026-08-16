@@ -551,7 +551,14 @@ function App(props: AppProps) {
                 cssVar="--right-panel-width"
                 label="Resize right panel"
               />
-              <div class="flex min-h-0 flex-1 flex-col border-l border-line">
+              {/* min-w-0 is load-bearing: this is a flex-1 item of the row above (ResizableSplit
+                  handle + this pane), and without it the classic flexbox "automatic minimum size"
+                  rule lets its content's min-content width (e.g. an unwrapped long code line deep
+                  in CodeMirror, or a diff's long line) win, pushing this pane wider than the
+                  resizable rail instead of letting the descendant scrollers (`.cm-scroller`, the
+                  editor tab strip) handle their own horizontal overflow. The `aside` ancestor's
+                  `overflow: hidden` was then silently clipping the excess instead of scrolling. */}
+              <div class="flex min-h-0 min-w-0 flex-1 flex-col border-l border-line">
                 <RightPanelHost
                   onToggleFullscreen={() => setRepomindFull(true)}
                   fleet={fleet}
