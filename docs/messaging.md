@@ -138,7 +138,15 @@ Claude and Codex launch builders add the server without replacing user MCP confi
 OpenCode merges a runtime-only `OPENCODE_CONFIG_CONTENT` object and preserves higher-precedence
 managed settings. Antigravity surgically merges the token-free `mcpServers.repomon` entry into its
 global MCP registry; identity remains in inherited environment and no repository MCP file is
-created.
+created. Cursor is wired the same way, merging only `mcpServers.repomon` into its global
+`~/.cursor/mcp.json`; its `--approve-mcps` flag is available for headless/non-interactive spawns.
+Aider has no native MCP client support as of its current release: the identity token and socket
+are still passed via the process environment (so a future Aider version that adds support would
+work without a repomon change), but its fleet mail tool calls cannot reach the MCP server today.
+Custom agents are inspected by binary name and receive the matching known backend's MCP wiring
+when they wrap one (e.g. a custom command wrapping `claude` or `agy` gets that backend's
+registration); a completely unknown binary gets no MCP registration, though the identity
+environment variables are always set.
 
 Repomind keeps its orchestrator tool surface and adds the same messaging tools under the
 `repomind` sender identity. An agent MCP process with a missing, revoked, or mismatched identity can
@@ -182,6 +190,8 @@ inbox-only delivery, and unsupported behavior based on live verification.
 |---------|---------------|------------------|-------------------|--------------|----------|
 | Claude Code | Yes | Yes | Transcript and pane | `--resume` | Yes |
 | Codex | Yes | Yes | Pane fallback | CLI session behavior only | Yes, pane-only |
-| OpenCode 1.15.5 | Yes | Yes, verified without approval | SQLite finish and tool state | `--session` | Omitted until attention identity is pinned |
-| Antigravity 1.1.12 | Yes | Global registration required; isolated proof did not load it | Pane dialogs and cache identity | `--conversation` | Omitted after trust and approval prompts |
-| Aider or Cursor | Yes when installed | Inbox only | Coarse or pane fallback | Unsupported | No |
+| OpenCode 1.15.5 | Yes | Yes, verified without approval | SQLite finish and tool state | `--session` | Yes, pane-only |
+| Antigravity 1.1.12 | Yes | Yes, global `~/.gemini/config/mcp_config.json` registration | Pane dialogs and cache identity | `--conversation` | Yes, pane-only |
+| Cursor | Yes when installed | Yes, global `~/.cursor/mcp.json` registration | Pane fallback | Unsupported (relaunches fresh) | No |
+| Aider | Yes when installed | Inbox only (no MCP client support) | Coarse (chat-history mtime) | Unsupported (relaunches fresh) | No |
+| Custom agent | Yes | Matches the known backend it wraps, or inbox only if unknown | Pane fallback | Unsupported (relaunches fresh) | No |
