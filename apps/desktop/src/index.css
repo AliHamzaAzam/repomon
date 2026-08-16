@@ -333,7 +333,7 @@
   width: 1px;
   transform: translateX(-50%);
   background: var(--line);
-  transition: background-color 120ms ease, width 120ms ease;
+  transition: background-color 120ms ease;
 }
 
 .resizable-split-handle:hover::before,
