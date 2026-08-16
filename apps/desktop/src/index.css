@@ -160,7 +160,7 @@
 }
 
 .mission-grid.is-repomind-open {
-  grid-template-columns: 18rem minmax(0, 1fr) 20rem;
+  grid-template-columns: 18rem minmax(0, 1fr) var(--right-panel-width, 20rem);
 }
 
 .repomind-panel {
@@ -182,7 +182,8 @@
   background: var(--line);
 }
 
-.warm-terminal-hidden {
+.warm-terminal-hidden,
+.warm-panel-hidden {
   position: absolute;
   inset: 0;
   visibility: hidden;

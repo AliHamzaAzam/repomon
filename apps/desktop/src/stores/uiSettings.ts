@@ -99,3 +99,30 @@ export function onOnboardingCompletedChanged(callback: (completed: boolean) => v
   return () => window.removeEventListener(ONBOARDING_COMPLETED_EVENT, handler);
 }
 
+export const RIGHT_PANEL_ACTIVE_TAB_KEY = "repomon:right-panel-active-tab";
+
+/**
+ * Reads which right-rail tab (RightPanelHost) was last active. Returns null when nothing has
+ * been persisted yet, so the host can fall back to its first registered tab.
+ */
+export function readRightPanelActiveTab(): string | null {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return null;
+  }
+  return localStorage.getItem(RIGHT_PANEL_ACTIVE_TAB_KEY);
+}
+
+/**
+ * Persists which right-rail tab is active, so switching Repomind/Git/Editor survives a reload.
+ */
+export function saveRightPanelActiveTab(id: string): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(RIGHT_PANEL_ACTIVE_TAB_KEY, id);
+  } catch {
+    // localStorage can throw (quota, private mode) — persistence is best-effort.
+  }
+}
+

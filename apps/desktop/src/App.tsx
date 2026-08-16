@@ -6,6 +6,12 @@ import ControlCenter from "./components/ControlCenter";
 import ExtensionsView from "./components/ExtensionsView";
 import Onboarding from "./components/Onboarding";
 import RepomindPanel from "./components/RepomindPanel";
+import RightPanelHost, {
+  RIGHT_PANEL_DEFAULT_WIDTH_PX,
+  RIGHT_PANEL_MAX_WIDTH_PX,
+  RIGHT_PANEL_MIN_WIDTH_PX,
+} from "./components/RightPanelHost";
+import { ResizableSplit } from "./components/ResizableSplit";
 import TerminalWorkspace from "./components/TerminalWorkspace";
 import UpdateBanner from "./components/UpdateBanner";
 import { getVersion } from "@tauri-apps/api/app";
@@ -432,10 +438,23 @@ function App(props: AppProps) {
 
         <aside
           aria-label="Repomind"
-          class="repomind-panel min-h-0 border-l border-line bg-surface"
+          class="repomind-panel min-h-0 bg-surface"
         >
           <Show when={repomindOpen() && !repomindFull()}>
-            <RepomindPanel onToggleFullscreen={() => setRepomindFull(true)} />
+            <div class="flex h-full min-h-0 flex-row">
+              <ResizableSplit
+                storageKey="repomon:right-panel-width"
+                defaultWidth={RIGHT_PANEL_DEFAULT_WIDTH_PX}
+                minWidth={RIGHT_PANEL_MIN_WIDTH_PX}
+                maxWidth={RIGHT_PANEL_MAX_WIDTH_PX}
+                panelSide="after"
+                cssVar="--right-panel-width"
+                label="Resize right panel"
+              />
+              <div class="flex min-h-0 flex-1 flex-col border-l border-line">
+                <RightPanelHost onToggleFullscreen={() => setRepomindFull(true)} />
+              </div>
+            </div>
           </Show>
         </aside>
       </div>
