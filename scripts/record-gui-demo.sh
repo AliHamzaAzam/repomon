@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/record-gui-demo.sh — records docs/gui-demo.gif, the desktop app's hero GIF.
+# scripts/record-gui-demo.sh - records docs/gui-demo.gif, the desktop app's hero GIF.
 #
 #   Usage:  scripts/record-gui-demo.sh [--keep-sandbox] [--skip-build]
 #
@@ -7,26 +7,43 @@
 #   1. Builds the release daemon + desktop binaries if missing (or --skip-build to reuse).
 #   2. Creates a throwaway sandbox: its own socket, config dir, and data dir, plus 4 fake
 #      git repos with a commit history, branches, and two worktree lanes carrying
-#      uncommitted changes — so the Git panel and fleet sidebar show real-looking content.
+#      uncommitted changes - so the Git panel and fleet sidebar show real-looking content.
 #      None of this touches your real ~/.config/repomon, real data dir, or real daemon.
 #   3. Starts a sandboxed `repomond` on its own socket and registers the fake repos/lanes
-#      over the daemon's JSON-RPC (repo.add, lane.create), plus one fake "agent" — a shell
-#      script that prints plausible tool-call-shaped output, NOT a real agent CLI. No API
-#      calls happen anywhere in this script.
+#      over the daemon's JSON-RPC (repo.add, lane.create), plus one fake "agent" - a shell
+#      script that loops forever printing plausible tool-call-shaped output, NOT a real
+#      agent CLI. No API calls happen anywhere in this script. The lane it runs in is
+#      pinned (agent.pin) so it is deterministically the top-priority, auto-selected lane
+#      when the GUI opens - the tour needs the agent terminal visible from frame one, and
+#      relying on natural activity-sort ordering to put it there is not reliable.
 #   4. Tests screen-recording permission with a throwaway 2-second capture. If macOS blocks
-#      it, the script prints what to grant and stops — it does not open the GUI, run the
+#      it, the script prints what to grant and stops - it does not open the GUI, run the
 #      AppleScript tour, or touch your real desktop. Grant Screen Recording to your terminal
 #      app in System Settings > Privacy & Security > Screen Recording, then re-run.
 #   5. If recording works: launches the desktop binary pointed at the sandbox (a second,
-#      independent process — the app has no single-instance guard, and it's on a different
+#      independent process - the app has no single-instance guard, and it's on a different
 #      socket than your real Repomon.app, so your real fleet is never touched), drives a
-#      short AppleScript tour (fleet -> git panel -> diff -> editor -> settings), records
-#      ~30-40s at 1440x900, and converts it to an optimized GIF at docs/gui-demo.gif.
+#      short AppleScript tour centered on the live agent terminal (fleet + agent hero shot
+#      -> git panel -> editor panel -> settings/system -> back to the agent terminal),
+#      records ~48s at 1440x900, and converts it to an optimized GIF at docs/gui-demo.gif.
 #   6. Cleans up: kills the sandbox daemon and app, removes the sandbox temp dir. Verifies
 #      your real daemon's PID is unchanged before and after.
 #
 # Idempotent: safe to re-run. Re-running rebuilds the sandbox from scratch each time (the
 # fake repos are regenerated, not reused) so the recording is always fresh.
+#
+# Tour beats dropped as keyboard-unreachable (see the AppleScript block below for details):
+#   - Hovering the lane roster for a tooltip: hover-only, no mouse automation in this script.
+#   - Explicitly switching to the meadow-web lane: no keymap chord moves lane selection other
+#     than bare j/k (needs focus on the Fleet nav landmark, itself only reachable by a mouse
+#     click or an unverifiable chain of blind Tab presses through an alphabetically-sorted,
+#     dynamically-sized sidebar) and mod+g (jumps only among lanes flagged "needs attention").
+#     The Fleet sidebar is visible for the entire tour regardless, so the other live lanes
+#     (meadow-web's dirty nav-focus-trap lane included) are on screen throughout anyway.
+#   - Opening a file in the Editor panel: the file tree's rows are plain buttons with only
+#     click handlers, and there is no reliable, verifiable keyboard path onto a specific row
+#     (Tab order into a lazily-loaded tree cannot be confirmed without visually running the
+#     app). The beat shows the editor tab with the tree visible instead.
 
 set -euo pipefail
 
@@ -47,11 +64,22 @@ for arg in "$@"; do
   esac
 done
 
-# A short, fixed socket path — macOS AF_UNIX paths cap at 104 bytes, and mktemp's
+# A short, fixed socket path - macOS AF_UNIX paths cap at 104 bytes, and mktemp's
 # /var/folders/... dirs regularly blow past that, so this deliberately does NOT live
 # under $SANDBOX.
 SOCK_PATH="/tmp/repomon-demo.sock"
 PROD_SOCK_PATH="/tmp/repomon-${USER}.sock"
+
+# The daemon's tmux session label (`tmux -L <label>`) is NOT namespaced by REPOMON_DATA_DIR or
+# XDG_CONFIG_HOME - it defaults to the fixed name "repomon" (crates/repomon-core/src/config.rs,
+# DEFAULT_TMUX_SESSION) unless config.toml overrides it, and that tmux server is deliberately
+# long-lived (it survives daemon restarts - see crates/repomon-daemon/src/reap.rs). Left at the
+# default, every sandboxed agent this script spawns would land as a window in the exact same
+# tmux server your real, production repomond attaches to - the one piece of state the socket
+# path, config dir, and data dir isolation above does not cover. Give this sandbox's daemon its
+# own label via config.toml below, and kill that server on exit (regardless of --keep-sandbox)
+# so repeated runs never accumulate orphaned windows either.
+TMUX_SESSION_LABEL="repomon-gui-demo"
 
 SANDBOX="$(mktemp -d /tmp/repomon-gui-demo.XXXXXX)"
 DATA_DIR="$SANDBOX/data"
@@ -84,6 +112,10 @@ cleanup() {
     sleep 0.5
     kill -9 "$DAEMON_PID" 2>/dev/null || true
   fi
+  # This sandbox's own tmux server (see the TMUX_SESSION_LABEL comment above) - unconditional,
+  # like the daemon/app kills above, since --keep-sandbox only preserves files for inspection,
+  # not live processes, and a leftover fake-agent tmux server has nothing worth keeping anyway.
+  tmux -L "$TMUX_SESSION_LABEL" kill-server 2>/dev/null || true
   rm -f "$SOCK_PATH"
   if [[ "$KEEP_SANDBOX" -eq 0 ]]; then
     rm -rf "$SANDBOX"
@@ -93,7 +125,7 @@ cleanup() {
 
   PROD_PID_AFTER="$(pgrep -f "repomond --socket $PROD_SOCK_PATH" | head -1 || true)"
   if [[ -n "$PROD_PID_BEFORE" && "$PROD_PID_BEFORE" != "$PROD_PID_AFTER" ]]; then
-    log "WARNING: production daemon PID changed ($PROD_PID_BEFORE -> $PROD_PID_AFTER) — investigate."
+    log "WARNING: production daemon PID changed ($PROD_PID_BEFORE -> $PROD_PID_AFTER) - investigate."
   fi
   exit "$status"
 }
@@ -350,41 +382,58 @@ EOF
 cat > "$ATLAS/docs/api-reference.md" <<'EOF'
 # API Reference
 
-Stub — see orbit-api's OpenAPI spec once published.
+Stub - see orbit-api's OpenAPI spec once published.
 EOF
 (cd "$ATLAS" && git add -A && commit_at 4 "Add API reference stub")
 
 # ---------------------------------------------------------------------------
-# 3. Fake agent script (no real CLI, no API calls — just plausible output)
+# 3. Fake agent script (no real CLI, no API calls - just plausible output)
 # ---------------------------------------------------------------------------
 
 FAKE_AGENT="$SANDBOX/fake_agent.sh"
 cat > "$FAKE_AGENT" <<'EOF'
 #!/usr/bin/env bash
-# A stand-in for a coding agent: prints tool-call-shaped lines on a delay so a terminal
-# panel has something believable to show. Does not call any model or network API.
+# A stand-in for a coding agent: loops forever, printing tool-call-shaped lines, a short
+# diff, and status beats on 1-2s delays, so the terminal pane always looks alive no matter
+# how much wall-clock time passes between spawn and whenever screencapture actually starts
+# (build + sandbox setup + permission checks can eat tens of seconds). Does not call any
+# model or network API. Deliberately generic - it only ever touches paths inside this
+# sandbox's own fake orbit-api repo, never a real project name.
 task="${1:-Investigate the flaky rate-limit test}"
 echo "> $task"
 sleep 1
-echo "  reading src/routes/rateLimit.ts"
-sleep 1
-echo "  reading test/rateLimit.test.ts"
-sleep 1
-echo "  found: window reset uses Date.now() directly, no fake-timer support"
-sleep 1
-echo "  editing src/routes/rateLimit.ts"
-sleep 1
-echo "  running tests..."
-sleep 2
-echo "  12 passed, 0 failed"
-sleep 1
-echo "  done — ready for review"
-while true; do sleep 30; done
+
+while true; do
+  echo "  reading src/routes/rateLimit.ts"
+  sleep 1.5
+  echo "  reading test/rateLimit.test.ts"
+  sleep 1.5
+  echo "  found: window reset uses Date.now() directly, no fake-timer support"
+  sleep 2
+  echo "  editing src/routes/rateLimit.ts"
+  sleep 1
+  echo "    - if (recent.length > MAX_REQUESTS) {"
+  sleep 1
+  echo "    + const remaining = Math.max(0, MAX_REQUESTS - recent.length);"
+  sleep 1
+  echo "    + if (remaining <= 0) {"
+  sleep 1.5
+  echo "  running tests..."
+  sleep 1
+  echo "  Waiting for tests..."
+  sleep 2
+  echo "  12 passed, 0 failed"
+  sleep 1.5
+  echo "  done - ready for review"
+  sleep 2
+done
 EOF
 chmod +x "$FAKE_AGENT"
 
 mkdir -p "$CONFIG_HOME/repomon"
 cat > "$CONFIG_HOME/repomon/config.toml" <<EOF
+tmux_session = "$TMUX_SESSION_LABEL"
+
 [agents]
 demo-agent = "$FAKE_AGENT"
 EOF
@@ -405,7 +454,7 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 if [[ ! -S "$SOCK_PATH" ]]; then
-  log "sandbox daemon never bound its socket — see $OUT_DIR/daemond.log"
+  log "sandbox daemon never bound its socket - see $OUT_DIR/daemond.log"
   exit 1
 fi
 log "sandbox daemon up (pid $DAEMON_PID)"
@@ -506,7 +555,15 @@ EOF
 log "spawning fake agent in orbit-api lane..."
 rpc agent.spawn "{\"lane_id\": $LANE1_ID, \"agent\": \"demo-agent\", \"task\": \"Investigate the flaky rate-limit test\"}" > /dev/null
 
-log "sandbox ready: 4 repos, 2 lanes with uncommitted changes, 1 fake agent running"
+# Pin the lane the fake agent runs in so it sorts first (stores/fleet.ts byPriority: pinned
+# lanes always win) and is therefore the lane auto-selected the moment the GUI's first
+# lane.list poll lands. The tour depends on this: it never sends a lane-selection keystroke,
+# because there is no reliable, keyboard-only way to land on a specific lane (see the header
+# comment above), so the hero shot has to already be pointed at the right lane on open.
+log "pinning orbit-api's agent lane so it's the default selection..."
+rpc agent.pin "{\"lane_id\": $LANE1_ID, \"pinned\": true}" > /dev/null
+
+log "sandbox ready: 4 repos, 2 lanes with uncommitted changes, 1 looping fake agent (pinned)"
 
 # ---------------------------------------------------------------------------
 # 5. Screen recording permission check
@@ -516,13 +573,13 @@ PERM_TEST="$OUT_DIR/perm-test.png"
 rm -f "$PERM_TEST"
 if ! screencapture -x "$PERM_TEST" 2>"$OUT_DIR/perm-test.err" || [[ ! -s "$PERM_TEST" ]]; then
   log "----------------------------------------------------------------------"
-  log "Screen recording permission is NOT granted — cannot record the GUI demo."
+  log "Screen recording permission is NOT granted - cannot record the GUI demo."
   log "The sandbox above is fully set up and verified (repos/lanes/agent all"
   log "registered over RPC), but the GUI has NOT been launched and nothing was"
   log "recorded, so your real desktop was never touched."
   log ""
   log "To fix: System Settings > Privacy & Security > Screen Recording, grant"
-  log "access to your terminal app (Terminal.app, iTerm, etc — whichever hosts"
+  log "access to your terminal app (Terminal.app, iTerm, etc - whichever hosts"
   log "this shell), then re-run this script."
   log "----------------------------------------------------------------------"
   exit 2
@@ -552,36 +609,75 @@ end tell
 OSA
 sleep 1
 
+# Tour length: sum of every sleep below plus the pre-roll, ~46.5s. REC_SECONDS gives a small
+# buffer over that so screencapture never cuts the final hold short; keep the two in step if
+# you change the beats below.
+REC_SECONDS=50
+
 MOV_PATH="$OUT_DIR/gui-demo-raw.mov"
-log "recording ~35s to $MOV_PATH"
-screencapture -v -V 35 -x -R "${WIN_X},${WIN_Y},${WIN_W},${WIN_H}" "$MOV_PATH" &
+log "recording ~${REC_SECONDS}s to $MOV_PATH"
+screencapture -v -V "$REC_SECONDS" -x -R "${WIN_X},${WIN_Y},${WIN_W},${WIN_H}" "$MOV_PATH" &
 REC_PID=$!
-sleep 1.5
+sleep 2.0
 
 tour_key() {
-  # $1 = key spec for `keystroke`/`key code`, $2 = using-modifiers clause
+  # $1 = key spec for `keystroke`, $2 = using-modifiers clause. Matches BINDINGS in
+  # apps/desktop/src/keymap.ts - verify against that file before changing any chord here.
   osascript -e "tell application \"System Events\" to keystroke \"$1\" using {$2}"
 }
 
-# Beat 1: fleet sidebar, let it settle.
-sleep 2.0
-# Beat 2: open the Git panel on a lane with changes.
+tour_keycode() {
+  # $1 = numeric key code, no modifiers (Tab=48, Return=36, Escape=53).
+  osascript -e "tell application \"System Events\" to key code $1"
+}
+
+# Beat 1 (HERO SHOT): fleet sidebar with orbit-api's rate-limit-headers lane already selected
+# (pinned during sandbox setup above, so no keystroke is needed to get here) and its fake
+# agent looping in the terminal bay. This is the point of the product - hold it the longest.
+sleep 9.0
+
+# Beat 2: Git panel (mod+3) on that same lane, whose working tree is seeded dirty (an edited
+# rateLimit.ts, an untracked rateLimitHeaders.ts) - no lane switch needed, it's already the
+# selected lane. (Dropped: switching to meadow-web's lane first - see header comment for why.)
 tour_key "3" "command down"
-sleep 2.5
-# Beat 3: click into a diff (best-effort — coordinates depend on layout, so this is a
-# gentle nudge rather than a precise click; the tour still reads fine without it).
 sleep 2.0
-# Beat 4: open the Editor panel.
+sleep 6.0
+
+# Beat 3: Editor panel (mod+7) on the same lane. Shows the file tree for real (including the
+# uncommitted rateLimitHeaders.ts once src/routes/ is expanded) but does not open a file -
+# TreeEntryRow's rows are plain onClick buttons with no verified keyboard path onto a specific
+# row (see header comment). Reading the tour, not clicking, is still the point of this beat.
 tour_key "7" "command down"
-sleep 2.5
-# Beat 5: back to Git panel briefly.
-tour_key "3" "command down"
 sleep 2.0
-# Beat 6: open Settings (System health lives here).
+sleep 6.0
+
+# Beat 4: Settings (mod+,) -> System tab, for the bundled-tmux badge and System Health view.
+# There is no chord straight to the System tab, but Modal.tsx's focus trap is deterministic:
+# on open, focus lands on the dialog's first focusable element in DOM order, which is the
+# header's Close button (the tab strip is rendered inside the content div, after the header).
+# Tab once -> the "General" tab button (first tab, DOM order). Tab again -> "System" (second
+# tab). Return activates it like a click, since Enter/Space both fire a focused <button>'s
+# click handler natively. Verified by reading Modal.tsx and SettingsModal.tsx's TABS array
+# (General, System, Agents, Notifications, Appearance, Automation, Keyboard) - not by running
+# the GUI, which this script cannot do in this environment.
 tour_key "," "command down"
-sleep 2.5
-osascript -e 'tell application "System Events" to key code 53' # Escape, close settings
 sleep 1.5
+tour_keycode 48 # Tab: Close button -> "General" tab button
+sleep 0.5
+tour_keycode 48 # Tab: "General" -> "System" tab button
+sleep 0.5
+tour_keycode 36 # Return: activate the "System" tab
+sleep 5.0
+tour_keycode 53 # Escape: close Settings
+sleep 1.5
+
+# Beat 5: back to the agent terminal for the close. rightPanelTab is still "editor" from beat
+# 3 (Settings is a separate modal and never touched it), and openPanelTab's own toggle rule is
+# "already open on this tab -> close" - so pressing mod+7 again collapses the right rail
+# instead of doing nothing, handing the full terminal bay back to the agent for the final hold.
+tour_key "7" "command down"
+sleep 1.5
+sleep 8.0
 
 wait "$REC_PID" 2>/dev/null || true
 log "recording done"
@@ -595,12 +691,21 @@ DOCS_MOV="$REPO_ROOT/docs/gui-demo.mov"
 PALETTE="$OUT_DIR/palette.png"
 
 if [[ -s "$MOV_PATH" ]]; then
+  # screencapture -V records at the display's full backing resolution (2880x1800 on a 2x
+  # Retina screen for this 1440x900 window), so this step downscales ~2.4x to 1200px wide.
+  # `flags=lanczos` rings (overshoots) at high-contrast edges, which on this app's
+  # near-black theme shows up as a dark halo hugging light text and icon edges - the "black
+  # outline" that is not present in the live app, only in a scaled-down raster of it.
+  # `bicubic` has a much gentler falloff and does not ring, at a small cost in sharpness that
+  # does not matter at GIF size. If a fringe is still visible after this, it is baked into
+  # the .mov itself (screencapture's own H264 encode, which its CLI does not expose a
+  # quality/bitrate knob for) rather than introduced by this conversion step.
   log "building palette..."
-  ffmpeg -y -i "$MOV_PATH" -vf "fps=12,scale=1200:-1:flags=lanczos,palettegen" "$PALETTE" \
+  ffmpeg -y -i "$MOV_PATH" -vf "fps=12,scale=1200:-1:flags=bicubic,palettegen" "$PALETTE" \
     -loglevel error
   log "encoding gif..."
   ffmpeg -y -i "$MOV_PATH" -i "$PALETTE" \
-    -filter_complex "fps=12,scale=1200:-1:flags=lanczos[x];[x][1:v]paletteuse" \
+    -filter_complex "fps=12,scale=1200:-1:flags=bicubic[x];[x][1:v]paletteuse" \
     "$DOCS_GIF" -loglevel error
 
   gif_size=$(stat -f%z "$DOCS_GIF" 2>/dev/null || stat -c%s "$DOCS_GIF")
