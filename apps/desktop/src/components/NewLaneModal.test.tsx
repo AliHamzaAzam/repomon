@@ -28,7 +28,7 @@ afterEach(() => {
 
 describe("NewLaneModal error rendering", () => {
   const dummyRepos: Repo[] = [
-    { id: 1, name: "repomon", path: "/tmp/repo", main_branch: "main", hidden: false, added_at: "2026-08-01T00:00:00Z", worktree_root_template: null },
+    { id: 1, name: "repomon", path: "/tmp/repo", hidden: false, added_at: "2026-08-01T00:00:00Z", worktree_root_template: null },
   ];
 
   it("renders friendly error and details when lane creation fails due to missing git", async () => {

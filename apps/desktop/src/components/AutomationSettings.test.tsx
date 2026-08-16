@@ -10,8 +10,7 @@ vi.mock("../ipc/rpc", () => ({
         playbooks: [
           {
             name: "test-playbook",
-            description: "Automated regression verification",
-            content: "run cargo test",
+            content: "Automated regression verification\nrun cargo test",
             status: "draft",
             draft_content: null,
             created_at: "2026-07-27T00:00:00Z",
@@ -25,7 +24,7 @@ vi.mock("../ipc/rpc", () => ({
       return Promise.resolve({
         schedules: [
           {
-            id: "sch-1",
+            id: 1,
             spec: "weekdays 09:00",
             prompt: "Morning fleet check",
             max_actions: 15,

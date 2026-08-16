@@ -3,6 +3,7 @@ import { createSignal } from "solid-js";
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ConfirmOptions } from "../components/ConfirmDialog";
 import type { SettingsTab } from "../components/SettingsModal";
+import { pickDirectory } from "../ipc/dialog";
 import { daemonCall } from "../ipc/rpc";
 import type { FleetStore } from "./fleet";
 import type { WorkspaceStore } from "./workspace";

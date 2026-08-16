@@ -1,10 +1,9 @@
 import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
-import type { TerminalRenderer } from "../ipc/term";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import type { WorkspaceStore } from "../stores/workspace";
+import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
@@ -39,7 +38,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [canScrollRight, setCanScrollRight] = createSignal(false);
   const [openingShell, setOpeningShell] = createSignal(false);
   const [adopting, setAdopting] = createSignal(false);
-  const [closingShell, setClosingShell] = createSignal<string | null>(null);
   const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
   const [warmWindows, setWarmWindows] = createSignal<string[]>([]);
 
@@ -151,7 +149,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   });
 
   const chooseLayout = props.workspace.chooseLayout;
-  const chooseRenderer = props.workspace.chooseRenderer;
 
   async function openShell() {
     if (props.fleet.selectedLaneId() === null) return;

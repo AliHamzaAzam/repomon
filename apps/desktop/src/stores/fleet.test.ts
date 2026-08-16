@@ -51,6 +51,7 @@ function agent(overrides: Partial<AgentSession> = {}): AgentSession {
     gate: null,
     config_dir: null,
     custom_label: null,
+    generated_label: null,
     ...overrides,
   };
 }

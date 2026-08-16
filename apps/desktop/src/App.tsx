@@ -21,7 +21,7 @@ import { daemonCall } from "./ipc/rpc";
 import { isMac, matchChord } from "./keymap";
 import BrandMark from "./components/BrandMark";
 import { setAgentIconOverrides } from "./components/icons";
-import { applyAccent, applyTheme, nextTheme, readTheme, themeLabel } from "./theme";
+import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";

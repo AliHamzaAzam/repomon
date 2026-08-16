@@ -4,8 +4,6 @@ import type { ActionsStore } from "../stores/actions";
 import BrandMark from "./BrandMark";
 import SystemHealthView from "./SystemHealthView";
 import {
-  AgentIcon,
-  IconArrowUp,
   IconCheck,
   IconChevronLeft,
   IconChevronRight,
@@ -13,7 +11,6 @@ import {
   IconGitBranch,
   IconLayers,
   IconPlus,
-  IconSparkles,
   IconTerminal,
 } from "./icons";
 
@@ -352,7 +349,7 @@ export default function Onboarding(props: OnboardingProps) {
                           </div>
                           <div class="flex items-center gap-2 shrink-0">
                             <span class="rounded bg-surface px-2 py-0.5 font-mono text-[10px] text-muted border border-line">
-                              {repo.main_branch}
+                              tracked
                             </span>
                           </div>
                         </div>

@@ -104,14 +104,36 @@ interface RpcMap {
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
   "repo.set_hidden": { params: { repo_id: number; hidden: boolean }; result: null };
-  "approval.list": { params: undefined; result: { rules: ApprovalRule[] } };
+  "approval.record": {
+    params: { repo: string; command: string; verdict: string };
+    result: { pattern: string | null; approvals: number; rule_exists: boolean; propose: boolean };
+  };
+  "approval.allow": { params: { repo: string; pattern: string }; result: null };
   "approval.remove": { params: { repo: string; pattern: string }; result: null };
-  "schedule.list": { params: undefined; result: { schedules: Schedule[] } };
-  "schedule.add": { params: { spec: string; prompt: string; max_actions?: number }; result: unknown };
-  "schedule.remove": { params: { id: number }; result: unknown };
+  "approval.list": { params: undefined; result: { rules: ApprovalRule[] } };
+  "schedule.add": {
+    params: { spec: string; prompt: string; max_actions?: number };
+    result: Schedule & { next_run?: string };
+  };
+  "schedule.list": { params: undefined; result: { schedules: Array<Schedule & { next_run?: string }> } };
+  "schedule.remove": { params: { id: number }; result: null };
+  "playbook.save": { params: { name: string; content: string }; result: Playbook };
+  "playbook.search": { params: { query: string; limit?: number }; result: { playbooks: Playbook[] } };
   "playbook.list": { params: undefined; result: { playbooks: Playbook[] } };
-  "playbook.approve": { params: { name: string }; result: unknown };
-  "playbook.delete": { params: { name: string }; result: unknown };
+  "playbook.approve": { params: { name: string }; result: Playbook };
+  "playbook.delete": { params: { name: string }; result: null };
+  "journal.append": {
+    params: {
+      session: string;
+      action: string;
+      lane_id?: number | null;
+      repo?: string | null;
+      params?: string | null;
+      outcome?: string;
+      detail?: string | null;
+    };
+    result: { id: number };
+  };
   "journal.query": {
     params: { query?: string; since_last_session?: boolean; limit?: number };
     result: { entries: JournalEntry[] };

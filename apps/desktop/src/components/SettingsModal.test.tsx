@@ -59,7 +59,7 @@ vi.mock("../ipc/rpc", () => ({
     if (method === "agent.remove") {
       calls.removedAgents.push(params.name);
       if (state.config && state.config.agents) {
-        const nextAgents = { ...state.config.agents };
+        const nextAgents: Record<string, string> = { ...state.config.agents };
         delete nextAgents[params.name];
         state.config = { ...state.config, agents: nextAgents };
       }

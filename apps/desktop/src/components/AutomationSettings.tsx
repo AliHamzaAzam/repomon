@@ -9,7 +9,7 @@ import {
   playbookState,
   scheduleAddParams,
 } from "./automation";
-import { IconCheck, IconClose, IconLayers, IconPlus, IconRefresh, IconSearch, IconSparkles } from "./icons";
+import { IconCheck, IconClose, IconPlus, IconRefresh, IconSearch } from "./icons";
 
 interface AutomationSettingsProps {
   onConfirmDeletePlaybook?: (name: string, onConfirm: () => Promise<void>) => void;
@@ -32,10 +32,10 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
   async function loadData() {
     try {
       const [pbRes, schRes, appRes, jRes] = await Promise.all([
-        daemonCall<{ playbooks: Playbook[] }>("playbook.list").catch(() => ({ playbooks: [] })),
-        daemonCall<{ schedules: Schedule[] }>("schedule.list").catch(() => ({ schedules: [] })),
-        daemonCall<{ rules: ApprovalRule[] }>("approval.list").catch(() => ({ rules: [] })),
-        daemonCall<{ entries: JournalEntry[] }>("journal.query", journalQueryParams(journalSearch())).catch(() => ({ entries: [] })),
+        daemonCall("playbook.list").catch(() => ({ playbooks: [] })),
+        daemonCall("schedule.list").catch(() => ({ schedules: [] })),
+        daemonCall("approval.list").catch(() => ({ rules: [] })),
+        daemonCall("journal.query", journalQueryParams(journalSearch())).catch(() => ({ entries: [] })),
       ]);
       setPlaybooks(pbRes.playbooks ?? []);
       setSchedules(schRes.schedules ?? []);
@@ -82,8 +82,8 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
     }
   }
 
-  async function removeSchedule(id: string) {
-    setBusy(id);
+  async function removeSchedule(id: number) {
+    setBusy(String(id));
     setError(null);
     try {
       await daemonCall("schedule.remove", { id });
@@ -99,7 +99,7 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
     setBusy(rule.pattern);
     setError(null);
     try {
-      await daemonCall("approval.revoke", { pattern: rule.pattern, repo: rule.repo });
+      await daemonCall("approval.remove", { pattern: rule.pattern, repo: rule.repo });
       await loadData();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -112,7 +112,7 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
     event.preventDefault();
     setBusy("journal");
     try {
-      const res = await daemonCall<{ entries: JournalEntry[] }>("journal.query", journalQueryParams(journalSearch()));
+      const res = await daemonCall("journal.query", journalQueryParams(journalSearch()));
       setJournal(res.entries ?? []);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -219,7 +219,7 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
                     <div class="min-w-0">
                       <b class="block truncate text-xs font-semibold text-foreground">{book.name}</b>
                       <span class="mt-0.5 block truncate text-[11px] text-muted">
-                        {book.description || "No description provided"}
+                        {(book.draft_content ?? book.content).split("\n")[0] || "No content"}
                       </span>
                     </div>
                     <span

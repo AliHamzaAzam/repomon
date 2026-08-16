@@ -1,7 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 
-import type { Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { MessageStore } from "../stores/messages";
@@ -15,9 +14,7 @@ import {
   scheduleAddParams,
 } from "./automation";
 import {
-  AgentIcon,
   IconBot,
-  IconCheck,
   IconClose,
   IconCommand,
   IconLayers,
@@ -157,7 +154,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       icon: "settings",
       shortcut: "⌘,",
       run: () => {
-        props.actions.openSettings("general");
+        props.actions.openSettingsTab("general");
       },
     });
 
@@ -208,11 +205,11 @@ export default function ControlCenter(props: ControlCenterProps) {
 
       let badgeType: PaletteItem["badgeType"] = "muted";
       let badge: string | undefined = undefined;
-      if (ind?.attention) {
+      if (ind?.urgent || ind?.tone === "attention" || ind?.tone === "fault") {
         badge = ind.label;
-        badgeType = "attention";
-      } else if (ind?.running) {
-        badge = "RUNNING";
+        badgeType = ind.tone === "fault" ? "attention" : ind.tone;
+      } else if (ind?.tone === "signal") {
+        badge = ind.label ? ind.label.toUpperCase() : "RUNNING";
         badgeType = "signal";
       }
 

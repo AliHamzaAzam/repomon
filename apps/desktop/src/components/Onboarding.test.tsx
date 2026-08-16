@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { RepoView } from "../bindings";
+import type { Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import Onboarding from "./Onboarding";
 
@@ -21,7 +21,7 @@ vi.mock("../ipc/rpc", () => ({
   }),
 }));
 
-function createMockActions(repos: RepoView[] = []): ActionsStore {
+function createMockActions(repos: Repo[] = []): ActionsStore {
   return {
     fleet: {
       repos: () => repos,
@@ -45,39 +45,45 @@ function createMockActions(repos: RepoView[] = []): ActionsStore {
       start: vi.fn(),
       stop: vi.fn(),
     } as any,
-    workspace: {} as any,
     settingsOpen: () => false,
     settingsTab: () => "general",
     openSettings: vi.fn(),
     openSettingsTab: vi.fn(),
     closeSettings: vi.fn(),
+    controlOpen: () => false,
+    openControl: vi.fn(),
+    closeControl: vi.fn(),
+    toggleControl: vi.fn(),
     spawnLane: () => null,
-    openSpawn: vi.fn(),
+    spawn: vi.fn(),
     closeSpawn: vi.fn(),
     notesRepo: () => null,
     openRepoNotes: vi.fn(),
     closeRepoNotes: vi.fn(),
     newLaneOpen: () => false,
     newLaneRepoId: () => null,
-    openNewLane: vi.fn(),
+    newLane: vi.fn(),
     closeNewLane: vi.fn(),
     renameTarget: () => null,
-    openRename: vi.fn(),
+    rename: vi.fn(),
     closeRename: vi.fn(),
     confirmOptions: () => null,
     confirm: vi.fn(),
     closeConfirm: vi.fn(),
     error: () => null,
     dismissError: vi.fn(),
+    reportError: vi.fn(),
     addRepo: vi.fn().mockResolvedValue(undefined),
-    removeRepo: vi.fn().mockResolvedValue(undefined),
-    killLane: vi.fn().mockResolvedValue(undefined),
-    pruneWorktree: vi.fn().mockResolvedValue(undefined),
-    deleteBranch: vi.fn().mockResolvedValue(undefined),
-    openWorktreeInCursor: vi.fn().mockResolvedValue(undefined),
-    openWorktreeInClaude: vi.fn().mockResolvedValue(undefined),
-    copyWorktreePath: vi.fn().mockResolvedValue(undefined),
-  };
+    removeRepo: vi.fn(),
+    setRepoHidden: vi.fn().mockResolvedValue(undefined),
+    confirmPlaybookDelete: vi.fn(),
+    pinLane: vi.fn().mockResolvedValue(undefined),
+    mergeLane: vi.fn(),
+    deleteLane: vi.fn(),
+    stopAgent: vi.fn().mockResolvedValue(undefined),
+    adoptAgent: vi.fn().mockResolvedValue(undefined),
+    restoreAllAgents: vi.fn().mockResolvedValue(0),
+  } as unknown as ActionsStore;
 }
 
 describe("Onboarding component", () => {
@@ -166,11 +172,12 @@ describe("Onboarding component", () => {
   });
 
   it("renders tracked repositories in Step 3 when repos exist", () => {
-    const mockRepo: RepoView = {
+    const mockRepo: Repo = {
       id: 1,
       name: "repomon",
       path: "/Users/dev/repomon",
-      main_branch: "main",
+      added_at: "2026-08-01T00:00:00Z",
+      worktree_root_template: null,
       hidden: false,
     };
     const actions = createMockActions([mockRepo]);

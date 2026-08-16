@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRule, Lane, Playbook, Repo } from "../bindings";
 import { DaemonRpcError } from "../ipc/rpc";
-import { createActionsStore } from "../stores/actions";
-import { createFleetStore } from "../stores/fleet";
+import type { ActionsStore } from "../stores/actions";
+import type { FleetStore } from "../stores/fleet";
 import { createMessageStore } from "../stores/messages";
 import { createNotificationStore } from "../stores/notifications";
 import ControlCenter, {
