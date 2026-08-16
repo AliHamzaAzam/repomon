@@ -1,6 +1,9 @@
 # Cross-kind agent orchestration: architecture & limitations
 
-Updated 2026-08-16 (Track A: cross-kind orchestration, A5: universal fleet-mail invariant).
+Status: **implemented** (Track A, 2026-08-16). The original limitation - only Claude/Codex could
+orchestrate, Antigravity/OpenCode workers were mail-only, Cursor had no MCP wiring at all - is
+resolved. Remaining by-design gaps: Cursor/Aider/custom kinds cannot run as orchestrators, and
+Aider workers get no fleet mail (no native MCP client support; see findings below).
 
 ## Goal
 
@@ -99,7 +102,9 @@ Probed & documented 2026-08-16:
 1. **Fleet Mail (`message_send` / `message_inbox` / `message_mark_read` / `fleet_status`)**:
    Fully kind-agnostic — addressed by `lane-X/slot`, not by kind. Any agent wired with the restricted
    MCP surface can mail any other agent regardless of kind. Supported for Claude, Codex, Antigravity,
-   OpenCode, Cursor, and dialect-matching custom agents.
+   OpenCode, Cursor, and dialect-matching custom agents. Since A6 (2026-08-16), `message_send`
+   also accepts a list of addresses, `lane-X/*` (whole lane), and `*` (whole fleet, sender excluded),
+   with per-recipient delivery results - see `docs/messaging.md` for the grammar and semantics.
 2. **Underlying Daemon RPCs (`agent.spawn`, `agent.send_input`, `agent.capture`, `agent.adopt`, `agent.stop`, etc.)**:
    Fully kind-agnostic — operates on lane/window addressing regardless of kind. All kinds are now adoptable.
 3. **Orchestrator Allowlist**:
