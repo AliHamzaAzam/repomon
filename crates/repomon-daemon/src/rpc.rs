@@ -2647,12 +2647,36 @@ pub async fn dispatch(
                     cwd: path,
                     env: Vec::new(),
                 },
-                _ => SpawnSpec {
-                    program: String::new(),
+                AgentKind::Codex => SpawnSpec {
+                    // Codex has no stable session-resume flag; re-launch fresh in the worktree.
+                    program: "codex".into(),
                     args: Vec::new(),
                     cwd: path,
                     env: Vec::new(),
                 },
+                AgentKind::Cursor => SpawnSpec {
+                    // cursor-agent has no session-resume flag; re-launch fresh in the worktree.
+                    program: "cursor-agent".into(),
+                    args: Vec::new(),
+                    cwd: path,
+                    env: Vec::new(),
+                },
+                AgentKind::Aider => SpawnSpec {
+                    // Aider has no MCP support and no session-resume flag; re-launch fresh.
+                    program: "aider".into(),
+                    args: Vec::new(),
+                    cwd: path,
+                    env: Vec::new(),
+                },
+                AgentKind::Other(ref cmd) => {
+                    // Custom agent: re-launch the configured command. No session-resume support.
+                    SpawnSpec {
+                        program: cmd.clone(),
+                        args: Vec::new(),
+                        cwd: path,
+                        env: Vec::new(),
+                    }
+                }
             })
             .await
             .map_err(internal)?;
@@ -6157,6 +6181,13 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
 /// Attach backend-specific MCP configuration without placing identity values in persistent files.
 /// OpenCode receives a runtime-only inline merge. Antigravity and Cursor need global registration,
 /// but their entries contain only the executable and arguments; the managed child inherits its identity env.
+///
+/// For `Other`/custom agents: the command string is inspected with `kind_from_command` to detect
+/// whether the custom command wraps a known binary (e.g. `claude --dangerously-skip-permissions`
+/// → `ClaudeCode`, `agy --mode plan` → `Antigravity`). If it matches, that kind's wiring is
+/// applied transparently. Completely unknown custom commands receive no MCP wiring.
+///
+/// `Aider` has no native MCP client support as of its current release; no wiring is attempted.
 fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), String> {
     match kind {
         AgentKind::OpenCode => {
@@ -6173,7 +6204,22 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
         }
         AgentKind::Antigravity => ensure_antigravity_mcp_registration()?,
         AgentKind::Cursor => ensure_cursor_mcp_registration()?,
-        _ => {}
+        AgentKind::Aider => {
+            // Aider has no native MCP client support; fleet mail is unavailable for Aider agents.
+        }
+        AgentKind::Other(_) => {
+            // Inspect the program name to detect whether a custom command wraps a known binary
+            // (e.g. `claude --dangerously-skip-permissions` wraps ClaudeCode). If it matches a
+            // wired dialect, apply that kind's registration so the custom agent gets fleet mail.
+            // Fully unknown commands silently receive no MCP wiring.
+            let dialect = kind_from_command(&spec.program);
+            if !matches!(dialect, AgentKind::Other(_)) {
+                configure_backend_mcp(&dialect, spec)?;
+            }
+        }
+        // ClaudeCode and Codex wiring is handled at the call site via attach_agent_mcp /
+        // write_agent_mcp_config; configure_backend_mcp is a no-op for them.
+        AgentKind::ClaudeCode | AgentKind::Codex => {}
     }
     Ok(())
 }
@@ -8055,6 +8101,46 @@ mod tests {
             .env
             .iter()
             .any(|(k, v)| k == "REPOMON_MCP_IDENTITY_TOKEN" && v == "secret-worker-token-xyz"));
+    }
+
+    #[test]
+    fn custom_agent_dialect_routing_wires_known_binary_wrappers() {
+        // A custom agent whose command wraps `agy` must receive Antigravity MCP wiring.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mcp_cfg = dir.path().join("mcp_config.json");
+        unsafe {
+            std::env::set_var("REPOMON_ANTIGRAVITY_MCP_CONFIG", &mcp_cfg);
+        }
+        let mut spec = SpawnSpec::new("agy --mode plan", dir.path());
+        configure_backend_mcp(&AgentKind::Other("my-agy-wrapper".into()), &mut spec).unwrap();
+        // The Antigravity registration should have fired (dialect detected from spec.program).
+        assert!(mcp_cfg.exists(), "Antigravity mcp_config.json must be created for agy wrapper");
+
+        // A custom agent wrapping cursor-agent must receive Cursor MCP wiring.
+        let cursor_cfg = dir.path().join("mcp.json");
+        unsafe {
+            std::env::set_var("REPOMON_CURSOR_MCP_CONFIG", &cursor_cfg);
+        }
+        let mut spec2 = SpawnSpec::new("cursor-agent --approve-mcps", dir.path());
+        configure_backend_mcp(&AgentKind::Other("my-cursor-wrapper".into()), &mut spec2).unwrap();
+        assert!(cursor_cfg.exists(), "Cursor mcp.json must be created for cursor-agent wrapper");
+
+        // A completely unknown custom command must produce no error and no file.
+        let unknown_cfg = dir.path().join("unknown.json");
+        let mut spec3 = SpawnSpec::new("my-exotic-agent", dir.path());
+        configure_backend_mcp(&AgentKind::Other("exotic".into()), &mut spec3).unwrap();
+        assert!(!unknown_cfg.exists(), "unknown binary must not produce any config file");
+    }
+
+    #[test]
+    fn aider_configure_backend_mcp_is_a_no_op() {
+        // Aider has no MCP support: configure_backend_mcp must succeed (no error) and must not
+        // write any file or modify spec.env beyond what it received.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut spec = SpawnSpec::new("aider", dir.path());
+        let env_before: Vec<_> = spec.env.clone();
+        configure_backend_mcp(&AgentKind::Aider, &mut spec).unwrap();
+        assert_eq!(spec.env, env_before, "Aider must not alter spec.env");
     }
 
     #[test]
