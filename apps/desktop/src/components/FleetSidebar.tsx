@@ -24,6 +24,7 @@ import {
   IconLayers,
   IconPin,
   IconPlus,
+  IconRefresh,
   IconSearch,
 } from "./icons";
 import { LaneAgentRosterPopover } from "./LaneAgentRosterPopover";
@@ -70,6 +71,19 @@ function usageTone(pct: number): string {
   if (pct >= 95) return "text-fault font-semibold";
   if (pct >= 75) return "text-attention font-semibold";
   return "text-foreground";
+}
+
+/// Format a reset_at ISO timestamp as a short local time string for E9 tooltips.
+/// Returns null when reset_at is absent (omit the tooltip rather than showing nothing).
+function formatResetAt(resetAt: string | null | undefined): string | null {
+  if (!resetAt) return null;
+  try {
+    const d = new Date(resetAt);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return null;
+  }
 }
 
 function LaneRow(props: {
@@ -380,6 +394,20 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   const [manuallyExpandedLanes, setManuallyExpandedLanes] = createSignal<Set<number>>(new Set());
   const [manuallyCollapsedLanes, setManuallyCollapsedLanes] = createSignal<Set<number>>(loadCollapsedLanes());
   const [hiddenCollapsed, setHiddenCollapsed] = createSignal<boolean>(loadHiddenSectionCollapsed());
+  // E9: local spin state for the Rate Limits manual refresh button. Scoped here rather than reusing
+  // `fleet.loading()`, which also flips on every 1.2s poll tick and would make the icon flicker
+  // continuously instead of spinning only for the click the user actually made.
+  const [usageRefreshing, setUsageRefreshing] = createSignal(false);
+
+  const refreshUsage = async () => {
+    if (usageRefreshing()) return;
+    setUsageRefreshing(true);
+    try {
+      await props.fleet.refresh();
+    } finally {
+      setUsageRefreshing(false);
+    }
+  };
 
   const toggleHiddenCollapsed = () => {
     setHiddenCollapsed((prev) => {
@@ -732,23 +760,43 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   <IconCpu size={11} class="text-muted/70" />
                   <span>Rate Limits ({usage().label})</span>
                 </span>
-                <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
-                  {usage().age_secs < 60 ? "just now" : `${Math.floor(usage().age_secs / 60)}m ago`}
+                {/* E9: staleness + manual refresh button */}
+                <span class="flex items-center gap-1">
+                  <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
+                    {usage().age_secs < 60 ? "just now" : `${Math.floor(usage().age_secs / 60)}m ago`}
+                  </span>
+                  <button
+                    type="button"
+                    class="focus-ring ml-0.5 flex items-center justify-center rounded p-0.5 text-muted/50 hover:bg-raised hover:text-muted transition-colors disabled:opacity-40"
+                    title="Refresh usage data"
+                    aria-label="Refresh rate limit data"
+                    disabled={usageRefreshing()}
+                    onClick={() => void refreshUsage()}
+                  >
+                    <IconRefresh size={9} class={usageRefreshing() ? "animate-spin" : ""} />
+                  </button>
                 </span>
               </div>
               <div class="space-y-1">
                 <For each={usage().report.windows}>
-                  {(window) => (
-                    <div
-                      class="flex items-center justify-between font-mono text-[10px] text-muted py-0.5"
-                      title={`${formatUsageWindow(window.label)}: ${window.pct_used}% used`}
-                    >
-                      <span class="text-muted/80">{formatUsageWindow(window.label)}</span>
-                      <span class={`rounded bg-raised px-1.5 py-0.2 ${usageTone(window.pct_used)}`}>
-                        {window.pct_used}%
-                      </span>
-                    </div>
-                  )}
+                  {(window) => {
+                    // E9: show reset time in tooltip when the daemon captured it; omit otherwise.
+                    const resetStr = formatResetAt(window.reset_at);
+                    const tooltipText = resetStr
+                      ? `${formatUsageWindow(window.label)}: ${window.pct_used}% used · resets at ${resetStr}`
+                      : `${formatUsageWindow(window.label)}: ${window.pct_used}% used`;
+                    return (
+                      <div
+                        class="flex items-center justify-between font-mono text-[10px] text-muted py-0.5"
+                        title={tooltipText}
+                      >
+                        <span class="text-muted/80">{formatUsageWindow(window.label)}</span>
+                        <span class={`rounded bg-raised px-1.5 py-0.2 ${usageTone(window.pct_used)}`}>
+                          {window.pct_used}%
+                        </span>
+                      </div>
+                    );
+                  }}
                 </For>
               </div>
             </div>

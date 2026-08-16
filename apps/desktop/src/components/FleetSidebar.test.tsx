@@ -78,6 +78,7 @@ function stubs(repos: Repo[], lanes: Lane[]) {
     loading: () => false,
     counts: () => ({ urgent: 0, running: 0 }),
     focusedUsage: () => null,
+    refresh: vi.fn().mockResolvedValue(undefined),
   } as unknown as FleetStore;
   const actions = { setRepoHidden, removeRepo: vi.fn(), newLane: vi.fn(), addRepo: vi.fn() } as unknown as ActionsStore;
   return { fleet, actions, setRepoHidden };
@@ -258,5 +259,63 @@ describe("fleet sidebar hiding", () => {
     expect(screen.queryByLabelText("Expand lane main")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Minimize inactive lane main")).not.toBeInTheDocument();
     expect(screen.getByText("running")).toBeInTheDocument();
+  });
+
+  it("shows a reset-time tooltip only for windows that carry reset_at (E9)", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({
+      label: "claude-3-5-sonnet",
+      age_secs: 15,
+      report: {
+        windows: [
+          { label: "5h", pct_used: 12, reset_at: "2026-08-17T18:30:00Z" },
+          { label: "wk", pct_used: 85, reset_at: null },
+          { label: "mo", pct_used: 40, reset_at: "not-a-real-date" },
+        ],
+      },
+    });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    // Window with a valid reset_at gets a tooltip mentioning the reset time.
+    expect(screen.getByText("12%").parentElement?.getAttribute("title")).toMatch(/resets at/);
+    // Window with no reset_at omits the reset clause entirely rather than showing nothing useful.
+    const weeklyTitle = screen.getByText("85%").parentElement?.getAttribute("title");
+    expect(weeklyTitle).not.toMatch(/resets at/);
+    expect(weeklyTitle).toMatch(/85% used$/);
+    // Window with an unparsable reset_at is treated the same as absent (formatResetAt returns null).
+    const monthlyTitle = screen.getByText("40%").parentElement?.getAttribute("title");
+    expect(monthlyTitle).not.toMatch(/resets at/);
+  });
+
+  it("wires the Rate Limits refresh button to fleet.refresh with a spinning affordance", async () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    let resolveRefresh: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    (fleet as any).refresh = vi.fn().mockReturnValue(pending);
+    (fleet as any).focusedUsage = () => ({
+      label: "claude-3-5-sonnet",
+      age_secs: 15,
+      report: { windows: [{ label: "5h", pct_used: 12, reset_at: null }] },
+    });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    const button = screen.getByLabelText("Refresh rate limit data");
+    fireEvent.click(button);
+
+    expect(fleet.refresh).toHaveBeenCalledTimes(1);
+    expect(button).toBeDisabled();
+    expect(button.querySelector("svg")).toHaveClass("animate-spin");
+
+    resolveRefresh();
+    await pending;
+    await Promise.resolve();
+
+    expect(button).not.toBeDisabled();
   });
 });
