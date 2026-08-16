@@ -33,11 +33,19 @@ async fn call(
     serde_json::from_slice(&frame).unwrap()
 }
 
+static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn system_doctor_reports_unavailable_when_binaries_missing() {
+    let _lock = ENV_MUTEX.lock().await;
+    let old_path = std::env::var_os("PATH");
+    let old_tmux = std::env::var_os("REPOMON_TMUX");
     let empty_dir = tempfile::tempdir().unwrap();
     // Point PATH at an empty dir so no binaries exist on PATH
-    unsafe { std::env::set_var("PATH", empty_dir.path()) };
+    unsafe {
+        std::env::set_var("PATH", empty_dir.path());
+        std::env::remove_var("REPOMON_TMUX");
+    }
 
     let mut config = Config::default();
     config.agents.insert("custom-cli".into(), "nonexistent-cmd-abc".into());
@@ -79,4 +87,60 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
+    unsafe {
+        if let Some(p) = old_path {
+            std::env::set_var("PATH", p);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        if let Some(t) = old_tmux {
+            std::env::set_var("REPOMON_TMUX", t);
+        } else {
+            std::env::remove_var("REPOMON_TMUX");
+        }
+    }
+}
+
+#[tokio::test]
+async fn system_doctor_honors_repomon_tmux_env_override() {
+    let _lock = ENV_MUTEX.lock().await;
+    let old_tmux = std::env::var_os("REPOMON_TMUX");
+    let dir = tempfile::tempdir().unwrap();
+    let fake_tmux = dir.path().join("custom-tmux");
+    std::fs::write(&fake_tmux, b"#!/bin/sh\necho tmux 3.4\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    unsafe { std::env::set_var("REPOMON_TMUX", &fake_tmux) };
+
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-doctor-env-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let r = call(&mut stream, 1, "system.doctor", None).await;
+    let res = r.result.expect("system.doctor result");
+
+    assert_eq!(res["tmux"]["available"], json!(true));
+    assert_eq!(res["tmux"]["source"], json!("system"));
+    assert_eq!(res["tmux"]["path"], json!(fake_tmux.to_str().unwrap()));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+    unsafe {
+        if let Some(t) = old_tmux {
+            std::env::set_var("REPOMON_TMUX", t);
+        } else {
+            std::env::remove_var("REPOMON_TMUX");
+        }
+    }
 }

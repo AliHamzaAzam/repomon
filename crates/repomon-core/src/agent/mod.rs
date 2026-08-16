@@ -33,7 +33,10 @@ pub use backend::{
 };
 pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
-pub use tmux::{TmuxRuntime, WindowMeta, shell_quote};
+pub use tmux::{
+    ResolvedTmux, TmuxRuntime, WindowMeta, resolve_tmux_from, resolve_tmux_uncached, resolved_tmux,
+    shell_quote, tmux_program,
+};
 pub use usage::{
     AccountUsage, UsageReport, UsageWindow, parse_antigravity_usage, parse_codex_status,
     parse_usage,

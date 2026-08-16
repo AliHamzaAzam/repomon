@@ -439,7 +439,7 @@ mod tests {
             &claude_spec("claude".to_string()),
             &Cancel::new(PROBE_TIMEOUT),
         );
-        let _ = std::process::Command::new("tmux")
+        let _ = std::process::Command::new(repomon_core::agent::tmux_program())
             .args(["-L", "repomon-usagetest-claude", "kill-server"])
             .output();
         let r = report.expect("probe should scrape and parse /usage");
@@ -460,7 +460,7 @@ mod tests {
             &codex_spec(),
             &Cancel::new(PROBE_TIMEOUT),
         );
-        let _ = std::process::Command::new("tmux")
+        let _ = std::process::Command::new(repomon_core::agent::tmux_program())
             .args(["-L", "repomon-usagetest-codex", "kill-server"])
             .output();
         let r = report.expect("probe should scrape and parse /status");

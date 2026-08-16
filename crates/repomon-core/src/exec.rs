@@ -9,7 +9,7 @@ pub fn find_in_path(bin: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
+pub fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
     std::env::split_paths(path_var)
         .map(|dir| dir.join(bin))
         .find(|cand| is_executable(cand))
@@ -20,7 +20,7 @@ fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
 /// probed with every candidate name before moving on, so the first PATH entry that has the
 /// tool wins (matching the unix behavior and `CreateProcess` semantics).
 #[cfg(windows)]
-fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
+pub fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
     let pathext = std::env::var("PATHEXT").ok().filter(|v| !v.is_empty());
     let names = candidate_names(bin, pathext.as_deref().unwrap_or(DEFAULT_PATHEXT));
     std::env::split_paths(path_var)

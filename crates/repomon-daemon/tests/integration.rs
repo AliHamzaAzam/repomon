@@ -337,7 +337,7 @@ async fn daemon_spawns_and_drives_an_agent() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new("tmux")
+    let _ = Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }
@@ -451,7 +451,7 @@ async fn streams_agent_output_for_visible_lanes() {
     // (No further requests here — we're subscribed, so responses and events interleave.)
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new("tmux")
+    let _ = Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }
@@ -798,7 +798,7 @@ async fn agent_spawn_uses_custom_command() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new("tmux")
+    let _ = Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }

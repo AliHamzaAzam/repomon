@@ -1021,7 +1021,7 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         "A resizes a window nobody else owns"
     );
 
-    let _ = std::process::Command::new("tmux")
+    let _ = std::process::Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }
@@ -1132,7 +1132,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         );
     }
 
-    let _ = std::process::Command::new("tmux")
+    let _ = std::process::Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }

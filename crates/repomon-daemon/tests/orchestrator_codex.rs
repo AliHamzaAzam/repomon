@@ -129,7 +129,7 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new("tmux")
+    let _ = Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }

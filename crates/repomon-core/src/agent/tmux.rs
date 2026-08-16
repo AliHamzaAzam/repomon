@@ -41,6 +41,98 @@ pub struct WindowMeta {
     pub agent_kind: Option<String>,
 }
 
+/// Where a resolved tmux binary originates and what path was resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTmux {
+    pub path: PathBuf,
+    pub source: crate::model::TmuxDoctorSource,
+}
+
+/// Resolve the tmux binary path and its source against a custom environment, custom PATH, and candidate directories.
+pub fn resolve_tmux_from(
+    env_override: Option<&str>,
+    path_var: Option<&std::ffi::OsStr>,
+    sibling_dirs: &[PathBuf],
+) -> Option<ResolvedTmux> {
+    // 1. REPOMON_TMUX env var override
+    if let Some(val) = env_override {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(ResolvedTmux {
+                path: PathBuf::from(trimmed),
+                source: crate::model::TmuxDoctorSource::System,
+            });
+        }
+    }
+
+    // 2. System tmux via PATH
+    let path_candidate = match path_var {
+        Some(p) => crate::exec::find_in(p, "tmux"),
+        None => crate::exec::find_in_path("tmux"),
+    };
+    if let Some(p) = path_candidate {
+        return Some(ResolvedTmux {
+            path: p,
+            source: crate::model::TmuxDoctorSource::System,
+        });
+    }
+
+    // 3. Bundled sidecar tmux binary next to running executable or repomond
+    for dir in sibling_dirs {
+        let cand = dir.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
+        if cand.is_file() {
+            return Some(ResolvedTmux {
+                path: cand,
+                source: crate::model::TmuxDoctorSource::Bundled,
+            });
+        }
+    }
+
+    None
+}
+
+/// Uncached resolution of the tmux binary following the precedence:
+/// 1. `REPOMON_TMUX` environment variable (absolute or path override).
+/// 2. System tmux via PATH (`repomon_core::exec::find_in_path("tmux")`).
+/// 3. Bundled sidecar tmux binary next to current executable or managed repomond copy.
+pub fn resolve_tmux_uncached() -> Option<ResolvedTmux> {
+    let env_override = std::env::var("REPOMON_TMUX").ok();
+    let mut sibling_dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            sibling_dirs.push(dir.to_path_buf());
+        }
+    }
+    let repomond_cand = crate::service::repomond_path();
+    if let Some(dir) = repomond_cand.parent() {
+        sibling_dirs.push(dir.to_path_buf());
+    }
+    resolve_tmux_from(env_override.as_deref(), None, &sibling_dirs)
+}
+
+/// The cached or freshly resolved tmux binary and source.
+pub fn resolved_tmux() -> Option<ResolvedTmux> {
+    // If REPOMON_TMUX is set, don't lock on static cache so test environment overrides work dynamically
+    if let Ok(val) = std::env::var("REPOMON_TMUX") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(ResolvedTmux {
+                path: PathBuf::from(trimmed),
+                source: crate::model::TmuxDoctorSource::System,
+            });
+        }
+    }
+    static CACHE: std::sync::OnceLock<Option<ResolvedTmux>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(resolve_tmux_uncached).clone()
+}
+
+/// The program path to invoke for tmux commands.
+pub fn tmux_program() -> PathBuf {
+    resolved_tmux()
+        .map(|r| r.path)
+        .unwrap_or_else(|| PathBuf::from("tmux"))
+}
+
 impl TmuxRuntime {
     pub fn new(session: impl Into<String>) -> Self {
         Self {
@@ -48,11 +140,15 @@ impl TmuxRuntime {
         }
     }
 
+    /// Return the resolved tmux program path.
+    pub fn tmux_program() -> PathBuf {
+        tmux_program()
+    }
+
     /// Probe tmux availability, version, source, and path.
     pub fn probe() -> crate::model::TmuxDoctorInfo {
-        let path = crate::exec::find_in_path("tmux");
-        match path {
-            Some(p) => match Command::new(&p).arg("-V").output() {
+        match resolve_tmux_uncached() {
+            Some(resolved) => match Command::new(&resolved.path).arg("-V").output() {
                 Ok(out) if out.status.success() => {
                     let version_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     crate::model::TmuxDoctorInfo {
@@ -62,15 +158,15 @@ impl TmuxRuntime {
                         } else {
                             Some(version_str)
                         },
-                        source: Some(crate::model::TmuxDoctorSource::System),
-                        path: Some(p.to_string_lossy().into_owned()),
+                        source: Some(resolved.source),
+                        path: Some(resolved.path.to_string_lossy().into_owned()),
                     }
                 }
                 _ => crate::model::TmuxDoctorInfo {
                     available: false,
                     version: None,
                     source: None,
-                    path: Some(p.to_string_lossy().into_owned()),
+                    path: Some(resolved.path.to_string_lossy().into_owned()),
                 },
             },
             None => crate::model::TmuxDoctorInfo {
@@ -190,7 +286,7 @@ impl TmuxRuntime {
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new("tmux")
+        let out = Command::new(tmux_program())
             .args(self.full_args(args))
             .output()
             .map_err(Error::Io)?;
@@ -209,7 +305,7 @@ impl TmuxRuntime {
     /// skip a `has-session`/`has_named` preflight fork (the single biggest CPU win): a vanished
     /// target means "nothing to show", while a *real* tmux fault still propagates as `Err`.
     fn run_allow_absent(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new("tmux")
+        let out = Command::new(tmux_program())
             .args(self.full_args(args))
             .output()
             .map_err(Error::Io)?;
@@ -238,7 +334,7 @@ impl TmuxRuntime {
     }
 
     fn ok(&self, args: &[&str]) -> bool {
-        Command::new("tmux")
+        Command::new(tmux_program())
             .args(self.full_args(args))
             .output()
             .map(|o| o.status.success())
@@ -1004,7 +1100,7 @@ impl SessionBackend for TmuxRuntime {
 
     fn attach_command(&self, target: &str) -> AttachCommand {
         AttachCommand {
-            program: "tmux".to_string(),
+            program: tmux_program().to_string_lossy().into_owned(),
             args: vec![
                 "-L".to_string(),
                 self.session.clone(),
@@ -1130,7 +1226,7 @@ mod tests {
     fn backend_attach_command_matches_the_tmux_invocation() {
         let rt = TmuxRuntime::new("repomon");
         let cmd = SessionBackend::attach_command(&rt, "repomon:=lane-7");
-        assert_eq!(cmd.program, "tmux");
+        assert_eq!(cmd.program, tmux_program().to_string_lossy().as_ref());
         assert_eq!(
             cmd.args,
             vec!["-L", "repomon", "attach", "-t", "repomon:=lane-7"]
@@ -1482,7 +1578,7 @@ mod tests {
             "a terminal window stole the session's active window"
         );
 
-        let _ = Command::new("tmux")
+        let _ = Command::new(tmux_program())
             .args(["-L", rt.session(), "kill-server"])
             .output();
     }
@@ -1492,12 +1588,68 @@ mod tests {
         let probe = TmuxRuntime::probe();
         if probe.available {
             assert!(probe.version.is_some());
-            assert_eq!(probe.source, Some(crate::model::TmuxDoctorSource::System));
+            assert!(probe.source.is_some());
             assert!(probe.path.is_some());
             assert!(probe.version.unwrap().starts_with("tmux"));
         } else {
             assert!(probe.version.is_none());
             assert!(probe.source.is_none());
         }
+    }
+
+    #[test]
+    fn resolution_order_prefers_env_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_env_tmux = dir.path().join("fake-env-tmux");
+        std::fs::write(&fake_env_tmux, b"fake").unwrap();
+
+        let sibling_dir = dir.path().join("bundle");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        let sibling_tmux = sibling_dir.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&sibling_tmux, b"sibling").unwrap();
+
+        let resolved = resolve_tmux_from(
+            Some(fake_env_tmux.to_str().unwrap()),
+            None,
+            &[sibling_dir],
+        );
+        assert_eq!(
+            resolved,
+            Some(ResolvedTmux {
+                path: fake_env_tmux,
+                source: crate::model::TmuxDoctorSource::System,
+            })
+        );
+    }
+
+    #[test]
+    fn resolution_order_falls_back_to_sibling_when_path_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sibling_dir = dir.path().join("bundle");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        let sibling_tmux = sibling_dir.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&sibling_tmux, b"sibling-tmux").unwrap();
+
+        // Empty PATH
+        let empty_path = std::ffi::OsStr::new("");
+        let resolved = resolve_tmux_from(None, Some(empty_path), &[sibling_dir]);
+        assert_eq!(
+            resolved,
+            Some(ResolvedTmux {
+                path: sibling_tmux,
+                source: crate::model::TmuxDoctorSource::Bundled,
+            })
+        );
+    }
+
+    #[test]
+    fn resolution_returns_none_when_no_source_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_path = std::ffi::OsStr::new("");
+        let empty_sibling_dir = dir.path().join("empty");
+        std::fs::create_dir_all(&empty_sibling_dir).unwrap();
+
+        let resolved = resolve_tmux_from(None, Some(empty_path), &[empty_sibling_dir]);
+        assert_eq!(resolved, None);
     }
 }

@@ -26,6 +26,26 @@ fn bundled_agent_host_path() -> Option<PathBuf> {
     })
 }
 
+#[cfg(not(windows))]
+fn bundled_tmux_path() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(directory) = exe.parent() {
+            let cand = directory.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    let bundled = service::repomond_path();
+    if let Some(directory) = bundled.parent() {
+        let cand = directory.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 fn service_is_installed(status: &str) -> bool {
     !status.trim().eq_ignore_ascii_case("not installed")
 }
@@ -113,6 +133,14 @@ pub async fn apply_pending_daemon_update(
             ));
         copy_daemon(&host, &destination)?;
     }
+    #[cfg(not(windows))]
+    if let Some(tmux) = bundled_tmux_path().filter(|path| path.is_file()) {
+        let destination = managed
+            .parent()
+            .context("managed daemon path has no parent")?
+            .join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
+        copy_daemon(&tmux, &destination)?;
+    }
     if service_managed {
         service::install(&managed, &socket)?;
     }
@@ -142,5 +170,17 @@ mod tests {
         copy_daemon(&source, &destination).unwrap();
 
         assert_eq!(std::fs::read(destination).unwrap(), b"daemon-v2");
+    }
+
+    #[test]
+    fn copies_sibling_tmux_to_managed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmux_source = dir.path().join("tmux");
+        let tmux_destination = dir.path().join("bin").join("tmux");
+        std::fs::write(&tmux_source, b"tmux-binary").unwrap();
+
+        copy_daemon(&tmux_source, &tmux_destination).unwrap();
+
+        assert_eq!(std::fs::read(tmux_destination).unwrap(), b"tmux-binary");
     }
 }

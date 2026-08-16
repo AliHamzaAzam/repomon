@@ -674,7 +674,7 @@ fn attach_tmux_target(target: &str, attach: Option<&Value>) -> Result<()> {
     let (program, args) = parsed.unwrap_or_else(|| {
         let socket_label = target.split(':').next().unwrap_or("repomon");
         (
-            "tmux".to_string(),
+            repomon_core::agent::tmux_program().to_string_lossy().into_owned(),
             vec![
                 "-L".to_string(),
                 socket_label.to_string(),

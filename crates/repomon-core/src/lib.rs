@@ -35,7 +35,7 @@ pub mod watch;
 
 #[cfg(windows)]
 pub use agent::WindowsBackend;
-pub use agent::{AgentMonitor, ClaudeMonitor, SessionBackend, TmuxRuntime};
+pub use agent::{AgentMonitor, ClaudeMonitor, SessionBackend, TmuxRuntime, tmux_program};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use indexer::Indexer;
