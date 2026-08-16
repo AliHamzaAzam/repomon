@@ -49,7 +49,7 @@ restart).
   (`file.list`/`file.read`/`file.write`, doubly so for `file.write` since it overwrites host
   files), `commit.show` (a caller-chosen oid can walk the entire repo history, unlike the
   already-allowed `lane.diff`), the blind `agent.resize` (only the arbitrated `agent.fit` is
-  reachable remotely — an unconditional remote resize is exactly what squeezed the TUI's
+  reachable remotely, since an unconditional remote resize is exactly what squeezed the TUI's
   mediated view), the orchestrator's `start`/`stop`/`watch`/`resize` (spawning/killing repomind
   and its pane geometry stay local), and credential minting (`remote.*`). Anything else answers
   `-32601` `"not permitted over remote bridge"`.
@@ -198,7 +198,7 @@ newest `$HOME` transcript", which misattributes any other active Claude session 
 repomind's. Like `autonomy`, it is `null` when the daemon *adopted* a surviving window: the prior
 process's session id lived only in its own memory, so an adopted session falls back to the old
 newest-with-content heuristic. Always `null` for a `"codex"`, `"antigravity"`, or `"opencode"`
-backend (none has an equivalent of `--session-id`, and none of their session files are parsed —
+backend (none has an equivalent of `--session-id`, and none of their session files are parsed;
 the fallback heuristic is deliberately NOT applied there, since it would misattribute an
 unrelated Claude session's transcript).
 
