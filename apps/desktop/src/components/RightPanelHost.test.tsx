@@ -173,8 +173,11 @@ describe("Right rail integration (App)", () => {
     expect(localStorage.getItem(REPOMIND_OPEN_KEY)).toBe("true");
 
     // The Repomind content (still real RepomindPanel, unchanged) is now live in the right rail.
+    // Scoped to RepomindPanel's own header span (not a bare `getByText`): C1 registers a second
+    // tab, so the tab strip's "Repomind" pill now sits alongside it in the same `aside`, and both
+    // are plain-text matches for "Repomind".
     const aside = within(container).getByRole("complementary", { name: "Repomind" });
-    expect(within(aside).getByText("Repomind")).toBeInTheDocument();
+    expect(within(aside).getByText("Repomind", { selector: "span.text-xs.font-semibold" })).toBeInTheDocument();
 
     // mod+5 is the keymap binding for panel.repomind (src/keymap.ts) — toggling via keyboard
     // must reach the same state as the header button.

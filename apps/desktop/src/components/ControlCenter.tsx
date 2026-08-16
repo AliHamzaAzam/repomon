@@ -129,7 +129,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Toggle Repomind Panel",
       subtitle: "Fleet intelligence and autonomous agent assistance",
       icon: "sparkles",
-      shortcut: "⌘3",
+      shortcut: "⌘5",
       run: () => {
         if (props.onToggleRepomind) props.onToggleRepomind();
       },

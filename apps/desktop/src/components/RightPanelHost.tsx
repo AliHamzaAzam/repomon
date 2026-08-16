@@ -1,8 +1,10 @@
-import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 
+import GitExplorerPanel from "./GitExplorerPanel";
 import RepomindPanel from "./RepomindPanel";
-import { IconSparkles, type IconProps } from "./icons";
+import { IconGitBranch, IconSparkles, type IconProps } from "./icons";
 import { readRightPanelActiveTab, saveRightPanelActiveTab } from "../stores/uiSettings";
+import type { FleetStore } from "../stores/fleet";
 
 /**
  * F2: the right rail generalizes from "the Repomind panel" into a tabbed host any number of
@@ -28,9 +30,27 @@ export interface RightPanelHostProps {
    * passes this — the host always builds its real registry from `buildDefaultPanels`.
    */
   panels?: RightPanelTabDef[];
+  /**
+   * C1: threaded down to GitExplorerPanel's registry entry the same way FleetSidebar and
+   * TerminalWorkspace receive the fleet store — the panel only reads `selectedLane()` off it, but
+   * that memo lives on the store. Optional purely so the pre-C1 test suite (which renders this
+   * host with a synthetic `panels` list and never touches the real registry) keeps compiling.
+   */
+  fleet?: FleetStore;
+  /**
+   * One-shot activation command some external shortcut can push to select a tab even after the
+   * host has already mounted — e.g. App.tsx's `panel.git` binding switching away from an
+   * already-open Repomind tab. Bump `token` on every dispatch (the id alone would not refire the
+   * effect on repeated presses of the same shortcut); the id is also consulted on first mount so
+   * "closed → open already on git" works without waiting on a post-mount effect.
+   */
+  requestTab?: { id: string; token: number } | null;
+  /** Fires with the active tab id on mount and on every switch (click or `requestTab`), so a
+   * caller can tell whether the panel is already showing the tab it's about to toggle. */
+  onActiveTabChange?: (id: string) => void;
 }
 
-function buildDefaultPanels(onToggleFullscreen: () => void): RightPanelTabDef[] {
+function buildDefaultPanels(onToggleFullscreen: () => void, fleet?: FleetStore): RightPanelTabDef[] {
   return [
     {
       id: "repomind",
@@ -39,9 +59,8 @@ function buildDefaultPanels(onToggleFullscreen: () => void): RightPanelTabDef[] 
       component: () => <RepomindPanel onToggleFullscreen={onToggleFullscreen} />,
     },
 
-    // Registered by C1: git status/diff for the active lane. Uncomment once GitPanel exists —
-    // no other change in this file is needed to bring the tab strip to life.
-    // { id: "git", label: "Git", icon: IconGitBranch, component: () => <GitPanel /> },
+    // C1: git status/diff for the active lane.
+    { id: "git", label: "Git", icon: IconGitBranch, component: () => <GitExplorerPanel fleet={fleet} /> },
 
     // Registered by D4: inline file editor for the active lane. Same deal — uncomment when
     // EditorPanel ships.
@@ -57,26 +76,46 @@ export const RIGHT_PANEL_MAX_WIDTH_PX = 640; // 40rem
 export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 320; // 20rem — matches the pre-F2 fixed .repomind-panel width.
 
 export default function RightPanelHost(props: RightPanelHostProps) {
-  const panels = createMemo(() => props.panels ?? buildDefaultPanels(props.onToggleFullscreen));
+  const panels = createMemo(() => props.panels ?? buildDefaultPanels(props.onToggleFullscreen, props.fleet));
 
   const [activeId, setActiveId] = createSignal((() => {
-    const stored = readRightPanelActiveTab();
+    const requested = props.requestTab?.id;
     const list = panels();
+    if (requested && list.some((panel) => panel.id === requested)) return requested;
+    const stored = readRightPanelActiveTab();
     if (stored && list.some((panel) => panel.id === stored)) return stored;
     return list[0]?.id ?? "";
   })());
 
-  // Only one tab exists today (Repomind), so the strip stays hidden and this whole host renders
-  // with zero visual change from the pre-F2 panel — the registry is real, but nothing about the
-  // chrome changes until a second panel is registered. Once Git/Editor land, the strip reuses
-  // RepomindPanel's own segmented-control vocabulary (rounded-lg border, pill buttons) so it
-  // reads as one more row of the same chrome rather than a bolted-on control.
+  // C1 registers Git as a second tab, so the strip is live: rounded-lg border, pill buttons,
+  // matching RepomindPanel's own segmented-control vocabulary so it reads as one more row of the
+  // same chrome rather than a bolted-on control.
   const showStrip = createMemo(() => panels().length > 1);
 
   function selectTab(id: string) {
     setActiveId(id);
     saveRightPanelActiveTab(id);
   }
+
+  // Reports the active tab on mount and every switch — App.tsx's `panel.git` shortcut needs this
+  // to tell whether the panel is already showing "git" before deciding to switch vs. close.
+  createEffect((prev?: string) => {
+    const id = activeId();
+    if (id !== prev) props.onActiveTabChange?.(id);
+    return id;
+  });
+
+  // The imperative half of the `requestTab` command described on the prop: a shortcut pressed
+  // while this host is already mounted (panel open, on some other tab) bumps the token, and this
+  // effect switches tabs in response. The mount-time value is handled by `activeId`'s initializer
+  // above so "closed → open already on git" doesn't wait a tick for this effect to run.
+  let lastRequestToken: number | undefined;
+  createEffect(() => {
+    const req = props.requestTab;
+    if (!req || req.token === lastRequestToken) return;
+    lastRequestToken = req.token;
+    if (panels().some((panel) => panel.id === req.id)) selectTab(req.id);
+  });
 
   return (
     <div class="flex h-full min-h-0 flex-1 flex-col">

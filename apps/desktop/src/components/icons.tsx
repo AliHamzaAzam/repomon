@@ -155,6 +155,28 @@ export function IconGitBranch(props: IconProps): JSX.Element {
   );
 }
 
+export function IconGitCommit(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 13;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <line x1="3" y1="12" x2="8" y2="12" />
+      <circle cx="12" cy="12" r="4" />
+      <line x1="16" y1="12" x2="21" y2="12" />
+    </svg>
+  );
+}
+
 export function IconArrowUp(props: IconProps): JSX.Element {
   const s = () => props.size ?? 12;
   return (

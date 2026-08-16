@@ -99,6 +99,24 @@ export interface OrchestratorStatus {
   headline?: string | null;
 }
 
+/**
+ * `lane.diff`'s result: a lane's branch compared against the repo's base branch, plus its own
+ * uncommitted state. Mirrors `LaneDiff` in crates/repomon-core/src/git/diff.rs — `commits` is the
+ * raw `git log --oneline <merge_base>..HEAD` text (newline-separated "oid summary" lines), not a
+ * structured array, so callers split it themselves (see GitExplorerPanel's `parseCommits`).
+ */
+export interface LaneDiff {
+  base: string;
+  merge_base: string;
+  commits: string;
+  commits_truncated?: boolean;
+  committed_stat: string;
+  uncommitted_stat: string;
+  untracked: number;
+  patch?: string;
+  patch_truncated?: boolean;
+}
+
 interface RpcMap {
   "repo.list": { params: undefined; result: Repo[] };
   "repo.add": { params: { path: string }; result: Repo };
@@ -161,7 +179,7 @@ interface RpcMap {
   "lane.delete": { params: { lane_id: number; also_delete_branch?: boolean }; result: null };
   "lane.focus": { params: { lane_id: number }; result: { path: string } };
   "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
-  "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: unknown };
+  "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: LaneDiff };
   // `to` also accepts a list of addresses, "lane-2/*", or "*" (A6 broadcast/multi-recipient
   // mail). A single plain address still returns a bare `FleetMessage`; anything else returns a
   // fan-out summary instead (`{ recipient_count, sent_count, results: { to, status, ... }[] }`).

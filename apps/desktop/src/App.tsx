@@ -85,6 +85,11 @@ function App(props: AppProps) {
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(readRepomindOpen());
   const [repomindFull, setRepomindFull] = createSignal(false);
+  // C1: which right-rail tab is currently showing, and a one-shot command to switch to it — see
+  // RightPanelHost's `requestTab`/`onActiveTabChange` props for why this isn't just local state.
+  const [rightPanelTab, setRightPanelTab] = createSignal("repomind");
+  const [gitTabRequest, setGitTabRequest] = createSignal<{ id: string; token: number } | null>(null);
+  let gitTabRequestToken = 0;
   const [onboardingOpen, setOnboardingOpen] = createSignal(false);
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
@@ -204,6 +209,25 @@ function App(props: AppProps) {
       case "panel.control": actions.toggleControl(); break;
       case "panel.settings": actions.openSettings(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
+      case "panel.git": {
+        if (!repomindOpen()) {
+          // Closed → open already on the git tab. RightPanelHost consults `requestTab.id` on its
+          // very first render, so bumping this in the same tick as opening is enough — no need to
+          // wait for the panel to mount before it takes effect.
+          setGitTabRequest({ id: "git", token: ++gitTabRequestToken });
+          setRepomindOpen(true);
+          persistRepomindOpen(true);
+        } else if (rightPanelTab() === "git") {
+          // Already open and already on git: mirrors the repomind toggle's own feel — the
+          // shortcut for "the panel I'm looking at" closes it.
+          setRepomindOpen(false);
+          persistRepomindOpen(false);
+        } else {
+          // Open on some other tab (Repomind): switch to git without closing.
+          setGitTabRequest({ id: "git", token: ++gitTabRequestToken });
+        }
+        break;
+      }
       case "panel.repomind":
         setRepomindOpen((open) => {
           const next = !open;
@@ -378,7 +402,7 @@ function App(props: AppProps) {
               persistRepomindOpen(next);
             }}
             aria-pressed={repomindOpen()}
-            title="Repomind (⌘3)"
+            title="Repomind (⌘5)"
           >
             <IconSparkles size={13} />
             <span>Repomind</span>
@@ -452,7 +476,12 @@ function App(props: AppProps) {
                 label="Resize right panel"
               />
               <div class="flex min-h-0 flex-1 flex-col border-l border-line">
-                <RightPanelHost onToggleFullscreen={() => setRepomindFull(true)} />
+                <RightPanelHost
+                  onToggleFullscreen={() => setRepomindFull(true)}
+                  fleet={fleet}
+                  requestTab={gitTabRequest()}
+                  onActiveTabChange={setRightPanelTab}
+                />
               </div>
             </div>
           </Show>
