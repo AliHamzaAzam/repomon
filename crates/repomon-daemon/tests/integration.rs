@@ -642,6 +642,13 @@ async fn agent_detect_lists_builtins_and_customs() {
     assert!(names.contains(&"claude-code"));
     assert!(names.contains(&"codex"));
     assert!(names.contains(&"aider"));
+    assert!(names.contains(&"cursor"));
+    let cursor = arr
+        .iter()
+        .find(|c| c["name"] == "cursor")
+        .expect("cursor agent listed");
+    assert_eq!(cursor["custom"], json!(false));
+    assert_eq!(cursor["command"], json!("cursor-agent"));
     let yolo = arr
         .iter()
         .find(|c| c["name"] == "yolo")

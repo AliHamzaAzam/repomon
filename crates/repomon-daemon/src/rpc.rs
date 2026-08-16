@@ -2236,6 +2236,7 @@ pub async fn dispatch(
                 AgentKind::OpenCode,
                 AgentKind::Antigravity,
                 AgentKind::Aider,
+                AgentKind::Cursor,
             ] {
                 let command = kind.command().to_string();
                 let name = kind.as_str().into_owned();
@@ -5088,7 +5089,7 @@ fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>
 
 /// Built-in agent kinds with a fixed binary name. Claude is handled separately (one variant
 /// per detected config dir). These names can't be used for a custom agent.
-const BUILTIN_AGENTS: [&str; 4] = ["codex", "opencode", "antigravity", "aider"];
+const BUILTIN_AGENTS: [&str; 5] = ["codex", "opencode", "antigravity", "aider", "cursor"];
 
 /// A name is reserved (can't be added/removed as a custom) if it's a fixed built-in or one of
 /// the autodetected Claude variants (claude-code, claude-work, …).
