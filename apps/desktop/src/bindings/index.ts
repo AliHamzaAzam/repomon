@@ -8,6 +8,7 @@ export type { ApprovalRule } from "./ApprovalRule";
 export type { BrowseEntry } from "./BrowseEntry";
 export type { BrowseResult } from "./BrowseResult";
 export type { Commit } from "./Commit";
+export type { CommitShow } from "./CommitShow";
 export type { CreateLaneParams } from "./CreateLaneParams";
 export type { EnabledSource } from "./EnabledSource";
 export type { ExtAccount } from "./ExtAccount";

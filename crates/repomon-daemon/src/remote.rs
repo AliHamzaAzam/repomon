@@ -55,6 +55,9 @@ impl Drop for ConnGuard {
 /// The worktree file-editor RPCs (`file.list`/`file.read`/`file.write`, D1/D2) join `fs.browse` in
 /// that filesystem-access group for the same reason — deliberately absent below, not merely
 /// unlisted, and doubly so for `file.write` since it can overwrite files on the host.
+/// `commit.show` (item 6) is local-only too: unlike the already-allowed `lane.diff` (scoped to
+/// one lane's current diff), a caller-chosen `oid` can walk the *entire* repo history one commit
+/// at a time — a materially broader read surface than what's on the allowlist below.
 /// The local Unix socket is unaffected.
 fn remote_method_allowed(method: &str) -> bool {
     matches!(
@@ -684,6 +687,12 @@ mod tests {
             "file.list",
             "file.read",
             "file.write",
+            // commit.show (item 6) shells out to `git show` for one caller-chosen oid at a time -
+            // a much broader read surface than lane.diff (which is scoped to one lane's *current*
+            // diff): a remote caller could walk an entire repo's commit history, one commit's
+            // full patch at a time, over the bridge. Local-only until a deliberate decision opens
+            // it up, same reasoning as the filesystem-access group just above.
+            "commit.show",
             "daemon.shutdown",
             // system.doctor is intentionally local-only (machine health / dependency check of the host)
             "system.doctor",

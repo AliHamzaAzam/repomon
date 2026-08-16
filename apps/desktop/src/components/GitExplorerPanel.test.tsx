@@ -21,6 +21,8 @@ const responses = vi.hoisted(() => ({
   diffError: null as string | null,
   history: [] as unknown[],
   historyError: null as string | null,
+  commitShow: null as unknown,
+  commitShowError: null as string | null,
 }));
 
 vi.mock("../ipc/rpc", () => ({
@@ -31,6 +33,11 @@ vi.mock("../ipc/rpc", () => ({
     }
     if (method === "commit.recent") {
       return responses.historyError ? Promise.reject(new Error(responses.historyError)) : Promise.resolve(responses.history);
+    }
+    if (method === "commit.show") {
+      return responses.commitShowError
+        ? Promise.reject(new Error(responses.commitShowError))
+        : Promise.resolve(responses.commitShow);
     }
     return Promise.resolve({});
   },
@@ -44,6 +51,8 @@ afterEach(() => {
   responses.diffError = null;
   responses.history = [];
   responses.historyError = null;
+  responses.commitShow = null;
+  responses.commitShowError = null;
   localStorage.clear();
 });
 
@@ -85,6 +94,31 @@ function commit(overrides: Partial<Commit> = {}): Commit {
     summary: "Add the analytical engine",
     time: "2026-08-16T11:00:00Z",
     parent_count: 1,
+    ...overrides,
+  };
+}
+
+function commitShow(overrides: Partial<{
+  oid: string;
+  author_name: string;
+  author_email: string;
+  time: string;
+  summary: string;
+  body: string;
+  patch: string;
+  stat: string;
+  patch_truncated: boolean;
+}> = {}) {
+  return {
+    oid: "0123456789abcdef0123456789abcdef01234567",
+    author_name: "Ada Lovelace",
+    author_email: "ada@example.com",
+    time: "2026-08-16T11:00:00Z",
+    summary: "Add the analytical engine",
+    body: "Explains why the engine was added.",
+    patch: "diff --git a/engine.ts b/engine.ts\n@@ -0,0 +1 @@\n+export const engine = 1;\n",
+    stat: " engine.ts | 1 +\n 1 file changed, 1 insertion(+)",
+    patch_truncated: false,
     ...overrides,
   };
 }
@@ -505,7 +539,34 @@ describe("GitExplorerPanel Diff view", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Diff truncated");
   });
 
-  it("does not add a click handler to commit rows (Branch or History) - no per-commit patch RPC exists yet", async () => {
+  it("makes History commit rows clickable, opening that commit's detail via commit.show (item 6)", async () => {
+    responses.diff = { base: "main", merge_base: "abc0000", commits: "", committed_stat: "", uncommitted_stat: "", untracked: 0 };
+    responses.history = [commit({ oid: "0123456789abcdef0123456789abcdef01234567", summary: "Add the analytical engine" })];
+    responses.commitShow = commitShow({ oid: "0123456789abcdef0123456789abcdef01234567" });
+    render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
+
+    const row = await screen.findByRole("button", { name: /Add the analytical engine/ });
+    fireEvent.click(row);
+
+    const showCall = await waitFor(() => {
+      const c = calls.list.find((c) => c.method === "commit.show");
+      expect(c).toBeDefined();
+      return c!;
+    });
+    expect(showCall.params).toEqual({ lane_id: 7, oid: "0123456789abcdef0123456789abcdef01234567" });
+
+    // Commit meta (author, relative+absolute date, full body) renders above the patch, and the
+    // patch itself is rendered via the shared DiffView (its file card shows the changed path).
+    expect(await screen.findByText("Add the analytical engine")).toBeInTheDocument();
+    expect(screen.getByText("Explains why the engine was added.")).toBeInTheDocument();
+    expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByText("engine.ts")).toBeInTheDocument();
+    // Same overview-replacing shape as the working-tree Diff view: Branch/Working tree/History
+    // sections are gone while the commit view is open.
+    expect(screen.queryByText("Working tree")).not.toBeInTheDocument();
+  });
+
+  it("makes Branch commit rows clickable too, and returns to the overview on close", async () => {
     responses.diff = {
       base: "main",
       merge_base: "abc0000",
@@ -514,16 +575,68 @@ describe("GitExplorerPanel Diff view", () => {
       uncommitted_stat: "",
       untracked: 0,
     };
-    responses.history = [commit({ oid: "0123456789abcdef0123456789abcdef01234567", summary: "Add the analytical engine" })];
+    responses.history = [];
+    responses.commitShow = commitShow({ oid: "abc1234full", summary: "Fix the thing" });
     render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
 
-    await screen.findByText("Fix the thing");
-    await screen.findByText("Add the analytical engine");
+    const row = await screen.findByRole("button", { name: /Fix the thing/ });
+    fireEvent.click(row);
 
-    // Neither commit row is a <button> (or any other element exposing a "button" role) - unlike
-    // the Working-tree file rows, they carry no click affordance at all.
-    expect(screen.queryByRole("button", { name: /Fix the thing/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Add the analytical engine/ })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(calls.list.find((c) => c.method === "commit.show")?.params).toEqual({ lane_id: 7, oid: "abc1234" });
+    });
+    expect(await screen.findByLabelText("Close commit")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Close commit"));
+
+    await waitFor(() => expect(screen.queryByLabelText("Close commit")).not.toBeInTheDocument());
+    expect(await screen.findByText(/commits? ahead of/)).toBeInTheDocument();
+  });
+
+  it("shows a friendly error with retry when commit.show fails", async () => {
+    responses.diff = { base: "main", merge_base: "abc0000", commits: "", committed_stat: "", uncommitted_stat: "", untracked: 0 };
+    responses.history = [commit({ oid: "0123456789abcdef0123456789abcdef01234567", summary: "Add the analytical engine" })];
+    responses.commitShowError = "no such file or directory (os error 2)";
+    render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Add the analytical engine/ }));
+
+    expect(await screen.findByText("Couldn't load commit")).toBeInTheDocument();
+    const callsBeforeRetry = calls.list.length;
+
+    responses.commitShowError = null;
+    responses.commitShow = commitShow();
+    fireEvent.click(screen.getByText("Retry"));
+
+    await waitFor(() => expect(calls.list.length).toBeGreaterThan(callsBeforeRetry));
+    await waitFor(() => expect(screen.queryByText("Couldn't load commit")).not.toBeInTheDocument());
+  });
+
+  it("returns to a working commit-row list after closing the working-tree diff view", async () => {
+    // The working-tree Diff view and the commit view both replace the same overview sections, so
+    // a commit row is only reachable once the tree diff is closed - this exercises that sequence
+    // rather than a simultaneous click on a target that isn't in the DOM yet.
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " a.ts | 1 +\n",
+      untracked: 0,
+      patch: "diff --git a/a.ts b/a.ts\n@@ -0,0 +1 @@\n+x\n",
+    };
+    responses.history = [commit({ oid: "0123456789abcdef0123456789abcdef01234567", summary: "Add the analytical engine" })];
+    responses.commitShow = commitShow();
+    render(() => <GitExplorerPanel fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /a\.ts/ }));
+    expect(await screen.findByTitle("Close diff")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Close diff"));
+    await waitFor(() => expect(screen.queryByTitle("Close diff")).not.toBeInTheDocument());
+
+    fireEvent.click(await screen.findByRole("button", { name: /Add the analytical engine/ }));
+    expect(await screen.findByLabelText("Close commit")).toBeInTheDocument();
   });
 });
 

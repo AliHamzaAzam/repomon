@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 
-import type { Commit, Lane } from "../bindings";
+import type { Commit, CommitShow, Lane } from "../bindings";
 import DiffView from "./DiffView";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall, type LaneDiff } from "../ipc/rpc";
@@ -11,6 +11,7 @@ import {
   IconArrowUp,
   IconChevronDown,
   IconChevronRight,
+  IconClose,
   IconGitBranch,
   IconGitCommit,
   IconRefresh,
@@ -118,12 +119,10 @@ function splitPath(path: string): { dir: string; base: string } {
   return idx === -1 ? { dir: "", base: path } : { dir: path.slice(0, idx + 1), base: path.slice(idx + 1) };
 }
 
-/// Working-tree file rows are the one clickable target that opens the Diff view (see
-/// `openDiff`/`DiffView` below) - `onSelect` fires with the file's (post-rename) path. Commit
-/// rows in Branch/History stay plain `<li>`s with no click handler: `lane.diff`'s patch is
-/// working-tree-only (see the comment on `openDiff`), so there is no backing data for a
-/// per-commit diff yet, and a hover/click affordance here would promise something that isn't
-/// there.
+/// Working-tree file rows open the Diff view (see `openDiff`/`DiffView` below) - `onSelect` fires
+/// with the file's (post-rename) path. Commit rows in Branch/History (see `openCommit`) share the
+/// same view via `commit.show` (item 6), each opening that one commit's detail instead of the
+/// lane's working-tree patch.
 function StatFileRowView(props: { file: StatFileRow; onSelect: (path: string) => void }) {
   const parts = () => splitPath(props.file.path);
   return (
@@ -222,6 +221,16 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   const [diffOpen, setDiffOpen] = createSignal(false);
   const [diffFocusPath, setDiffFocusPath] = createSignal<string | null>(null);
 
+  // Item 6: commit-detail view, mutually exclusive with the working-tree Diff view above (opening
+  // one closes the other - see `openDiff`/`openCommit`). Kept as its own signal group rather than
+  // folded into `diffOpen`/`branchData` since its data (one commit's `commit.show` result) is a
+  // different shape and fetch from the lane-wide working-tree patch.
+  const [commitOid, setCommitOid] = createSignal<string | null>(null);
+  const [commitDetail, setCommitDetail] = createSignal<CommitShow | null>(null);
+  const [commitLoading, setCommitLoading] = createSignal(false);
+  const [commitError, setCommitError] = createSignal<TranslatedError | null>(null);
+  let commitEpoch = 0;
+
   let epoch = 0;
 
   async function load(laneId: number) {
@@ -249,6 +258,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   // any one file fetches (or reuses an already-fetched) whole-lane patch and just tells DiffView
   // which file's card to land on/expand.
   function openDiff(path: string) {
+    closeCommit(); // mutually exclusive with the commit view (see the field group's comment)
     setDiffFocusPath(path);
     const wasOpen = diffOpen();
     setDiffOpen(true);
@@ -263,6 +273,46 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   function closeDiff() {
     setDiffOpen(false);
     setDiffFocusPath(null);
+  }
+
+  // Item 6: Branch/History commit rows open this instead of `openDiff` - same "replaces the
+  // overview sections, same close/back affordance" feel, but backed by `commit.show` for one
+  // commit rather than `lane.diff`'s working-tree patch. `oid` may be abbreviated (Branch rows
+  // parse a short hash out of `git log --oneline` text; History rows carry the full oid from
+  // `commit.recent`) - the daemon resolves either against the lane's repo.
+  function openCommit(oid: string) {
+    closeDiff(); // mutually exclusive with the working-tree Diff view
+    const mine = ++commitEpoch;
+    setCommitOid(oid);
+    setCommitDetail(null);
+    setCommitError(null);
+    const l = lane();
+    if (!l) {
+      setCommitLoading(false);
+      return;
+    }
+    setCommitLoading(true);
+    daemonCall("commit.show", { lane_id: l.id, oid })
+      .then((detail) => {
+        if (mine !== commitEpoch) return;
+        setCommitDetail(detail);
+      })
+      .catch((cause) => {
+        if (mine !== commitEpoch) return;
+        setCommitError(translateError(cause, { binary: "git" }));
+      })
+      .finally(() => {
+        if (mine !== commitEpoch) return;
+        setCommitLoading(false);
+      });
+  }
+
+  function closeCommit() {
+    commitEpoch += 1; // invalidate any in-flight commit.show for the commit we're leaving
+    setCommitOid(null);
+    setCommitDetail(null);
+    setCommitError(null);
+    setCommitLoading(false);
   }
 
   // `patch` is `undefined` both before the first patch fetch and after an error; an empty string
@@ -295,10 +345,10 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     void load(l.id);
   });
 
-  // A patch belongs to one lane; switching lanes (not just a same-lane poll refresh) closes an
-  // open Diff view rather than showing a stale or mismatched patch. Tracked by id, not object
-  // identity, since the fleet store's poll produces a fresh Lane object every cycle even when
-  // the selection hasn't moved.
+  // A patch (or a commit) belongs to one lane; switching lanes (not just a same-lane poll
+  // refresh) closes an open Diff/commit view rather than showing a stale or mismatched patch.
+  // Tracked by id, not object identity, since the fleet store's poll produces a fresh Lane
+  // object every cycle even when the selection hasn't moved.
   let lastLaneId: number | null = null;
   createEffect(() => {
     const id = lane()?.id ?? null;
@@ -306,6 +356,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     lastLaneId = id;
     setDiffOpen(false);
     setDiffFocusPath(null);
+    closeCommit();
   });
 
   function refresh() {
@@ -417,7 +468,89 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
           </div>
         </Show>
 
-        <Show when={!diffOpen()}>
+        {/* Item 6: commit-detail view, opened by a Branch/History row click - same
+            replaces-the-overview / close-back-to-overview shape as the working-tree Diff view
+            above, mutually exclusive with it (see openDiff/openCommit). */}
+        <Show when={commitOid()} keyed>
+          {(oid) => (
+            <div class="min-h-0 flex-1">
+              <Show
+                when={commitError()}
+                keyed
+                fallback={
+                  <Show
+                    when={commitDetail()}
+                    keyed
+                    fallback={
+                      commitLoading() ? (
+                        <div class="p-3">
+                          <RowSkeleton rows={5} />
+                        </div>
+                      ) : (
+                        <p class="p-3 text-xs text-muted">Commit not loaded yet.</p>
+                      )
+                    }
+                  >
+                    {(detail) => (
+                      <DiffView
+                        patch={detail.patch}
+                        truncated={detail.patch_truncated}
+                        header={
+                          <div class="flex shrink-0 flex-col gap-1.5 border-b border-line px-3 py-2.5">
+                            <div class="flex items-center justify-between gap-2">
+                              <span class="flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted">
+                                <IconGitCommit size={11} class="shrink-0 text-muted/50" />
+                                <span class="truncate">{detail.oid.slice(0, 7)}</span>
+                              </span>
+                              <button
+                                type="button"
+                                class="focus-ring flex size-5 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                                onClick={closeCommit}
+                                title="Close commit"
+                                aria-label="Close commit"
+                              >
+                                <IconClose size={11} />
+                              </button>
+                            </div>
+                            <p class="text-xs font-medium text-foreground">{detail.summary}</p>
+                            <Show when={detail.body.trim()} keyed>
+                              {(body) => <p class="whitespace-pre-wrap text-xs text-muted">{body}</p>}
+                            </Show>
+                            <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted/70">
+                              <span>{detail.author_name}</span>
+                              <span aria-hidden="true">·</span>
+                              <span title={new Date(detail.time).toLocaleString()}>
+                                {formatRelativeTime(detail.time)} ({new Date(detail.time).toLocaleString()})
+                              </span>
+                            </div>
+                          </div>
+                        }
+                      />
+                    )}
+                  </Show>
+                }
+              >
+                {(err) => (
+                  <div role="alert" class="m-3 flex items-start justify-between gap-3 rounded-xl border border-fault/30 bg-fault/10 p-3 text-xs text-fault">
+                    <div class="min-w-0">
+                      <p class="font-semibold">Couldn't load commit</p>
+                      <p class="mt-0.5 break-words text-fault/80">{err.friendly}</p>
+                    </div>
+                    <button
+                      type="button"
+                      class="focus-ring shrink-0 rounded-lg border border-fault/40 bg-surface px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-fault/20"
+                      onClick={() => openCommit(oid)}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+              </Show>
+            </div>
+          )}
+        </Show>
+
+        <Show when={!diffOpen() && !commitOid()}>
           <div class="min-h-0 flex-1 space-y-5 overflow-y-auto p-3">
             <section>
               <p class="section-label mb-2">Branch</p>
@@ -448,10 +581,16 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                         <ul class="space-y-0.5">
                           <For each={commits()}>
                             {(commit) => (
-                              <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
-                                <IconGitCommit size={10} class="shrink-0 text-muted/40" />
-                                <span class="shrink-0 font-mono text-[10px] text-muted">{commit.oid}</span>
-                                <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
+                              <li>
+                                <button
+                                  type="button"
+                                  class="focus-ring flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left hover:bg-raised/60"
+                                  onClick={() => openCommit(commit.oid)}
+                                >
+                                  <IconGitCommit size={10} class="shrink-0 text-muted/40" />
+                                  <span class="shrink-0 font-mono text-[10px] text-muted">{commit.oid}</span>
+                                  <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
+                                </button>
                               </li>
                             )}
                           </For>
@@ -558,14 +697,20 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                   <ul class="space-y-0.5">
                     <For each={history()}>
                       {(commit) => (
-                        <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
-                          <IconGitCommit size={10} class="shrink-0 text-muted/40" />
-                          <span class="shrink-0 font-mono text-[10px] text-muted/70">{commit.oid.slice(0, 7)}</span>
-                          <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
-                          <span class="shrink-0 text-[10px] text-muted" title={new Date(commit.time).toLocaleString()}>
-                            {formatRelativeTime(commit.time)}
-                          </span>
-                          <span class="max-w-[5.5rem] shrink-0 truncate text-[10px] text-muted/70">{commit.author_name}</span>
+                        <li>
+                          <button
+                            type="button"
+                            class="focus-ring flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left hover:bg-raised/60"
+                            onClick={() => openCommit(commit.oid)}
+                          >
+                            <IconGitCommit size={10} class="shrink-0 text-muted/40" />
+                            <span class="shrink-0 font-mono text-[10px] text-muted/70">{commit.oid.slice(0, 7)}</span>
+                            <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
+                            <span class="shrink-0 text-[10px] text-muted" title={new Date(commit.time).toLocaleString()}>
+                              {formatRelativeTime(commit.time)}
+                            </span>
+                            <span class="max-w-[5.5rem] shrink-0 truncate text-[10px] text-muted/70">{commit.author_name}</span>
+                          </button>
                         </li>
                       )}
                     </For>

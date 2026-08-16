@@ -1151,6 +1151,125 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
 }
 
 #[tokio::test]
+async fn commit_show_returns_full_detail_rejects_malformed_oid_and_honors_truncation() {
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, Config::default(), None);
+    let sock = std::env::temp_dir().join(format!("repomon-commitshow-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    git(repo_dir.path(), &["init", "-b", "main"]);
+    std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
+    git(repo_dir.path(), &["add", "."]);
+    git(repo_dir.path(), &["commit", "-m", "init"]);
+    let r = call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let repo_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    let wt_parent = tempfile::tempdir().unwrap();
+    let wt_path = wt_parent.path().join("feat");
+    let r = call(
+        &mut stream,
+        2,
+        "lane.create",
+        Some(json!({
+            "repo_id": repo_id,
+            "branch": "feat/thing",
+            "source_branch": "main",
+            "path": wt_path.to_string_lossy(),
+        })),
+    )
+    .await;
+    assert!(r.error.is_none(), "lane.create errored: {:?}", r.error);
+    let lane_id = r.result.unwrap()["id"].as_i64().unwrap();
+
+    std::fs::write(wt_path.join("a.txt"), "a\n").unwrap();
+    git(&wt_path, &["add", "a.txt"]);
+    git(
+        &wt_path,
+        &["commit", "-m", "feat: add a\n\nA longer explanation of why."],
+    );
+    let full_oid = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&wt_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    // Valid oid -> full metadata + patch.
+    let r = call(
+        &mut stream,
+        3,
+        "commit.show",
+        Some(json!({ "lane_id": lane_id, "oid": full_oid })),
+    )
+    .await;
+    assert!(r.error.is_none(), "commit.show errored: {:?}", r.error);
+    let show = r.result.unwrap();
+    assert_eq!(show["oid"], json!(full_oid));
+    assert_eq!(show["author_name"], json!("T"));
+    assert_eq!(show["author_email"], json!("t@e.com"));
+    assert_eq!(show["summary"], json!("feat: add a"));
+    let body = show["body"].as_str().unwrap();
+    assert!(body.contains("A longer explanation of why."), "body was: {body:?}");
+    let patch = show["patch"].as_str().unwrap();
+    assert!(patch.contains("+a"), "patch was: {patch:?}");
+    let stat = show["stat"].as_str().unwrap();
+    assert!(stat.contains("a.txt"), "stat was: {stat:?}");
+    assert_eq!(show["patch_truncated"], json!(false));
+
+    // Malformed oid (not hex - would also look like a git flag) is rejected outright.
+    let r = call(
+        &mut stream,
+        4,
+        "commit.show",
+        Some(json!({ "lane_id": lane_id, "oid": "--not-an-oid" })),
+    )
+    .await;
+    assert!(r.result.is_none());
+    let err = r.error.expect("malformed oid should error");
+    assert!(
+        err.message.contains("not a valid commit id"),
+        "unexpected message: {}",
+        err.message
+    );
+
+    // A tiny max_patch_chars cap truncates, same as lane.diff's cap.
+    let r = call(
+        &mut stream,
+        5,
+        "commit.show",
+        Some(json!({ "lane_id": lane_id, "oid": full_oid, "max_patch_chars": 10 })),
+    )
+    .await;
+    assert!(r.error.is_none(), "commit.show errored: {:?}", r.error);
+    let show = r.result.unwrap();
+    let patch = show["patch"].as_str().unwrap();
+    assert_eq!(patch.chars().count(), 10, "patch was: {patch:?}");
+    assert_eq!(show["patch_truncated"], json!(true));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
 async fn extension_rpcs_list_toggle_and_fan_out() {
     // Point the daemon at an isolated Claude home (process-global env: keep this the only test
     // that sets it).

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 
 import { IconChevronDown, IconChevronRight, IconClose } from "./icons";
 
@@ -304,6 +304,11 @@ export interface DiffViewProps {
   /// opening the diff view without a specific file in mind.
   focusPath?: string;
   onClose?: () => void;
+  /// Item 6: replaces the default "Diff" title bar with custom content — GitExplorerPanel's
+  /// commit-detail header (author, relative+absolute date, full message body, close button) for
+  /// the commit view, so that view owns its own title/close chrome instead of stacking a second
+  /// header row above this one's default.
+  header?: JSX.Element;
 }
 
 /// Lightweight unified-diff viewer for the Git explorer's right rail. Pure presentation: the
@@ -336,22 +341,29 @@ export default function DiffView(props: DiffViewProps) {
 
   return (
     <div class="flex h-full min-h-0 flex-col">
-      <div class="flex h-8 shrink-0 items-center justify-between border-b border-line px-2">
-        <span class="section-label">Diff</span>
-        <Show when={props.onClose} keyed>
-          {(onClose) => (
-            <button
-              type="button"
-              class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
-              onClick={onClose}
-              title="Close diff"
-              aria-label="Close diff"
-            >
-              <IconClose size={11} />
-            </button>
-          )}
-        </Show>
-      </div>
+      <Show
+        when={props.header}
+        fallback={
+          <div class="flex h-8 shrink-0 items-center justify-between border-b border-line px-2">
+            <span class="section-label">Diff</span>
+            <Show when={props.onClose} keyed>
+              {(onClose) => (
+                <button
+                  type="button"
+                  class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                  onClick={onClose}
+                  title="Close diff"
+                  aria-label="Close diff"
+                >
+                  <IconClose size={11} />
+                </button>
+              )}
+            </Show>
+          </div>
+        }
+      >
+        {props.header}
+      </Show>
       <Show when={props.truncated}>
         <div role="status" class="m-2 mb-0 rounded-lg border border-attention/40 bg-attention/10 px-2.5 py-1.5 text-[11px] text-attention">
           Diff truncated at {props.patch.length.toLocaleString()} chars, showing partial diff.

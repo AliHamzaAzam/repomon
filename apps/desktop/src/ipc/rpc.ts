@@ -6,6 +6,7 @@ import type {
   AgentChoice,
   BrowseResult,
   Commit,
+  CommitShow,
   ExtSnapshot,
   FanoutSummary,
   FileListResult,
@@ -240,6 +241,10 @@ interface RpcMap {
   "viewport.set": { params: { lane_ids: number[]; focus_lane?: number; focus_window?: string; windows?: string[] }; result: null };
   "commit.recent": { params: { lane_id?: number; repo_id?: number; limit?: number }; result: Commit[] };
   "commit.search": { params: { query: string; limit?: number }; result: Commit[] };
+  // Local-only (see remote.rs's remote_method_allowed) - same reasoning as the worktree
+  // file-editor RPCs above: a caller-chosen oid can walk the entire repo history one commit at a
+  // time, broader than lane.diff's current-diff-only scope.
+  "commit.show": { params: { lane_id: number; oid: string; max_patch_chars?: number }; result: CommitShow };
   timeline: { params: { from_iso: string; to_iso: string; bucket_secs: number }; result: TimelineData };
   sessions: { params: { from_iso: string; to_iso: string }; result: WorkSession[] };
   "config.get": { params: undefined; result: ConfigView };

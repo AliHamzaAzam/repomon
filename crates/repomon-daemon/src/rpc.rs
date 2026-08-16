@@ -1010,6 +1010,13 @@ fn default_max_patch_chars() -> usize {
 /// Server-side cap: even a caller-supplied `max_patch_chars` can't force an unbounded patch.
 const MAX_PATCH_CHARS_CEILING: usize = 20_000;
 #[derive(Deserialize)]
+struct CommitShowParams {
+    lane_id: repomon_core::model::LaneId,
+    oid: String,
+    #[serde(default = "default_max_patch_chars")]
+    max_patch_chars: usize,
+}
+#[derive(Deserialize)]
 struct FileList {
     lane_id: repomon_core::model::LaneId,
     /// Relative to the worktree root; omitted/`None` lists the root itself.
@@ -1900,6 +1907,28 @@ pub async fn dispatch(
                 }
             }
             Ok(result)
+        }
+        // commit.show: item 6, one commit's full metadata + patch for GitExplorerPanel's
+        // commit-detail view (Branch/History rows becoming clickable). LOCAL-ONLY — see
+        // remote.rs's remote_method_allowed, which withholds this alongside the worktree
+        // file-editor RPCs: unlike lane.diff (scoped to one lane's current diff), a caller-chosen
+        // oid can walk the *entire* repo history one commit at a time, a much broader read surface
+        // than the already-allowed reads.
+        "commit.show" => {
+            let p: CommitShowParams = parse(params)?;
+            let max_patch_chars = p.max_patch_chars.min(MAX_PATCH_CHARS_CEILING);
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let wt_path = lane.worktree.path.clone();
+            let oid = p.oid.clone();
+            let mut show = tokio::task::spawn_blocking(move || diff::commit_show(&wt_path, &oid))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
+
+            let (patch, patch_truncated) = cap_chars(&show.patch, max_patch_chars);
+            show.patch = patch;
+            show.patch_truncated = patch_truncated;
+            to_value(show)
         }
 
         // ---- worktree files, for the in-app editor (D1 file.list, D2 file.read/file.write) ----
