@@ -314,6 +314,44 @@
   box-shadow: 0 0 0 1px var(--signal);
 }
 
+.resizable-split-handle {
+  position: relative;
+  z-index: 5;
+  flex: 0 0 auto;
+  width: 6px;
+  margin-inline: -3px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.resizable-split-handle::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--line);
+  transition: background-color 120ms ease, width 120ms ease;
+}
+
+.resizable-split-handle:hover::before,
+.resizable-split-handle.is-dragging::before {
+  width: 2px;
+  background: var(--signal);
+}
+
+.resizable-split-handle:focus-visible {
+  outline: none;
+}
+
+.resizable-split-handle:focus-visible::before {
+  width: 2px;
+  background: var(--signal);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 25%, transparent);
+}
+
 @media (max-width: 980px) {
   .mission-grid,
   .mission-grid.is-repomind-open {
