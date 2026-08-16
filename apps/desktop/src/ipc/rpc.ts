@@ -8,6 +8,9 @@ import type {
   Commit,
   ExtSnapshot,
   FanoutSummary,
+  FileListResult,
+  FileReadResult,
+  FileWriteResult,
   JournalEntry,
   Lane,
   FleetMessage,
@@ -180,6 +183,17 @@ interface RpcMap {
   "lane.focus": { params: { lane_id: number }; result: { path: string } };
   "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
   "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: LaneDiff };
+  // Worktree file I/O for the in-app editor (D1/D2). Local-only (see remote.rs's
+  // remote_method_allowed) — never reachable from a paired-device connection.
+  "file.list": { params: { lane_id: number; path?: string }; result: FileListResult };
+  "file.read": { params: { lane_id: number; path: string }; result: FileReadResult };
+  // `expected_mtime_ms` omitted = last-write-wins; given and stale, the daemon rejects with
+  // DaemonRpcError.code === -32011 ("conflict: file changed on disk") and
+  // `data: { expected_mtime_ms, actual_mtime_ms }` (actual is null if the file was deleted).
+  "file.write": {
+    params: { lane_id: number; path: string; content: string; expected_mtime_ms?: number };
+    result: FileWriteResult;
+  };
   // `to` also accepts a list of addresses, "lane-2/*", or "*" (A6 broadcast/multi-recipient
   // mail). A single plain address still returns a bare `FleetMessage`; anything else returns a
   // fan-out summary instead (`{ recipient_count, sent_count, results: { to, status, ... }[] }`).

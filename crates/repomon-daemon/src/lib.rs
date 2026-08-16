@@ -8,6 +8,7 @@ pub mod auto_continue;
 pub mod bytes_stream;
 pub mod conn;
 pub mod ext;
+pub mod files;
 pub mod mail;
 pub mod notify_watch;
 pub mod path_env;

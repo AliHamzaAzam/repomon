@@ -52,6 +52,9 @@ impl Drop for ConnGuard {
 /// daemon lifecycle (`daemon.shutdown`), host diagnostics (`system.doctor`, local machine health),
 /// config/secrets (`config.get` can carry the remote token, `config.set`), host terminal + filesystem
 /// access (`terminal.open/close/target`, `fs.browse`), and credential minting (`remote.*`, local-only).
+/// The worktree file-editor RPCs (`file.list`/`file.read`/`file.write`, D1/D2) join `fs.browse` in
+/// that filesystem-access group for the same reason — deliberately absent below, not merely
+/// unlisted, and doubly so for `file.write` since it can overwrite files on the host.
 /// The local Unix socket is unaffected.
 fn remote_method_allowed(method: &str) -> bool {
     matches!(
@@ -667,6 +670,11 @@ mod tests {
             "terminal.close",
             "terminal.target",
             "fs.browse",
+            // worktree file-editor RPCs (D1/D2) — filesystem access, same local-only reasoning
+            // as fs.browse just above, doubly so for file.write (it overwrites host files).
+            "file.list",
+            "file.read",
+            "file.write",
             "daemon.shutdown",
             // system.doctor is intentionally local-only (machine health / dependency check of the host)
             "system.doctor",

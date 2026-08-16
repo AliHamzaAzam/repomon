@@ -741,6 +741,65 @@ pub struct BrowseResult {
     pub entries: Vec<BrowseEntry>,
 }
 
+/// One entry in a `file.list` directory listing (one worktree level — not a recursive tree, the
+/// desktop's file tree expands lazily). `size` is `None` for directories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileEntry {
+    pub name: String,
+    /// Relative to the lane's worktree root, forward-slash separated.
+    pub path: String,
+    pub is_dir: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub size: Option<u64>,
+    /// From a batched `git check-ignore --stdin` over the whole listing (see
+    /// `repomon-daemon/src/files.rs`), not a per-entry shell-out. `.git` itself is never listed
+    /// at all (independent of gitignore — see `file.list`'s handler).
+    pub ignored: bool,
+}
+
+/// `file.list`'s result: one directory level of a lane's worktree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileListResult {
+    pub entries: Vec<FileEntry>,
+    /// True when the directory had more entries than the cap and the tail was dropped.
+    pub truncated: bool,
+}
+
+/// `file.read`'s result: whole-file content plus enough metadata for the editor's dirty/conflict
+/// checks. `mtime_ms` round-trips back into `file.write`'s `expected_mtime_ms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileReadResult {
+    pub content: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub mtime_ms: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub size: u64,
+    /// Always `false`: unlike display RPCs (e.g. `lane.diff`'s patch, which caps-and-flags),
+    /// `file.read` REJECTS a file over its size cap outright rather than truncating it — a
+    /// truncated read here risks the editor saving the truncated copy back over the real file.
+    /// Kept for shape symmetry with other file DTOs (and a possible future soft-cap mode); the
+    /// frontend should not expect this to ever be `true` today.
+    pub truncated: bool,
+}
+
+/// `file.write`'s result: enough for the editor to adopt the new on-disk state as its baseline
+/// without a round-trip `file.read`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileWriteResult {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub mtime_ms: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub size: u64,
+}
+
 /// Where a plugin's enabled/disabled value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

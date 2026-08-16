@@ -1797,8 +1797,10 @@ pub fn delete_skill(
 /// nearest existing ancestor, canonicalize that ancestor, then rejoin the (possibly
 /// nonexistent) tail. Applying this to both sides of a comparison keeps them on the same
 /// footing when an ancestor is a symlink (e.g. macOS's `/var` -> `/private/var`), whether or
-/// not the full path exists yet.
-fn canonical_prefix(path: &Path) -> Option<PathBuf> {
+/// not the full path exists yet. `pub(crate)`: also the basis for `files::worktree_path_allowed`
+/// (D1/D2's containment check for `file.list`/`file.read`/`file.write`), which needs the same
+/// not-yet-existing-tail tolerance for a not-yet-created file.
+pub(crate) fn canonical_prefix(path: &Path) -> Option<PathBuf> {
     let mut probe = path.to_path_buf();
     let mut rest = Vec::new();
     while !probe.exists() {

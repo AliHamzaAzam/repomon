@@ -103,6 +103,14 @@ fn percent_encode(s: &str) -> String {
 /// client can re-render instead of re-fetching.
 const DIALOG_CHANGED: i64 = -32010;
 
+/// `file.write` found the on-disk mtime didn't match the caller's `expected_mtime_ms` (or the
+/// file vanished entirely). The frontend must treat this as a save conflict — offer to re-read,
+/// merge, or force — never as a generic failure to retry blindly. `error.data` carries both
+/// mtimes (`actual_mtime_ms` is `null` when the file no longer exists) so the client can render
+/// the conflict without a second RPC round-trip. Same "distinct code + structured data" shape as
+/// `DIALOG_CHANGED` above.
+const FILE_CONFLICT: i64 = -32011;
+
 /// Record that input reached a lane window: stamp `input_seen` (quiets the notification
 /// engine) and drop the window's sniff-cache entry, so an answered dialog can't be
 /// re-advertised by `lane.list` for the rest of its TTL.
@@ -718,6 +726,43 @@ async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
     }
     Ok(roots)
 }
+
+/// Translate `files::ReadError` into the RPC-level error `file.read` returns. Both cases are
+/// deliberate rejections (see `files::read_file`'s doc comment for why this RPC never truncates),
+/// so both are `invalid_params` rather than `internal` — the caller gave a request this RPC
+/// can't safely satisfy, not the daemon hitting an unexpected failure.
+fn file_read_error(e: crate::files::ReadError) -> RpcError {
+    match e {
+        crate::files::ReadError::Binary => RpcError::invalid_params("binary file"),
+        crate::files::ReadError::TooLarge(size) => RpcError::invalid_params(format!(
+            "file too large to edit ({size} bytes; cap is {} bytes) — rejected rather than \
+             truncated, since a truncated read risks the editor saving a truncated copy back \
+             over the real file",
+            crate::files::READ_CAP_BYTES
+        )),
+        crate::files::ReadError::Io(e) => internal(e),
+    }
+}
+
+/// Translate `files::WriteError` into the RPC-level error `file.write` returns. `Conflict` gets
+/// the distinct `FILE_CONFLICT` code + structured `data` (see that const's doc comment) so the
+/// frontend can branch on it instead of pattern-matching the message text.
+fn file_write_error(e: crate::files::WriteError) -> RpcError {
+    match e {
+        crate::files::WriteError::Conflict { expected_ms, actual_ms } => RpcError {
+            code: FILE_CONFLICT,
+            message: "conflict: file changed on disk".into(),
+            data: Some(json!({
+                "expected_mtime_ms": expected_ms,
+                "actual_mtime_ms": actual_ms,
+            })),
+        },
+        crate::files::WriteError::NoParentDir => {
+            RpcError::invalid_params("parent directory does not exist (no mkdir -p in v1)")
+        }
+        crate::files::WriteError::Io(e) => internal(e),
+    }
+}
 #[derive(Deserialize)]
 struct AgentWatchBytes {
     lane_id: repomon_core::model::LaneId,
@@ -964,6 +1009,28 @@ fn default_max_patch_chars() -> usize {
 }
 /// Server-side cap: even a caller-supplied `max_patch_chars` can't force an unbounded patch.
 const MAX_PATCH_CHARS_CEILING: usize = 20_000;
+#[derive(Deserialize)]
+struct FileList {
+    lane_id: repomon_core::model::LaneId,
+    /// Relative to the worktree root; omitted/`None` lists the root itself.
+    #[serde(default)]
+    path: Option<String>,
+}
+#[derive(Deserialize)]
+struct FileRead {
+    lane_id: repomon_core::model::LaneId,
+    path: String,
+}
+#[derive(Deserialize)]
+struct FileWrite {
+    lane_id: repomon_core::model::LaneId,
+    path: String,
+    content: String,
+    /// The mtime (ms) the editor last read for this file. Given, this write is rejected with
+    /// `FILE_CONFLICT` unless the on-disk mtime still matches. Omitted = last-write-wins.
+    #[serde(default)]
+    expected_mtime_ms: Option<u64>,
+}
 #[derive(Deserialize)]
 struct Search {
     query: String,
@@ -1833,6 +1900,59 @@ pub async fn dispatch(
                 }
             }
             Ok(result)
+        }
+
+        // ---- worktree files, for the in-app editor (D1 file.list, D2 file.read/file.write) ----
+        // LOCAL-ONLY: see `remote::remote_method_allowed`'s doc comment, which withholds these
+        // three the same way it already withholds `fs.browse` — doubly so here since `file.write`
+        // touches the host filesystem.
+        "file.list" => {
+            let p: FileList = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let rel = p.path.unwrap_or_default();
+            let Some(dir) = crate::files::worktree_path_allowed(&root, &rel) else {
+                return Err(RpcError::invalid_params("path escapes the worktree root"));
+            };
+            tokio::task::spawn_blocking(move || crate::files::list_dir(&root, &dir))
+                .await
+                .map_err(internal)?
+                .map_err(internal)
+                .and_then(to_value)
+        }
+        "file.read" => {
+            let p: FileRead = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let Some(target) = crate::files::worktree_path_allowed(&root, &p.path) else {
+                return Err(RpcError::invalid_params("path escapes the worktree root"));
+            };
+            tokio::task::spawn_blocking(move || crate::files::read_file(&target))
+                .await
+                .map_err(internal)?
+                .map_err(file_read_error)
+                .and_then(to_value)
+        }
+        "file.write" => {
+            let p: FileWrite = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let Some(target) = crate::files::worktree_path_allowed(&root, &p.path) else {
+                return Err(RpcError::invalid_params("path escapes the worktree root"));
+            };
+            let content = p.content.clone();
+            let expected = p.expected_mtime_ms;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::files::write_file(&target, &content, expected)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(file_write_error)?;
+            ctx.broadcast(
+                "event.file.changed",
+                json!({ "lane_id": p.lane_id, "path": p.path }),
+            );
+            to_value(result)
         }
 
         // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----
