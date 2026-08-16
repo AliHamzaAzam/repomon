@@ -3713,9 +3713,16 @@ pub async fn dispatch(
                     (command, None)
                 }
                 crate::OrchestratorBackend::OpenCode => {
-                    return Err(RpcError::invalid_params(
-                        "backend accepted but launch command not implemented yet (A2/A3)",
-                    ));
+                    let command = build_opencode_orchestrator_command(
+                        &base,
+                        &socket,
+                        &p.autonomy,
+                        p.max_agents,
+                        &model,
+                        &p.prompt,
+                    )
+                    .map_err(internal)?;
+                    (command, None)
                 }
             };
             // cwd = the user's home, so repomind starts from there rather than the daemon's cwd.
@@ -6153,42 +6160,58 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
 fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), String> {
     match kind {
         AgentKind::OpenCode => {
-            let mut root = match std::env::var("OPENCODE_CONFIG_CONTENT") {
-                Ok(raw) if !raw.trim().is_empty() => {
-                    serde_json::from_str::<serde_json::Value>(&raw)
-                        .map_err(|error| format!("invalid OPENCODE_CONFIG_CONTENT: {error}"))?
-                }
-                _ => json!({}),
-            };
-            let root_object = root
-                .as_object_mut()
-                .ok_or_else(|| "OPENCODE_CONFIG_CONTENT must be a JSON object".to_string())?;
-            let mcp = root_object.entry("mcp").or_insert_with(|| json!({}));
-            let mcp_object = mcp
-                .as_object_mut()
-                .ok_or_else(|| "OPENCODE_CONFIG_CONTENT.mcp must be an object".to_string())?;
-            let repomond = repomon_core::service::repomond_path();
-            mcp_object.insert(
-                "repomon".into(),
-                json!({
-                    "type": "local",
-                    "command": [repomond.to_string_lossy(), "mcp"],
-                    "environment": {
-                        "REPOMON_MCP_SOCKET": "{env:REPOMON_MCP_SOCKET}",
-                        "REPOMON_MCP_MODE": "{env:REPOMON_MCP_MODE}",
-                        "REPOMON_MCP_IDENTITY_TOKEN": "{env:REPOMON_MCP_IDENTITY_TOKEN}"
-                    }
-                }),
-            );
-            spec.env.push((
-                "OPENCODE_CONFIG_CONTENT".into(),
-                serde_json::to_string(&root).map_err(|error| error.to_string())?,
-            ));
+            let raw_existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+            let config_json = build_opencode_config_content(
+                raw_existing.as_deref(),
+                &[
+                    "REPOMON_MCP_SOCKET",
+                    "REPOMON_MCP_MODE",
+                    "REPOMON_MCP_IDENTITY_TOKEN",
+                ],
+            )?;
+            spec.env.push(("OPENCODE_CONFIG_CONTENT".into(), config_json));
         }
         AgentKind::Antigravity => ensure_antigravity_mcp_registration()?,
         _ => {}
     }
     Ok(())
+}
+
+/// Build the `OPENCODE_CONFIG_CONTENT` JSON string registering the `repomon` MCP server.
+/// Preserves any existing configuration in `existing` (or parsed from `OPENCODE_CONFIG_CONTENT`),
+/// adding or replacing `mcp.repomon` with a local server executing `repomond mcp`.
+/// The `environment` mapping specifies which process environment variables OpenCode should
+/// interpolate into the child process using `{env:VAR}` syntax.
+pub(crate) fn build_opencode_config_content(
+    existing: Option<&str>,
+    env_vars: &[&str],
+) -> Result<String, String> {
+    let mut root = match existing {
+        Some(raw) if !raw.trim().is_empty() => serde_json::from_str::<serde_json::Value>(raw)
+            .map_err(|error| format!("invalid OPENCODE_CONFIG_CONTENT: {error}"))?,
+        _ => json!({}),
+    };
+    let root_object = root
+        .as_object_mut()
+        .ok_or_else(|| "OPENCODE_CONFIG_CONTENT must be a JSON object".to_string())?;
+    let mcp = root_object.entry("mcp").or_insert_with(|| json!({}));
+    let mcp_object = mcp
+        .as_object_mut()
+        .ok_or_else(|| "OPENCODE_CONFIG_CONTENT.mcp must be an object".to_string())?;
+    let repomond = repomon_core::service::repomond_path();
+    let mut environment_map = serde_json::Map::new();
+    for var in env_vars {
+        environment_map.insert((*var).into(), json!(format!("{{env:{var}}}")));
+    }
+    mcp_object.insert(
+        "repomon".into(),
+        json!({
+            "type": "local",
+            "command": [repomond.to_string_lossy(), "mcp"],
+            "environment": environment_map
+        }),
+    );
+    serde_json::to_string(&root).map_err(|error| error.to_string())
 }
 
 fn ensure_antigravity_mcp_registration() -> Result<(), String> {
@@ -6389,6 +6412,64 @@ fn build_antigravity_orchestrator_command(
     command.push_str(" --prompt-interactive ");
     command.push_str(&shell_quote(&goal));
     command
+}
+
+/// Build the full `opencode` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
+/// the window command through a shell). ALL OpenCode-CLI flag knowledge lives here (plus its unit
+/// test), so an OpenCode release changing a flag is a one-function fix. Verified against
+/// `opencode --help`; where it diverges from the Claude arm:
+/// - No `--mcp-config` file: the repomon fleet server is registered dynamically via the
+///   `OPENCODE_CONFIG_CONTENT` environment variable using [`build_opencode_config_content`].
+///   The config's `environment` table maps `{env:VAR}` entries for `REPOMON_MCP_SOCKET`,
+///   `REPOMON_MCP_AUTONOMY`, and optionally `REPOMON_MCP_MAX_AGENTS`, which are exported inline
+///   in the command prefix. `REPOMON_MCP_MODE` is deliberately NOT set to `"agent"`, granting full
+///   orchestrator tool access.
+/// - No `--append-system-prompt`: the repomind persona is prepended to the initial prompt passed
+///   via `--prompt` instead.
+/// - No `--session-id` and no `--allowedTools`: OpenCode has no session-id flag or stable
+///   transcript contract (`has_transcript` is false), so dialogs are monitored via pane output;
+///   tool approval behavior is bounded server-side via `REPOMON_MCP_AUTONOMY`.
+/// - Autonomy levels: OpenCode's interactive TUI mode has no CLI-level approval bypass flag;
+///   posture (`autonomous`, `supervised`, `read-only`) is strictly enforced by `repomon_mcp::policy`
+///   via `REPOMON_MCP_AUTONOMY`.
+fn build_opencode_orchestrator_command(
+    base: &str,
+    socket: &Path,
+    autonomy: &str,
+    max_agents: Option<usize>,
+    model: &Option<String>,
+    prompt: &Option<String>,
+) -> Result<String, String> {
+    let mut env_var_names = vec!["REPOMON_MCP_SOCKET", "REPOMON_MCP_AUTONOMY"];
+    if max_agents.is_some() {
+        env_var_names.push("REPOMON_MCP_MAX_AGENTS");
+    }
+    let raw_existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+    let config_json = build_opencode_config_content(raw_existing.as_deref(), &env_var_names)?;
+
+    let mut env_parts = vec![
+        format!("OPENCODE_CONFIG_CONTENT={}", shell_quote(&config_json)),
+        format!("REPOMON_MCP_SOCKET={}", shell_quote(&socket.to_string_lossy())),
+        format!("REPOMON_MCP_AUTONOMY={}", shell_quote(autonomy)),
+    ];
+    if let Some(n) = max_agents {
+        env_parts.push(format!("REPOMON_MCP_MAX_AGENTS={}", shell_quote(&n.to_string())));
+    }
+    let env_prefix = env_parts.join(" ");
+    let mut command = format!("{env_prefix} {base}");
+
+    if let Some(model) = model {
+        command.push_str(" --model ");
+        command.push_str(&shell_quote(model));
+    }
+
+    let goal = match prompt.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}\n\n{p}", repomon_mcp::PERSONA),
+        None => repomon_mcp::PERSONA.to_string(),
+    };
+    command.push_str(" --prompt ");
+    command.push_str(&shell_quote(&goal));
+    Ok(command)
 }
 
 /// Mint a fresh v4-shaped UUID for `--session-id`, without pulling in the `uuid` crate (no crate
@@ -7736,6 +7817,143 @@ mod tests {
         );
         assert!(cmd.contains(" --mode plan"), "{cmd}");
         assert!(!cmd.contains("--dangerously-skip-permissions"), "{cmd}");
+    }
+
+    #[test]
+    fn opencode_orchestrator_command_wires_mcp_and_persona() {
+        let socket = PathBuf::from("/tmp/repomon-test.sock");
+        // Autonomous: OPENCODE_CONFIG_CONTENT carries socket/autonomy/max_agents, persona as --prompt.
+        let cmd = build_opencode_orchestrator_command(
+            "opencode",
+            &socket,
+            "autonomous",
+            Some(4),
+            &None,
+            &None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains("OPENCODE_CONFIG_CONTENT="),
+            "missing OPENCODE_CONFIG_CONTENT: {cmd}"
+        );
+        assert!(
+            cmd.contains("REPOMON_MCP_SOCKET='/tmp/repomon-test.sock'"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("REPOMON_MCP_AUTONOMY='autonomous'"), "{cmd}");
+        assert!(cmd.contains("REPOMON_MCP_MAX_AGENTS='4'"), "{cmd}");
+        assert!(
+            !cmd.contains("REPOMON_MCP_MODE"),
+            "orchestrator must not set agent mode: {cmd}"
+        );
+        assert!(cmd.contains("opencode"), "{cmd}");
+        assert!(cmd.contains(" --prompt "), "{cmd}");
+        assert!(cmd.contains("repomind"), "{cmd}");
+
+        // None of the Claude-only, Codex-only, or Antigravity-only flags may leak into an opencode invocation.
+        for forbidden_flag in [
+            "--mcp-config",
+            "--append-system-prompt",
+            "--allowedTools",
+            "--session-id",
+            " -c ",
+            " -a ",
+            " -s ",
+            " -m ",
+            "--prompt-interactive",
+            "--dangerously-skip-permissions",
+            " --mode ",
+        ] {
+            assert!(!cmd.contains(forbidden_flag), "{forbidden_flag} leaked: {cmd}");
+        }
+
+        // Supervised + model + prompt: --model, prompt appended to persona.
+        let cmd = build_opencode_orchestrator_command(
+            "opencode",
+            &socket,
+            "supervised",
+            None,
+            &Some("anthropic/claude-3-7-sonnet".into()),
+            &Some("coordinate lane-1 and lane-2".into()),
+        )
+        .unwrap();
+        assert!(!cmd.contains("REPOMON_MCP_MAX_AGENTS"), "{cmd}");
+        assert!(
+            cmd.contains(" --model 'anthropic/claude-3-7-sonnet'"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("coordinate lane-1 and lane-2"), "{cmd}");
+
+        // Read-only passes autonomy level in env.
+        let cmd = build_opencode_orchestrator_command(
+            "opencode",
+            &socket,
+            "read-only",
+            None,
+            &None,
+            &None,
+        )
+        .unwrap();
+        assert!(cmd.contains("REPOMON_MCP_AUTONOMY='read-only'"), "{cmd}");
+    }
+
+    #[test]
+    fn opencode_config_content_drift_and_isolation() {
+        // Worker config: sets REPOMON_MCP_SOCKET, REPOMON_MCP_MODE, REPOMON_MCP_IDENTITY_TOKEN.
+        let worker_json = build_opencode_config_content(
+            Some(r#"{"existing_key": true}"#),
+            &[
+                "REPOMON_MCP_SOCKET",
+                "REPOMON_MCP_MODE",
+                "REPOMON_MCP_IDENTITY_TOKEN",
+            ],
+        )
+        .unwrap();
+        let worker_val: serde_json::Value = serde_json::from_str(&worker_json).unwrap();
+        assert_eq!(worker_val["existing_key"], json!(true));
+        let worker_env = &worker_val["mcp"]["repomon"]["environment"];
+        assert_eq!(
+            worker_env["REPOMON_MCP_SOCKET"],
+            json!("{env:REPOMON_MCP_SOCKET}")
+        );
+        assert_eq!(
+            worker_env["REPOMON_MCP_MODE"],
+            json!("{env:REPOMON_MCP_MODE}")
+        );
+        assert_eq!(
+            worker_env["REPOMON_MCP_IDENTITY_TOKEN"],
+            json!("{env:REPOMON_MCP_IDENTITY_TOKEN}")
+        );
+        assert!(worker_env.get("REPOMON_MCP_AUTONOMY").is_none());
+
+        // Orchestrator config: sets REPOMON_MCP_SOCKET, REPOMON_MCP_AUTONOMY, REPOMON_MCP_MAX_AGENTS.
+        let orch_json = build_opencode_config_content(
+            None,
+            &[
+                "REPOMON_MCP_SOCKET",
+                "REPOMON_MCP_AUTONOMY",
+                "REPOMON_MCP_MAX_AGENTS",
+            ],
+        )
+        .unwrap();
+        let orch_val: serde_json::Value = serde_json::from_str(&orch_json).unwrap();
+        let orch_env = &orch_val["mcp"]["repomon"]["environment"];
+        assert_eq!(
+            orch_env["REPOMON_MCP_SOCKET"],
+            json!("{env:REPOMON_MCP_SOCKET}")
+        );
+        assert_eq!(
+            orch_env["REPOMON_MCP_AUTONOMY"],
+            json!("{env:REPOMON_MCP_AUTONOMY}")
+        );
+        assert_eq!(
+            orch_env["REPOMON_MCP_MAX_AGENTS"],
+            json!("{env:REPOMON_MCP_MAX_AGENTS}")
+        );
+        assert!(
+            orch_env.get("REPOMON_MCP_MODE").is_none(),
+            "orchestrator config must not set REPOMON_MCP_MODE"
+        );
     }
 
     #[test]
