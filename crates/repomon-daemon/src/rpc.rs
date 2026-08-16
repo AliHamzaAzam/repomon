@@ -1340,16 +1340,16 @@ pub async fn dispatch(
                     "schedule prompt must be 1-2000 bytes",
                 ));
             }
-            // Headless standing runs drive `claude -p`; a codex orchestrator can't run them.
+            // Headless standing runs drive `claude -p`; a non-Claude orchestrator can't run them.
             {
                 let cfg = ctx.config.read().await;
                 if matches!(
                     resolve_orchestrator_backend(&cfg.orchestrator_agent, &cfg.agents),
-                    Ok(crate::OrchestratorBackend::Codex)
+                    Ok(b) if b != crate::OrchestratorBackend::Claude
                 ) {
                     return Err(RpcError::invalid_params(
                         "headless standing runs support the claude backend only; \
-                         orchestrator_agent is set to codex",
+                         orchestrator_agent is set to a non-claude backend",
                     ));
                 }
             }
@@ -3700,6 +3700,16 @@ pub async fn dispatch(
                     ),
                     None,
                 ),
+                crate::OrchestratorBackend::Antigravity => {
+                    return Err(RpcError::invalid_params(
+                        "backend accepted but launch command not implemented yet (A2/A3)",
+                    ));
+                }
+                crate::OrchestratorBackend::OpenCode => {
+                    return Err(RpcError::invalid_params(
+                        "backend accepted but launch command not implemented yet (A2/A3)",
+                    ));
+                }
             };
             // cwd = the user's home, so repomind starts from there rather than the daemon's cwd.
             let home = config::home();
@@ -5824,9 +5834,11 @@ pub(crate) fn resolve_orchestrator_backend(
     }
     match AgentKind::from_kind_str(name) {
         AgentKind::Codex => Ok(B::Codex),
+        AgentKind::Antigravity => Ok(B::Antigravity),
+        AgentKind::OpenCode => Ok(B::OpenCode),
         _ => Err(RpcError::invalid_params(format!(
             "agent '{name}' can't run the orchestrator: repomind needs an MCP-capable CLI \
-             (a claude account, codex, or a custom agent command)"
+             (a claude account, codex, antigravity, opencode, or a custom agent command)"
         ))),
     }
 }
@@ -7500,16 +7512,35 @@ mod tests {
             resolve_orchestrator_backend(&Some("my-yolo".into()), &customs).unwrap(),
             B::Claude
         );
-        // Codex is the one non-Claude backend.
+        // Codex is a non-Claude backend.
         assert_eq!(
             resolve_orchestrator_backend(&Some("codex".into()), &customs).unwrap(),
             B::Codex
         );
+        // Antigravity resolves from both "antigravity" and "agy".
+        for name in ["antigravity", "agy"] {
+            assert_eq!(
+                resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap(),
+                B::Antigravity,
+                "{name}"
+            );
+        }
+        // OpenCode resolves from both "opencode" and "open-code".
+        for name in ["opencode", "open-code"] {
+            assert_eq!(
+                resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap(),
+                B::OpenCode,
+                "{name}"
+            );
+        }
         // MCP-less agents and unknown names are loud errors, not broken spawns.
         for name in ["aider", "cursor", "gemini"] {
             let err = resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap_err();
             assert!(
-                err.message.contains(name) && err.message.contains("orchestrator"),
+                err.message.contains(name)
+                    && err.message.contains("orchestrator")
+                    && err.message.contains("antigravity")
+                    && err.message.contains("opencode"),
                 "{name}: {}",
                 err.message
             );

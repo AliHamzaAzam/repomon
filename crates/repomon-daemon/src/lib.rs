@@ -112,6 +112,12 @@ pub enum OrchestratorBackend {
     /// so no transcript chat view, no end-of-turn attention, no session pinning — pane-based
     /// dialog detection only.
     Codex,
+    /// Antigravity CLI — MCP-capable, but no reliably parseable on-disk transcript (protobuf
+    /// payload without a stable status contract) — pane-based dialog detection only.
+    Antigravity,
+    /// OpenCode CLI — MCP-capable, but no reliably parseable on-disk transcript — pane-based
+    /// dialog detection only.
+    OpenCode,
 }
 
 impl OrchestratorBackend {
@@ -120,6 +126,8 @@ impl OrchestratorBackend {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Antigravity => "antigravity",
+            Self::OpenCode => "opencode",
         }
     }
 

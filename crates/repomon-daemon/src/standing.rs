@@ -145,7 +145,7 @@ fn build_run_command(
     use repomon_core::agent::tmux::shell_quote;
     let backend = crate::rpc::resolve_orchestrator_backend(&cfg.orchestrator_agent, &cfg.agents)
         .map_err(|e| e.message)?;
-    if matches!(backend, crate::OrchestratorBackend::Codex) {
+    if !matches!(backend, crate::OrchestratorBackend::Claude) {
         return Err("headless standing runs support the claude backend only".to_string());
     }
     let base = crate::rpc::orchestrator_base_command(&cfg.orchestrator_agent, &cfg.agents);
