@@ -48,7 +48,10 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 ///    see.
 pub fn worktree_path_allowed(root: &Path, rel: &str) -> Option<PathBuf> {
     let candidate = Path::new(rel);
-    if candidate.is_absolute() || candidate.components().any(|c| matches!(c, Component::ParentDir))
+    if candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
     {
         return None;
     }
@@ -96,7 +99,10 @@ pub fn list_dir(root: &Path, dir: &Path) -> io::Result<FileListResult> {
             .replace('\\', "/");
         raw.push((name, rel, is_dir, size));
     }
-    raw.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    raw.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then(a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
     let truncated = raw.len() > LIST_CAP;
     raw.truncate(LIST_CAP);
 
@@ -205,7 +211,10 @@ pub enum WriteError {
     /// `expected_mtime_ms` was given and didn't match what's on disk (`actual_ms = None` when
     /// the file no longer exists at all — also a conflict, not a fresh create, since the caller
     /// believed it existed).
-    Conflict { expected_ms: u64, actual_ms: Option<u64> },
+    Conflict {
+        expected_ms: u64,
+        actual_ms: Option<u64>,
+    },
     /// The parent directory doesn't exist. v1 doesn't `mkdir -p`.
     NoParentDir,
 }
@@ -282,7 +291,10 @@ mod tests {
     #[test]
     fn empty_path_resolves_to_the_root_itself() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(worktree_path_allowed(root.path(), ""), Some(root.path().to_path_buf()));
+        assert_eq!(
+            worktree_path_allowed(root.path(), ""),
+            Some(root.path().to_path_buf())
+        );
     }
 
     #[test]
@@ -298,7 +310,10 @@ mod tests {
     fn rejects_literal_parent_dir_components() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(worktree_path_allowed(root.path(), "../escape.txt"), None);
-        assert_eq!(worktree_path_allowed(root.path(), "src/../../escape.txt"), None);
+        assert_eq!(
+            worktree_path_allowed(root.path(), "src/../../escape.txt"),
+            None
+        );
     }
 
     #[test]
@@ -313,7 +328,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), "shh").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("link"))
+            .unwrap();
         assert_eq!(worktree_path_allowed(root.path(), "link"), None);
     }
 
@@ -355,7 +371,10 @@ mod tests {
         let path = dir.path().join("note.txt");
         let written = write_file(&path, "v1", None).unwrap();
         match write_file(&path, "v2", Some(written.mtime_ms.wrapping_sub(1))) {
-            Err(WriteError::Conflict { expected_ms, actual_ms }) => {
+            Err(WriteError::Conflict {
+                expected_ms,
+                actual_ms,
+            }) => {
                 assert_eq!(expected_ms, written.mtime_ms.wrapping_sub(1));
                 assert_eq!(actual_ms, Some(written.mtime_ms));
             }
@@ -369,6 +388,9 @@ mod tests {
     fn write_rejects_missing_parent_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nope/note.txt");
-        assert!(matches!(write_file(&path, "x", None), Err(WriteError::NoParentDir)));
+        assert!(matches!(
+            write_file(&path, "x", None),
+            Err(WriteError::NoParentDir)
+        ));
     }
 }

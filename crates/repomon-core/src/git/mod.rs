@@ -43,7 +43,6 @@ pub fn probe() -> crate::model::GitDoctorInfo {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

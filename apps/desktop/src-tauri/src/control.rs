@@ -7,7 +7,7 @@ use repomon_core::service;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use crate::connection::{publish, ConnectionSnapshot};
+use crate::connection::{ConnectionSnapshot, publish};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -58,7 +58,11 @@ pub async fn daemon_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(
         let _ = service::stop();
     }
 
-    publish(&app, ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped")).await;
+    publish(
+        &app,
+        ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
+    )
+    .await;
     Ok(())
 }
 

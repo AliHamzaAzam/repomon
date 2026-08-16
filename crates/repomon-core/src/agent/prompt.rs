@@ -276,7 +276,9 @@ fn has_trailing_content(cleaned: &[String], block_end: usize) -> bool {
         false
     };
 
-    cleaned[block_end + 1..].iter().any(|l| !is_footer_or_border(l))
+    cleaned[block_end + 1..]
+        .iter()
+        .any(|l| !is_footer_or_border(l))
 }
 
 /// How a pending prompt should be handled by an orchestrator: a routine **permission** ask the
@@ -393,9 +395,15 @@ pub fn detect_subagent_running(pane: &str) -> Option<String> {
     }
 
     if let Some((desc, timer)) = active_tasks.first() {
-        let timer_str = timer.as_deref().map(|t| format!(" ({t})")).unwrap_or_default();
+        let timer_str = timer
+            .as_deref()
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
         if active_tasks.len() > 1 {
-            Some(format!("{desc}{timer_str} +{} more", active_tasks.len() - 1))
+            Some(format!(
+                "{desc}{timer_str} +{} more",
+                active_tasks.len() - 1
+            ))
         } else if let Some(count) = waiting_count {
             if count > 1 {
                 Some(format!("{desc}{timer_str} +{} more", count - 1))
@@ -436,11 +444,7 @@ fn parse_subagent_row(line: &str) -> Option<(String, Option<String>)> {
         // If there is a double space separating agent kind and task description:
         let desc = if let Some(idx) = before_timer.find("  ") {
             let task = before_timer[idx..].trim();
-            if !task.is_empty() {
-                task
-            } else {
-                before_timer
-            }
+            if !task.is_empty() { task } else { before_timer }
         } else {
             before_timer
         };
@@ -448,11 +452,7 @@ fn parse_subagent_row(line: &str) -> Option<(String, Option<String>)> {
     } else {
         let desc = if let Some(idx) = rest.find("  ") {
             let task = rest[idx..].trim();
-            if !task.is_empty() {
-                task
-            } else {
-                rest
-            }
+            if !task.is_empty() { task } else { rest }
         } else {
             rest
         };
@@ -468,7 +468,11 @@ fn extract_timer(s: &str) -> Option<(String, usize, usize)> {
         if !bytes[i].is_ascii_digit() {
             continue;
         }
-        if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'-') {
+        if i > 0
+            && (bytes[i - 1].is_ascii_alphanumeric()
+                || bytes[i - 1] == b'_'
+                || bytes[i - 1] == b'-')
+        {
             continue;
         }
         let mut curr = i;
@@ -492,9 +496,15 @@ fn extract_timer(s: &str) -> Option<(String, usize, usize)> {
                 let u = bytes[curr];
                 curr += 1;
                 found_unit = true;
-                if u == b'h' { has_h = true; }
-                if u == b'm' { has_m = true; }
-                if u == b's' { has_s = true; }
+                if u == b'h' {
+                    has_h = true;
+                }
+                if u == b'm' {
+                    has_m = true;
+                }
+                if u == b's' {
+                    has_s = true;
+                }
 
                 while curr < len && bytes[curr] == b' ' {
                     curr += 1;

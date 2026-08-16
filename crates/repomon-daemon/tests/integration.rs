@@ -701,10 +701,7 @@ async fn system_doctor_reports_machine_health_and_agents() {
 
     // agents probe
     let agents = res["agents"].as_array().expect("agents array");
-    let names: Vec<&str> = agents
-        .iter()
-        .map(|a| a["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"claude-code"));
     assert!(names.contains(&"codex"));
     assert!(names.contains(&"opencode"));
@@ -725,7 +722,10 @@ async fn system_doctor_reports_machine_health_and_agents() {
 
     let yolo = agents.iter().find(|a| a["name"] == "yolo").unwrap();
     assert_eq!(yolo["kind"], json!("custom"));
-    assert_eq!(yolo["command"], json!("claude --dangerously-skip-permissions"));
+    assert_eq!(
+        yolo["command"],
+        json!("claude --dangerously-skip-permissions")
+    );
     assert!(yolo["detected"].is_boolean());
 
     server.abort();
@@ -1154,7 +1154,8 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
 async fn commit_show_returns_full_detail_rejects_malformed_oid_and_honors_truncation() {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);
-    let sock = std::env::temp_dir().join(format!("repomon-commitshow-it-{}.sock", std::process::id()));
+    let sock =
+        std::env::temp_dir().join(format!("repomon-commitshow-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
         let ctx = ctx.clone();
@@ -1198,7 +1199,11 @@ async fn commit_show_returns_full_detail_rejects_malformed_oid_and_honors_trunca
     git(&wt_path, &["add", "a.txt"]);
     git(
         &wt_path,
-        &["commit", "-m", "feat: add a\n\nA longer explanation of why."],
+        &[
+            "commit",
+            "-m",
+            "feat: add a\n\nA longer explanation of why.",
+        ],
     );
     let full_oid = String::from_utf8(
         Command::new("git")
@@ -1228,7 +1233,10 @@ async fn commit_show_returns_full_detail_rejects_malformed_oid_and_honors_trunca
     assert_eq!(show["author_email"], json!("t@e.com"));
     assert_eq!(show["summary"], json!("feat: add a"));
     let body = show["body"].as_str().unwrap();
-    assert!(body.contains("A longer explanation of why."), "body was: {body:?}");
+    assert!(
+        body.contains("A longer explanation of why."),
+        "body was: {body:?}"
+    );
     let patch = show["patch"].as_str().unwrap();
     assert!(patch.contains("+a"), "patch was: {patch:?}");
     let stat = show["stat"].as_str().unwrap();

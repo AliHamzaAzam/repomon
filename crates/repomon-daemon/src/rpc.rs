@@ -297,7 +297,9 @@ impl MessageTo {
     /// unchanged; anything else (a list, or a bare wildcard) returns a fan-out summary.
     fn as_legacy_single(&self) -> Option<&str> {
         match self {
-            MessageTo::Single(value) if matches!(classify_token(value), AddressToken::Literal(_)) => {
+            MessageTo::Single(value)
+                if matches!(classify_token(value), AddressToken::Literal(_)) =>
+            {
                 Some(value.as_str())
             }
             _ => None,
@@ -749,7 +751,10 @@ fn file_read_error(e: crate::files::ReadError) -> RpcError {
 /// frontend can branch on it instead of pattern-matching the message text.
 fn file_write_error(e: crate::files::WriteError) -> RpcError {
     match e {
-        crate::files::WriteError::Conflict { expected_ms, actual_ms } => RpcError {
+        crate::files::WriteError::Conflict {
+            expected_ms,
+            actual_ms,
+        } => RpcError {
             code: FILE_CONFLICT,
             message: "conflict: file changed on disk".into(),
             data: Some(json!({
@@ -1683,13 +1688,7 @@ pub async fn dispatch(
                 let recipient = resolve_message_address(ctx, &to).await?;
                 let message = ctx
                     .store
-                    .send_message(
-                        AgentAddress::new(to),
-                        sender,
-                        recipient,
-                        p.body,
-                        p.reply_to,
-                    )
+                    .send_message(AgentAddress::new(to), sender, recipient, p.body, p.reply_to)
                     .await
                     .map_err(internal)?;
                 ctx.broadcast("event.message.stored", message_event(&message));
@@ -1721,10 +1720,7 @@ pub async fn dispatch(
                                 .await
                             {
                                 Ok(message) => {
-                                    ctx.broadcast(
-                                        "event.message.stored",
-                                        message_event(&message),
-                                    );
+                                    ctx.broadcast("event.message.stored", message_event(&message));
                                     sent_count += 1;
                                     results.push(json!({
                                         "to": target,
@@ -2003,7 +1999,8 @@ pub async fn dispatch(
             };
             let accounts = crate::ext::ext_accounts();
             let snap = tokio::task::spawn_blocking(move || {
-                let mut snap = crate::ext::scan_for_account(&account, repo_root.as_deref(), cli_version);
+                let mut snap =
+                    crate::ext::scan_for_account(&account, repo_root.as_deref(), cli_version);
                 snap.accounts = accounts;
                 snap.account = account;
                 snap
@@ -2050,7 +2047,8 @@ pub async fn dispatch(
                     crate::ext::set_plugin_enabled(&settings_path, &p.id, Some(enabled))
                         .map_err(internal)?;
                     if raw_name != p.id {
-                        let _ = crate::ext::set_plugin_enabled(&settings_path, raw_name, Some(enabled));
+                        let _ =
+                            crate::ext::set_plugin_enabled(&settings_path, raw_name, Some(enabled));
                     }
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
@@ -2071,7 +2069,8 @@ pub async fn dispatch(
                     crate::ext::set_plugin_enabled(&settings_path, &p.id, Some(enabled))
                         .map_err(internal)?;
                     if raw_name != p.id {
-                        let _ = crate::ext::set_plugin_enabled(&settings_path, raw_name, Some(enabled));
+                        let _ =
+                            crate::ext::set_plugin_enabled(&settings_path, raw_name, Some(enabled));
                     }
                     ctx.broadcast("event.ext.changed", ext_scope_json(&p.scope));
                     Ok(json!({ "ok": true }))
@@ -2096,8 +2095,9 @@ pub async fn dispatch(
                 _ => {
                     let (settings, fanout_root) = match &p.scope {
                         ExtScope::Global => {
-                            let home = crate::ext::claude_home_for(account)
-                                .ok_or_else(|| internal("this account has no Claude config directory"))?;
+                            let home = crate::ext::claude_home_for(account).ok_or_else(|| {
+                                internal("this account has no Claude config directory")
+                            })?;
                             (home.join("settings.json"), None)
                         }
                         ExtScope::Repo { repo_id } => {
@@ -2264,9 +2264,7 @@ pub async fn dispatch(
                 Some("antigravity") => {
                     Ok(json!({ "ok": true, "stdout": "Antigravity plugins up to date" }))
                 }
-                Some("codex") => {
-                    Ok(json!({ "ok": true, "stdout": "Codex plugins up to date" }))
-                }
+                Some("codex") => Ok(json!({ "ok": true, "stdout": "Codex plugins up to date" })),
                 Some("cursor") => {
                     Ok(json!({ "ok": true, "stdout": "Cursor extensions are managed by Cursor" }))
                 }
@@ -3331,8 +3329,12 @@ pub async fn dispatch(
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             let win = window.clone();
             let (dialog, sub) = tokio::task::spawn_blocking(move || {
-                tmux.capture_named(&win, CaptureOpts::last(45))
-                    .map(|pane| (agent::prompt::detect_dialog(&pane), agent::prompt::detect_subagent_running(&pane)))
+                tmux.capture_named(&win, CaptureOpts::last(45)).map(|pane| {
+                    (
+                        agent::prompt::detect_dialog(&pane),
+                        agent::prompt::detect_subagent_running(&pane),
+                    )
+                })
             })
             .await
             .map_err(internal)?
@@ -3375,10 +3377,10 @@ pub async fn dispatch(
             };
             if let Some(expect) = &p.expect_summary {
                 if *expect != dialog.summary() {
-                    ctx.prompt_cache
-                        .lock()
-                        .await
-                        .insert(window, (std::time::Instant::now(), Some(dialog.clone()), None));
+                    ctx.prompt_cache.lock().await.insert(
+                        window,
+                        (std::time::Instant::now(), Some(dialog.clone()), None),
+                    );
                     return Err(RpcError {
                         code: DIALOG_CHANGED,
                         message: "dialog changed".into(),
@@ -4376,7 +4378,11 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // User-set session labels (keyed by transcript session_id), overlaid below.
     let labels = ctx.store.list_session_labels().await.unwrap_or_default();
     // Auto-generated session labels from the local LLM subsystem.
-    let generated_labels = ctx.store.list_session_generated_labels().await.unwrap_or_default();
+    let generated_labels = ctx
+        .store
+        .list_session_generated_labels()
+        .await
+        .unwrap_or_default();
     let tmux = ctx.backend.clone();
     // Distinguish a *failed* probe from a genuinely empty server: on failure reuse the last-good
     // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
@@ -4514,12 +4520,20 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                                         set.insert(sid.clone())
                                     };
                                     if should_run {
-                                        match repomon_core::local_llm::generate_session_slug_async(prompt).await {
+                                        match repomon_core::local_llm::generate_session_slug_async(
+                                            prompt,
+                                        )
+                                        .await
+                                        {
                                             Ok(slug) => {
-                                                let _ = store.set_session_generated_label(sid.clone(), slug).await;
+                                                let _ = store
+                                                    .set_session_generated_label(sid.clone(), slug)
+                                                    .await;
                                             }
                                             Err(e) => {
-                                                tracing::debug!("Local LLM naming skipped for {sid}: {e}");
+                                                tracing::debug!(
+                                                    "Local LLM naming skipped for {sid}: {e}"
+                                                );
                                             }
                                         }
                                         in_flight.lock().await.remove(&sid);
@@ -4701,7 +4715,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     // Exactly 1 candidate and 1 unclaimed probe window in this lane with no competing claimants:
                     // bind them directly so agents without long text fingerprints (e.g. Antigravity) are stamped
                     // and never surface as phantom external adoptables.
-                    vec![(probe[0].0, probe[0].1.clone(), cands[0].sid.clone(), cands[0].kind.clone())]
+                    vec![(
+                        probe[0].0,
+                        probe[0].1.clone(),
+                        cands[0].sid.clone(),
+                        cands[0].kind.clone(),
+                    )]
                 } else {
                     Vec::new()
                 };
@@ -4710,7 +4729,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
                     }
                     if let Err(e) = tmux.set_window_agent_kind_by_id(wid, kind.as_str().as_ref()) {
-                        tracing::warn!("failed to stamp @repomon_agent_kind on {name} (@{wid}): {e}");
+                        tracing::warn!(
+                            "failed to stamp @repomon_agent_kind on {name} (@{wid}): {e}"
+                        );
                     }
                 }
             }
@@ -4815,33 +4836,39 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 misses.iter().map(|&i| candidates[i].2.clone()).collect();
             // Each fresh capture yields the parsed dialog, running subagents, AND a content hash —
             // the hash feeds the stall detector's "when did this pane last change?" clock.
-            let fresh: Vec<(Option<agent::prompt::PendingDialog>, Option<String>, Option<u64>)> =
-                tokio::task::spawn_blocking(move || {
-                    miss_windows
-                        .iter()
-                        .map(|w| match tmux.capture_named(w, CaptureOpts::last(45)) {
-                            Ok(pane) => {
-                                use std::hash::{Hash, Hasher};
-                                let mut h = std::collections::hash_map::DefaultHasher::new();
-                                pane.hash(&mut h);
-                                (
-                                    agent::prompt::detect_dialog(&pane),
-                                    agent::prompt::detect_subagent_running(&pane),
-                                    Some(h.finish()),
-                                )
-                            }
-                            Err(_) => (None, None, None),
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await
-                .unwrap_or_default();
+            let fresh: Vec<(
+                Option<agent::prompt::PendingDialog>,
+                Option<String>,
+                Option<u64>,
+            )> = tokio::task::spawn_blocking(move || {
+                miss_windows
+                    .iter()
+                    .map(|w| match tmux.capture_named(w, CaptureOpts::last(45)) {
+                        Ok(pane) => {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            pane.hash(&mut h);
+                            (
+                                agent::prompt::detect_dialog(&pane),
+                                agent::prompt::detect_subagent_running(&pane),
+                                Some(h.finish()),
+                            )
+                        }
+                        Err(_) => (None, None, None),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
             let now_utc = chrono::Utc::now();
             let mut cache = ctx.prompt_cache.lock().await;
             let mut seen = ctx.pane_seen.lock().await;
             for (&i, (p, sub, hash)) in misses.iter().zip(fresh) {
                 let window = &candidates[i].2;
-                cache.insert(window.clone(), (std::time::Instant::now(), p.clone(), sub.clone()));
+                cache.insert(
+                    window.clone(),
+                    (std::time::Instant::now(), p.clone(), sub.clone()),
+                );
                 // Stamp the pane's last-change time only when the content actually differs.
                 if let Some(h) = hash {
                     match seen.get(window) {
@@ -5202,9 +5229,9 @@ fn select_kept_summaries(
     // writing right now — `sessions_to_keep`'s "never drop a session that is working"
     // contract must survive bound-protection, or a stale binding could make the one live
     // transcript invisible. When keep == 0 and bound is empty, the agent has exited and is dropped.
-    let (mut out, rest): (Vec<_>, Vec<_>) = summaries
-        .into_iter()
-        .partition(|s| (keep > 0 && is_fresh(s)) || s.session_id.as_ref().is_some_and(|id| bound.contains(id)));
+    let (mut out, rest): (Vec<_>, Vec<_>) = summaries.into_iter().partition(|s| {
+        (keep > 0 && is_fresh(s)) || s.session_id.as_ref().is_some_and(|id| bound.contains(id))
+    });
     let take_rest = keep.saturating_sub(out.len());
     out.extend(rest.into_iter().take(take_rest));
     out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
@@ -5785,7 +5812,8 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
         .filter_map(|line| {
             let (pid, comm) = line.trim_start().split_once(char::is_whitespace)?;
             let base = comm.trim().rsplit('/').next().unwrap_or("");
-            matches!(base, "claude" | "opencode" | "agy" | "codex" | "cursor").then(|| pid.to_string())
+            matches!(base, "claude" | "opencode" | "agy" | "codex" | "cursor")
+                .then(|| pid.to_string())
         })
         .collect();
     let mut counts: HashMap<PathBuf, usize> = HashMap::new();
@@ -5944,7 +5972,9 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
                 }
             }
         }
-        sticky.retain(|k, (_, seen)| map.get(k).copied().unwrap_or(0) > 0 && seen.elapsed() < STICKY_GRACE);
+        sticky.retain(|k, (_, seen)| {
+            map.get(k).copied().unwrap_or(0) > 0 && seen.elapsed() < STICKY_GRACE
+        });
         // Lift the fresh count to the surviving held high (covers worktrees missing from `map`).
         for (k, (hi, _)) in sticky.iter() {
             let e = effective.entry(k.clone()).or_insert(0);
@@ -6554,7 +6584,8 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
                     "REPOMON_MCP_IDENTITY_TOKEN",
                 ],
             )?;
-            spec.env.push(("OPENCODE_CONFIG_CONTENT".into(), config_json));
+            spec.env
+                .push(("OPENCODE_CONFIG_CONTENT".into(), config_json));
         }
         AgentKind::Antigravity => ensure_antigravity_mcp_registration()?,
         AgentKind::Cursor => ensure_cursor_mcp_registration()?,
@@ -6822,11 +6853,17 @@ fn build_antigravity_orchestrator_command(
     prompt: &Option<String>,
 ) -> String {
     let mut env_parts = vec![
-        format!("REPOMON_MCP_SOCKET={}", shell_quote(&socket.to_string_lossy())),
+        format!(
+            "REPOMON_MCP_SOCKET={}",
+            shell_quote(&socket.to_string_lossy())
+        ),
         format!("REPOMON_MCP_AUTONOMY={}", shell_quote(autonomy)),
     ];
     if let Some(n) = max_agents {
-        env_parts.push(format!("REPOMON_MCP_MAX_AGENTS={}", shell_quote(&n.to_string())));
+        env_parts.push(format!(
+            "REPOMON_MCP_MAX_AGENTS={}",
+            shell_quote(&n.to_string())
+        ));
     }
     let env_prefix = env_parts.join(" ");
     let mut command = format!("{env_prefix} {base}");
@@ -6887,11 +6924,17 @@ fn build_opencode_orchestrator_command(
 
     let mut env_parts = vec![
         format!("OPENCODE_CONFIG_CONTENT={}", shell_quote(&config_json)),
-        format!("REPOMON_MCP_SOCKET={}", shell_quote(&socket.to_string_lossy())),
+        format!(
+            "REPOMON_MCP_SOCKET={}",
+            shell_quote(&socket.to_string_lossy())
+        ),
         format!("REPOMON_MCP_AUTONOMY={}", shell_quote(autonomy)),
     ];
     if let Some(n) = max_agents {
-        env_parts.push(format!("REPOMON_MCP_MAX_AGENTS={}", shell_quote(&n.to_string())));
+        env_parts.push(format!(
+            "REPOMON_MCP_MAX_AGENTS={}",
+            shell_quote(&n.to_string())
+        ));
     }
     let env_prefix = env_parts.join(" ");
     let mut command = format!("{env_prefix} {base}");
@@ -7326,13 +7369,11 @@ mod tests {
     #[test]
     fn expand_message_targets_rejects_empty_list_and_blank_items() {
         let empty = MessageTo::Multi(vec![]);
-        let error =
-            expand_message_targets(&empty, &[], &resolved_sender(None, None)).unwrap_err();
+        let error = expand_message_targets(&empty, &[], &resolved_sender(None, None)).unwrap_err();
         assert!(error.message.contains("must not be empty"));
 
         let blank = MessageTo::Multi(vec!["  ".into()]);
-        let error =
-            expand_message_targets(&blank, &[], &resolved_sender(None, None)).unwrap_err();
+        let error = expand_message_targets(&blank, &[], &resolved_sender(None, None)).unwrap_err();
         assert!(error.message.contains("must not be empty"));
     }
 
@@ -7587,12 +7628,7 @@ mod tests {
         }
     }
 
-    fn wm_kind(
-        name: &str,
-        wid: u64,
-        sid: Option<&str>,
-        kind: Option<&str>,
-    ) -> agent::WindowMeta {
+    fn wm_kind(name: &str, wid: u64, sid: Option<&str>, kind: Option<&str>) -> agent::WindowMeta {
         agent::WindowMeta {
             name: name.into(),
             wid,
@@ -7801,8 +7837,18 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (1, "lane-7".to_string(), "a".to_string(), AgentKind::ClaudeCode),
-                (2, "lane-7-2".to_string(), "b".to_string(), AgentKind::ClaudeCode),
+                (
+                    1,
+                    "lane-7".to_string(),
+                    "a".to_string(),
+                    AgentKind::ClaudeCode
+                ),
+                (
+                    2,
+                    "lane-7-2".to_string(),
+                    "b".to_string(),
+                    AgentKind::ClaudeCode
+                ),
             ]
         );
     }
@@ -7892,7 +7938,10 @@ mod tests {
         // forever. It's fine to offer that window to the evidence probe (it wins nothing, since
         // pane evidence never confirms an unrelated transcript there), but the display must stay
         // put every single tick, not just the first.
-        let windows = vec![wm("lane-81", 1, Some("bound")), wm("lane-81-2", 2, Some("other"))];
+        let windows = vec![
+            wm("lane-81", 1, Some("bound")),
+            wm("lane-81-2", 2, Some("other")),
+        ];
         let p = pair_transcripts_to_windows(
             &[
                 tsum("operator", t(100)),
@@ -7918,7 +7967,10 @@ mod tests {
             &windows,
             t(100),
         );
-        assert_eq!(p.assignment, p2.assignment, "must not flip-flop tick to tick");
+        assert_eq!(
+            p.assignment, p2.assignment,
+            "must not flip-flop tick to tick"
+        );
     }
 
     #[test]
@@ -8039,8 +8091,18 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (1, "lane-7".to_string(), "b".to_string(), AgentKind::ClaudeCode),
-                (2, "lane-7-2".to_string(), "a".to_string(), AgentKind::ClaudeCode),
+                (
+                    1,
+                    "lane-7".to_string(),
+                    "b".to_string(),
+                    AgentKind::ClaudeCode
+                ),
+                (
+                    2,
+                    "lane-7-2".to_string(),
+                    "a".to_string(),
+                    AgentKind::ClaudeCode
+                ),
             ]
         );
     }
@@ -8372,7 +8434,10 @@ mod tests {
             " -s ",
             " -m ",
         ] {
-            assert!(!cmd.contains(forbidden_flag), "{forbidden_flag} leaked: {cmd}");
+            assert!(
+                !cmd.contains(forbidden_flag),
+                "{forbidden_flag} leaked: {cmd}"
+            );
         }
 
         // Supervised + model + prompt: no dangerously-skip-permissions, --model, prompt appended to persona.
@@ -8391,14 +8456,8 @@ mod tests {
         assert!(cmd.contains("coordinate lane-1 and lane-2"), "{cmd}");
 
         // Read-only maps to --mode plan.
-        let cmd = build_antigravity_orchestrator_command(
-            "agy",
-            &socket,
-            "read-only",
-            None,
-            &None,
-            &None,
-        );
+        let cmd =
+            build_antigravity_orchestrator_command("agy", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" --mode plan"), "{cmd}");
         assert!(!cmd.contains("--dangerously-skip-permissions"), "{cmd}");
     }
@@ -8448,7 +8507,10 @@ mod tests {
             "--dangerously-skip-permissions",
             " --mode ",
         ] {
-            assert!(!cmd.contains(forbidden_flag), "{forbidden_flag} leaked: {cmd}");
+            assert!(
+                !cmd.contains(forbidden_flag),
+                "{forbidden_flag} leaked: {cmd}"
+            );
         }
 
         // Supervised + model + prompt: --model, prompt appended to persona.
@@ -8597,10 +8659,11 @@ mod tests {
             "identity token leaked to disk: {content}"
         );
         // spec.env retains the token for process inheritance
-        assert!(spec
-            .env
-            .iter()
-            .any(|(k, v)| k == "REPOMON_MCP_IDENTITY_TOKEN" && v == "secret-worker-token-xyz"));
+        assert!(
+            spec.env
+                .iter()
+                .any(|(k, v)| k == "REPOMON_MCP_IDENTITY_TOKEN" && v == "secret-worker-token-xyz")
+        );
     }
 
     #[test]
@@ -8614,7 +8677,10 @@ mod tests {
         let mut spec = SpawnSpec::new("agy --mode plan", dir.path());
         configure_backend_mcp(&AgentKind::Other("my-agy-wrapper".into()), &mut spec).unwrap();
         // The Antigravity registration should have fired (dialect detected from spec.program).
-        assert!(mcp_cfg.exists(), "Antigravity mcp_config.json must be created for agy wrapper");
+        assert!(
+            mcp_cfg.exists(),
+            "Antigravity mcp_config.json must be created for agy wrapper"
+        );
 
         // A custom agent wrapping cursor-agent must receive Cursor MCP wiring.
         let cursor_cfg = dir.path().join("mcp.json");
@@ -8623,13 +8689,19 @@ mod tests {
         }
         let mut spec2 = SpawnSpec::new("cursor-agent --approve-mcps", dir.path());
         configure_backend_mcp(&AgentKind::Other("my-cursor-wrapper".into()), &mut spec2).unwrap();
-        assert!(cursor_cfg.exists(), "Cursor mcp.json must be created for cursor-agent wrapper");
+        assert!(
+            cursor_cfg.exists(),
+            "Cursor mcp.json must be created for cursor-agent wrapper"
+        );
 
         // A completely unknown custom command must produce no error and no file.
         let unknown_cfg = dir.path().join("unknown.json");
         let mut spec3 = SpawnSpec::new("my-exotic-agent", dir.path());
         configure_backend_mcp(&AgentKind::Other("exotic".into()), &mut spec3).unwrap();
-        assert!(!unknown_cfg.exists(), "unknown binary must not produce any config file");
+        assert!(
+            !unknown_cfg.exists(),
+            "unknown binary must not produce any config file"
+        );
     }
 
     #[test]
@@ -9155,7 +9227,8 @@ mod tests {
 
     #[test]
     fn managed_session_is_never_promoted_to_external() {
-        let known_managed: std::collections::HashSet<String> = ["managed-session-1".to_string()].into_iter().collect();
+        let known_managed: std::collections::HashSet<String> =
+            ["managed-session-1".to_string()].into_iter().collect();
         let sid = "managed-session-1";
         let was_managed = known_managed.contains(sid);
         assert!(was_managed);

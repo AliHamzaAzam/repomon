@@ -5587,7 +5587,9 @@ impl AttachSpec {
         // target's prefix (exactly what this client always ran before the `attach` field).
         let socket = target.split(':').next().unwrap_or("repomon").to_string();
         AttachSpec {
-            program: repomon_core::agent::tmux_program().to_string_lossy().into_owned(),
+            program: repomon_core::agent::tmux_program()
+                .to_string_lossy()
+                .into_owned(),
             args: vec![
                 "-L".into(),
                 socket,
@@ -5937,7 +5939,9 @@ mod tests {
     fn attach_spec_falls_back_to_the_classic_tmux_invocation() {
         // An older daemon without the `attach` field: derive `tmux -L <session> attach -t <target>`
         // from the target's session prefix, exactly as this client always did.
-        let expected_prog = repomon_core::agent::tmux_program().to_string_lossy().into_owned();
+        let expected_prog = repomon_core::agent::tmux_program()
+            .to_string_lossy()
+            .into_owned();
         let v = serde_json::json!({ "target": "mysess:=lane-1", "available": true });
         let spec = AttachSpec::from_response(&v).expect("target present");
         assert_eq!(spec.program, expected_prog);

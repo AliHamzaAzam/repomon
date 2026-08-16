@@ -48,10 +48,15 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
     }
 
     let mut config = Config::default();
-    config.agents.insert("custom-cli".into(), "nonexistent-cmd-abc".into());
+    config
+        .agents
+        .insert("custom-cli".into(), "nonexistent-cmd-abc".into());
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
-    let sock = std::env::temp_dir().join(format!("repomon-doctor-missing-{}.sock", std::process::id()));
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-doctor-missing-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&sock);
     let server = {
         let ctx = ctx.clone();

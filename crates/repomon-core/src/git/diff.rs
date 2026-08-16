@@ -146,7 +146,11 @@ pub fn commit_show(worktree_path: &Path, oid: &str) -> Result<CommitShow> {
         worktree_path,
         &["rev-parse", "--verify", &format!("{oid}^{{commit}}")],
     )
-    .map_err(|e| Error::Git(format!("{oid} does not resolve to a commit in this repo: {e}")))?
+    .map_err(|e| {
+        Error::Git(format!(
+            "{oid} does not resolve to a commit in this repo: {e}"
+        ))
+    })?
     .trim()
     .to_string();
 
@@ -164,9 +168,11 @@ pub fn commit_show(worktree_path: &Path, oid: &str) -> Result<CommitShow> {
         .trim_end_matches('\n')
         .to_string();
 
-    let epoch: i64 = epoch_field
-        .parse()
-        .map_err(|_| Error::Git(format!("git show returned an unparsable author date for {full}: {epoch_field:?}")))?;
+    let epoch: i64 = epoch_field.parse().map_err(|_| {
+        Error::Git(format!(
+            "git show returned an unparsable author date for {full}: {epoch_field:?}"
+        ))
+    })?;
     let time = DateTime::<Utc>::from_timestamp(epoch, 0)
         .ok_or_else(|| Error::Git(format!("author date out of range for {full}: {epoch}")))?;
 
@@ -360,14 +366,10 @@ mod tests {
     #[test]
     fn looks_like_oid_accepts_only_plain_hex_in_gits_abbreviation_range() {
         assert!(looks_like_oid("abc1234"));
-        assert!(looks_like_oid(
-            "0123456789abcdef0123456789abcdef01234567"
-        ));
+        assert!(looks_like_oid("0123456789abcdef0123456789abcdef01234567"));
         assert!(looks_like_oid("ABC1234")); // git accepts uppercase hex too
         assert!(!looks_like_oid("abc")); // shorter than git's 4-char floor
-        assert!(!looks_like_oid(
-            "0123456789abcdef0123456789abcdef012345678"
-        )); // one char past a full sha1
+        assert!(!looks_like_oid("0123456789abcdef0123456789abcdef012345678")); // one char past a full sha1
         assert!(!looks_like_oid("not-hex-at-all"));
         // The one case that matters most: nothing starting with `-` (a git flag) ever passes,
         // regardless of what follows.
@@ -384,22 +386,33 @@ mod tests {
         git(&wt_path, &["add", "a.txt"]);
         git(
             &wt_path,
-            &["commit", "-m", "feat: add a\n\nExplains why a was added.\nSecond body line."],
+            &[
+                "commit",
+                "-m",
+                "feat: add a\n\nExplains why a was added.\nSecond body line.",
+            ],
         );
         let short = run(&wt_path, &["rev-parse", "--short", "HEAD"])
             .unwrap()
             .trim()
             .to_string();
-        let full = run(&wt_path, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let full = run(&wt_path, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
 
         // Resolves from an abbreviated oid, same as a commit row's short hash would supply.
         let show = commit_show(&wt_path, &short).unwrap();
-        assert_eq!(show.oid, full, "should resolve to the full oid, not echo the short input");
+        assert_eq!(
+            show.oid, full,
+            "should resolve to the full oid, not echo the short input"
+        );
         assert_eq!(show.author_name, "T");
         assert_eq!(show.author_email, "t@e.com");
         assert_eq!(show.summary, "feat: add a");
         assert!(
-            show.body.contains("Explains why a was added.") && show.body.contains("Second body line."),
+            show.body.contains("Explains why a was added.")
+                && show.body.contains("Second body line."),
             "body was: {:?}",
             show.body
         );

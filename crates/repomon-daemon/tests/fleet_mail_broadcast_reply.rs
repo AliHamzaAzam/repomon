@@ -82,7 +82,10 @@ async fn wait_for_token(token_file: &std::path::Path) -> String {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("fake agent CLI never wrote its identity token to {}", token_file.display());
+    panic!(
+        "fake agent CLI never wrote its identity token to {}",
+        token_file.display()
+    );
 }
 
 async fn spawn_claude(
@@ -112,11 +115,16 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
         return;
     }
     let session = format!("repomon-broadcast-reply-it-{}", std::process::id());
-    let config = Config { tmux_session: session.clone(), ..Default::default() };
+    let config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
-    let sock =
-        std::env::temp_dir().join(format!("repomon-broadcast-reply-it-{}.sock", std::process::id()));
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-broadcast-reply-it-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&sock);
     let server = {
         let ctx = ctx.clone();
@@ -142,8 +150,17 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
-    call(&mut stream, 1, "repo.add", Some(json!({ "path": repo_dir.path().to_string_lossy() }))).await;
-    let lanes = call(&mut stream, 2, "lane.list", None).await.result.unwrap();
+    call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
     let repo_id = lanes[0]["repo"]["id"].as_i64().unwrap();
     let lane_a = lanes[0]["id"].as_i64().unwrap();
     let r = call(
@@ -212,11 +229,16 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
         .unwrap()["error"]
         .as_str()
         .unwrap();
-    assert!(a2_error.contains("reverse the parent message"), "{a2_error}");
+    assert!(
+        a2_error.contains("reverse the parent message"),
+        "{a2_error}"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program()).args(["-L", &session, "kill-server"]).output();
+    let _ = Command::new(repomon_core::agent::tmux_program())
+        .args(["-L", &session, "kill-server"])
+        .output();
     unsafe {
         match old_path {
             Some(p) => std::env::set_var("PATH", p),

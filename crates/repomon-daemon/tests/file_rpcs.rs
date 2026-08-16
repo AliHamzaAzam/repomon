@@ -144,7 +144,10 @@ async fn file_list_is_sorted_dirs_first_and_excludes_dot_git() {
     let result = r.result.unwrap();
     assert_eq!(result["truncated"], json!(false));
     let entries = result["entries"].as_array().unwrap();
-    let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
 
     // .git (a gitlink FILE in a linked worktree, not a dir) never appears.
     assert!(!names.contains(&".git"), "names was: {names:?}");
@@ -241,7 +244,12 @@ async fn path_escapes_are_hard_rejected() {
     let mut h = setup("file-escape").await;
     std::fs::write(h.root.join("inside.txt"), "safe").unwrap();
 
-    for bad in ["../outside.txt", "../../etc/passwd", "/etc/passwd", "a/../../b"] {
+    for bad in [
+        "../outside.txt",
+        "../../etc/passwd",
+        "/etc/passwd",
+        "a/../../b",
+    ] {
         let r = call(
             &mut h.stream,
             3,
@@ -279,7 +287,10 @@ async fn path_escapes_are_hard_rejected() {
         Some(json!({ "lane_id": h.lane_id, "path": "../outside.txt", "content": "x" })),
     )
     .await;
-    assert!(r.error.is_some(), "file.write must reject an escaping path too");
+    assert!(
+        r.error.is_some(),
+        "file.write must reject an escaping path too"
+    );
 
     h.shutdown().await;
 }
@@ -319,7 +330,11 @@ async fn file_read_rejects_binary_content() {
     )
     .await;
     let err = r.error.expect("binary file must be rejected");
-    assert!(err.message.contains("binary"), "message was: {}", err.message);
+    assert!(
+        err.message.contains("binary"),
+        "message was: {}",
+        err.message
+    );
 
     h.shutdown().await;
 }
@@ -337,7 +352,9 @@ async fn file_read_rejects_over_cap_size_without_truncating() {
         Some(json!({ "lane_id": h.lane_id, "path": "big.txt" })),
     )
     .await;
-    let err = r.error.expect("oversized file must be rejected, not truncated");
+    let err = r
+        .error
+        .expect("oversized file must be rejected, not truncated");
     assert!(
         err.message.contains("too large"),
         "message was: {}",
@@ -393,7 +410,13 @@ async fn file_write_rejects_stale_mtime_and_broadcasts_event_on_success() {
     std::fs::write(h.root.join("shared.txt"), "v1").unwrap();
 
     // Subscribe before the write we expect to succeed, so the broadcast is observable.
-    let r = call(&mut h.stream, 3, "subscribe", Some(json!({ "topics": ["*"] }))).await;
+    let r = call(
+        &mut h.stream,
+        3,
+        "subscribe",
+        Some(json!({ "topics": ["*"] })),
+    )
+    .await;
     assert!(r.error.is_none(), "subscribe errored: {:?}", r.error);
 
     let read = call(
@@ -485,7 +508,10 @@ async fn file_write_rejects_stale_mtime_and_broadcasts_event_on_success() {
             }
         }
     }
-    assert!(saw_event, "expected an event.file.changed broadcast after a successful write");
+    assert!(
+        saw_event,
+        "expected an event.file.changed broadcast after a successful write"
+    );
     assert_eq!(
         std::fs::read_to_string(h.root.join("shared.txt")).unwrap(),
         "v3-from-editor"

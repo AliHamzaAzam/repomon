@@ -83,7 +83,10 @@ async fn wait_for_token(token_file: &std::path::Path) -> String {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("fake agent CLI never wrote its identity token to {}", token_file.display());
+    panic!(
+        "fake agent CLI never wrote its identity token to {}",
+        token_file.display()
+    );
 }
 
 /// Spawn a `claude-code` agent in `lane_id` via the fake `claude` binary on `PATH`, waiting for
@@ -141,7 +144,11 @@ async fn mcp_send(stdin: &mut ChildStdin, msg: &Value) {
 }
 
 async fn mcp_request(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) {
-    mcp_send(stdin, &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await;
+    mcp_send(
+        stdin,
+        &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+    )
+    .await;
 }
 
 async fn mcp_notify(stdin: &mut ChildStdin, method: &str) {
@@ -166,7 +173,13 @@ async fn call_tool(
     name: &str,
     arguments: Value,
 ) -> (Value, bool) {
-    mcp_request(stdin, id, "tools/call", json!({ "name": name, "arguments": arguments })).await;
+    mcp_request(
+        stdin,
+        id,
+        "tools/call",
+        json!({ "name": name, "arguments": arguments }),
+    )
+    .await;
     let resp = mcp_read(lines).await;
     let content = &resp["result"]["content"];
     let text = content[0]["text"].as_str().unwrap_or_default();
@@ -177,7 +190,10 @@ async fn call_tool(
 
 async fn shutdown_mcp_child(mut child: Child, stdin: ChildStdin) {
     drop(stdin);
-    if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+    if tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .is_err()
+    {
         let _ = child.start_kill();
     }
 }
@@ -199,10 +215,14 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
         return;
     }
     let session = format!("repomon-broadcast-it-{}", std::process::id());
-    let config = Config { tmux_session: session.clone(), ..Default::default() };
+    let config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
-    let sock = std::env::temp_dir().join(format!("repomon-broadcast-it-{}.sock", std::process::id()));
+    let sock =
+        std::env::temp_dir().join(format!("repomon-broadcast-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
         let ctx = ctx.clone();
@@ -230,8 +250,17 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
-    call(&mut stream, 1, "repo.add", Some(json!({ "path": repo_dir.path().to_string_lossy() }))).await;
-    let lanes = call(&mut stream, 2, "lane.list", None).await.result.unwrap();
+    call(
+        &mut stream,
+        1,
+        "repo.add",
+        Some(json!({ "path": repo_dir.path().to_string_lossy() })),
+    )
+    .await;
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
     let repo_id = lanes[0]["repo"]["id"].as_i64().unwrap();
     let lane_a = lanes[0]["id"].as_i64().unwrap();
     let r = call(
@@ -256,13 +285,22 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     let addr_b1 = format!("lane-{lane_b}/1");
 
     // Sender: an agent-mode MCP client authenticated as lane-B/1.
-    let mut sender = spawn_mcp_child(&sock, &[
-        ("REPOMON_MCP_MODE", "agent"),
-        ("REPOMON_MCP_IDENTITY_TOKEN", &token_b1),
-    ]);
+    let mut sender = spawn_mcp_child(
+        &sock,
+        &[
+            ("REPOMON_MCP_MODE", "agent"),
+            ("REPOMON_MCP_IDENTITY_TOKEN", &token_b1),
+        ],
+    );
     let mut sender_stdin = sender.stdin.take().expect("child stdin");
     let mut sender_lines = BufReader::new(sender.stdout.take().expect("child stdout")).lines();
-    mcp_request(&mut sender_stdin, 1, "initialize", json!({ "protocolVersion": "2025-06-18" })).await;
+    mcp_request(
+        &mut sender_stdin,
+        1,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18" }),
+    )
+    .await;
     let _ = mcp_read(&mut sender_lines).await;
     mcp_notify(&mut sender_stdin, "notifications/initialized").await;
 
@@ -295,7 +333,10 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     .await
     .result
     .unwrap();
-    assert!(bodies(&inbox_a1).contains(&"list-body".to_string()), "{inbox_a1:?}");
+    assert!(
+        bodies(&inbox_a1).contains(&"list-body".to_string()),
+        "{inbox_a1:?}"
+    );
     let inbox_a2 = call(
         &mut stream,
         21,
@@ -305,7 +346,10 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     .await
     .result
     .unwrap();
-    assert!(bodies(&inbox_a2).contains(&"list-body".to_string()), "{inbox_a2:?}");
+    assert!(
+        bodies(&inbox_a2).contains(&"list-body".to_string()),
+        "{inbox_a2:?}"
+    );
 
     // Each fan-out send reuses `send_message`'s existing per-sender rate limiter unchanged (a
     // deliberate A6 design call — see the report), so pace these steps >1s apart to stay clear
@@ -331,10 +375,32 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
         .collect();
     assert_eq!(targets, [addr_a1.as_str(), addr_a2.as_str()], "{result:?}");
 
-    let inbox_a1 = call(&mut stream, 22, "message.inbox", Some(json!({ "identity_token": token_a1 }))).await.result.unwrap();
-    assert!(bodies(&inbox_a1).contains(&"lane-wild-body".to_string()), "{inbox_a1:?}");
-    let inbox_a2 = call(&mut stream, 23, "message.inbox", Some(json!({ "identity_token": token_a2 }))).await.result.unwrap();
-    assert!(bodies(&inbox_a2).contains(&"lane-wild-body".to_string()), "{inbox_a2:?}");
+    let inbox_a1 = call(
+        &mut stream,
+        22,
+        "message.inbox",
+        Some(json!({ "identity_token": token_a1 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        bodies(&inbox_a1).contains(&"lane-wild-body".to_string()),
+        "{inbox_a1:?}"
+    );
+    let inbox_a2 = call(
+        &mut stream,
+        23,
+        "message.inbox",
+        Some(json!({ "identity_token": token_a2 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        bodies(&inbox_a2).contains(&"lane-wild-body".to_string()),
+        "{inbox_a2:?}"
+    );
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
@@ -348,21 +414,61 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     )
     .await;
     assert!(!is_error, "global wildcard send errored: {result:?}");
-    assert_eq!(result["recipient_count"], json!(2), "{result:?} (sender must self-exclude)");
+    assert_eq!(
+        result["recipient_count"],
+        json!(2),
+        "{result:?} (sender must self-exclude)"
+    );
     let targets: Vec<&str> = result["results"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| r["to"].as_str().unwrap())
         .collect();
-    assert!(!targets.contains(&addr_b1.as_str()), "broadcast must not mail the sender: {targets:?}");
+    assert!(
+        !targets.contains(&addr_b1.as_str()),
+        "broadcast must not mail the sender: {targets:?}"
+    );
 
-    let inbox_a1 = call(&mut stream, 24, "message.inbox", Some(json!({ "identity_token": token_a1 }))).await.result.unwrap();
-    assert!(bodies(&inbox_a1).contains(&"global-wild-body".to_string()), "{inbox_a1:?}");
-    let inbox_a2 = call(&mut stream, 25, "message.inbox", Some(json!({ "identity_token": token_a2 }))).await.result.unwrap();
-    assert!(bodies(&inbox_a2).contains(&"global-wild-body".to_string()), "{inbox_a2:?}");
-    let inbox_b1 = call(&mut stream, 26, "message.inbox", Some(json!({ "identity_token": token_b1 }))).await.result.unwrap();
-    assert!(!bodies(&inbox_b1).contains(&"global-wild-body".to_string()), "self-broadcast leaked: {inbox_b1:?}");
+    let inbox_a1 = call(
+        &mut stream,
+        24,
+        "message.inbox",
+        Some(json!({ "identity_token": token_a1 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        bodies(&inbox_a1).contains(&"global-wild-body".to_string()),
+        "{inbox_a1:?}"
+    );
+    let inbox_a2 = call(
+        &mut stream,
+        25,
+        "message.inbox",
+        Some(json!({ "identity_token": token_a2 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        bodies(&inbox_a2).contains(&"global-wild-body".to_string()),
+        "{inbox_a2:?}"
+    );
+    let inbox_b1 = call(
+        &mut stream,
+        26,
+        "message.inbox",
+        Some(json!({ "identity_token": token_b1 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        !bodies(&inbox_b1).contains(&"global-wild-body".to_string()),
+        "self-broadcast leaked: {inbox_b1:?}"
+    );
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
@@ -377,10 +483,27 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     .await;
     assert!(!is_error, "explicit self-send errored: {result:?}");
     // Legacy single-address shape: a bare FleetMessage, not a fan-out summary.
-    assert!(result.get("results").is_none(), "single self-send must not be wrapped: {result:?}");
-    assert!(result.get("id").is_some(), "single self-send must return a FleetMessage: {result:?}");
-    let inbox_b1 = call(&mut stream, 27, "message.inbox", Some(json!({ "identity_token": token_b1 }))).await.result.unwrap();
-    assert!(bodies(&inbox_b1).contains(&"self-explicit-body".to_string()), "{inbox_b1:?}");
+    assert!(
+        result.get("results").is_none(),
+        "single self-send must not be wrapped: {result:?}"
+    );
+    assert!(
+        result.get("id").is_some(),
+        "single self-send must return a FleetMessage: {result:?}"
+    );
+    let inbox_b1 = call(
+        &mut stream,
+        27,
+        "message.inbox",
+        Some(json!({ "identity_token": token_b1 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        bodies(&inbox_b1).contains(&"self-explicit-body".to_string()),
+        "{inbox_b1:?}"
+    );
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
@@ -394,10 +517,24 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     )
     .await;
     assert!(!is_error, "single legacy send errored: {result:?}");
-    assert!(result.get("results").is_none(), "single send must not be wrapped: {result:?}");
+    assert!(
+        result.get("results").is_none(),
+        "single send must not be wrapped: {result:?}"
+    );
     assert_eq!(result["recipient"]["address"], json!(addr_a1), "{result:?}");
-    let inbox_a1 = call(&mut stream, 28, "message.inbox", Some(json!({ "identity_token": token_a1 }))).await.result.unwrap();
-    assert!(bodies(&inbox_a1).contains(&"single-legacy-body".to_string()), "{inbox_a1:?}");
+    let inbox_a1 = call(
+        &mut stream,
+        28,
+        "message.inbox",
+        Some(json!({ "identity_token": token_a1 })),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(
+        bodies(&inbox_a1).contains(&"single-legacy-body".to_string()),
+        "{inbox_a1:?}"
+    );
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
@@ -410,7 +547,10 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
         json!({ "to": [addr_a1, "not-a-real-address"], "body": "mixed-body" }),
     )
     .await;
-    assert!(!is_error, "mixed list send itself must not error: {result:?}");
+    assert!(
+        !is_error,
+        "mixed list send itself must not error: {result:?}"
+    );
     assert_eq!(result["recipient_count"], json!(2), "{result:?}");
     assert_eq!(result["sent_count"], json!(1), "{result:?}");
     let by_to: std::collections::HashMap<&str, &str> = result["results"]
@@ -437,7 +577,9 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program()).args(["-L", &session, "kill-server"]).output();
+    let _ = Command::new(repomon_core::agent::tmux_program())
+        .args(["-L", &session, "kill-server"])
+        .output();
     unsafe {
         match old_path {
             Some(p) => std::env::set_var("PATH", p),

@@ -548,7 +548,11 @@ impl Store {
     }
 
     /// Set an auto-generated local LLM label for a session, keyed by its durable transcript `session_id`.
-    pub async fn set_session_generated_label(&self, session_id: String, label: String) -> Result<()> {
+    pub async fn set_session_generated_label(
+        &self,
+        session_id: String,
+        label: String,
+    ) -> Result<()> {
         self.call(move |c| {
             c.execute(
                 "INSERT INTO session_generated_labels(session_id, label, created_at) VALUES(?1, ?2, ?3)

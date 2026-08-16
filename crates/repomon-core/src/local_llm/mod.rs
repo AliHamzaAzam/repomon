@@ -11,8 +11,8 @@ use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::quantized_qwen2::ModelWeights as Qwen2Model;
-use hf_hub::api::sync::Api;
 use hf_hub::Repo;
+use hf_hub::api::sync::Api;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
@@ -51,16 +51,23 @@ impl Default for LocalLlmConfig {
 
 /// Resolves model and tokenizer files from HuggingFace cache or downloads them if not present.
 pub fn resolve_model_files(config: &LocalLlmConfig) -> Result<(PathBuf, PathBuf)> {
-    let api = Api::new().map_err(|e| Error::LocalLlm(format!("HF Hub API initialization failed: {e}")))?;
+    let api = Api::new()
+        .map_err(|e| Error::LocalLlm(format!("HF Hub API initialization failed: {e}")))?;
     let model_repo = api.repo(Repo::model(config.model_repo.clone()));
-    let model_path = model_repo
-        .get(&config.model_file)
-        .map_err(|e| Error::LocalLlm(format!("Failed to retrieve model weight {}: {e}", config.model_file)))?;
+    let model_path = model_repo.get(&config.model_file).map_err(|e| {
+        Error::LocalLlm(format!(
+            "Failed to retrieve model weight {}: {e}",
+            config.model_file
+        ))
+    })?;
 
     let tokenizer_repo = api.repo(Repo::model(config.tokenizer_repo.clone()));
-    let tokenizer_path = tokenizer_repo
-        .get(&config.tokenizer_file)
-        .map_err(|e| Error::LocalLlm(format!("Failed to retrieve tokenizer {}: {e}", config.tokenizer_file)))?;
+    let tokenizer_path = tokenizer_repo.get(&config.tokenizer_file).map_err(|e| {
+        Error::LocalLlm(format!(
+            "Failed to retrieve tokenizer {}: {e}",
+            config.tokenizer_file
+        ))
+    })?;
 
     Ok((model_path, tokenizer_path))
 }
@@ -79,8 +86,12 @@ pub fn generate_oneshot(prompt: &str, config: Option<&LocalLlmConfig>) -> Result
     let (model_path, tokenizer_path) = resolve_model_files(cfg)?;
     let device = Device::Cpu;
 
-    let mut file = File::open(&model_path)
-        .map_err(|e| Error::LocalLlm(format!("Failed to open model file at {}: {e}", model_path.display())))?;
+    let mut file = File::open(&model_path).map_err(|e| {
+        Error::LocalLlm(format!(
+            "Failed to open model file at {}: {e}",
+            model_path.display()
+        ))
+    })?;
     let content = gguf_file::Content::read(&mut file)
         .map_err(|e| Error::LocalLlm(format!("Failed to read GGUF content: {e}")))?;
     let mut model = Qwen2Model::from_gguf(content, &mut file, &device)
@@ -99,7 +110,11 @@ pub fn generate_oneshot(prompt: &str, config: Option<&LocalLlmConfig>) -> Result
 
     let mut logits_processor = LogitsProcessor::new(
         299792458,
-        if cfg.temperature > 0.0 { Some(cfg.temperature) } else { None },
+        if cfg.temperature > 0.0 {
+            Some(cfg.temperature)
+        } else {
+            None
+        },
         None,
     );
 
@@ -195,11 +210,7 @@ pub fn sanitize_session_slug(raw: &str) -> Option<String> {
         }
     }
 
-    if slug.len() >= 2 {
-        Some(slug)
-    } else {
-        None
-    }
+    if slug.len() >= 2 { Some(slug) } else { None }
 }
 
 /// Formats a user prompt into a ChatML session naming prompt.
@@ -223,8 +234,9 @@ pub fn generate_session_slug(user_prompt: &str) -> Result<String> {
     cfg.max_tokens = 14;
 
     let raw = generate_oneshot(&prompt, Some(&cfg))?;
-    sanitize_session_slug(&raw)
-        .ok_or_else(|| Error::LocalLlm(format!("Failed to parse clean slug from response: '{raw}'")))
+    sanitize_session_slug(&raw).ok_or_else(|| {
+        Error::LocalLlm(format!("Failed to parse clean slug from response: '{raw}'"))
+    })
 }
 
 /// Asynchronously generates a session slug on a blocking threadpool.
@@ -240,11 +252,26 @@ mod tests {
 
     #[test]
     fn test_slug_sanitization() {
-        assert_eq!(sanitize_session_slug("fix-auth-tokens"), Some("fix-auth-tokens".into()));
-        assert_eq!(sanitize_session_slug("\"redesign-fleet-sidebar\""), Some("redesign-fleet-sidebar".into()));
-        assert_eq!(sanitize_session_slug("`fix_login_flow`"), Some("fix-login-flow".into()));
-        assert_eq!(sanitize_session_slug("Fix the desktop UI tab labels"), Some("fix-the-desktop-ui-tab-labels".into()));
-        assert_eq!(sanitize_session_slug("  \n\nfix-claude-code\nSome explanation"), Some("fix-claude-code".into()));
+        assert_eq!(
+            sanitize_session_slug("fix-auth-tokens"),
+            Some("fix-auth-tokens".into())
+        );
+        assert_eq!(
+            sanitize_session_slug("\"redesign-fleet-sidebar\""),
+            Some("redesign-fleet-sidebar".into())
+        );
+        assert_eq!(
+            sanitize_session_slug("`fix_login_flow`"),
+            Some("fix-login-flow".into())
+        );
+        assert_eq!(
+            sanitize_session_slug("Fix the desktop UI tab labels"),
+            Some("fix-the-desktop-ui-tab-labels".into())
+        );
+        assert_eq!(
+            sanitize_session_slug("  \n\nfix-claude-code\nSome explanation"),
+            Some("fix-claude-code".into())
+        );
         assert_eq!(sanitize_session_slug(""), None);
         assert_eq!(sanitize_session_slug("---"), None);
     }

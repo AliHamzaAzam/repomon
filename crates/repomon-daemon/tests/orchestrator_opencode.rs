@@ -52,8 +52,10 @@ async fn opencode_backend_starts_degrades_transcript_and_stops() {
     };
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
-    let sock =
-        std::env::temp_dir().join(format!("repomon-orch-opencode-it-{}.sock", std::process::id()));
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-orch-opencode-it-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&sock);
 
     let server = {

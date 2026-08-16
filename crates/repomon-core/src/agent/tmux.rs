@@ -183,7 +183,6 @@ impl TmuxRuntime {
         Self::probe().available
     }
 
-
     pub fn session(&self) -> &str {
         &self.session
     }
@@ -1274,7 +1273,8 @@ mod tests {
     #[test]
     fn parses_windows_meta_lines() {
         // `name\t@id\tsession?\tagent_kind?` — fields 3 and 4 are empty when options are unset.
-        let out = "lane-1\t@3\tabc-123\tclaude-code\nlane-1-2\t@7\t\tantigravity\norchestrator\t@1\t\t\n";
+        let out =
+            "lane-1\t@3\tabc-123\tclaude-code\nlane-1-2\t@7\t\tantigravity\norchestrator\t@1\t\t\n";
         assert_eq!(
             TmuxRuntime::parse_windows_meta(out),
             vec![
@@ -1608,11 +1608,8 @@ mod tests {
         let sibling_tmux = sibling_dir.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&sibling_tmux, b"sibling").unwrap();
 
-        let resolved = resolve_tmux_from(
-            Some(fake_env_tmux.to_str().unwrap()),
-            None,
-            &[sibling_dir],
-        );
+        let resolved =
+            resolve_tmux_from(Some(fake_env_tmux.to_str().unwrap()), None, &[sibling_dir]);
         assert_eq!(
             resolved,
             Some(ResolvedTmux {

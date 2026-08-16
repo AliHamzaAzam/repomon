@@ -150,22 +150,31 @@ fn log_term_trace(tag: &str, window: &str, seq: Option<u64>, bytes: &[u8]) {
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/repomon-terminal-trace.log") else { return };
-    let preview: String = bytes.iter().take(128).map(|&b| {
-        match b {
+        .open("/tmp/repomon-terminal-trace.log")
+    else {
+        return;
+    };
+    let preview: String = bytes
+        .iter()
+        .take(128)
+        .map(|&b| match b {
             0x1b => "\\e".to_string(),
             b'\r' => "\\r".to_string(),
             b'\n' => "\\n".to_string(),
             b'\t' => "\\t".to_string(),
             32..=126 => (b as char).to_string(),
             _ => format!("\\x{:02x}", b),
-        }
-    }).collect();
+        })
+        .collect();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let _ = writeln!(file, "[{ts}] [{tag}] win={window} seq={seq:?} len={} preview={preview}", bytes.len());
+    let _ = writeln!(
+        file,
+        "[{ts}] [{tag}] win={window} seq={seq:?} len={} preview={preview}",
+        bytes.len()
+    );
 }
 
 fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
@@ -233,7 +242,12 @@ async fn capture_resync(
         sequence: value.get("sequence").and_then(Value::as_u64)?,
     };
     let frame_bytes = resync_frame(content, alternate, cursor);
-    log_term_trace("RESYNC_FRAME", window, Some(repaint_cursor.sequence), &frame_bytes);
+    log_term_trace(
+        "RESYNC_FRAME",
+        window,
+        Some(repaint_cursor.sequence),
+        &frame_bytes,
+    );
     channel
         .send(InvokeResponseBody::Raw(frame_bytes))
         .is_ok()

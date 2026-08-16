@@ -37,12 +37,7 @@ async fn connect_retry(sock: &std::path::Path) -> IpcStream {
     panic!("daemon endpoint {} never came up", sock.display());
 }
 
-async fn call(
-    stream: &mut IpcStream,
-    id: u64,
-    method: &str,
-    params: Option<Value>,
-) -> Response {
+async fn call(stream: &mut IpcStream, id: u64, method: &str, params: Option<Value>) -> Response {
     let req = Request::new(id, method, params);
     protocol::write_message(stream, &req).await.unwrap();
     let frame = tokio::time::timeout(Duration::from_secs(10), protocol::read_frame(stream))
@@ -163,7 +158,10 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         Some(json!({ "path": repo_dir.path().to_string_lossy() })),
     )
     .await;
-    let lanes = call(&mut stream, 2, "lane.list", None).await.result.unwrap();
+    let lanes = call(&mut stream, 2, "lane.list", None)
+        .await
+        .result
+        .unwrap();
     let lane_id = lanes[0]["id"].as_i64().unwrap();
 
     let repomond = repomon_core::service::repomond_path();
@@ -179,13 +177,21 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
     )
     .await;
     next_id += 1;
-    assert!(r.error.is_none(), "claude-code spawn errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "claude-code spawn errored: {:?}",
+        r.error
+    );
     let window = r.result.unwrap()["window"]
         .as_str()
         .expect("spawn returns a window")
         .to_string();
     let token = wait_for_token(&claude_token_file).await;
-    assert_eq!(token.len(), 64, "identity token should be 32 random bytes as hex: {token:?}");
+    assert_eq!(
+        token.len(),
+        64,
+        "identity token should be 32 random bytes as hex: {token:?}"
+    );
     let identity = ctx
         .store
         .resolve_mcp_identity(token.clone())
@@ -193,8 +199,16 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         .unwrap()
         .expect("daemon must resolve the token it minted for the spawned claude-code session");
     assert_eq!(identity.lane_id, Some(lane_id), "identity: {identity:?}");
-    assert_eq!(identity.window.as_deref(), Some(window.as_str()), "identity: {identity:?}");
-    assert_eq!(identity.agent_kind.as_deref(), Some("claude-code"), "identity: {identity:?}");
+    assert_eq!(
+        identity.window.as_deref(),
+        Some(window.as_str()),
+        "identity: {identity:?}"
+    );
+    assert_eq!(
+        identity.agent_kind.as_deref(),
+        Some("claude-code"),
+        "identity: {identity:?}"
+    );
     // A tampered token must not resolve — this is what actually fails if hash-checking breaks.
     assert!(
         ctx.store
@@ -231,7 +245,11 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
     )
     .await;
     next_id += 1;
-    assert!(r.error.is_none(), "claude-code adopt errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "claude-code adopt errored: {:?}",
+        r.error
+    );
     let window = r.result.unwrap()["window"]
         .as_str()
         .expect("adopt returns a window")
@@ -244,8 +262,16 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         .unwrap()
         .expect("daemon must resolve the token it minted for the adopted claude-code session");
     assert_eq!(identity.lane_id, Some(lane_id), "identity: {identity:?}");
-    assert_eq!(identity.window.as_deref(), Some(window.as_str()), "identity: {identity:?}");
-    assert_eq!(identity.agent_kind.as_deref(), Some("claude-code"), "identity: {identity:?}");
+    assert_eq!(
+        identity.window.as_deref(),
+        Some(window.as_str()),
+        "identity: {identity:?}"
+    );
+    assert_eq!(
+        identity.agent_kind.as_deref(),
+        Some("claude-code"),
+        "identity: {identity:?}"
+    );
     assert!(
         ctx.store
             .resolve_mcp_identity(format!("{token}00"))
@@ -274,7 +300,11 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
     )
     .await;
     next_id += 1;
-    assert!(r.error.is_none(), "antigravity spawn errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "antigravity spawn errored: {:?}",
+        r.error
+    );
     let window = r.result.unwrap()["window"]
         .as_str()
         .expect("spawn returns a window")
@@ -287,8 +317,16 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         .unwrap()
         .expect("daemon must resolve the token it minted for the spawned antigravity session");
     assert_eq!(identity.lane_id, Some(lane_id), "identity: {identity:?}");
-    assert_eq!(identity.window.as_deref(), Some(window.as_str()), "identity: {identity:?}");
-    assert_eq!(identity.agent_kind.as_deref(), Some("antigravity"), "identity: {identity:?}");
+    assert_eq!(
+        identity.window.as_deref(),
+        Some(window.as_str()),
+        "identity: {identity:?}"
+    );
+    assert_eq!(
+        identity.agent_kind.as_deref(),
+        Some("antigravity"),
+        "identity: {identity:?}"
+    );
     assert!(
         ctx.store
             .resolve_mcp_identity(format!("{token}00"))
@@ -322,7 +360,11 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         Some(json!({ "lane_id": lane_id, "agent": "antigravity" })),
     )
     .await;
-    assert!(r.error.is_none(), "antigravity adopt errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "antigravity adopt errored: {:?}",
+        r.error
+    );
     let window = r.result.unwrap()["window"]
         .as_str()
         .expect("adopt returns a window")
@@ -335,8 +377,16 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         .unwrap()
         .expect("daemon must resolve the token it minted for the adopted antigravity session");
     assert_eq!(identity.lane_id, Some(lane_id), "identity: {identity:?}");
-    assert_eq!(identity.window.as_deref(), Some(window.as_str()), "identity: {identity:?}");
-    assert_eq!(identity.agent_kind.as_deref(), Some("antigravity"), "identity: {identity:?}");
+    assert_eq!(
+        identity.window.as_deref(),
+        Some(window.as_str()),
+        "identity: {identity:?}"
+    );
+    assert_eq!(
+        identity.agent_kind.as_deref(),
+        Some("antigravity"),
+        "identity: {identity:?}"
+    );
     assert!(
         ctx.store
             .resolve_mcp_identity(format!("{token}00"))

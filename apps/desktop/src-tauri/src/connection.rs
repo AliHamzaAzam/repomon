@@ -77,7 +77,11 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
     publish(&app, ConnectionSnapshot::connecting(&endpoint)).await;
 
     let client = loop {
-        if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+        if app
+            .state::<AppState>()
+            .manual_stop
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             publish(
                 &app,
                 ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
@@ -90,7 +94,11 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
         match repomon_core::launch::ensure_daemon(&config, socket_override.clone()).await {
             Ok(client) => break client,
             Err(error) => {
-                if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if app
+                    .state::<AppState>()
+                    .manual_stop
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     publish(
                         &app,
                         ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
@@ -115,7 +123,11 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
     let _ = state.client.set(client);
 
     loop {
-        if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+        if app
+            .state::<AppState>()
+            .manual_stop
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             publish(
                 &app,
                 ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
@@ -134,13 +146,21 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
 
         match fetch_daemon_status(&client).await {
             Ok(status) => {
-                if !app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if !app
+                    .state::<AppState>()
+                    .manual_stop
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     publish(&app, ConnectionSnapshot::connected(&endpoint, status)).await;
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(error) => {
-                if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if app
+                    .state::<AppState>()
+                    .manual_stop
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     publish(
                         &app,
                         ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),

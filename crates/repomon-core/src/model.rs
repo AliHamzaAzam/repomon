@@ -981,7 +981,6 @@ pub struct SystemDoctorResult {
     pub agents: Vec<AgentDoctorInfo>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

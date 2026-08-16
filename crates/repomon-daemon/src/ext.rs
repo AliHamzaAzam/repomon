@@ -462,7 +462,10 @@ pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -
         let home = dirs.home_dir();
         let gemini = home.join(".gemini");
 
-        skills.extend(scan_skills(&gemini.join("config/skills"), SkillSource::User));
+        skills.extend(scan_skills(
+            &gemini.join("config/skills"),
+            SkillSource::User,
+        ));
         skills.extend(scan_skills(&gemini.join("skills"), SkillSource::User));
 
         global_enabled.extend(enabled_map(&gemini.join("settings.json")));
@@ -482,9 +485,14 @@ pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -
                         let version = read_json(&path.join("installed_version.json"))
                             .or_else(|| read_json(&path.join("plugin.json")))
                             .or_else(|| read_json(&path.join("package.json")))
-                            .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from));
+                            .and_then(|v| {
+                                v.get("version").and_then(Value::as_str).map(String::from)
+                            });
                         let id = format!("{name}@antigravity");
-                        let (enabled, enabled_source) = if let Some(&val) = global_enabled.get(&id).or_else(|| global_enabled.get(&name)) {
+                        let (enabled, enabled_source) = if let Some(&val) = global_enabled
+                            .get(&id)
+                            .or_else(|| global_enabled.get(&name))
+                        {
                             (val, EnabledSource::Global)
                         } else {
                             (true, EnabledSource::Global)
@@ -506,12 +514,24 @@ pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -
     }
 
     if let Some(repo) = repo_root {
-        skills.extend(scan_skills(&repo.join(".gemini/skills"), SkillSource::Project));
-        skills.extend(scan_skills(&repo.join(".gemini/config/skills"), SkillSource::Project));
-        skills.extend(scan_skills(&repo.join(".agents/skills"), SkillSource::Project));
+        skills.extend(scan_skills(
+            &repo.join(".gemini/skills"),
+            SkillSource::Project,
+        ));
+        skills.extend(scan_skills(
+            &repo.join(".gemini/config/skills"),
+            SkillSource::Project,
+        ));
+        skills.extend(scan_skills(
+            &repo.join(".agents/skills"),
+            SkillSource::Project,
+        ));
 
         let repo_enabled = enabled_map(&repo.join(".gemini/settings.json"));
-        for plugins_dir in [repo.join(".gemini/config/plugins"), repo.join(".gemini/plugins")] {
+        for plugins_dir in [
+            repo.join(".gemini/config/plugins"),
+            repo.join(".gemini/plugins"),
+        ] {
             if let Ok(entries) = fs::read_dir(plugins_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -525,11 +545,18 @@ pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -
                         let version = read_json(&path.join("installed_version.json"))
                             .or_else(|| read_json(&path.join("plugin.json")))
                             .or_else(|| read_json(&path.join("package.json")))
-                            .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from));
+                            .and_then(|v| {
+                                v.get("version").and_then(Value::as_str).map(String::from)
+                            });
                         let id = format!("{name}@antigravity");
-                        let (enabled, enabled_source) = if let Some(&val) = repo_enabled.get(&id).or_else(|| repo_enabled.get(&name)) {
+                        let (enabled, enabled_source) = if let Some(&val) =
+                            repo_enabled.get(&id).or_else(|| repo_enabled.get(&name))
+                        {
                             (val, EnabledSource::Repo)
-                        } else if let Some(&val) = global_enabled.get(&id).or_else(|| global_enabled.get(&name)) {
+                        } else if let Some(&val) = global_enabled
+                            .get(&id)
+                            .or_else(|| global_enabled.get(&name))
+                        {
                             (val, EnabledSource::Global)
                         } else {
                             (true, EnabledSource::Repo)
@@ -551,7 +578,10 @@ pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -
 
         for p in &mut plugins {
             let raw_name = p.name.clone();
-            if let Some(&val) = repo_enabled.get(&p.id).or_else(|| repo_enabled.get(&raw_name)) {
+            if let Some(&val) = repo_enabled
+                .get(&p.id)
+                .or_else(|| repo_enabled.get(&raw_name))
+            {
                 p.enabled = val;
                 p.enabled_source = EnabledSource::Repo;
             }
@@ -601,7 +631,10 @@ pub fn scan_codex(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtS
                         .or_else(|| read_json(&path.join("package.json")))
                         .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from));
                     let id = format!("{name}@codex");
-                    let (enabled, enabled_source) = if let Some(&val) = global_enabled.get(&id).or_else(|| global_enabled.get(&name)) {
+                    let (enabled, enabled_source) = if let Some(&val) = global_enabled
+                        .get(&id)
+                        .or_else(|| global_enabled.get(&name))
+                    {
                         (val, EnabledSource::Global)
                     } else {
                         (true, EnabledSource::Global)
@@ -622,7 +655,10 @@ pub fn scan_codex(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtS
     }
 
     if let Some(repo) = repo_root {
-        skills.extend(scan_skills(&repo.join(".codex/skills"), SkillSource::Project));
+        skills.extend(scan_skills(
+            &repo.join(".codex/skills"),
+            SkillSource::Project,
+        ));
         let repo_enabled = enabled_map(&repo.join(".codex/settings.json"));
         let repo_plugins = repo.join(".codex/plugins");
         if let Ok(entries) = fs::read_dir(repo_plugins) {
@@ -635,9 +671,14 @@ pub fn scan_codex(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtS
                         .or_else(|| read_json(&path.join("package.json")))
                         .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from));
                     let id = format!("{name}@codex");
-                    let (enabled, enabled_source) = if let Some(&val) = repo_enabled.get(&id).or_else(|| repo_enabled.get(&name)) {
+                    let (enabled, enabled_source) = if let Some(&val) =
+                        repo_enabled.get(&id).or_else(|| repo_enabled.get(&name))
+                    {
                         (val, EnabledSource::Repo)
-                    } else if let Some(&val) = global_enabled.get(&id).or_else(|| global_enabled.get(&name)) {
+                    } else if let Some(&val) = global_enabled
+                        .get(&id)
+                        .or_else(|| global_enabled.get(&name))
+                    {
                         (val, EnabledSource::Global)
                     } else {
                         (true, EnabledSource::Repo)
@@ -657,7 +698,10 @@ pub fn scan_codex(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtS
         }
         for p in &mut plugins {
             let raw_name = p.name.clone();
-            if let Some(&val) = repo_enabled.get(&p.id).or_else(|| repo_enabled.get(&raw_name)) {
+            if let Some(&val) = repo_enabled
+                .get(&p.id)
+                .or_else(|| repo_enabled.get(&raw_name))
+            {
                 p.enabled = val;
                 p.enabled_source = EnabledSource::Repo;
             }
@@ -738,9 +782,15 @@ pub fn scan_opencode(repo_root: Option<&Path>, cli_version: Option<String>) -> E
     }
 
     if let Some(repo) = repo_root {
-        skills.extend(scan_skills(&repo.join(".opencode/skills"), SkillSource::Project));
+        skills.extend(scan_skills(
+            &repo.join(".opencode/skills"),
+            SkillSource::Project,
+        ));
 
-        for cfg_path in [repo.join("opencode.json"), repo.join(".opencode/opencode.json")] {
+        for cfg_path in [
+            repo.join("opencode.json"),
+            repo.join(".opencode/opencode.json"),
+        ] {
             if let Some(root) = read_json(&cfg_path) {
                 if let Some(arr) = root.get("plugin").and_then(Value::as_array) {
                     for item in arr {
@@ -819,7 +869,8 @@ pub fn scan_cursor(repo_root: Option<&Path>, cli_version: Option<String>) -> Ext
         if let Some(root) = read_json(&ext_json_path) {
             if let Some(arr) = root.as_array() {
                 for item in arr {
-                    let id = item.get("identifier")
+                    let id = item
+                        .get("identifier")
                         .and_then(|id_obj| id_obj.get("id"))
                         .and_then(Value::as_str)
                         .unwrap_or("")
@@ -827,8 +878,12 @@ pub fn scan_cursor(repo_root: Option<&Path>, cli_version: Option<String>) -> Ext
                     if id.is_empty() {
                         continue;
                     }
-                    let version = item.get("version").and_then(Value::as_str).map(String::from);
-                    let name = item.get("metadata")
+                    let version = item
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    let name = item
+                        .get("metadata")
                         .and_then(|m| m.get("publisherDisplayName"))
                         .and_then(Value::as_str)
                         .map(|p| format!("{p}/{id}"))
@@ -856,7 +911,10 @@ pub fn scan_cursor(repo_root: Option<&Path>, cli_version: Option<String>) -> Ext
     }
 
     if let Some(repo) = repo_root {
-        skills.extend(scan_skills(&repo.join(".cursor/skills"), SkillSource::Project));
+        skills.extend(scan_skills(
+            &repo.join(".cursor/skills"),
+            SkillSource::Project,
+        ));
         let repo_enabled = enabled_map(&repo.join(".cursor/settings.json"));
         for p in &mut plugins {
             if let Some(&val) = repo_enabled.get(&p.id) {
@@ -892,8 +950,8 @@ pub fn scan_for_account(
         "opencode" => scan_opencode(repo_root, cli_version),
         "cursor" => scan_cursor(repo_root, cli_version),
         other => {
-            let home = claude_home_for(Some(other))
-                .unwrap_or_else(|| claude_home().unwrap_or_default());
+            let home =
+                claude_home_for(Some(other)).unwrap_or_else(|| claude_home().unwrap_or_default());
             scan(&home, repo_root, cli_version)
         }
     }
@@ -1002,7 +1060,10 @@ pub fn uninstall_claude_plugin(
             {
                 for inst in instances {
                     let scope = inst.get("scope").and_then(Value::as_str).unwrap_or("user");
-                    let proj = inst.get("projectPath").and_then(Value::as_str).map(PathBuf::from);
+                    let proj = inst
+                        .get("projectPath")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from);
                     let cwd = proj.as_deref().or(repo_root);
 
                     let mut cmd = std::process::Command::new(&cli.bin);
@@ -1081,11 +1142,17 @@ pub fn add_opencode_plugin(plugin_ref: &str, repo_root: Option<&Path>) -> io::Re
     };
 
     let Value::Object(map) = &mut root else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "opencode.json not an object"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "opencode.json not an object",
+        ));
     };
 
     let raw_name = plugin_ref.split('@').next().unwrap_or(plugin_ref);
-    if let Some(disabled) = map.get_mut("disabled_plugins").and_then(Value::as_array_mut) {
+    if let Some(disabled) = map
+        .get_mut("disabled_plugins")
+        .and_then(Value::as_array_mut)
+    {
         disabled.retain(|item| {
             if let Some(s) = item.as_str() {
                 let n = s.split('@').next().unwrap_or(s);
@@ -1135,10 +1202,15 @@ pub fn enable_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::
             Ok(text) => serde_json::from_str(&text).unwrap_or(Value::Object(Default::default())),
             Err(_) => Value::Object(Default::default()),
         };
-        let Some(map) = root.as_object_mut() else { continue; };
+        let Some(map) = root.as_object_mut() else {
+            continue;
+        };
 
         let mut found_id = None;
-        if let Some(disabled) = map.get_mut("disabled_plugins").and_then(Value::as_array_mut) {
+        if let Some(disabled) = map
+            .get_mut("disabled_plugins")
+            .and_then(Value::as_array_mut)
+        {
             disabled.retain(|item| {
                 if let Some(s) = item.as_str() {
                     let n = s.split('@').next().unwrap_or(s);
@@ -1155,9 +1227,14 @@ pub fn enable_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::
         }
 
         let id_to_record = found_id.unwrap_or_else(|| plugin_id.to_string());
-        let plugins = map.entry("plugin").or_insert_with(|| Value::Array(Vec::new()));
+        let plugins = map
+            .entry("plugin")
+            .or_insert_with(|| Value::Array(Vec::new()));
         if let Value::Array(arr) = plugins {
-            if !arr.iter().any(|item| item.as_str() == Some(&id_to_record) || item.as_str() == Some(raw_name)) {
+            if !arr
+                .iter()
+                .any(|item| item.as_str() == Some(&id_to_record) || item.as_str() == Some(raw_name))
+            {
                 arr.push(Value::String(id_to_record));
             }
         }
@@ -1196,7 +1273,9 @@ pub fn disable_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io:
             Ok(text) => serde_json::from_str(&text).unwrap_or(Value::Object(Default::default())),
             Err(_) => Value::Object(Default::default()),
         };
-        let Some(map) = root.as_object_mut() else { continue; };
+        let Some(map) = root.as_object_mut() else {
+            continue;
+        };
 
         let mut found_id = None;
         if let Some(plugins) = map.get_mut("plugin").and_then(Value::as_array_mut) {
@@ -1216,7 +1295,9 @@ pub fn disable_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io:
         }
 
         let id_to_record = found_id.unwrap_or_else(|| plugin_id.to_string());
-        let disabled = map.entry("disabled_plugins").or_insert_with(|| Value::Array(Vec::new()));
+        let disabled = map
+            .entry("disabled_plugins")
+            .or_insert_with(|| Value::Array(Vec::new()));
         if let Value::Array(arr) = disabled {
             if !arr.iter().any(|item| item.as_str() == Some(&id_to_record)) {
                 arr.push(Value::String(id_to_record));
@@ -1270,7 +1351,10 @@ pub fn remove_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::
                         modified = true;
                     }
                 }
-                if let Some(arr) = root.get_mut("disabled_plugins").and_then(Value::as_array_mut) {
+                if let Some(arr) = root
+                    .get_mut("disabled_plugins")
+                    .and_then(Value::as_array_mut)
+                {
                     let prev_len = arr.len();
                     arr.retain(|item| {
                         if let Some(s) = item.as_str() {
@@ -1300,7 +1384,10 @@ pub fn remove_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::
 pub fn opencode_plugin_details(plugin_id: &str, _repo_root: Option<&Path>) -> String {
     let name = plugin_id.split('@').next().unwrap_or(plugin_id).trim();
     if let Some(dirs) = directories::BaseDirs::new() {
-        let nm = dirs.home_dir().join(".config/opencode/node_modules").join(name);
+        let nm = dirs
+            .home_dir()
+            .join(".config/opencode/node_modules")
+            .join(name);
         if let Ok(pkg) = fs::read_to_string(nm.join("package.json")) {
             return pkg;
         }
@@ -1315,7 +1402,10 @@ pub fn opencode_plugin_details(plugin_id: &str, _repo_root: Option<&Path>) -> St
 pub fn install_antigravity_plugin(plugin_ref: &str, repo_root: Option<&Path>) -> io::Result<()> {
     let name = plugin_ref.split('@').next().unwrap_or(plugin_ref).trim();
     if name.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid plugin name"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid plugin name",
+        ));
     }
     let target_dir = match repo_root {
         Some(repo) => repo.join(".gemini/plugins").join(name),
@@ -1334,7 +1424,10 @@ pub fn install_antigravity_plugin(plugin_ref: &str, repo_root: Option<&Path>) ->
             "name": name,
             "version": "1.0.0"
         });
-        fs::write(target_dir.join("plugin.json"), serde_json::to_vec_pretty(&plugin_json)?)?;
+        fs::write(
+            target_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&plugin_json)?,
+        )?;
         fs::create_dir_all(target_dir.join("skills"))?;
     }
     let settings_path = match repo_root {
@@ -1354,7 +1447,10 @@ pub fn remove_antigravity_plugin(plugin_id: &str, repo_root: Option<&Path>) -> i
     let name = plugin_id.split('@').next().unwrap_or(plugin_id).trim();
     if let Some(dirs) = directories::BaseDirs::new() {
         let gemini = dirs.home_dir().join(".gemini");
-        for dir in [gemini.join("plugins").join(name), gemini.join("config/plugins").join(name)] {
+        for dir in [
+            gemini.join("plugins").join(name),
+            gemini.join("config/plugins").join(name),
+        ] {
             if dir.is_dir() {
                 let _ = fs::remove_dir_all(dir);
             }
@@ -1397,7 +1493,10 @@ pub fn antigravity_plugin_details(plugin_id: &str, repo_root: Option<&Path>) -> 
             let skills = count_dir(&dir.join("skills"));
             let commands = count_dir(&dir.join("commands"));
             let agents = count_dir(&dir.join("agents"));
-            return format!("Antigravity Plugin: {name}\nPath: {}\nSkills: {skills}, Commands: {commands}, Agents: {agents}", dir.display());
+            return format!(
+                "Antigravity Plugin: {name}\nPath: {}\nSkills: {skills}, Commands: {commands}, Agents: {agents}",
+                dir.display()
+            );
         }
     }
     format!("Antigravity Plugin: {name} (Installed)")
@@ -1407,7 +1506,10 @@ pub fn antigravity_plugin_details(plugin_id: &str, repo_root: Option<&Path>) -> 
 pub fn install_codex_plugin(plugin_ref: &str, repo_root: Option<&Path>) -> io::Result<()> {
     let name = plugin_ref.split('@').next().unwrap_or(plugin_ref).trim();
     if name.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid plugin name"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid plugin name",
+        ));
     }
     let target_dir = match repo_root {
         Some(repo) => repo.join(".codex/plugins").join(name),
@@ -1426,7 +1528,10 @@ pub fn install_codex_plugin(plugin_ref: &str, repo_root: Option<&Path>) -> io::R
             "name": name,
             "version": "1.0.0"
         });
-        fs::write(target_dir.join("plugin.json"), serde_json::to_vec_pretty(&plugin_json)?)?;
+        fs::write(
+            target_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&plugin_json)?,
+        )?;
     }
     let settings_path = match repo_root {
         Some(repo) => repo.join(".codex/settings.json"),
@@ -1491,7 +1596,10 @@ pub fn codex_plugin_details(plugin_id: &str, repo_root: Option<&Path>) -> String
 pub fn install_cursor_extension(ext_ref: &str, repo_root: Option<&Path>) -> io::Result<()> {
     let id = ext_ref.trim();
     if id.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid extension ID"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid extension ID",
+        ));
     }
     if let Some(dirs) = directories::BaseDirs::new() {
         let cursor_dir = dirs.home_dir().join(".cursor");
@@ -1505,7 +1613,8 @@ pub fn install_cursor_extension(ext_ref: &str, repo_root: Option<&Path>) -> io::
             let already = arr.iter().any(|item| {
                 item.get("identifier")
                     .and_then(|i| i.get("id"))
-                    .and_then(Value::as_str) == Some(id)
+                    .and_then(Value::as_str)
+                    == Some(id)
             });
             if !already {
                 let entry = serde_json::json!({
@@ -1541,11 +1650,13 @@ pub fn remove_cursor_extension(ext_id: &str, repo_root: Option<&Path>) -> io::Re
                 let mut locs_to_remove = Vec::new();
                 if let Some(arr) = root.as_array_mut() {
                     arr.retain(|item| {
-                        let item_id = item.get("identifier")
+                        let item_id = item
+                            .get("identifier")
                             .and_then(|i| i.get("id"))
                             .and_then(Value::as_str)
                             .unwrap_or("");
-                        let rel = item.get("relativeLocation")
+                        let rel = item
+                            .get("relativeLocation")
                             .and_then(Value::as_str)
                             .unwrap_or("");
                         if item_id == ext_id || rel == ext_id {
@@ -1585,18 +1696,28 @@ pub fn cursor_extension_details(ext_id: &str, _repo_root: Option<&Path>) -> Stri
         if let Some(root) = read_json(&ext_json_path) {
             if let Some(arr) = root.as_array() {
                 for item in arr {
-                    let item_id = item.get("identifier")
+                    let item_id = item
+                        .get("identifier")
                         .and_then(|i| i.get("id"))
                         .and_then(Value::as_str)
                         .unwrap_or("");
                     if item_id == ext_id {
-                        let version = item.get("version").and_then(Value::as_str).unwrap_or("unknown");
-                        let publisher = item.get("metadata")
+                        let version = item
+                            .get("version")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let publisher = item
+                            .get("metadata")
                             .and_then(|m| m.get("publisherDisplayName"))
                             .and_then(Value::as_str)
                             .unwrap_or("unknown");
-                        let rel = item.get("relativeLocation").and_then(Value::as_str).unwrap_or("");
-                        return format!("Cursor Extension: {ext_id}\nVersion: {version}\nPublisher: {publisher}\nLocation: {rel}");
+                        let rel = item
+                            .get("relativeLocation")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        return format!(
+                            "Cursor Extension: {ext_id}\nVersion: {version}\nPublisher: {publisher}\nLocation: {rel}"
+                        );
                     }
                 }
             }
@@ -2486,7 +2607,8 @@ mod tests {
 
         clean_claude_plugin_records(home.path(), "test-plugin@official", None).unwrap();
 
-        let installed_txt = std::fs::read_to_string(plugins_dir.join("installed_plugins.json")).unwrap();
+        let installed_txt =
+            std::fs::read_to_string(plugins_dir.join("installed_plugins.json")).unwrap();
         assert!(!installed_txt.contains("test-plugin@official"));
         let settings_txt = std::fs::read_to_string(home.path().join("settings.json")).unwrap();
         assert!(!settings_txt.contains("test-plugin@official"));
@@ -2500,12 +2622,22 @@ mod tests {
         std::fs::write(gem_skill.join("SKILL.md"), "---\nname: my-gem-skill\n---\n").unwrap();
 
         assert!(gem_skill.exists());
-        delete_skill(Some("antigravity"), false, "my-gem-skill", Some(repo.path())).unwrap();
+        delete_skill(
+            Some("antigravity"),
+            false,
+            "my-gem-skill",
+            Some(repo.path()),
+        )
+        .unwrap();
         assert!(!gem_skill.exists());
 
         let codex_skill = repo.path().join(".codex/skills/my-codex-skill");
         std::fs::create_dir_all(&codex_skill).unwrap();
-        std::fs::write(codex_skill.join("SKILL.md"), "---\nname: my-codex-skill\n---\n").unwrap();
+        std::fs::write(
+            codex_skill.join("SKILL.md"),
+            "---\nname: my-codex-skill\n---\n",
+        )
+        .unwrap();
         assert!(codex_skill.exists());
         delete_skill(Some("codex"), false, "my-codex-skill", Some(repo.path())).unwrap();
         assert!(!codex_skill.exists());
@@ -2517,21 +2649,33 @@ mod tests {
         add_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
 
         let snap1 = scan_for_account("opencode", Some(repo.path()), None);
-        let p1 = snap1.plugins.iter().find(|p| p.name == "sample-tool").unwrap();
+        let p1 = snap1
+            .plugins
+            .iter()
+            .find(|p| p.name == "sample-tool")
+            .unwrap();
         assert!(p1.enabled);
         assert!(p1.installed);
 
         // Disable plugin: should not delete, but mark disabled
         disable_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
         let snap2 = scan_for_account("opencode", Some(repo.path()), None);
-        let p2 = snap2.plugins.iter().find(|p| p.name == "sample-tool").unwrap();
+        let p2 = snap2
+            .plugins
+            .iter()
+            .find(|p| p.name == "sample-tool")
+            .unwrap();
         assert!(!p2.enabled);
         assert!(p2.installed);
 
         // Re-enable plugin
         enable_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
         let snap3 = scan_for_account("opencode", Some(repo.path()), None);
-        let p3 = snap3.plugins.iter().find(|p| p.name == "sample-tool").unwrap();
+        let p3 = snap3
+            .plugins
+            .iter()
+            .find(|p| p.name == "sample-tool")
+            .unwrap();
         assert!(p3.enabled);
 
         // Remove plugin completely
@@ -2549,7 +2693,11 @@ mod tests {
         assert!(plugin_dir.join("plugin.json").is_file());
 
         let snap1 = scan_for_account("antigravity", Some(repo.path()), None);
-        let p1 = snap1.plugins.iter().find(|p| p.name == "test-gem-plugin").unwrap();
+        let p1 = snap1
+            .plugins
+            .iter()
+            .find(|p| p.name == "test-gem-plugin")
+            .unwrap();
         assert!(p1.enabled);
 
         // Disable via settings
@@ -2557,7 +2705,11 @@ mod tests {
         set_plugin_enabled(&settings, "test-gem-plugin@antigravity", Some(false)).unwrap();
 
         let snap2 = scan_for_account("antigravity", Some(repo.path()), None);
-        let p2 = snap2.plugins.iter().find(|p| p.name == "test-gem-plugin").unwrap();
+        let p2 = snap2
+            .plugins
+            .iter()
+            .find(|p| p.name == "test-gem-plugin")
+            .unwrap();
         assert!(!p2.enabled);
 
         // Remove

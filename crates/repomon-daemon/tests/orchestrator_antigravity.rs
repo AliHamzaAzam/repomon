@@ -76,7 +76,11 @@ async fn antigravity_backend_starts_degrades_transcript_and_stops() {
         Some(json!({ "agent": "antigravity", "autonomy": "read-only" })),
     )
     .await;
-    assert!(r.error.is_none(), "antigravity start errored: {:?}", r.error);
+    assert!(
+        r.error.is_none(),
+        "antigravity start errored: {:?}",
+        r.error
+    );
     let status = r.result.unwrap();
     assert_eq!(status["running"], json!(true), "status: {status}");
     assert_eq!(status["backend"], json!("antigravity"), "status: {status}");
