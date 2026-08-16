@@ -249,6 +249,19 @@
   background: var(--raised);
 }
 
+.diff-file-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 6rem;
+}
+
+.diff-line-add {
+  background: color-mix(in srgb, var(--signal) 5%, var(--surface));
+}
+
+.diff-line-remove {
+  background: color-mix(in srgb, var(--fault) 5%, var(--surface));
+}
+
 .action-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

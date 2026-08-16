@@ -379,6 +379,109 @@ describe("GitExplorerPanel Working tree section", () => {
   });
 });
 
+describe("GitExplorerPanel Diff view", () => {
+  const PATCH = [
+    "diff --git a/App.tsx b/App.tsx",
+    "index 1111111..2222222 100644",
+    "--- a/App.tsx",
+    "+++ b/App.tsx",
+    "@@ -1,2 +1,3 @@",
+    " line one",
+    "+line two",
+    " line three",
+    "",
+  ].join("\n");
+
+  it("clicking a Working-tree file row loads the patch and shows that file's diff card", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " App.tsx | 1 +\n 1 file changed, 1 insertion(+)\n",
+      untracked: 0,
+      patch: PATCH,
+      patch_truncated: false,
+    };
+    responses.history = [];
+    render(() => <GitExplorerPanel fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))} />);
+
+    const row = await screen.findByRole("button", { name: /App\.tsx/ });
+    const diffCallsBeforeClick = calls.list.filter((c) => c.method === "lane.diff").length;
+    fireEvent.click(row);
+
+    // Opening the diff triggers a fresh `lane.diff` fetch (this time asking for the patch), and
+    // the Working tree/Branch/History overview is replaced by the Diff view, not shown alongside it.
+    await waitFor(() => expect(calls.list.filter((c) => c.method === "lane.diff").length).toBeGreaterThan(diffCallsBeforeClick));
+    expect(await screen.findByRole("button", { name: "Close diff" })).toBeInTheDocument();
+    expect(screen.queryByText("Working tree")).not.toBeInTheDocument();
+
+    // The clicked file's card auto-expands (its added line is visible without a further click).
+    expect(await screen.findByText("line two")).toBeInTheDocument();
+  });
+
+  it("closes back to the overview sections when the close button is clicked", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " App.tsx | 1 +\n 1 file changed, 1 insertion(+)\n",
+      untracked: 0,
+      patch: PATCH,
+      patch_truncated: false,
+    };
+    responses.history = [];
+    render(() => <GitExplorerPanel fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /App\.tsx/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Close diff" }));
+
+    expect(await screen.findByText("Working tree")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close diff" })).not.toBeInTheDocument();
+  });
+
+  it("shows the truncation banner when the patch was capped", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " App.tsx | 1 +\n 1 file changed, 1 insertion(+)\n",
+      untracked: 0,
+      patch: PATCH,
+      patch_truncated: true,
+    };
+    responses.history = [];
+    render(() => <GitExplorerPanel fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /App\.tsx/ }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Diff truncated");
+  });
+
+  it("does not add a click handler to commit rows (Branch or History) - no per-commit patch RPC exists yet", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "abc1234 Fix the thing\n",
+      committed_stat: "",
+      uncommitted_stat: "",
+      untracked: 0,
+    };
+    responses.history = [commit({ oid: "0123456789abcdef0123456789abcdef01234567", summary: "Add the analytical engine" })];
+    render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
+
+    await screen.findByText("Fix the thing");
+    await screen.findByText("Add the analytical engine");
+
+    // Neither commit row is a <button> (or any other element exposing a "button" role) - unlike
+    // the Working-tree file rows, they carry no click affordance at all.
+    expect(screen.queryByRole("button", { name: /Fix the thing/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add the analytical engine/ })).not.toBeInTheDocument();
+  });
+});
+
 describe("panel.git keybinding (App integration)", () => {
   beforeEach(() => {
     Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });

@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 
 import type { Commit, Lane } from "../bindings";
+import DiffView from "./DiffView";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall, type LaneDiff } from "../ipc/rpc";
 import type { FleetStore } from "../stores/fleet";
@@ -117,31 +118,43 @@ function splitPath(path: string): { dir: string; base: string } {
   return idx === -1 ? { dir: "", base: path } : { dir: path.slice(0, idx + 1), base: path.slice(idx + 1) };
 }
 
-function StatFileRowView(props: { file: StatFileRow }) {
+/// Working-tree file rows are the one clickable target that opens the Diff view (see
+/// `openDiff`/`DiffView` below) - `onSelect` fires with the file's (post-rename) path. Commit
+/// rows in Branch/History stay plain `<li>`s with no click handler: `lane.diff`'s patch is
+/// working-tree-only (see the comment on `openDiff`), so there is no backing data for a
+/// per-commit diff yet, and a hover/click affordance here would promise something that isn't
+/// there.
+function StatFileRowView(props: { file: StatFileRow; onSelect: (path: string) => void }) {
   const parts = () => splitPath(props.file.path);
   return (
-    <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
-      <span class="min-w-0 flex-1 truncate font-mono text-xs">
-        <span class="text-muted/70">{parts().dir}</span>
-        <span class="text-foreground">{parts().base}</span>
-        <Show when={props.file.renamedFrom} keyed>
-          {(from) => <span class="text-muted/50"> ← {from}</span>}
-        </Show>
-      </span>
-      <Show
-        when={!props.file.binary}
-        fallback={<span class="shrink-0 text-[10px] text-muted/60">binary</span>}
+    <li>
+      <button
+        type="button"
+        class="focus-ring flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left hover:bg-raised/60"
+        onClick={() => props.onSelect(props.file.path)}
       >
-        <span class="shrink-0 text-[10px] tabular-nums">
-          <Show when={props.file.adds > 0}>
-            <span class="text-signal">+{props.file.adds}</span>
-          </Show>
-          <Show when={props.file.adds > 0 && props.file.dels > 0}> </Show>
-          <Show when={props.file.dels > 0}>
-            <span class="text-fault">-{props.file.dels}</span>
+        <span class="min-w-0 flex-1 truncate font-mono text-xs">
+          <span class="text-muted/70">{parts().dir}</span>
+          <span class="text-foreground">{parts().base}</span>
+          <Show when={props.file.renamedFrom} keyed>
+            {(from) => <span class="text-muted/50"> ← {from}</span>}
           </Show>
         </span>
-      </Show>
+        <Show
+          when={!props.file.binary}
+          fallback={<span class="shrink-0 text-[10px] text-muted/60">binary</span>}
+        >
+          <span class="shrink-0 text-[10px] tabular-nums">
+            <Show when={props.file.adds > 0}>
+              <span class="text-signal">+{props.file.adds}</span>
+            </Show>
+            <Show when={props.file.adds > 0 && props.file.dels > 0}> </Show>
+            <Show when={props.file.dels > 0}>
+              <span class="text-fault">-{props.file.dels}</span>
+            </Show>
+          </span>
+        </Show>
+      </button>
     </li>
   );
 }
@@ -200,6 +213,15 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   // changes; session-local only, per C3 — no localStorage persistence needed here.
   const [changesExpanded, setChangesExpanded] = createSignal(true);
 
+  // C4: the Diff view replaces the Branch/Working tree/History sections while open (see the
+  // `Show when={diffOpen()}` split below) rather than expanding inline - a lane-wide patch can
+  // run to many files and hunks, and a second nested scroll region under History would fight the
+  // panel's single outer scrollbar. `diffOpen` gates whether `load()` below asks for
+  // `include_patch` at all, so idle polls (the common case) never pay for fetching patch text
+  // nobody's looking at.
+  const [diffOpen, setDiffOpen] = createSignal(false);
+  const [diffFocusPath, setDiffFocusPath] = createSignal<string | null>(null);
+
   let epoch = 0;
 
   async function load(laneId: number) {
@@ -208,7 +230,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     setError(null);
     try {
       const [diff, commits] = await Promise.all([
-        daemonCall("lane.diff", { lane_id: laneId }),
+        daemonCall("lane.diff", { lane_id: laneId, include_patch: diffOpen() }),
         daemonCall("commit.recent", { lane_id: laneId, limit: HISTORY_LIMIT }),
       ]);
       if (mine !== epoch) return;
@@ -221,6 +243,32 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
       if (mine === epoch) setLoading(false);
     }
   }
+
+  // Working-tree file rows are the only click target that opens the Diff view (see the comment
+  // on `StatFileRowView`). `lane.diff`'s `patch` is lane-wide, not per-file, so opening it for
+  // any one file fetches (or reuses an already-fetched) whole-lane patch and just tells DiffView
+  // which file's card to land on/expand.
+  function openDiff(path: string) {
+    setDiffFocusPath(path);
+    const wasOpen = diffOpen();
+    setDiffOpen(true);
+    // Reuse this refresh cycle's patch if the view was already open (e.g. a second file click) -
+    // only kick off a fresh fetch the moment it's needed, not once per click.
+    if (!wasOpen) {
+      const l = lane();
+      if (l) void load(l.id);
+    }
+  }
+
+  function closeDiff() {
+    setDiffOpen(false);
+    setDiffFocusPath(null);
+  }
+
+  // `patch` is `undefined` both before the first patch fetch and after an error; an empty string
+  // (a lane with no uncommitted changes) is a legitimate loaded-but-empty state, not "not yet
+  // loaded" - so this checks presence, not truthiness, to tell the two apart.
+  const patchLoaded = createMemo(() => branchData()?.patch !== undefined);
 
   // Piggybacks on the fleet store's own 1.2s poll instead of running a second timer: any change
   // to the selected lane's live git state (a new commit landing, files getting dirtied) already
@@ -245,6 +293,19 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
       return;
     }
     void load(l.id);
+  });
+
+  // A patch belongs to one lane; switching lanes (not just a same-lane poll refresh) closes an
+  // open Diff view rather than showing a stale or mismatched patch. Tracked by id, not object
+  // identity, since the fleet store's poll produces a fresh Lane object every cycle even when
+  // the selection hasn't moved.
+  let lastLaneId: number | null = null;
+  createEffect(() => {
+    const id = lane()?.id ?? null;
+    if (id === lastLaneId) return;
+    lastLaneId = id;
+    setDiffOpen(false);
+    setDiffFocusPath(null);
   });
 
   function refresh() {
@@ -332,160 +393,188 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
           </div>
         }
       >
-        <div class="min-h-0 flex-1 space-y-5 overflow-y-auto p-3">
-          <section>
-            <p class="section-label mb-2">Branch</p>
+        <Show when={diffOpen()}>
+          <div class="min-h-0 flex-1">
             <Show
-              when={branchData()}
-              keyed
-              fallback={loading() ? <RowSkeleton rows={3} /> : <p class="text-xs text-muted">Git status unavailable.</p>}
-            >
-              {(diff) => {
-                const commits = () => parseCommits(diff.commits);
-                return (
-                  <div class="space-y-2">
-                    <Show
-                      when={commits().length > 0}
-                      fallback={
-                        <p class="text-xs text-muted">
-                          Nothing ahead of <span class="font-mono text-foreground">{diff.base}</span>
-                        </p>
-                      }
-                    >
-                      <p class="text-xs text-muted">
-                        {commits().length} commit{commits().length === 1 ? "" : "s"} ahead of{" "}
-                        <span class="font-mono text-foreground">{diff.base}</span>
-                      </p>
-                      <Show when={statSummary(diff.committed_stat)} keyed>
-                        {(summary) => <p class="text-[10px] text-muted/70">{summary}</p>}
-                      </Show>
-                      <ul class="space-y-0.5">
-                        <For each={commits()}>
-                          {(commit) => (
-                            <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
-                              <IconGitCommit size={10} class="shrink-0 text-muted/40" />
-                              <span class="shrink-0 font-mono text-[10px] text-muted">{commit.oid}</span>
-                              <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
-                            </li>
-                          )}
-                        </For>
-                      </ul>
-                      <Show when={diff.commits_truncated}>
-                        <p class="text-[10px] text-muted/70">Showing the most recent 20 commits.</p>
-                      </Show>
-                    </Show>
+              when={patchLoaded()}
+              fallback={
+                loading() ? (
+                  <div class="p-3">
+                    <RowSkeleton rows={5} />
                   </div>
-                );
-              }}
-            </Show>
-          </section>
-
-          <section>
-            <p class="section-label mb-2">Working tree</p>
-            <Show
-              when={branchData()}
-              keyed
-              fallback={loading() ? <RowSkeleton rows={2} /> : <p class="text-xs text-muted">Git status unavailable.</p>}
+                ) : (
+                  <p class="p-3 text-xs text-muted">Diff not loaded yet.</p>
+                )
+              }
             >
-              {(diff) => {
-                // Counts here are sourced from `lane().state.dirty` (gix's live status walk,
-                // reader.rs `dirty_state`) rather than `diff.untracked`/parsed file rows, so this
-                // section always agrees with the header's dirty badge — same lane, same field.
-                //
-                // Grouping: `uncommitted_stat` is `git diff HEAD --stat`, which diffs the worktree
-                // straight against HEAD and so already mixes staged and unstaged hunks into one
-                // per-file line (see LaneDiff.uncommitted_stat in diff.rs) — there's no way to tell,
-                // from that text, which lines are staged. So file rows fall under a single honest
-                // "Changes" group, with the staged/unstaged split shown only as the header's
-                // aggregate counts, not as a per-file split the data can't support.
-                //
-                // "Untracked" is a count-only row, not a file list, for the same reason: neither
-                // `lane.diff` (LaneDiff.untracked, diff.rs) nor the live dirty walk exposes
-                // untracked *filenames* — both only ever return a usize. There is currently no RPC
-                // that lists them by name, so an honest UI shows the count and nothing invented.
-                const dirty = () => lane()?.state.dirty ?? { staged: 0, unstaged: 0, untracked: 0 };
-                const changesCount = () => dirty().staged + dirty().unstaged;
-                const files = () => parseStatFiles(diff.uncommitted_stat);
-                return (
-                  <Show
-                    when={changesCount() > 0 || dirty().untracked > 0}
-                    fallback={<p class="text-xs text-muted">Working tree clean</p>}
-                  >
-                    <div class="space-y-3">
-                      <Show when={changesCount() > 0}>
-                        <div>
-                          <button
-                            type="button"
-                            class="focus-ring flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-raised/40"
-                            onClick={() => setChangesExpanded((v) => !v)}
-                            aria-expanded={changesExpanded()}
-                          >
-                            <Show when={changesExpanded()} fallback={<IconChevronRight size={10} class="shrink-0 text-muted/50" />}>
-                              <IconChevronDown size={10} class="shrink-0 text-muted/50" />
-                            </Show>
-                            <span class="section-label">Changes</span>
-                            <GroupCountBadge count={changesCount()} tone="attention" />
-                            <span class="text-[10px] text-muted/70">
-                              {dirty().staged} staged · {dirty().unstaged} unstaged
-                            </span>
-                          </button>
-                          <Show when={changesExpanded()}>
-                            <Show
-                              when={files().length > 0}
-                              fallback={<p class="px-1 py-1 text-xs text-muted">No per-file details available.</p>}
-                            >
-                              <ul class="space-y-0.5">
-                                <For each={files()}>{(f) => <StatFileRowView file={f} />}</For>
-                              </ul>
-                            </Show>
-                          </Show>
-                        </div>
-                      </Show>
+              <DiffView
+                patch={branchData()?.patch ?? ""}
+                truncated={branchData()?.patch_truncated ?? false}
+                focusPath={diffFocusPath() ?? undefined}
+                onClose={closeDiff}
+              />
+            </Show>
+          </div>
+        </Show>
 
-                      <Show when={dirty().untracked > 0}>
-                        <div>
-                          <div class="flex items-center gap-1.5 px-1 py-0.5">
-                            <span class="section-label">Untracked</span>
-                            <GroupCountBadge count={dirty().untracked} tone="muted" />
-                          </div>
-                          <div class="flex items-center gap-1.5 rounded-lg px-1.5 py-1">
-                            <UntrackedGlyph />
-                            <span class="text-xs text-muted">
-                              {dirty().untracked} file{dirty().untracked === 1 ? "" : "s"} not tracked by git
-                            </span>
-                          </div>
-                        </div>
+        <Show when={!diffOpen()}>
+          <div class="min-h-0 flex-1 space-y-5 overflow-y-auto p-3">
+            <section>
+              <p class="section-label mb-2">Branch</p>
+              <Show
+                when={branchData()}
+                keyed
+                fallback={loading() ? <RowSkeleton rows={3} /> : <p class="text-xs text-muted">Git status unavailable.</p>}
+              >
+                {(diff) => {
+                  const commits = () => parseCommits(diff.commits);
+                  return (
+                    <div class="space-y-2">
+                      <Show
+                        when={commits().length > 0}
+                        fallback={
+                          <p class="text-xs text-muted">
+                            Nothing ahead of <span class="font-mono text-foreground">{diff.base}</span>
+                          </p>
+                        }
+                      >
+                        <p class="text-xs text-muted">
+                          {commits().length} commit{commits().length === 1 ? "" : "s"} ahead of{" "}
+                          <span class="font-mono text-foreground">{diff.base}</span>
+                        </p>
+                        <Show when={statSummary(diff.committed_stat)} keyed>
+                          {(summary) => <p class="text-[10px] text-muted/70">{summary}</p>}
+                        </Show>
+                        <ul class="space-y-0.5">
+                          <For each={commits()}>
+                            {(commit) => (
+                              <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
+                                <IconGitCommit size={10} class="shrink-0 text-muted/40" />
+                                <span class="shrink-0 font-mono text-[10px] text-muted">{commit.oid}</span>
+                                <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
+                              </li>
+                            )}
+                          </For>
+                        </ul>
+                        <Show when={diff.commits_truncated}>
+                          <p class="text-[10px] text-muted/70">Showing the most recent 20 commits.</p>
+                        </Show>
                       </Show>
                     </div>
-                  </Show>
-                );
-              }}
-            </Show>
-          </section>
-
-          <section>
-            <p class="section-label mb-2">History</p>
-            <Show when={!loading() || history().length > 0} fallback={<RowSkeleton rows={6} />}>
-              <Show when={history().length > 0} fallback={<p class="text-xs text-muted">No commits recorded for this lane yet.</p>}>
-                <ul class="space-y-0.5">
-                  <For each={history()}>
-                    {(commit) => (
-                      <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
-                        <IconGitCommit size={10} class="shrink-0 text-muted/40" />
-                        <span class="shrink-0 font-mono text-[10px] text-muted/70">{commit.oid.slice(0, 7)}</span>
-                        <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
-                        <span class="shrink-0 text-[10px] text-muted" title={new Date(commit.time).toLocaleString()}>
-                          {formatRelativeTime(commit.time)}
-                        </span>
-                        <span class="max-w-[5.5rem] shrink-0 truncate text-[10px] text-muted/70">{commit.author_name}</span>
-                      </li>
-                    )}
-                  </For>
-                </ul>
+                  );
+                }}
               </Show>
-            </Show>
-          </section>
-        </div>
+            </section>
+
+            <section>
+              <p class="section-label mb-2">Working tree</p>
+              <Show
+                when={branchData()}
+                keyed
+                fallback={loading() ? <RowSkeleton rows={2} /> : <p class="text-xs text-muted">Git status unavailable.</p>}
+              >
+                {(diff) => {
+                  // Counts here are sourced from `lane().state.dirty` (gix's live status walk,
+                  // reader.rs `dirty_state`) rather than `diff.untracked`/parsed file rows, so this
+                  // section always agrees with the header's dirty badge — same lane, same field.
+                  //
+                  // Grouping: `uncommitted_stat` is `git diff HEAD --stat`, which diffs the worktree
+                  // straight against HEAD and so already mixes staged and unstaged hunks into one
+                  // per-file line (see LaneDiff.uncommitted_stat in diff.rs) — there's no way to tell,
+                  // from that text, which lines are staged. So file rows fall under a single honest
+                  // "Changes" group, with the staged/unstaged split shown only as the header's
+                  // aggregate counts, not as a per-file split the data can't support.
+                  //
+                  // "Untracked" is a count-only row, not a file list, for the same reason: neither
+                  // `lane.diff` (LaneDiff.untracked, diff.rs) nor the live dirty walk exposes
+                  // untracked *filenames* — both only ever return a usize. There is currently no RPC
+                  // that lists them by name, so an honest UI shows the count and nothing invented.
+                  const dirty = () => lane()?.state.dirty ?? { staged: 0, unstaged: 0, untracked: 0 };
+                  const changesCount = () => dirty().staged + dirty().unstaged;
+                  const files = () => parseStatFiles(diff.uncommitted_stat);
+                  return (
+                    <Show
+                      when={changesCount() > 0 || dirty().untracked > 0}
+                      fallback={<p class="text-xs text-muted">Working tree clean</p>}
+                    >
+                      <div class="space-y-3">
+                        <Show when={changesCount() > 0}>
+                          <div>
+                            <button
+                              type="button"
+                              class="focus-ring flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-raised/40"
+                              onClick={() => setChangesExpanded((v) => !v)}
+                              aria-expanded={changesExpanded()}
+                            >
+                              <Show when={changesExpanded()} fallback={<IconChevronRight size={10} class="shrink-0 text-muted/50" />}>
+                                <IconChevronDown size={10} class="shrink-0 text-muted/50" />
+                              </Show>
+                              <span class="section-label">Changes</span>
+                              <GroupCountBadge count={changesCount()} tone="attention" />
+                              <span class="text-[10px] text-muted/70">
+                                {dirty().staged} staged · {dirty().unstaged} unstaged
+                              </span>
+                            </button>
+                            <Show when={changesExpanded()}>
+                              <Show
+                                when={files().length > 0}
+                                fallback={<p class="px-1 py-1 text-xs text-muted">No per-file details available.</p>}
+                              >
+                                <ul class="space-y-0.5">
+                                  <For each={files()}>
+                                    {(f) => <StatFileRowView file={f} onSelect={openDiff} />}
+                                  </For>
+                                </ul>
+                              </Show>
+                            </Show>
+                          </div>
+                        </Show>
+
+                        <Show when={dirty().untracked > 0}>
+                          <div>
+                            <div class="flex items-center gap-1.5 px-1 py-0.5">
+                              <span class="section-label">Untracked</span>
+                              <GroupCountBadge count={dirty().untracked} tone="muted" />
+                            </div>
+                            <div class="flex items-center gap-1.5 rounded-lg px-1.5 py-1">
+                              <UntrackedGlyph />
+                              <span class="text-xs text-muted">
+                                {dirty().untracked} file{dirty().untracked === 1 ? "" : "s"} not tracked by git
+                              </span>
+                            </div>
+                          </div>
+                        </Show>
+                      </div>
+                    </Show>
+                  );
+                }}
+              </Show>
+            </section>
+
+            <section>
+              <p class="section-label mb-2">History</p>
+              <Show when={!loading() || history().length > 0} fallback={<RowSkeleton rows={6} />}>
+                <Show when={history().length > 0} fallback={<p class="text-xs text-muted">No commits recorded for this lane yet.</p>}>
+                  <ul class="space-y-0.5">
+                    <For each={history()}>
+                      {(commit) => (
+                        <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
+                          <IconGitCommit size={10} class="shrink-0 text-muted/40" />
+                          <span class="shrink-0 font-mono text-[10px] text-muted/70">{commit.oid.slice(0, 7)}</span>
+                          <span class="min-w-0 flex-1 truncate text-xs text-foreground">{commit.summary}</span>
+                          <span class="shrink-0 text-[10px] text-muted" title={new Date(commit.time).toLocaleString()}>
+                            {formatRelativeTime(commit.time)}
+                          </span>
+                          <span class="max-w-[5.5rem] shrink-0 truncate text-[10px] text-muted/70">{commit.author_name}</span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+              </Show>
+            </section>
+          </div>
+        </Show>
       </Show>
     </div>
   );
