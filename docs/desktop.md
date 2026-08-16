@@ -322,6 +322,12 @@ empty state rather than pretending to have Claude-style plugins.
 
 ## Known gaps
 
+- Agent terminal panes can occasionally show visual corruption (garbled or stale rows). The
+  v0.7.0 rendering fixes eliminated the main causes, but rare cases remain. Workaround: resize
+  the pane or window slightly, which forces a clean refit and redraw.
+- Agent terminal screens can occasionally freeze and stop updating even though the agent is
+  still running underneath. Workaround: quit and reopen the app; the tmux-backed session is
+  durable, so nothing is lost and the pane comes back live.
 - On Windows and Linux, `mod` is Ctrl, which is also the terminal's own control modifier. A bound
   Ctrl chord pressed while a terminal is focused currently fires the GUI action **and** reaches the
   agent. macOS is unaffected, since Cmd is not a terminal control key.
