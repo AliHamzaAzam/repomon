@@ -624,6 +624,9 @@ mod tests {
         // minting stay blocked over the bridge even under full fleet control.
         for m in [
             "agent.resize",
+            // agent.add/remove/set_default mutate the persisted custom-agent config
+            // (~/.config/repomon/config.toml) — a write channel into the launch commands for
+            // every future spawn. Remote control of what binary runs is strictly local-only.
             "agent.add",
             "agent.remove",
             "agent.set_default",
@@ -662,6 +665,12 @@ mod tests {
             "playbook.list",
             "playbook.approve",
             "playbook.delete",
+            // message.send/inbox/mark_read/list are the fleet-mail RPC surface. They stay
+            // local-only: the sending identity derives from the Unix-socket caller's registered
+            // MCP token (local daemon only), and fleet-mail delivery targets managed sessions by
+            // lane address — a remote caller with no local session context has no meaningful
+            // identity to send from. Reads are also excluded: fleet mail content is internal
+            // agent-to-agent coordination, not a remote-companion view surface.
             "message.send",
             "message.inbox",
             "message.mark_read",
