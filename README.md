@@ -4,9 +4,9 @@
 
 # repomon
 
-**Run a fleet of AI coding agents across all your repos, from one terminal.**
+**Mission control for a fleet of AI coding agents across all your repos.**
 
-Many repos × many worktrees × many agents on one screen. Durable across restarts, the ones
+Many repos × many worktrees × many agents, on one screen. Durable across restarts, the ones
 waiting on you float to the top, and you can approve a prompt from your phone.
 
 <p>
@@ -14,94 +14,97 @@ waiting on you float to the top, and you can approve a prompt from your phone.
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue">
   <img alt="Platforms: macOS · Linux · Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-555">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange">
-  <img alt="For Claude Code · Codex · Aider" src="https://img.shields.io/badge/for-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Aider-8A2BE2">
+  <img alt="For Claude Code · Codex · Antigravity · OpenCode · Cursor · Aider" src="https://img.shields.io/badge/for-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Antigravity%20%C2%B7%20OpenCode%20%C2%B7%20Cursor%20%C2%B7%20Aider-8A2BE2">
 </p>
 
-<!-- Hero demo GIF: docs/demo.gif -->
+<!-- Hero demo GIF: docs/gui-demo.gif, produced by scripts/record-gui-demo.sh from a
+     sandboxed instance of the desktop app with throwaway fake repos (no real data ever
+     appears in it). If this image is missing or blank, the gif hasn't been recorded yet on
+     this checkout, run the script (it needs macOS Screen Recording permission for your
+     terminal app, granted once in System Settings > Privacy & Security > Screen Recording). -->
 <p align="center">
-  <img src="docs/demo.gif" alt="repomon: triaging a fleet of AI coding agents across repos" width="900">
+  <img src="docs/gui-demo.gif" alt="Mission Control: browsing the fleet, the git explorer, and the in-app editor across several repos" width="900">
 </p>
 
 Other tools run parallel agents in *one repo, many worktrees* (Claude Squad, Conductor,
-Crystal, ccmanager). repomon is built for the developer juggling **5–15 active projects** with
+Crystal, ccmanager). repomon is built for the developer juggling **5-15 active projects** with
 a fleet of agents running at once: **many repos × many worktrees × many agents**, spawned and
-steered from one place.
+steered from one place, in a desktop app or a terminal, whichever you reach for.
 
-```
-REPOMON                                              14:02 fri 29 may 2026
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FLEET   8 agents · 4 repos · 3 need you                    ↑ sorted: needs-you
-─────────────────────────────────────────────────────────────────────────
+## Mission Control
 
-  pos-saas ────────────────────────────────────────────────────────────
-  ⏸ wt-checkout  hotfix/checkout-bug     claude  needs you   89↻   3m
-  ▶ main         feat/supabase-migration claude  running    142↻  18m
-  ○ wt-ui        spike/new-pos-ui                idle              2h
+Download the app, add a repo, and there's nothing left to configure: the daemon and a portable
+`tmux` ship inside the bundle, so agents run durably (survive closing the window, reattach with
+full scrollback) with no separate install. First launch walks you through a short onboarding
+flow, and **Settings > System** shows a live health check for tmux, git, and every agent CLI,
+with one-click-copy install commands for anything missing.
 
-  montage-ai ──────────────────────────────────────────────────────────
-  ⏸ wt-mcp       spike/mcp-batch         codex   needs you   44↻   8m
-  ▶ main         phase-2-studio-floor    claude  running    201↻   2m
+- **One fleet, every repo.** The sidebar groups lanes (repo + worktree) by project, sorts by
+  recent activity, and floats the ones waiting on you. A lane with more than one agent running
+  shows a live roster on hover, so you can see who's doing what without opening it.
+- **Git explorer and editor, built in, side by side.** The right rail is a resizable (drag its
+  edge), multi-panel host. Git (`⌘3`): branch status against its base, working-tree changes with
+  per-file stats, commit history, a unified diff viewer, and clickable commit details (message,
+  author, full patch). Editor (`⌘7`): a file tree over the lane's worktree, multi-file tabs with
+  dirty tracking, and a full CodeMirror editor themed to match. If an agent changes a file you
+  have open, you get a conflict banner (reload or keep mine) instead of a silent overwrite.
+- **Self-service recovery.** Settings can stop, start, or reset the daemon and bulk-restore
+  orphaned agent sessions, without a terminal.
+- **Any agent kind can orchestrate any other.** repomind (the fleet orchestrator) can now run as
+  Claude Code, Codex, Antigravity, or OpenCode, and manage agents of every kind underneath it.
+  Every managed session gets fleet mail: address one agent, a whole lane (`lane-12/*`), or the
+  whole fleet (`*`), with per-recipient delivery results.
 
-  ↑↓ select   ↵/→ open   spc babysit   n new-lane   / filter   g needs-you   q
-```
-
-repomon is one tool with four **zoom levels**, one selection that follows you the whole way:
-
-- **Fleet**: every agent on one screen; the ones waiting on you float to the top.
-- **Split**: fleet sidebar + the selected agent's live output and an input line.
-- **Babysit grid**: live tiles auto-sized to your window; watch and nudge several at once.
-- **Focus**: one agent full-screen with full live terminal, input, and controls.
-
-Arrow keys drive everything (`↵`/`→` zoom in, `esc`/`←` zoom out, `space` the grid). Agents
-run in durable sessions (tmux on macOS/Linux, detached host processes on Windows), so they
-survive closing the UI and reattach (`a`) with full scrollback. `⏸` flags an agent that needs
-you; `g` jumps to the next one.
-
-Beyond the live views, three Phase-3 dashboards (keys `2`/`3`/`4`): a per-repo **timeline**
-of commit density with cross-repo correlations, detected **work sessions** (focused vs
-parallel, exportable to Markdown), and global commit **search**.
-
-Agents: Claude Code is first-class (rich status from its transcript); Codex and Aider also
-run, with a tmux-alive fallback for any kind. See [docs/agents.md](docs/agents.md).
-
-**Remote access**: an optional token-gated WebSocket bridge serves the same JSON-RPC API
-over a private network (Tailscale). The daemon detects per-session state changes (including
-interactive permission dialogs read from the pane), broadcasts them as `event.notification`,
-and can push them to Apple devices via APNs directly (no relay). The bridge and protocol are
-**open**, so any client can drive it today (see [docs/protocol.md](docs/protocol.md)). A
-polished **iOS companion app** (fleet view, live conversations, and an Approve button for
-pending dialogs) is built and ships once an Apple Developer account is in place.
+See [docs/desktop.md](docs/desktop.md) for the full keyboard reference and every setting.
 
 ## How it compares
 
 |  | **repomon** | Claude Squad / ccmanager | GUI apps (Conductor, Crystal) | built-in `claude agents` |
 |---|---|---|---|---|
 | **Scope** | many repos × worktrees × agents | one repo, many worktrees | one repo, many worktrees | one tool, flat list |
+| **Interface** | desktop app or TUI, same fleet | terminal only | GUI only | inside the CLI |
 | **Runtime** | durable tmux: survives close, reattach | tmux | app process | inside the CLI |
-| **Triage** | needs-you float to top, `g` to jump | flat list | varies | grouped by state |
+| **Triage** | needs-you float to top, jump-to-next | flat list | varies | grouped by state |
 | **Usage limits** | live usage corner + auto-continue | ✗ | ✗ | ✗ |
 | **Remote** | open WebSocket bridge + APNs over Tailscale (iOS app soon) | ✗ | ✗ | ✗ |
-| **Lives in the terminal** | ✅ (4-zoom TUI) | ✅ | ❌ (GUI) | ✅ |
 
-Honest take: if you work in **one** repo, Claude Squad/ccmanager or a GUI may be simpler.
-repomon earns its keep once you're running agents across **several** projects at once.
+Honest take: if you work in **one** repo, Claude Squad/ccmanager or a single-repo GUI may be
+simpler. repomon earns its keep once you're running agents across **several** projects at once,
+and it doesn't make you choose between a terminal and a GUI to get there.
 
 ## Architecture
 
 A background daemon (`repomond`) owns SQLite, file watchers, the git layer, and the agent
-runtime, exposing a JSON-RPC API over a local transport (Unix socket on macOS/Linux, named
-pipe on Windows). The agent runtime sits behind a `SessionBackend` trait: tmux on macOS/Linux,
-and per-agent host processes on Windows. The TUI (`repomon`) is a thin client. Five crates:
+runtime, exposing a JSON-RPC API over a local transport (Unix socket on macOS/Linux, named pipe
+on Windows). The agent runtime sits behind a `SessionBackend` trait: tmux on macOS/Linux, and
+per-agent host processes on Windows. Every client, the desktop app, the TUI, and the iOS
+companion, is a thin client over that one API, so any of them can watch and drive the same fleet
+at once. Five crates, plus the desktop app:
 
 - `repomon-core`: data model, gix git layer, SQLite store, watchers, agent runtime (`SessionBackend`).
 - `repomon-daemon`: the `repomond` socket/pipe server and background services.
+- `apps/desktop`: Mission Control, the Tauri desktop app (`repomon-desktop`), bundling its own
+  daemon and (on macOS/Linux) a portable `tmux`.
 - `repomon-tui`: the `repomon` terminal UI.
 - `repomon-mcp`: repomind's MCP server (`repomond mcp`), exposing the fleet to an orchestrator agent over stdio.
 - `repomon-host`: `repomon-agent-host.exe`, the per-agent ConPTY host that gives Windows tmux-style durability (Windows only).
 
 ## Install
 
-**One line, no deps** (macOS & Linux, x86_64 / aarch64, incl. WSL2; prebuilt binaries, no Rust or Xcode):
+**Download Mission Control** from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest):
+
+| Platform | File |
+|---|---|
+| macOS (Apple silicon or Intel) | `Repomon_<version>_aarch64.dmg` / `Repomon_<version>_x64.dmg` |
+| Windows | `Repomon_<version>_x64-setup.exe` |
+| Linux | `Repomon_<version>_amd64.AppImage`, `.deb`, or `.rpm` |
+
+Open it, add a repo, go. The bundle carries its own daemon and its own portable `tmux`, so
+nothing else needs installing first, and it updates itself after the first download (**Settings
+> General > Check for updates**). See [docs/desktop.md](docs/desktop.md).
+
+**Prefer the command line?** The TUI and headless `repomon` commands install the same way they
+always have:
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -118,26 +121,13 @@ Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repo
 per-arch (`aarch64`/`x86_64`) or the `universal` build, then extract, and put `repomon` and `repomond`
 on your `PATH`.
 
-**Mission Control** (the desktop app) ships separately, for macOS, Windows, and Linux, from the
-[`desktop-preview`](https://github.com/AliHamzaAzam/repomon/releases/tag/desktop-preview) release:
-
-| Platform | File |
-|---|---|
-| macOS (Apple silicon and Intel) | `Repomon_<version>_universal.dmg` |
-| Windows | `Repomon_<version>_x64-setup.exe` |
-| Linux | `Repomon_<version>_amd64.AppImage`, `.deb`, or `.rpm` |
-
-The bundle carries its own daemon, so it needs no separate `repomond`, and it updates itself after
-the first download. It drives the same fleet as the TUI and can be run entirely from the keyboard.
-See [docs/desktop.md](docs/desktop.md) for the shortcut reference and settings.
-
 **From source**: any platform with the Rust toolchain (anywhere without a prebuilt binary):
 
 ```sh
 cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
 ```
 
-On macOS and Linux repomon needs `tmux` (agents run in tmux) and `git` at runtime.
+On macOS and Linux the CLI (unlike the desktop bundle) needs `tmux` and `git` on the system.
 Don't have `tmux`? Install it: `brew install tmux` (macOS), `sudo apt install tmux` (Debian / Ubuntu / WSL2), `sudo dnf install tmux` (Fedora), `sudo pacman -S tmux` (Arch).
 
 **Windows** (native, no WSL, no tmux):
@@ -182,8 +172,9 @@ eval "$(repomon shell-init zsh)"
 
 ### Run the daemon as a service (optional)
 
-The TUI auto-starts `repomond` on demand, so a service is never required. To keep the daemon
-(and its notifications) alive across logins:
+Both the CLI and the desktop app auto-start `repomond` on demand, so a service is never
+required. To keep the daemon (and its notifications) alive across logins even with neither UI
+open:
 
 ```sh
 repomon daemon install     # macOS: launchd LaunchAgent · Linux: systemd user unit
@@ -205,20 +196,17 @@ On Linux this writes `~/.config/systemd/user/repomon.service`; run
 - **No tmux, no WSL.** On Windows repomon runs natively. Each agent runs in its own detached
   host process (`repomon-agent-host.exe`, a ConPTY + server-side terminal emulator) that plays
   exactly the durability role tmux plays on Unix: agents survive daemon restarts and re-adopt
-  with full scrollback. The daemon talks to the TUI and to the hosts over named pipes instead
-  of Unix sockets.
-- **Windows Terminal recommended.** repomon runs in any modern console, but Windows Terminal
-  gives the best rendering and is where the pop-out attach opens a new tab.
+  with full scrollback. The daemon talks to its clients and to the hosts over named pipes
+  instead of Unix sockets.
+- **Windows Terminal recommended** for the CLI. The desktop app renders its own terminals and
+  doesn't depend on the host console.
 - **ConPTY floor: Windows 10 1809.** The host relies on ConPTY, which requires Windows 10
   version 1809 or newer (Windows 11 fully supported). Claude Code on native Windows needs Git
   for Windows.
-- **Keep the three exes together.** `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe`
-  must live in the **same directory**; the daemon spawns the host by looking next to itself.
-  `install.ps1` and the release zip already place all three together.
-- **Unsigned binaries → SmartScreen.** The release binaries are not yet code-signed, so
-  Windows SmartScreen may warn on first run ("Windows protected your PC"). Choose *More info →
-  Run anyway*, or unblock the zip before extracting (`Unblock-File`). Signing is on the
-  roadmap.
+- **Keep the three CLI exes together.** `repomon.exe`, `repomond.exe`, and
+  `repomon-agent-host.exe` must live in the **same directory**; the daemon spawns the host by
+  looking next to itself. `install.ps1` and the release zip already place all three together.
+  (The desktop bundle carries its own copies and doesn't need this.)
 
 ## Usage
 
@@ -242,29 +230,31 @@ force in-process always, or manage the daemon with
 > **Building from source?** After a rebuild, run `repomon daemon restart` so the new code is
 > served (the daemon outlives the UI). The dev build runs from `./target/debug/repomon`.
 
-## repomind — fleet orchestrator
+## repomind (fleet orchestrator)
 
-repomind is an orchestrator agent for the fleet: a `claude` session wired to repomon's own
-MCP server, so it can read every lane's status and act on your behalf — spawn workers, answer
-their permission prompts, and merge finished work — while you supervise or check in only when
-it needs you.
+repomind is an orchestrator agent for the fleet: a coding-agent session (Claude Code, Codex,
+Antigravity, or OpenCode) wired to repomon's own MCP server, so it can read every lane's status
+and act on your behalf, spawning workers, answering their permission prompts, and merging
+finished work, while you supervise or check in only when it needs you. It's built into Mission
+Control (the repomind panel, `⌘5`) and available from the CLI:
 
 ```sh
 repomon orchestrate [--autonomy read-only|supervised|autonomous] [--max-agents N] [--model m] [prompt]
 ```
 
 This makes sure the daemon is up, starts (or reuses) the single daemon-owned `orchestrator`
-tmux window running `claude`, and attaches you to it. `prompt` is an optional initial goal.
+tmux window running the orchestrator agent, and attaches you to it. `prompt` is an optional
+initial goal.
 
 **TUI command-center** (`O` key, or `6`): a pinned fleet row plus a dashboard for repomind,
 reachable like any other zoom level. The row and header escalate the moment repomind needs
-you — a permission/decision dialog, or an end-of-turn wait — and fire a "repomind needs you"
+you, a permission/decision dialog, or an end-of-turn wait, and fire a "repomind needs you"
 desktop notification when the TUI isn't already looking at it. Press `i` to type straight to
 repomind without leaving the view (mediated `send-keys`); `↵`/`→` attaches to its real tmux
 pane instead.
 
-**Guardrails.** By product decision, `--autonomy` defaults to `autonomous` — repomind may
-create, merge, and delete lanes and run a goal end-to-end without asking first — bounded by a
+**Guardrails.** By product decision, `--autonomy` defaults to `autonomous`, repomind may
+create, merge, and delete lanes and run a goal end-to-end without asking first, bounded by a
 few hard caps enforced server-side (not just requested in the prompt): a per-session action
 cap (100 actions by default), a concurrent-agent cap (`--max-agents`, default 4), a 15s dedupe
 on sending the same text to the same lane twice in a row, and a two-phase human-confirmation
@@ -275,23 +265,6 @@ creation for you to confirm instead, or `--autonomy read-only` to keep it to obs
 Before merging a lane's work, repomind is expected to verify it: `lane_diff` (commits ahead of
 base with diffstat, plus uncommitted changes) before `merge_lane` lands them.
 
-## Shell integration (cd-on-exit)
-
-Pressing `c` on a lane exits repomon and changes your shell into that worktree. repomon
-writes the path to the file descriptor in `$REPOMON_CD_FD`; add the wrapper to your
-`~/.zshrc` / `~/.bashrc` so the shell acts on it:
-
-```sh
-eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repomon shell-init fish
-```
-
-On **Windows / PowerShell** the wrapper reads the path from a temp file (`$REPOMON_CD_FILE`)
-instead of an inherited file descriptor; add it to your `$PROFILE`:
-
-```powershell
-repomon shell-init powershell | Out-String | Invoke-Expression
-```
-
 ## Remote access (open bridge over Tailscale)
 
 The daemon serves the same JSON-RPC API over a token-gated WebSocket bridge, so you can drive
@@ -301,8 +274,8 @@ ships once an Apple Developer account is in place; until then the bridge and `re
 pairing work for any client you point at them. Bind it to your **private tailnet** address,
 never a public interface; anyone holding the token can read your panes and type into your agents.
 
-1. **Install [Tailscale](https://tailscale.com)** on the Mac (and any device you'll connect
-   from), signed into the same tailnet, so it can reach the Mac at its `100.x.y.z` address.
+1. **Install [Tailscale](https://tailscale.com)** on the machine (and any device you'll connect
+   from), signed into the same tailnet, so it can reach it at its `100.x.y.z` address.
 2. **Enable the bridge**, then restart the daemon to apply:
    ```sh
    repomon remote enable     # detects the Tailscale IPv4, binds ws://<ip>:7878, mints a token
@@ -317,9 +290,64 @@ Manage it with `repomon remote status` (shows the bind and a masked token),
 `repomon remote disable` (stops serving; keeps the token). Each change needs a
 `repomon daemon restart` to take effect.
 
+## Prefer the terminal? The original TUI
+
+repomon started as a terminal UI, and it's still a first-class client of the same daemon, not a
+legacy mode: same fleet, same lanes, same agents, whichever one you have open.
+
+```
+REPOMON                                              14:02 fri 29 may 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FLEET   8 agents · 4 repos · 3 need you                    ↑ sorted: needs-you
+─────────────────────────────────────────────────────────────────────────
+
+  pos-saas ────────────────────────────────────────────────────────────
+  ⏸ wt-checkout  hotfix/checkout-bug     claude  needs you   89↻   3m
+  ▶ main         feat/supabase-migration claude  running    142↻  18m
+  ○ wt-ui        spike/new-pos-ui                idle              2h
+
+  montage-ai ──────────────────────────────────────────────────────────
+  ⏸ wt-mcp       spike/mcp-batch         codex   needs you   44↻   8m
+  ▶ main         phase-2-studio-floor    claude  running    201↻   2m
+
+  ↑↓ select   ↵/→ open   spc babysit   n new-lane   / filter   g needs-you   q
+```
+
+<p align="center">
+  <img src="docs/demo.gif" alt="repomon TUI: triaging a fleet of AI coding agents across repos" width="800">
+</p>
+
+repomon is one tool with four **zoom levels**, one selection that follows you the whole way:
+
+- **Fleet**: every agent on one screen; the ones waiting on you float to the top.
+- **Split**: fleet sidebar + the selected agent's live output and an input line.
+- **Babysit grid**: live tiles auto-sized to your window; watch and nudge several at once.
+- **Focus**: one agent full-screen with full live terminal, input, and controls.
+
+Arrow keys drive everything (`↵`/`→` zoom in, `esc`/`←` zoom out, `space` the grid). `⏸` flags
+an agent that needs you; `g` jumps to the next one. Beyond the live views, three dashboards
+(keys `2`/`3`/`4`): a per-repo **timeline** of commit density with cross-repo correlations,
+detected **work sessions** (focused vs parallel, exportable to Markdown), and global commit
+**search**.
+
+**Shell integration (cd-on-exit).** Pressing `c` on a lane exits repomon and changes your shell
+into that worktree. repomon writes the path to the file descriptor in `$REPOMON_CD_FD`; add the
+wrapper to your `~/.zshrc` / `~/.bashrc` so the shell acts on it:
+
+```sh
+eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repomon shell-init fish
+```
+
+On **Windows / PowerShell** the wrapper reads the path from a temp file (`$REPOMON_CD_FILE`)
+instead of an inherited file descriptor; add it to your `$PROFILE`:
+
+```powershell
+repomon shell-init powershell | Out-String | Invoke-Expression
+```
+
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md): how the daemon, TUI, and core fit together.
+- [docs/architecture.md](docs/architecture.md): how the daemon, desktop app, TUI, and core fit together.
 - [docs/desktop.md](docs/desktop.md): Mission Control, its keyboard shortcuts, and settings.
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC socket reference.
 - [docs/agents.md](docs/agents.md): how agents run and how status is detected.
@@ -328,24 +356,22 @@ Manage it with `repomon remote status` (shows the bind and a masked token),
 
 ## Status
 
-The fleet view (lanes/today), the agent multiplexer (spawn, live output, input, attach,
-babysit grid, multi-agent lanes), the history dashboard (timeline/sessions/search),
-per-session notifications (pane-sniffed permission-dialog detection, fired as desktop popups
-even when the TUI is closed or parked full-screen in an agent), the remote access layer
-(WebSocket bridge + APNs + pairing), and repomind (the MCP-driven fleet orchestrator —
-`repomon orchestrate` and the TUI command-center) are all in, on macOS, Linux, and Windows.
-Each platform has native paths for the service, notifications, clipboard, and process/agent
-liveness. **Native Windows support has landed** (code-complete and CI-green on
-`x86_64-pc-windows-msvc`): a `SessionBackend` trait with a tmux backend on Unix and a
-host-process backend on Windows, named-pipe IPC, and `repomon-agent-host.exe` for
-durability parity. It still awaits a physical Windows 11 end-to-end pass and binary signing
-before a Windows release is tagged (see [docs/windows-validation.md](docs/windows-validation.md)).
-The iOS companion app is built and ships once an Apple Developer account is in place.
-Deferred: a web dashboard.
+Mission Control (fleet, git explorer, in-app editor, onboarding, System Health, self-service
+daemon recovery), the TUI (fleet/today, the agent multiplexer, the history dashboard), the
+remote access layer (WebSocket bridge + APNs + pairing), and repomind (cross-kind
+orchestration, fleet mail, playbooks, approval memory, standing orchestrations) are all in, on
+macOS, Linux, and Windows. Each platform has native paths for the service, notifications,
+clipboard, and process/agent liveness. **Native Windows support has landed** (code-complete and
+CI-green on `x86_64-pc-windows-msvc`): a `SessionBackend` trait with a tmux backend on Unix and
+a host-process backend on Windows, named-pipe IPC, and `repomon-agent-host.exe` for durability
+parity. It still awaits a physical Windows 11 end-to-end pass and binary signing before a
+Windows release is tagged (see [docs/windows-validation.md](docs/windows-validation.md)). The
+iOS companion app is built and ships once an Apple Developer account is in place. Deferred: a
+web dashboard.
 
 ---
 
-If repomon saves you a few context-switches a day, a ⭐ helps other people find it.
+If repomon saves you a few context-switches a day, a star helps other people find it.
 
 ## License
 
