@@ -674,19 +674,20 @@ describe("panel.git keybinding (App integration)", () => {
     // C1 shipped a visible tab strip inside the right rail; that strip was removed once the
     // header buttons (+ mod+3/5/7) covered the same switching job, so "on the Git tab" is now
     // asserted via the header buttons' own aria-pressed state rather than a `role="tab"` query.
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-    expect(gitButton).toHaveAttribute("aria-pressed", "true");
+    // Every header button's pressed state is tab-scoped: opening on Git must NOT light Repomind.
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 
   it("closes the panel when mod+3 is pressed again while already on Git", async () => {
     const { container } = renderApp();
-    const toggle = within(container).getByRole("button", { name: "Repomind" });
+    const gitButton = within(container).getByRole("button", { name: "Git" });
 
     fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
 
     fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
+    await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "false"));
   });
 
   it("switches to the Git tab without closing when the panel is open on another tab", async () => {
@@ -701,8 +702,9 @@ describe("panel.git keybinding (App integration)", () => {
     fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
 
     // Removed strip: assert the tab switch via the header buttons' own aria-pressed state.
+    // Switching to Git un-lights Repomind (pressed state is tab-scoped, not rail-open-scoped).
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 });
 

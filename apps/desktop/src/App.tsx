@@ -198,7 +198,7 @@ function App(props: AppProps) {
   // Shared open/switch/toggle-close behavior for the git and editor right-rail tabs, used by both
   // the mod+3 / mod+7 shortcuts and their header icon-button counterparts (item 4) so the two entry
   // points can never drift apart.
-  const openPanelTab = (id: "git" | "editor") => {
+  const openPanelTab = (id: "repomind" | "git" | "editor") => {
     if (!repomindOpen()) {
       // Closed → open already on the requested tab. RightPanelHost consults `requestTab.id` on its
       // very first render, so bumping this in the same tick as opening is enough — no need to wait
@@ -240,11 +240,7 @@ function App(props: AppProps) {
       case "panel.git": openPanelTab("git"); break;
       case "panel.editor": openPanelTab("editor"); break;
       case "panel.repomind":
-        setRepomindOpen((open) => {
-          const next = !open;
-          persistRepomindOpen(next);
-          return next;
-        });
+        openPanelTab("repomind");
         break;
       case "panel.repomindFull":
         if (!repomindFull()) {
@@ -446,16 +442,12 @@ function App(props: AppProps) {
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
-              repomindOpen()
+              repomindOpen() && rightPanelTab() === "repomind"
                 ? "text-signal font-semibold"
                 : "text-muted hover:text-foreground"
             }`}
-            onClick={() => {
-              const next = !repomindOpen();
-              setRepomindOpen(next);
-              persistRepomindOpen(next);
-            }}
-            aria-pressed={repomindOpen()}
+            onClick={() => openPanelTab("repomind")}
+            aria-pressed={repomindOpen() && rightPanelTab() === "repomind"}
             title="Repomind (⌘5)"
           >
             <IconSparkles size={13} />
