@@ -5,7 +5,12 @@ import type { SystemDoctorResult } from "../bindings";
 import type { ConfigView } from "../ipc/rpc";
 import SettingsModal from "./SettingsModal";
 
-const calls = vi.hoisted(() => ({ saved: [] as ConfigView[] }));
+const calls = vi.hoisted(() => ({
+  saved: [] as ConfigView[],
+  addedAgents: [] as Array<{ name: string; command: string }>,
+  removedAgents: [] as string[],
+  defaultAgents: [] as Array<string | null>,
+}));
 const state = vi.hoisted(() => ({
   config: null as ConfigView | null,
   doctor: null as SystemDoctorResult | null,
@@ -13,9 +18,60 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("../ipc/rpc", () => ({
-  daemonCall: (method: string, params?: ConfigView) => {
+  daemonCall: (method: string, params?: any) => {
     if (method === "config.get") return Promise.resolve({ ...state.config });
-    if (method === "agent.detect") return Promise.resolve([]);
+    if (method === "agent.detect") {
+      const list = [
+        { kind: "claude-code", name: "claude-code", command: "claude", detected: true, custom: false, default: false },
+        { kind: "cursor", name: "cursor", command: "cursor-agent", detected: false, custom: false, default: false },
+        { kind: "aider", name: "aider", command: "aider", detected: true, custom: false, default: false },
+        { kind: "codex", name: "codex", command: "codex", detected: true, custom: false, default: false },
+        { kind: "antigravity", name: "antigravity", command: "agy", detected: true, custom: false, default: false },
+        { kind: "opencode", name: "opencode", command: "opencode", detected: true, custom: false, default: false },
+      ];
+      if (state.config?.agents) {
+        for (const [name, cmd] of Object.entries(state.config.agents)) {
+          list.push({
+            kind: name,
+            name,
+            command: cmd,
+            detected: true,
+            custom: true,
+            default: state.config.default_agent === name,
+          });
+        }
+      }
+      return Promise.resolve(list);
+    }
+    if (method === "agent.add") {
+      if (params.name === "claude-code") {
+        return Promise.reject(new Error("'claude-code' is a built-in agent name; pick a different name"));
+      }
+      calls.addedAgents.push(params);
+      if (state.config) {
+        state.config = {
+          ...state.config,
+          agents: { ...(state.config.agents ?? {}), [params.name]: params.command },
+        };
+      }
+      return Promise.resolve(null);
+    }
+    if (method === "agent.remove") {
+      calls.removedAgents.push(params.name);
+      if (state.config && state.config.agents) {
+        const nextAgents = { ...state.config.agents };
+        delete nextAgents[params.name];
+        state.config = { ...state.config, agents: nextAgents };
+      }
+      return Promise.resolve(null);
+    }
+    if (method === "agent.set_default") {
+      calls.defaultAgents.push(params.name ?? null);
+      if (state.config) {
+        state.config = { ...state.config, default_agent: params.name ?? null };
+      }
+      return Promise.resolve(null);
+    }
     if (method === "system.doctor") {
       state.doctorCalls++;
       if (state.doctor) return Promise.resolve({ ...state.doctor });
@@ -118,12 +174,12 @@ describe("Settings auto-save persistence", () => {
     ));
 
     // Find the change icon button for codex
-    await screen.findByText("Agent Icon Library & Overrides");
-    const changeButtons = screen.getAllByRole("button", { name: "Change Icon…" });
-    expect(changeButtons.length).toBeGreaterThan(0);
+    await screen.findByText("Built-in Runtime Icons & Overrides");
+    const changeCodexButton = screen.getByRole("button", { name: "Change icon for codex" });
+    expect(changeCodexButton).toBeInTheDocument();
 
-    // Open icon picker for the fourth agent (codex)
-    fireEvent.click(changeButtons[3]);
+    // Open icon picker for codex
+    fireEvent.click(changeCodexButton);
 
     // Icon picker modal should open
     await screen.findByText("Icon for");
@@ -354,5 +410,138 @@ describe("System Health tab", () => {
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onReplayOnboarding).toHaveBeenCalledTimes(1);
+  });
+
+  describe("Custom Agents in Settings", () => {
+    it("renders custom agents list and allows registering a new custom agent", async () => {
+      state.config = {
+        ...config,
+        agents: {
+          "custom-runner": "python -m runner",
+        },
+      };
+      calls.addedAgents = [];
+
+      render(() => (
+        <SettingsModal
+          initialTab="agents"
+          onClose={() => undefined}
+        />
+      ));
+
+      await screen.findByText("Custom Agent Registrations");
+      expect(screen.getByText("custom-runner")).toBeInTheDocument();
+      expect(screen.getByText("python -m runner")).toBeInTheDocument();
+
+      // Fill in new custom agent form
+      const nameInput = screen.getByPlaceholderText("e.g. 'devin', 'gemini-cli', 'deepseek'");
+      const cmdInput = screen.getByPlaceholderText("e.g. 'gemini --repomon', 'python run.py'");
+      const registerButton = screen.getByRole("button", { name: "Register Agent" });
+
+      fireEvent.input(nameInput, { target: { value: "devin" } });
+      fireEvent.input(cmdInput, { target: { value: "devin-cli run" } });
+      expect(registerButton).not.toBeDisabled();
+
+      fireEvent.click(registerButton);
+
+      await waitFor(() => {
+        expect(calls.addedAgents).toContainEqual({
+          name: "devin",
+          command: "devin-cli run",
+        });
+      });
+
+      await screen.findByText("Registered custom agent 'devin'");
+      expect(screen.getByText("devin")).toBeInTheDocument();
+    });
+
+    it("displays friendly validation error when trying to add a built-in agent name", async () => {
+      state.config = { ...config, agents: {} };
+      calls.addedAgents = [];
+
+      render(() => (
+        <SettingsModal
+          initialTab="agents"
+          onClose={() => undefined}
+        />
+      ));
+
+      await screen.findByText("Custom Agent Registrations");
+      const nameInput = screen.getByPlaceholderText("e.g. 'devin', 'gemini-cli', 'deepseek'");
+      const cmdInput = screen.getByPlaceholderText("e.g. 'gemini --repomon', 'python run.py'");
+      const registerButton = screen.getByRole("button", { name: "Register Agent" });
+
+      fireEvent.input(nameInput, { target: { value: "claude-code" } });
+      fireEvent.input(cmdInput, { target: { value: "claude --danger" } });
+      fireEvent.click(registerButton);
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("'claude-code' is a built-in agent name; pick a different name");
+      expect(calls.addedAgents).toHaveLength(0);
+    });
+
+    it("sets a custom agent as default with agent.set_default RPC", async () => {
+      state.config = {
+        ...config,
+        agents: {
+          "custom-runner": "python -m runner",
+        },
+        default_agent: null,
+      };
+      calls.defaultAgents = [];
+
+      render(() => (
+        <SettingsModal
+          initialTab="agents"
+          onClose={() => undefined}
+        />
+      ));
+
+      await screen.findByText("Custom Agent Registrations");
+      const setDefaultButton = screen.getByRole("button", { name: "Set custom-runner as default agent" });
+      fireEvent.click(setDefaultButton);
+
+      await waitFor(() => {
+        expect(calls.defaultAgents).toContain("custom-runner");
+      });
+    });
+
+    it("removes a custom agent with confirmation and agent.remove RPC", async () => {
+      state.config = {
+        ...config,
+        agents: {
+          "to-delete": "echo 'delete me'",
+        },
+      };
+      calls.removedAgents = [];
+
+      const mockConfirm = vi.fn((opts: { onConfirm: () => void }) => {
+        opts.onConfirm();
+      });
+
+      render(() => (
+        <SettingsModal
+          initialTab="agents"
+          onClose={() => undefined}
+          actions={{ confirm: mockConfirm } as any}
+        />
+      ));
+
+      await screen.findByText("Custom Agent Registrations");
+      expect(screen.getByText("to-delete")).toBeInTheDocument();
+
+      const removeButton = screen.getByRole("button", { name: "Remove agent to-delete" });
+      fireEvent.click(removeButton);
+
+      expect(mockConfirm).toHaveBeenCalledTimes(1);
+      expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
+        title: "Remove agent 'to-delete'?",
+        danger: true,
+      }));
+
+      await waitFor(() => {
+        expect(calls.removedAgents).toContain("to-delete");
+      });
+    });
   });
 });

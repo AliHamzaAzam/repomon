@@ -6,7 +6,12 @@ import { daemonCall } from "../ipc/rpc";
 import { AgentIcon } from "./icons";
 import Modal from "./Modal";
 
-export default function SpawnModal(props: { lane: Lane; onClose: () => void; onDone: () => Promise<void> }) {
+export default function SpawnModal(props: {
+  lane: Lane;
+  onClose: () => void;
+  onDone: () => Promise<void>;
+  onOpenSettingsTab?: (tab: import("./SettingsModal").SettingsTab) => void;
+}) {
   const [choices, setChoices] = createSignal<AgentChoice[]>([]);
   const [agent, setAgent] = createSignal("");
   const [task, setTask] = createSignal("");
@@ -88,7 +93,28 @@ export default function SpawnModal(props: { lane: Lane; onClose: () => void; onD
                   </div>
                   <div class="flex items-center gap-1">
                     <Show when={!choice.detected}>
-                      <span class="rounded bg-fault/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault">missing</span>
+                      <Show
+                        when={props.onOpenSettingsTab}
+                        fallback={
+                          <span class="rounded bg-fault/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault">
+                            missing
+                          </span>
+                        }
+                      >
+                        <button
+                          type="button"
+                          class="focus-ring rounded bg-fault/10 hover:bg-fault/20 border border-fault/30 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault transition-colors cursor-pointer"
+                          title="View installation instructions in Settings > System"
+                          aria-label={`View install instructions for ${choice.name} in System Health`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            props.onClose();
+                            props.onOpenSettingsTab?.("system");
+                          }}
+                        >
+                          missing ↗
+                        </button>
+                      </Show>
                     </Show>
                     <Show when={choice.default}>
                       <span class="rounded bg-signal/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-signal">default</span>

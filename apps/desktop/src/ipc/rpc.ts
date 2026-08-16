@@ -145,6 +145,9 @@ interface RpcMap {
   "message.mark_read": { params: { id: string }; result: FleetMessage };
   "message.list": { params: { lane_id?: number; unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
   "agent.detect": { params: undefined; result: AgentChoice[] };
+  "agent.add": { params: { name: string; command: string }; result: null };
+  "agent.remove": { params: { name: string }; result: null };
+  "agent.set_default": { params: { name: string | null }; result: null };
   "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string } };
   "agent.adopt": { params: { lane_id: number; session_id?: string; agent?: string }; result: { lane_id: number; window: string } };
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };

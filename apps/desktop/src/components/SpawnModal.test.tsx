@@ -76,4 +76,33 @@ describe("SpawnModal error rendering", () => {
     const friendlyMsg = await screen.findByText("'custom-agent' isn't installed or not on PATH");
     expect(friendlyMsg).toBeInTheDocument();
   });
+
+  it("navigates to Settings > System health when clicking missing badge on undetected agent", async () => {
+    state.agents = [
+      { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
+      { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
+    ];
+
+    const onClose = vi.fn();
+    const onOpenSettingsTab = vi.fn();
+
+    render(() => (
+      <SpawnModal
+        lane={dummyLane}
+        onClose={onClose}
+        onDone={vi.fn()}
+        onOpenSettingsTab={onOpenSettingsTab}
+      />
+    ));
+
+    await screen.findByText("claude-code");
+    expect(screen.getByText("cursor")).toBeInTheDocument();
+
+    const missingBtn = screen.getByRole("button", { name: /View install instructions for cursor/i });
+    expect(missingBtn).toBeInTheDocument();
+    fireEvent.click(missingBtn);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onOpenSettingsTab).toHaveBeenCalledWith("system");
+  });
 });

@@ -31,7 +31,14 @@ export default function ActionModals(props: {
         />
       </Show>
       <Show when={actions.spawnLane()}>
-        {(lane) => <SpawnModal lane={lane()} onClose={actions.closeSpawn} onDone={() => actions.fleet.refresh()} />}
+        {(lane) => (
+          <SpawnModal
+            lane={lane()}
+            onClose={actions.closeSpawn}
+            onDone={() => actions.fleet.refresh()}
+            onOpenSettingsTab={actions.openSettingsTab}
+          />
+        )}
       </Show>
       <Show keyed when={actions.notesRepo()}>
         {(repo) => <RepoNotesModal repo={repo} onClose={actions.closeRepoNotes} />}

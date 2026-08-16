@@ -1,6 +1,6 @@
-import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
-import type { AgentChoice, SystemDoctorResult } from "../bindings";
+import type { AgentChoice } from "../bindings";
 import {
   SOUND_PROFILES,
   readSoundProfile,
@@ -10,7 +10,6 @@ import {
 } from "../audio/sound";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
-import { isMac } from "../keymap";
 import {
   applyAccent,
   applyTheme,
@@ -32,6 +31,7 @@ import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
 import Switch from "./controls/Switch";
 import KeyboardHelp from "./KeyboardHelp";
+import { translateError } from "../ipc/errors";
 import Modal from "./Modal";
 import SystemHealthView from "./SystemHealthView";
 import {
@@ -41,12 +41,10 @@ import {
   setAgentIconOverrides,
   IconCheck,
   IconClose,
-  IconCopy,
-  IconGitBranch,
   IconPlus,
   IconRefresh,
   IconSearch,
-  IconTerminal,
+  IconTrash,
 } from "./icons";
 
 export type SettingsTab = "general" | "system" | "agents" | "notifications" | "appearance" | "automation" | "keyboard";
@@ -65,7 +63,7 @@ interface SettingsModalProps {
 const TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "General" },
   { id: "system", label: "System" },
-  { id: "agents", label: "Agents & Icons" },
+  { id: "agents", label: "Agents" },
   { id: "notifications", label: "Notifications" },
   { id: "appearance", label: "Appearance" },
   { id: "automation", label: "Automation" },
@@ -151,7 +149,13 @@ export default function SettingsModal(props: SettingsModalProps) {
   // Icon customization state
   const [pickerAgent, setPickerAgent] = createSignal<string | null>(null);
   const [iconFilter, setIconFilter] = createSignal("");
-  const [newAgentName, setNewAgentName] = createSignal("");
+
+  // Custom Agent registration state
+  const [customAgentName, setCustomAgentName] = createSignal("");
+  const [customAgentCommand, setCustomAgentCommand] = createSignal("");
+  const [customAgentBusy, setCustomAgentBusy] = createSignal(false);
+  const [customAgentError, setCustomAgentError] = createSignal<string | null>(null);
+  const [customAgentSuccess, setCustomAgentSuccess] = createSignal<string | null>(null);
 
   onMount(() => {
     void daemonCall("config.get").then((cfg) => {
@@ -162,6 +166,90 @@ export default function SettingsModal(props: SettingsModalProps) {
     });
     void daemonCall("agent.detect").then(setAgents).catch(() => undefined);
   });
+
+  async function addCustomAgent(e?: Event) {
+    e?.preventDefault();
+    const name = customAgentName().trim();
+    const command = customAgentCommand().trim();
+    if (!name || !command) {
+      setCustomAgentError("Agent name and launch command are both required.");
+      return;
+    }
+    setCustomAgentError(null);
+    setCustomAgentBusy(true);
+    try {
+      await daemonCall("agent.add", { name, command });
+      const [nextConfig, nextAgents] = await Promise.all([
+        daemonCall("config.get"),
+        daemonCall("agent.detect"),
+      ]);
+      setConfig(nextConfig);
+      setAgents(nextAgents);
+      props.onConfigSaved?.(nextConfig);
+      void props.fleet?.refresh();
+      setCustomAgentName("");
+      setCustomAgentCommand("");
+      setCustomAgentSuccess(`Registered custom agent '${name}'`);
+      setTimeout(() => setCustomAgentSuccess(null), 3000);
+    } catch (cause) {
+      const trans = translateError(cause);
+      setCustomAgentError(trans.friendly || String(cause));
+    } finally {
+      setCustomAgentBusy(false);
+    }
+  }
+
+  function removeCustomAgent(name: string) {
+    if (props.actions) {
+      props.actions.confirm({
+        title: `Remove agent '${name}'?`,
+        message: `Remove custom agent '${name}' from Repomon. Any active sessions will not be affected.`,
+        confirmLabel: "Remove Agent",
+        danger: true,
+        onConfirm: () => executeRemoveAgent(name),
+      });
+    } else {
+      void executeRemoveAgent(name);
+    }
+  }
+
+  async function executeRemoveAgent(name: string) {
+    setError(null);
+    setCustomAgentError(null);
+    try {
+      await daemonCall("agent.remove", { name });
+      const [nextConfig, nextAgents] = await Promise.all([
+        daemonCall("config.get"),
+        daemonCall("agent.detect"),
+      ]);
+      setConfig(nextConfig);
+      setAgents(nextAgents);
+      props.onConfigSaved?.(nextConfig);
+      void props.fleet?.refresh();
+    } catch (cause) {
+      const trans = translateError(cause);
+      setCustomAgentError(trans.friendly || String(cause));
+    }
+  }
+
+  async function setDefaultAgent(name: string | null) {
+    setError(null);
+    setCustomAgentError(null);
+    try {
+      await daemonCall("agent.set_default", { name });
+      const [nextConfig, nextAgents] = await Promise.all([
+        daemonCall("config.get"),
+        daemonCall("agent.detect"),
+      ]);
+      setConfig(nextConfig);
+      setAgents(nextAgents);
+      props.onConfigSaved?.(nextConfig);
+      void props.fleet?.refresh();
+    } catch (cause) {
+      const trans = translateError(cause);
+      setCustomAgentError(trans.friendly || String(cause));
+    }
+  }
 
   // Daemon & Recovery state
   const [daemonInfo, setDaemonInfo] = createSignal<{ service_managed: boolean; status: string } | null>(null);
@@ -311,6 +399,38 @@ export default function SettingsModal(props: SettingsModalProps) {
 
     return Array.from(set.values());
   };
+
+  const customAgentsList = createMemo(() => {
+    const list: Array<{ name: string; command: string; isDefault: boolean; detected: boolean }> = [];
+    const cfg = config();
+    const detectMap = new Map(agents().map((a) => [a.name, a]));
+
+    if (cfg?.agents && typeof cfg.agents === "object") {
+      for (const [name, cmd] of Object.entries(cfg.agents as Record<string, string>)) {
+        const detectedInfo = detectMap.get(name);
+        const isDef = Boolean(cfg.default_agent === name || detectedInfo?.default);
+        list.push({
+          name,
+          command: cmd,
+          isDefault: isDef,
+          detected: detectedInfo ? detectedInfo.detected : true,
+        });
+      }
+    }
+
+    for (const a of agents()) {
+      if (a.custom && !list.some((item) => item.name === a.name)) {
+        list.push({
+          name: a.name,
+          command: a.command,
+          isDefault: Boolean(a.default || cfg?.default_agent === a.name),
+          detected: a.detected,
+        });
+      }
+    }
+
+    return list;
+  });
 
   const filteredIcons = () => {
     const q = iconFilter().toLowerCase().trim();
@@ -689,124 +809,291 @@ export default function SettingsModal(props: SettingsModalProps) {
             </Show>
 
             <Show when={tab() === "agents"}>
-              <section class="space-y-4">
-                <div class="flex items-center justify-between">
+              <div class="space-y-6">
+                {/* SECTION 1: CUSTOM AGENTS */}
+                <section class="space-y-4">
                   <div>
-                    <p class="section-label">Agent Icon Library & Overrides</p>
+                    <p class="section-label">Custom Agent Registrations</p>
                     <p class="mt-0.5 text-xs text-muted">
-                      Assign distinct geometric icons from Repomon's curated library to built-in runtimes or custom CLI agents.
+                      Register custom coding agent CLIs with arbitrary arguments to spawn in git worktree lanes.
                     </p>
                   </div>
-                </div>
 
-                <div class="rounded-xl border border-line bg-surface/40 p-3.5">
-                  <div class="flex items-center gap-2">
-                    <input
-                      type="text"
-                      class="focus-ring h-8 flex-1 rounded-lg border border-line bg-surface px-3 text-xs text-foreground outline-none placeholder:text-muted/60"
-                      placeholder="Add custom agent name (e.g. 'my-agent', 'gemini-cli', 'devin')"
-                      value={newAgentName()}
-                      onInput={(e) => setNewAgentName(e.currentTarget.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && newAgentName().trim()) {
-                          const name = newAgentName().trim();
-                          setPickerAgent(name);
-                          setNewAgentName("");
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-raised disabled:opacity-50"
-                      disabled={!newAgentName().trim()}
-                      onClick={() => {
-                        const name = newAgentName().trim();
-                        if (!name) return;
-                        setPickerAgent(name);
-                        setNewAgentName("");
-                      }}
-                    >
-                      <IconPlus size={13} />
-                      <span>Configure Icon</span>
-                    </button>
-                  </div>
-                </div>
+                  {/* Add Agent Form */}
+                  <form
+                    class="rounded-xl border border-line bg-surface/50 p-4 space-y-3"
+                    onSubmit={addCustomAgent}
+                    aria-label="Register custom agent"
+                  >
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs font-semibold text-foreground">Register New Agent</span>
+                      <Show when={customAgentSuccess()}>
+                        {(msg) => (
+                          <span class="text-xs text-emerald-500 font-medium animate-in fade-in flex items-center gap-1">
+                            <IconCheck size={12} />
+                            {msg()}
+                          </span>
+                        )}
+                      </Show>
+                    </div>
 
-                <div class="space-y-2">
-                  <For each={knownAgentsList()}>
-                    {(agent) => {
-                      const currentKey = () =>
-                        settings().agent_icons?.[agent.name.toLowerCase()] ??
-                        settings().agent_icons?.[agent.name] ??
-                        resolveAgentIconKey(agent.name);
-                      const hasOverride = () =>
-                        Boolean(
-                          settings().agent_icons?.[agent.name.toLowerCase()] ||
-                            settings().agent_icons?.[agent.name]
-                        );
-                      const currentEntry = () =>
-                        AGENT_ICON_CATALOG.find((c) => c.id === currentKey());
+                    <div class="grid gap-3 sm:grid-cols-2">
+                      <label class="block">
+                        <span class="text-[11px] font-medium text-muted block mb-1">Agent Name / Kind</span>
+                        <input
+                          type="text"
+                          class="focus-ring h-8 w-full rounded-lg border border-line bg-surface px-3 text-xs text-foreground outline-none placeholder:text-muted/60"
+                          placeholder="e.g. 'devin', 'gemini-cli', 'deepseek'"
+                          value={customAgentName()}
+                          onInput={(e) => {
+                            setCustomAgentName(e.currentTarget.value);
+                            if (customAgentError()) setCustomAgentError(null);
+                          }}
+                        />
+                      </label>
 
-                      return (
-                        <div class="flex items-center justify-between rounded-xl border border-line/80 bg-surface/50 p-3 transition-colors hover:bg-surface/80">
-                          <div class="flex items-center gap-3 min-w-0">
-                            <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/70 text-foreground">
-                              <AgentIcon agent={agent.name} iconKey={currentKey()} size={18} />
-                            </div>
-                            <div class="min-w-0">
-                              <div class="flex items-center gap-2">
-                                <span class="truncate font-medium text-xs text-foreground">{agent.name}</span>
-                                <span
-                                  class={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider ${
-                                    agent.custom
-                                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                                      : "bg-surface text-muted border border-line"
-                                  }`}
-                                >
-                                  {agent.custom ? "Custom" : "Built-in"}
-                                </span>
-                              </div>
-                              <p class="truncate text-[11px] text-muted">
-                                {hasOverride() ? (
-                                  <span class="text-signal font-medium">
-                                    Custom icon: {currentEntry()?.label ?? currentKey()}
-                                  </span>
-                                ) : (
-                                  <span>Default: {currentEntry()?.label ?? currentKey()}</span>
-                                )}
-                              </p>
-                            </div>
+                      <label class="block">
+                        <span class="text-[11px] font-medium text-muted block mb-1">Launch Command</span>
+                        <input
+                          type="text"
+                          class="focus-ring h-8 w-full rounded-lg border border-line bg-surface px-3 text-xs font-mono text-foreground outline-none placeholder:text-muted/60"
+                          placeholder="e.g. 'gemini --repomon', 'python run.py'"
+                          value={customAgentCommand()}
+                          onInput={(e) => {
+                            setCustomAgentCommand(e.currentTarget.value);
+                            if (customAgentError()) setCustomAgentError(null);
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    {/* Inline Validation Feedback */}
+                    <Show when={customAgentError()}>
+                      {(errMsg) => (
+                        <div
+                          role="alert"
+                          class="flex items-start justify-between gap-2 rounded-lg border border-fault/30 bg-fault/10 p-2.5 text-xs text-fault animate-in fade-in"
+                        >
+                          <div class="flex items-center gap-1.5">
+                            <span class="font-medium">{errMsg()}</span>
                           </div>
+                          <button
+                            type="button"
+                            class="text-fault/70 hover:text-fault p-0.5 cursor-pointer"
+                            onClick={() => setCustomAgentError(null)}
+                            aria-label="Dismiss error"
+                          >
+                            <IconClose size={12} />
+                          </button>
+                        </div>
+                      )}
+                    </Show>
 
-                          <div class="flex items-center gap-2 shrink-0">
-                            <Show when={hasOverride()}>
+                    <div class="flex items-center justify-end pt-1">
+                      <button
+                        type="submit"
+                        class="focus-ring inline-flex items-center gap-1.5 rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50 cursor-pointer"
+                        disabled={customAgentBusy() || !customAgentName().trim() || !customAgentCommand().trim()}
+                      >
+                        <IconPlus size={13} />
+                        <span>{customAgentBusy() ? "Registering…" : "Register Agent"}</span>
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Custom Agents List */}
+                  <div class="space-y-2.5">
+                    <Show
+                      when={customAgentsList().length > 0}
+                      fallback={
+                        <div class="rounded-xl border border-dashed border-line/80 bg-surface/20 p-5 text-center space-y-1">
+                          <p class="text-xs font-medium text-foreground">No custom agents registered</p>
+                          <p class="text-[11px] text-muted max-w-md mx-auto">
+                            Add a custom CLI above to launch specialized scripts, local models, or proprietary agent binaries alongside built-in runtimes.
+                          </p>
+                        </div>
+                      }
+                    >
+                      <For each={customAgentsList()}>
+                        {(agent) => {
+                          const currentKey = () =>
+                            settings().agent_icons?.[agent.name.toLowerCase()] ??
+                            settings().agent_icons?.[agent.name] ??
+                            resolveAgentIconKey(agent.name);
+                          const isDefault = () =>
+                            Boolean(settings().default_agent === agent.name || agent.isDefault);
+
+                          return (
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-line/80 bg-surface/50 p-3.5 transition-colors hover:bg-surface/80">
+                              <div class="flex items-center gap-3 min-w-0">
+                                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/70 text-foreground">
+                                  <AgentIcon agent={agent.name} iconKey={currentKey()} size={18} />
+                                </div>
+                                <div class="min-w-0 space-y-1">
+                                  <div class="flex items-center gap-2 flex-wrap">
+                                    <span class="truncate font-semibold text-xs text-foreground">{agent.name}</span>
+                                    <span class="rounded px-1.5 py-0.2 text-[9.5px] font-mono uppercase tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                      Custom
+                                    </span>
+                                    <Show when={isDefault()}>
+                                      <span class="flex items-center gap-1 rounded bg-signal/15 border border-signal/30 px-1.5 py-0.2 text-[9.5px] font-mono text-signal font-medium">
+                                        <span class="size-1 rounded-full bg-signal" />
+                                        Default Agent
+                                      </span>
+                                    </Show>
+                                  </div>
+                                  <div class="flex items-center gap-1.5">
+                                    <span class="text-[10.5px] text-muted font-medium">Command:</span>
+                                    <code class="font-mono text-[10.5px] text-foreground bg-surface px-1.5 py-0.2 rounded border border-line select-all truncate max-w-xs">
+                                      {agent.command}
+                                    </code>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                                <Show when={!isDefault()}>
+                                  <button
+                                    type="button"
+                                    class="focus-ring inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-foreground cursor-pointer"
+                                    onClick={() => setDefaultAgent(agent.name)}
+                                    title="Set as default agent for new lanes and spawns"
+                                    aria-label={`Set ${agent.name} as default agent`}
+                                  >
+                                    <span>Set as Default</span>
+                                  </button>
+                                </Show>
+                                <button
+                                  type="button"
+                                  class="focus-ring inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-raised cursor-pointer"
+                                  onClick={() => {
+                                    setPickerAgent(agent.name);
+                                    setIconFilter("");
+                                  }}
+                                  aria-label={`Change icon for ${agent.name}`}
+                                >
+                                  <span>Change Icon…</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  class="focus-ring inline-flex items-center gap-1 rounded-lg border border-fault/30 bg-fault/5 px-2.5 py-1 text-xs text-fault transition-colors hover:bg-fault/15 hover:border-fault/50 cursor-pointer"
+                                  onClick={() => removeCustomAgent(agent.name)}
+                                  title={`Remove custom agent ${agent.name}`}
+                                  aria-label={`Remove agent ${agent.name}`}
+                                >
+                                  <IconTrash size={12} />
+                                  <span>Remove</span>
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </Show>
+                  </div>
+                </section>
+
+                {/* SECTION 2: BUILT-IN RUNTIMES & ICON OVERRIDES */}
+                <section class="space-y-4 border-t border-line/70 pt-5">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <p class="section-label">Built-in Runtime Icons & Overrides</p>
+                      <p class="mt-0.5 text-xs text-muted">
+                        Customize geometric visual identities for built-in runtimes (Claude Code, Cursor, Antigravity, OpenCode, Codex, Aider).
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="space-y-2">
+                    <For each={knownAgentsList().filter((a) => !a.custom)}>
+                      {(agent) => {
+                        const currentKey = () =>
+                          settings().agent_icons?.[agent.name.toLowerCase()] ??
+                          settings().agent_icons?.[agent.name] ??
+                          resolveAgentIconKey(agent.name);
+                        const hasOverride = () =>
+                          Boolean(
+                            settings().agent_icons?.[agent.name.toLowerCase()] ||
+                              settings().agent_icons?.[agent.name]
+                          );
+                        const currentEntry = () =>
+                          AGENT_ICON_CATALOG.find((c) => c.id === currentKey());
+                        const isDefault = () =>
+                          Boolean(settings().default_agent === agent.name);
+
+                        return (
+                          <div class="flex items-center justify-between rounded-xl border border-line/80 bg-surface/50 p-3 transition-colors hover:bg-surface/80">
+                            <div class="flex items-center gap-3 min-w-0">
+                              <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/70 text-foreground">
+                                <AgentIcon agent={agent.name} iconKey={currentKey()} size={18} />
+                              </div>
+                              <div class="min-w-0">
+                                <div class="flex items-center gap-2">
+                                  <span class="truncate font-medium text-xs text-foreground">{agent.name}</span>
+                                  <span class="rounded bg-surface px-1.5 py-0.2 text-[9.5px] font-mono uppercase tracking-wider text-muted border border-line">
+                                    Built-in
+                                  </span>
+                                  <Show when={isDefault()}>
+                                    <span class="flex items-center gap-1 rounded bg-signal/15 border border-signal/30 px-1.5 py-0.2 text-[9.5px] font-mono text-signal font-medium">
+                                      <span class="size-1 rounded-full bg-signal" />
+                                      Default
+                                    </span>
+                                  </Show>
+                                </div>
+                                <p class="truncate text-[11px] text-muted">
+                                  {hasOverride() ? (
+                                    <span class="text-signal font-medium">
+                                      Custom icon: {currentEntry()?.label ?? currentKey()}
+                                    </span>
+                                  ) : (
+                                    <span>Default: {currentEntry()?.label ?? currentKey()}</span>
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div class="flex items-center gap-2 shrink-0">
+                              <Show when={!isDefault()}>
+                                <button
+                                  type="button"
+                                  class="focus-ring inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-foreground cursor-pointer"
+                                  onClick={() => setDefaultAgent(agent.name)}
+                                  title="Set as default agent for new lanes and spawns"
+                                  aria-label={`Set ${agent.name} as default agent`}
+                                >
+                                  <span>Set as Default</span>
+                                </button>
+                              </Show>
+                              <Show when={hasOverride()}>
+                                <button
+                                  type="button"
+                                  class="focus-ring inline-flex items-center gap-1 rounded-lg border border-line/60 bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-foreground cursor-pointer"
+                                  onClick={() => updateAgentIcon(agent.name, null)}
+                                  title="Reset to default icon"
+                                >
+                                  <IconRefresh size={12} />
+                                  <span>Reset</span>
+                                </button>
+                              </Show>
                               <button
                                 type="button"
-                                class="focus-ring inline-flex items-center gap-1 rounded-lg border border-line/60 bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-foreground"
-                                onClick={() => updateAgentIcon(agent.name, null)}
-                                title="Reset to default icon"
+                                class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-raised cursor-pointer"
+                                onClick={() => {
+                                  setPickerAgent(agent.name);
+                                  setIconFilter("");
+                                }}
+                                aria-label={`Change icon for ${agent.name}`}
                               >
-                                <IconRefresh size={12} />
-                                <span>Reset</span>
+                                <span>Change Icon…</span>
                               </button>
-                            </Show>
-                            <button
-                              type="button"
-                              class="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-raised"
-                              onClick={() => {
-                                setPickerAgent(agent.name);
-                                setIconFilter("");
-                              }}
-                            >
-                              <span>Change Icon…</span>
-                            </button>
+                            </div>
                           </div>
-                        </div>
-                      );
-                    }}
-                  </For>
-                </div>
-              </section>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </section>
+              </div>
             </Show>
 
             <Show when={tab() === "notifications"}>
