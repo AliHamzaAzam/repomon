@@ -222,6 +222,18 @@ a repository, and keeps identity in the managed process environment. Antigravity
 normal workspace trust and tool permission prompts; Cursor's `--approve-mcps` flag is available for
 headless/non-interactive workflows.
 
+**Aider**: has no native MCP client support as of its current release. The identity token and
+socket are still passed via the process environment in case a future version adds support, but
+fleet mail tool calls will not reach the MCP server.
+
+**Custom/Other agents**: the daemon inspects the command's binary name (`kind_from_command`) to
+detect whether a custom agent wraps a known binary. Wrappers like
+`claude --dangerously-skip-permissions` receive ClaudeCode's `--mcp-config` wiring;
+`agy --mode plan` receives Antigravity's `~/.gemini/config/mcp_config.json` registration;
+`cursor-agent --approve-mcps` receives Cursor's `~/.cursor/mcp.json` registration. Completely
+unknown binaries (e.g. `my-exotic-agent`) receive no MCP registration, though the three
+environment variables are always set.
+
 Messages are durable in the daemon database. Terminal injection is only attempted when the
 recipient has a live managed window and is waiting, idle, or at an ended turn with no dialog,
 rate limit, or stall. Agent-to-agent injection is off by default. Operator and repomind injection
