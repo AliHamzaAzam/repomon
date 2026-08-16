@@ -224,6 +224,51 @@ describe("GitExplorerPanel", () => {
     expect(screen.getByText("5m ago")).toBeInTheDocument();
   });
 
+  // Regression guard for a right-edge overflow bug also seen in the Editor panel (fixed in
+  // commit c0c3cca via a missing min-w-0 on the shared right-rail ancestor pane in App.tsx,
+  // which structurally applies to every RightPanelHost tab including this one): the trailing
+  // metadata column (relative time / +/- counts) must stay visible instead of being pushed past
+  // the rail's right edge. That requires the row's one *growing* text element to carry
+  // min-w-0 + flex-1 + truncate, and every fixed-width sibling to carry shrink-0, so the summary
+  // truncates locally instead of the whole row overflowing.
+  it("truncates the growing summary text (not the trailing metadata columns) in every row type", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "abc1234 A very very very long commit summary that could overflow the narrow rail\n",
+      committed_stat: "",
+      uncommitted_stat: " src/a/very/deeply/nested/path/that/is/quite/long/indeed.ts | 12 +++++-----\n",
+      untracked: 0,
+    };
+    responses.history = [
+      commit({
+        oid: "0123456789abcdef0123456789abcdef01234567",
+        summary: "Another very very very long commit summary that could overflow the narrow rail",
+        author_name: "Ada Lovelace",
+      }),
+    ];
+    const { container } = render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
+
+    // Branch row.
+    const branchSummary = await screen.findByText(/A very very very long commit summary/);
+    expect(branchSummary).toHaveClass("min-w-0", "flex-1", "truncate");
+    const branchOid = within(branchSummary.closest("li")!).getByText("abc1234");
+    expect(branchOid).toHaveClass("shrink-0");
+
+    // History row.
+    const historySummary = screen.getByText(/Another very very very long commit summary/);
+    expect(historySummary).toHaveClass("min-w-0", "flex-1", "truncate");
+    const historyRow = historySummary.closest("li")!;
+    expect(within(historyRow).getByText("Ada Lovelace")).toHaveClass("shrink-0");
+    expect(within(historyRow).getByText("0123456")).toHaveClass("shrink-0");
+
+    // Working-tree file row (StatFileRowView) - open it via the Working tree section, which is
+    // expanded by default.
+    const fileSummary = container.querySelector(".min-w-0.flex-1.truncate.font-mono");
+    expect(fileSummary).not.toBeNull();
+    expect(fileSummary?.textContent).toContain("indeed.ts");
+  });
+
   it("shows an empty state for History when the lane has no recorded commits", async () => {
     responses.diff = { base: "main", merge_base: "abc0000", commits: "", committed_stat: "", uncommitted_stat: "", untracked: 0 };
     responses.history = [];
