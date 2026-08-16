@@ -162,7 +162,13 @@ interface RpcMap {
   "lane.focus": { params: { lane_id: number }; result: { path: string } };
   "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
   "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: unknown };
-  "message.send": { params: { to: string; body: string; reply_to?: string }; result: FleetMessage };
+  // `to` also accepts a list of addresses, "lane-2/*", or "*" (A6 broadcast/multi-recipient
+  // mail). A single plain address still returns a bare `FleetMessage`; anything else returns a
+  // fan-out summary instead (`{ recipient_count, sent_count, results: { to, status, ... }[] }`).
+  "message.send": {
+    params: { to: string | string[]; body: string; reply_to?: string };
+    result: FleetMessage | { recipient_count: number; sent_count: number; results: Array<{ to: string; status: "sent" | "no_such_session" | "delivery_error"; message_id?: string; thread_id?: string; error?: string }> };
+  };
   "message.inbox": { params: { unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
   "message.mark_read": { params: { id: string }; result: FleetMessage };
   "message.list": { params: { lane_id?: number; unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };

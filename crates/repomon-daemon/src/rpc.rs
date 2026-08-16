@@ -260,9 +260,148 @@ fn default_depth() -> usize {
 struct LaneId {
     lane_id: repomon_core::model::LaneId,
 }
+/// `to` on `message.send`: a single canonical address (the historical, still-default shape) or a
+/// list of addresses. Either shape may contain wildcard tokens (`lane-X/*`, `*`) — see
+/// [`classify_token`]. Declared `untagged` so existing string-`to` callers are unaffected.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum MessageTo {
+    Single(String),
+    Multi(Vec<String>),
+}
+
+impl MessageTo {
+    fn items(&self) -> Vec<&str> {
+        match self {
+            MessageTo::Single(value) => vec![value.as_str()],
+            MessageTo::Multi(values) => values.iter().map(String::as_str).collect(),
+        }
+    }
+
+    fn has_wildcard(&self) -> bool {
+        self.items()
+            .into_iter()
+            .any(|item| !matches!(classify_token(item), AddressToken::Literal(_)))
+    }
+
+    /// `Some(address)` when `to` is a single, non-wildcard address — the exact shape
+    /// `message.send` accepted before A6. That case keeps returning a bare `FleetMessage`
+    /// unchanged; anything else (a list, or a bare wildcard) returns a fan-out summary.
+    fn as_legacy_single(&self) -> Option<&str> {
+        match self {
+            MessageTo::Single(value) if matches!(classify_token(value), AddressToken::Literal(_)) => {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One parsed `to` token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AddressToken {
+    /// A canonical address handled exactly as before: `operator`, `repomind`, `@label`, or
+    /// `lane-X[/slot]`. Resolved later by [`resolve_message_address`].
+    Literal(String),
+    /// `lane-X/*` — every active agent session in lane X, minus the sender.
+    LaneWildcard(repomon_core::model::LaneId),
+    /// `*` — every active agent session in the fleet, minus the sender.
+    GlobalWildcard,
+}
+
+fn classify_token(token: &str) -> AddressToken {
+    let token = token.trim();
+    if token == "*" {
+        return AddressToken::GlobalWildcard;
+    }
+    if let Some(rest) = token.strip_prefix("lane-") {
+        if let Some(lane_part) = rest.strip_suffix("/*") {
+            if let Ok(lane_id) = lane_part.parse::<repomon_core::model::LaneId>() {
+                return AddressToken::LaneWildcard(lane_id);
+            }
+        }
+    }
+    AddressToken::Literal(token.to_string())
+}
+
+/// Every active agent session in `lanes`, addressed canonically (`lane-X/slot`), restricted to
+/// `lane_filter` when set, and excluding the sender's own session so a broadcast never mails
+/// itself.
+fn expand_wildcard_targets(
+    lanes: &[Lane],
+    lane_filter: Option<repomon_core::model::LaneId>,
+    sender: &ResolvedAgentAddress,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for lane in lanes {
+        if let Some(filter) = lane_filter {
+            if lane.id != filter {
+                continue;
+            }
+        }
+        for (index, _session) in lane.agent_sessions.iter().enumerate() {
+            let slot = (index + 1) as u32;
+            if sender.lane_id == Some(lane.id) && sender.slot == Some(slot) {
+                continue;
+            }
+            out.push(format!("lane-{}/{}", lane.id, slot));
+        }
+    }
+    out
+}
+
+/// Expand `to` into the literal address list to fan a send out to: wildcard tokens are resolved
+/// against `lanes` (self-excluded), plain tokens pass through unchanged, and duplicates collapse
+/// to a single delivery. `lanes` may be empty when `to` has no wildcard token — callers only need
+/// to fetch it when [`MessageTo::has_wildcard`] is true.
+fn expand_message_targets(
+    to: &MessageTo,
+    lanes: &[Lane],
+    sender: &ResolvedAgentAddress,
+) -> Result<Vec<String>, RpcError> {
+    let items = to.items();
+    if items.is_empty() {
+        return Err(RpcError::invalid_params(
+            "message recipient list must not be empty",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let token = item.trim();
+        if token.is_empty() {
+            return Err(RpcError::invalid_params(
+                "message recipient must not be empty",
+            ));
+        }
+        match classify_token(token) {
+            AddressToken::Literal(address) => {
+                if seen.insert(address.clone()) {
+                    out.push(address);
+                }
+            }
+            AddressToken::GlobalWildcard => {
+                for address in expand_wildcard_targets(lanes, None, sender) {
+                    if seen.insert(address.clone()) {
+                        out.push(address);
+                    }
+                }
+            }
+            AddressToken::LaneWildcard(lane_id) => {
+                for address in expand_wildcard_targets(lanes, Some(lane_id), sender) {
+                    if seen.insert(address.clone()) {
+                        out.push(address);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Deserialize)]
 struct MessageSend {
-    to: String,
+    to: MessageTo,
     body: String,
     #[serde(default)]
     reply_to: Option<String>,
@@ -1464,20 +1603,86 @@ pub async fn dispatch(
         "message.send" => {
             let p: MessageSend = parse(params)?;
             let sender = message_sender(ctx, p.identity_token, p.source).await?;
-            let recipient = resolve_message_address(ctx, &p.to).await?;
-            let message = ctx
-                .store
-                .send_message(
-                    AgentAddress::new(p.to),
-                    sender,
-                    recipient,
-                    p.body,
-                    p.reply_to,
-                )
-                .await
-                .map_err(internal)?;
-            ctx.broadcast("event.message.stored", message_event(&message));
-            to_value(message)
+            if let Some(single) = p.to.as_legacy_single() {
+                // Exact pre-A6 behavior: one address in, one `FleetMessage` out.
+                let to = single.to_string();
+                let recipient = resolve_message_address(ctx, &to).await?;
+                let message = ctx
+                    .store
+                    .send_message(
+                        AgentAddress::new(to),
+                        sender,
+                        recipient,
+                        p.body,
+                        p.reply_to,
+                    )
+                    .await
+                    .map_err(internal)?;
+                ctx.broadcast("event.message.stored", message_event(&message));
+                to_value(message)
+            } else {
+                // A list and/or a wildcard: fan out one `send_message` per resolved recipient,
+                // reusing the same single-delivery machinery, and report a per-recipient result
+                // instead of a bare `FleetMessage`.
+                let lanes = if p.to.has_wildcard() {
+                    lanes_with_agents(ctx).await?
+                } else {
+                    Vec::new()
+                };
+                let targets = expand_message_targets(&p.to, &lanes, &sender)?;
+                let mut results = Vec::with_capacity(targets.len());
+                let mut sent_count = 0usize;
+                for target in targets {
+                    match resolve_message_address(ctx, &target).await {
+                        Ok(recipient) => {
+                            match ctx
+                                .store
+                                .send_message(
+                                    AgentAddress::new(target.clone()),
+                                    sender.clone(),
+                                    recipient,
+                                    p.body.clone(),
+                                    p.reply_to.clone(),
+                                )
+                                .await
+                            {
+                                Ok(message) => {
+                                    ctx.broadcast(
+                                        "event.message.stored",
+                                        message_event(&message),
+                                    );
+                                    sent_count += 1;
+                                    results.push(json!({
+                                        "to": target,
+                                        "status": "sent",
+                                        "message_id": message.id,
+                                        "thread_id": message.thread_id,
+                                    }));
+                                }
+                                Err(error) => {
+                                    results.push(json!({
+                                        "to": target,
+                                        "status": "delivery_error",
+                                        "error": error.to_string(),
+                                    }));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            results.push(json!({
+                                "to": target,
+                                "status": "no_such_session",
+                                "error": error.message,
+                            }));
+                        }
+                    }
+                }
+                to_value(json!({
+                    "recipient_count": results.len(),
+                    "sent_count": sent_count,
+                    "results": results,
+                }))
+            }
         }
         "message.inbox" => {
             let p: MessageInbox = parse(params)?;
@@ -6851,6 +7056,152 @@ mod tests {
         ];
         let error = resolve_agent_message_address(&lanes, "@reviewer").unwrap_err();
         assert!(error.message.contains("ambiguous"));
+    }
+
+    fn resolved_sender(lane_id: Option<i64>, slot: Option<u32>) -> ResolvedAgentAddress {
+        ResolvedAgentAddress {
+            address: AgentAddress::new(match (lane_id, slot) {
+                (Some(l), Some(s)) => format!("lane-{l}/{s}"),
+                _ => "operator".to_string(),
+            }),
+            lane_id,
+            slot,
+            window: None,
+            session_id: None,
+            agent_kind: None,
+        }
+    }
+
+    #[test]
+    fn classify_token_recognizes_wildcards_and_falls_back_to_literal() {
+        assert_eq!(classify_token("*"), AddressToken::GlobalWildcard);
+        assert_eq!(classify_token(" * "), AddressToken::GlobalWildcard);
+        assert_eq!(classify_token("lane-7/*"), AddressToken::LaneWildcard(7));
+        assert_eq!(
+            classify_token("lane-7/1"),
+            AddressToken::Literal("lane-7/1".into())
+        );
+        assert_eq!(
+            classify_token("operator"),
+            AddressToken::Literal("operator".into())
+        );
+        // Malformed lane wildcards fall back to a literal token, resolved (and rejected) later
+        // by `resolve_message_address` exactly like any other bad address.
+        assert_eq!(
+            classify_token("lane-abc/*"),
+            AddressToken::Literal("lane-abc/*".into())
+        );
+        assert_eq!(
+            classify_token("lane-/*"),
+            AddressToken::Literal("lane-/*".into())
+        );
+        assert_eq!(classify_token("**"), AddressToken::Literal("**".into()));
+    }
+
+    #[test]
+    fn expand_wildcard_targets_covers_lane_and_fleet_and_excludes_sender() {
+        let lanes = vec![
+            mail_lane(5, &[Some("a"), Some("b")]),
+            mail_lane(6, &[Some("c")]),
+        ];
+        let outsider = resolved_sender(None, None);
+        assert_eq!(
+            expand_wildcard_targets(&lanes, Some(5), &outsider),
+            vec!["lane-5/1", "lane-5/2"]
+        );
+        assert_eq!(
+            expand_wildcard_targets(&lanes, None, &outsider),
+            vec!["lane-5/1", "lane-5/2", "lane-6/1"]
+        );
+        let self_in_lane5 = resolved_sender(Some(5), Some(1));
+        assert_eq!(
+            expand_wildcard_targets(&lanes, None, &self_in_lane5),
+            vec!["lane-5/2", "lane-6/1"]
+        );
+        assert_eq!(
+            expand_wildcard_targets(&lanes, Some(5), &self_in_lane5),
+            vec!["lane-5/2"]
+        );
+    }
+
+    #[test]
+    fn expand_message_targets_single_wildcard_and_list_dedupe() {
+        let lanes = vec![
+            mail_lane(5, &[Some("a"), Some("b")]),
+            mail_lane(6, &[Some("c")]),
+        ];
+        let outsider = resolved_sender(None, None);
+
+        let single_lane_wild = MessageTo::Single("lane-5/*".into());
+        assert_eq!(
+            expand_message_targets(&single_lane_wild, &lanes, &outsider).unwrap(),
+            vec!["lane-5/1", "lane-5/2"]
+        );
+
+        let global = MessageTo::Single("*".into());
+        assert_eq!(
+            expand_message_targets(&global, &lanes, &outsider).unwrap(),
+            vec!["lane-5/1", "lane-5/2", "lane-6/1"]
+        );
+
+        let list = MessageTo::Multi(vec!["lane-5/1".into(), "lane-6/1".into()]);
+        assert_eq!(
+            expand_message_targets(&list, &lanes, &outsider).unwrap(),
+            vec!["lane-5/1", "lane-6/1"]
+        );
+
+        // Overlap between an explicit address and a wildcard that also covers it collapses to
+        // one delivery.
+        let overlap = MessageTo::Multi(vec!["lane-5/1".into(), "lane-5/*".into()]);
+        assert_eq!(
+            expand_message_targets(&overlap, &lanes, &outsider).unwrap(),
+            vec!["lane-5/1", "lane-5/2"]
+        );
+
+        let self_in_lane5 = resolved_sender(Some(5), Some(1));
+        let broadcast_excludes_self = MessageTo::Single("*".into());
+        assert_eq!(
+            expand_message_targets(&broadcast_excludes_self, &lanes, &self_in_lane5).unwrap(),
+            vec!["lane-5/2", "lane-6/1"]
+        );
+
+        // An explicit self-address still goes through even though wildcard expansion excludes
+        // it: only the *implicit* broadcast targets skip the sender.
+        let explicit_self_plus_wildcard = MessageTo::Multi(vec!["lane-5/1".into(), "*".into()]);
+        assert_eq!(
+            expand_message_targets(&explicit_self_plus_wildcard, &lanes, &self_in_lane5).unwrap(),
+            vec!["lane-5/1", "lane-5/2", "lane-6/1"]
+        );
+    }
+
+    #[test]
+    fn expand_message_targets_rejects_empty_list_and_blank_items() {
+        let empty = MessageTo::Multi(vec![]);
+        let error =
+            expand_message_targets(&empty, &[], &resolved_sender(None, None)).unwrap_err();
+        assert!(error.message.contains("must not be empty"));
+
+        let blank = MessageTo::Multi(vec!["  ".into()]);
+        let error =
+            expand_message_targets(&blank, &[], &resolved_sender(None, None)).unwrap_err();
+        assert!(error.message.contains("must not be empty"));
+    }
+
+    #[test]
+    fn message_to_legacy_single_only_for_plain_non_wildcard_string() {
+        assert_eq!(
+            MessageTo::Single("lane-2/1".into()).as_legacy_single(),
+            Some("lane-2/1")
+        );
+        assert_eq!(MessageTo::Single("*".into()).as_legacy_single(), None);
+        assert_eq!(
+            MessageTo::Single("lane-2/*".into()).as_legacy_single(),
+            None
+        );
+        assert_eq!(
+            MessageTo::Multi(vec!["lane-2/1".into()]).as_legacy_single(),
+            None
+        );
     }
 
     fn fit_snap(

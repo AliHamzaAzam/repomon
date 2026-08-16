@@ -49,7 +49,8 @@ impl AgentServer {
         let token = self.require_identity()?;
         let to = args
             .get("to")
-            .and_then(Value::as_str)
+            .filter(|value| value.is_string() || value.is_array())
+            .cloned()
             .ok_or_else(|| "missing to".to_string())?;
         let body = args
             .get("body")
@@ -146,10 +147,22 @@ pub fn agent_tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "message_send",
-            description: "Send durable fleet mail to a canonical address.",
+            description: "Send durable fleet mail. `to` accepts a single canonical address \
+                (\"lane-2/1\", \"operator\", \"@label\"), a JSON array of addresses to fan the \
+                same message out to each one, \"lane-2/*\" for every active agent in that lane, \
+                or \"*\" for every active agent in the fleet. Wildcard/list sends never mail the \
+                sending agent's own session; an explicit self-address still delivers. A single \
+                plain address returns the sent message; a list or wildcard returns a \
+                per-recipient summary (sent / no_such_session / delivery_error).",
             input_schema: object(
                 json!({
-                    "to": { "type": "string" },
+                    "to": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                        ],
+                        "description": "\"lane-2/1\" | \"operator\" | \"@label\" | \"lane-2/*\" | \"*\" | an array of any of those."
+                    },
                     "body": { "type": "string", "maxLength": 8192 },
                     "reply_to": { "type": "string" }
                 }),

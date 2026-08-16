@@ -104,7 +104,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `lane.focus` | `{ lane_id }` | `{ path }` |
 | `lane.merge` | `{ lane_id, into? }` | `{ message }` |
 | `lane.diff` | `{ lane_id, include_patch=false, max_patch_chars=8000 }` | `LaneDiff` — commits ahead of the repo's base branch (with diffstat) plus uncommitted state; see below |
-| `message.send` | `{ to, body, reply_to? }` | `FleetMessage` (local socket only) |
+| `message.send` | `{ to: string \| string[], body, reply_to? }` — `to` also accepts `"lane-N/*"` or `"*"` | `FleetMessage` for a single plain address; a per-recipient fan-out summary (`{ recipient_count, sent_count, results: [{ to, status, message_id?, thread_id?, error? }] }`) for a list or wildcard `to` (local socket only; see `docs/messaging.md`) |
 | `message.inbox` | `{ unread_only=false, limit=50, before? }` | `MessagePage`; returned queued rows become delivered (local socket only) |
 | `message.mark_read` | `{ id }` | `FleetMessage` (local socket only) |
 | `message.list` | `{ lane_id?, unread_only=false, limit=50, before? }` | `MessagePage`, newest first (local socket only) |

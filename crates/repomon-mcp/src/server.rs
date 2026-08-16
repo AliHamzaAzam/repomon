@@ -168,7 +168,8 @@ impl Server {
     async fn message_send(&self, args: Value) -> Result<Value, String> {
         let to = args
             .get("to")
-            .and_then(Value::as_str)
+            .filter(|value| value.is_string() || value.is_array())
+            .cloned()
             .ok_or_else(|| "missing to".to_string())?;
         let body = args
             .get("body")
@@ -1532,10 +1533,23 @@ fn tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "message_send",
-            description: "Send durable fleet mail to an agent, repomind, or the human operator.",
+            description: "Send durable fleet mail to an agent, repomind, or the human operator. \
+                `to` accepts a single canonical address (\"lane-2/1\", \"operator\", \"@label\"), \
+                a JSON array of addresses to fan the same message out to each one, \"lane-2/*\" \
+                for every active agent in that lane, or \"*\" for every active agent in the \
+                fleet. Wildcard/list sends never mail repomind's own session; an explicit \
+                self-address still delivers. A single plain address returns the sent message; a \
+                list or wildcard returns a per-recipient summary (sent / no_such_session / \
+                delivery_error).",
             input_schema: obj(
                 json!({
-                    "to": { "type": "string" },
+                    "to": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                        ],
+                        "description": "\"lane-2/1\" | \"operator\" | \"@label\" | \"lane-2/*\" | \"*\" | an array of any of those."
+                    },
                     "body": { "type": "string", "maxLength": 8192 },
                     "reply_to": { "type": "string" }
                 }),

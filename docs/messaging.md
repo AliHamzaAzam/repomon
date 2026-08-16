@@ -23,6 +23,40 @@ that received the message even if lane ordering later changes. A missing lane, m
 missing label, ambiguous label, or unavailable repomind identity is a send error and does not
 create a message.
 
+### Multi-recipient and wildcard `to`
+
+`message.send`'s `to` also accepts a JSON array of any of the address forms above, or a wildcard:
+
+| `to` | Meaning |
+|------|---------|
+| `"lane-2/1"` | A single address — unchanged pre-existing behavior. Returns a bare `FleetMessage`. |
+| `["lane-2/1", "lane-3/1"]` | Fan out one message to each address, deduplicated. Returns a per-recipient summary (below). |
+| `"lane-2/*"` | Every active agent session in lane 2. |
+| `"*"` | Every active agent session in the fleet. |
+
+Wildcard expansion always excludes the sender's own session — a broadcast never mails itself — but
+an *explicit* self-address (in a plain single `to`, or listed by name inside an array) still
+delivers normally. A single plain address is the only shape that returns a bare `FleetMessage`;
+every list or wildcard `to` — even one that expands to a single recipient — returns:
+
+```json
+{
+  "recipient_count": 2,
+  "sent_count": 1,
+  "results": [
+    { "to": "lane-2/1", "status": "sent", "message_id": "…", "thread_id": "…" },
+    { "to": "lane-3/1", "status": "no_such_session", "error": "…" }
+  ]
+}
+```
+
+`status` is one of `sent`, `no_such_session` (the address didn't resolve to a live session), or
+`delivery_error` (the address resolved, but the store rejected the send — most commonly the
+existing sender rate limit, or an explicit `reply_to` that doesn't reverse that particular
+recipient's thread). Each recipient reuses the single-delivery path — the same validation,
+threading, and rate limiting described below — as if it had been sent to individually; one
+recipient's rejection never blocks the others.
+
 ## Persistence and threads
 
 The daemon stores messages in its existing SQLite database. A message records its ID, requested
@@ -79,7 +113,7 @@ bridge allowlist.
 
 | Method | Parameters | Result |
 |--------|------------|--------|
-| `message.send` | `{ to, body, reply_to? }` | `FleetMessage` |
+| `message.send` | `{ to: string \| string[], body, reply_to? }` | `FleetMessage` for a single plain address; a per-recipient fan-out summary for a list or wildcard `to` (see [Multi-recipient and wildcard `to`](#multi-recipient-and-wildcard-to)) |
 | `message.inbox` | `{ unread_only?, limit?, before? }` | `MessagePage` |
 | `message.mark_read` | `{ id }` | `FleetMessage` |
 | `message.list` | `{ lane_id?, unread_only?, limit?, before? }` | `MessagePage` |
