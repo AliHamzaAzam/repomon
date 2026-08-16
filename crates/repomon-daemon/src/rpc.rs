@@ -3701,9 +3701,16 @@ pub async fn dispatch(
                     None,
                 ),
                 crate::OrchestratorBackend::Antigravity => {
-                    return Err(RpcError::invalid_params(
-                        "backend accepted but launch command not implemented yet (A2/A3)",
-                    ));
+                    ensure_antigravity_mcp_registration().map_err(internal)?;
+                    let command = build_antigravity_orchestrator_command(
+                        &base,
+                        &socket,
+                        &p.autonomy,
+                        p.max_agents,
+                        &model,
+                        &p.prompt,
+                    );
+                    (command, None)
                 }
                 crate::OrchestratorBackend::OpenCode => {
                     return Err(RpcError::invalid_params(
@@ -6325,6 +6332,65 @@ fn build_codex_orchestrator_command(
     command
 }
 
+/// Build the full `agy` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs the
+/// window command through a shell). ALL Antigravity-CLI flag knowledge lives here (plus its unit
+/// test), so an Antigravity release changing a flag is a one-function fix. Verified against
+/// `agy --help`; where it diverges from the Claude arm:
+/// - No `--mcp-config` argument: the repomon fleet server is registered globally in
+///   `~/.gemini/config/mcp_config.json` via [`ensure_antigravity_mcp_registration`]. Environment
+///   variables (`REPOMON_MCP_SOCKET`, `REPOMON_MCP_AUTONOMY`, and optionally `REPOMON_MCP_MAX_AGENTS`)
+///   are exported inline in the command prefix so `agy` and its spawned MCP child processes inherit
+///   them; `REPOMON_MCP_MODE` is deliberately NOT set to `"agent"`, granting full orchestrator tool
+///   surface.
+/// - No `--append-system-prompt`: the repomind persona is prepended to the initial prompt passed
+///   via `--prompt-interactive` instead.
+/// - No `--session-id` and no `--allowedTools`: Antigravity has no session-id flag or stable
+///   transcript contract (`has_transcript` is false), so dialogs are monitored via pane output;
+///   tool approval behavior maps through `--dangerously-skip-permissions` and `--mode`.
+/// - `autonomy` maps onto `agy`'s execution flags:
+///   - `autonomous` -> `--dangerously-skip-permissions --mode accept-edits`
+///   - `supervised` -> default interactive mode (prompts for approvals and edits)
+///   - `read-only` -> `--mode plan` (plan mode produces plans without executing edits; server-side
+///     `REPOMON_MCP_AUTONOMY="read-only"` strictly enforces read-only tool access)
+fn build_antigravity_orchestrator_command(
+    base: &str,
+    socket: &Path,
+    autonomy: &str,
+    max_agents: Option<usize>,
+    model: &Option<String>,
+    prompt: &Option<String>,
+) -> String {
+    let mut env_parts = vec![
+        format!("REPOMON_MCP_SOCKET={}", shell_quote(&socket.to_string_lossy())),
+        format!("REPOMON_MCP_AUTONOMY={}", shell_quote(autonomy)),
+    ];
+    if let Some(n) = max_agents {
+        env_parts.push(format!("REPOMON_MCP_MAX_AGENTS={}", shell_quote(&n.to_string())));
+    }
+    let env_prefix = env_parts.join(" ");
+    let mut command = format!("{env_prefix} {base}");
+
+    match autonomy {
+        "autonomous" => command.push_str(" --dangerously-skip-permissions --mode accept-edits"),
+        "supervised" => {}
+        "read-only" => command.push_str(" --mode plan"),
+        _ => {}
+    }
+
+    if let Some(model) = model {
+        command.push_str(" --model ");
+        command.push_str(&shell_quote(model));
+    }
+
+    let goal = match prompt.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}\n\n{p}", repomon_mcp::PERSONA),
+        None => repomon_mcp::PERSONA.to_string(),
+    };
+    command.push_str(" --prompt-interactive ");
+    command.push_str(&shell_quote(&goal));
+    command
+}
+
 /// Mint a fresh v4-shaped UUID for `--session-id`, without pulling in the `uuid` crate (no crate
 /// in this workspace depends on it — see `Cargo.lock`). Mirrors the entropy pattern
 /// `repomon_mcp::policy`'s `mint_confirm`/`random_token` use for its confirmation tokens: this
@@ -7598,6 +7664,78 @@ mod tests {
         let cmd =
             build_codex_orchestrator_command("codex", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" -s read-only"), "{cmd}");
+    }
+
+    #[test]
+    fn antigravity_orchestrator_command_wires_mcp_and_persona() {
+        let socket = PathBuf::from("/tmp/repomon-test.sock");
+        // Autonomous: env prefixes for socket/autonomy/max_agents, dangerously-skip-permissions, accept-edits mode, persona as prompt-interactive.
+        let cmd = build_antigravity_orchestrator_command(
+            "agy",
+            &socket,
+            "autonomous",
+            Some(4),
+            &None,
+            &None,
+        );
+        assert!(
+            cmd.contains("REPOMON_MCP_SOCKET='/tmp/repomon-test.sock'"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("REPOMON_MCP_AUTONOMY='autonomous'"), "{cmd}");
+        assert!(cmd.contains("REPOMON_MCP_MAX_AGENTS='4'"), "{cmd}");
+        assert!(
+            !cmd.contains("REPOMON_MCP_MODE"),
+            "orchestrator must not set agent mode: {cmd}"
+        );
+        assert!(cmd.contains("agy"), "{cmd}");
+        assert!(
+            cmd.contains(" --dangerously-skip-permissions --mode accept-edits"),
+            "{cmd}"
+        );
+        assert!(cmd.contains(" --prompt-interactive "), "{cmd}");
+        assert!(cmd.contains("repomind"), "{cmd}");
+
+        // None of the Claude-only or Codex-only flags may leak into an antigravity invocation.
+        for forbidden_flag in [
+            "--mcp-config",
+            "--append-system-prompt",
+            "--allowedTools",
+            "--session-id",
+            " -c ",
+            " -a ",
+            " -s ",
+            " -m ",
+        ] {
+            assert!(!cmd.contains(forbidden_flag), "{forbidden_flag} leaked: {cmd}");
+        }
+
+        // Supervised + model + prompt: no dangerously-skip-permissions, --model, prompt appended to persona.
+        let cmd = build_antigravity_orchestrator_command(
+            "agy",
+            &socket,
+            "supervised",
+            None,
+            &Some("gemini-2.5-pro".into()),
+            &Some("coordinate lane-1 and lane-2".into()),
+        );
+        assert!(!cmd.contains("--dangerously-skip-permissions"), "{cmd}");
+        assert!(!cmd.contains(" --mode "), "{cmd}");
+        assert!(!cmd.contains("REPOMON_MCP_MAX_AGENTS"), "{cmd}");
+        assert!(cmd.contains(" --model 'gemini-2.5-pro'"), "{cmd}");
+        assert!(cmd.contains("coordinate lane-1 and lane-2"), "{cmd}");
+
+        // Read-only maps to --mode plan.
+        let cmd = build_antigravity_orchestrator_command(
+            "agy",
+            &socket,
+            "read-only",
+            None,
+            &None,
+            &None,
+        );
+        assert!(cmd.contains(" --mode plan"), "{cmd}");
+        assert!(!cmd.contains("--dangerously-skip-permissions"), "{cmd}");
     }
 
     #[test]
