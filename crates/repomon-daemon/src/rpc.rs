@@ -6155,8 +6155,8 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
 }
 
 /// Attach backend-specific MCP configuration without placing identity values in persistent files.
-/// OpenCode receives a runtime-only inline merge. Antigravity needs a global registration, but the
-/// entry contains only the executable and arguments; the managed child inherits its identity env.
+/// OpenCode receives a runtime-only inline merge. Antigravity and Cursor need global registration,
+/// but their entries contain only the executable and arguments; the managed child inherits its identity env.
 fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), String> {
     match kind {
         AgentKind::OpenCode => {
@@ -6172,6 +6172,7 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
             spec.env.push(("OPENCODE_CONFIG_CONTENT".into(), config_json));
         }
         AgentKind::Antigravity => ensure_antigravity_mcp_registration()?,
+        AgentKind::Cursor => ensure_cursor_mcp_registration()?,
         _ => {}
     }
     Ok(())
@@ -6243,6 +6244,43 @@ fn ensure_antigravity_mcp_registration() -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "Antigravity MCP config has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.repomon-tmp");
+    let encoded = serde_json::to_vec_pretty(&root).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, encoded).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn ensure_cursor_mcp_registration() -> Result<(), String> {
+    let path = std::env::var("REPOMON_CURSOR_MCP_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| config::home().join(".cursor/mcp.json"));
+    let mut root = match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice::<serde_json::Value>(&raw)
+            .map_err(|error| format!("invalid Cursor MCP config: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let root_object = root
+        .as_object_mut()
+        .ok_or_else(|| "Cursor MCP config must be a JSON object".to_string())?;
+    let servers = root_object.entry("mcpServers").or_insert_with(|| json!({}));
+    let servers_object = servers
+        .as_object_mut()
+        .ok_or_else(|| "Cursor mcpServers must be an object".to_string())?;
+    let repomond = repomon_core::service::repomond_path();
+    let wanted = json!({
+        "command": repomond.to_string_lossy(),
+        "args": ["mcp"]
+    });
+    if servers_object.get("repomon") == Some(&wanted) {
+        return Ok(());
+    }
+    servers_object.insert("repomon".into(), wanted);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Cursor MCP config has no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.repomon-tmp");
     let encoded = serde_json::to_vec_pretty(&root).map_err(|error| error.to_string())?;
@@ -7982,6 +8020,41 @@ mod tests {
             "{command}"
         );
         assert!(!command.contains("test-token"), "{command}");
+    }
+
+    #[test]
+    fn cursor_agent_mcp_registration_creates_config_and_avoids_secrets_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("mcp.json");
+        unsafe {
+            std::env::set_var("REPOMON_CURSOR_MCP_CONFIG", &config_path);
+        }
+        let mut spec = SpawnSpec::new("cursor-agent", dir.path());
+        spec.env.extend([
+            ("REPOMON_MCP_SOCKET".into(), "/tmp/repomon-test.sock".into()),
+            ("REPOMON_MCP_MODE".into(), "agent".into()),
+            (
+                "REPOMON_MCP_IDENTITY_TOKEN".into(),
+                "secret-worker-token-xyz".into(),
+            ),
+        ]);
+        configure_backend_mcp(&AgentKind::Cursor, &mut spec).unwrap();
+        assert!(config_path.exists(), "mcp.json must be created");
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let server = &val["mcpServers"]["repomon"];
+        assert!(server.is_object());
+        assert_eq!(server["args"], json!(["mcp"]));
+        // The token must NOT be written to disk!
+        assert!(
+            !content.contains("secret-worker-token-xyz"),
+            "identity token leaked to disk: {content}"
+        );
+        // spec.env retains the token for process inheritance
+        assert!(spec
+            .env
+            .iter()
+            .any(|(k, v)| k == "REPOMON_MCP_IDENTITY_TOKEN" && v == "secret-worker-token-xyz"));
     }
 
     #[test]
