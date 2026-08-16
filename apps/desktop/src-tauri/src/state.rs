@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use repomon_core::client::DaemonClient;
@@ -13,6 +14,7 @@ use crate::terminal::RouteFrame;
 pub struct AppState {
     pub client: OnceCell<DaemonClient>,
     pub connection: RwLock<ConnectionSnapshot>,
+    pub manual_stop: Arc<AtomicBool>,
     pub terminal_watches: Arc<Mutex<HashMap<String, oneshot::Sender<oneshot::Sender<()>>>>>,
     /// Per-window byte routes fed by the demux task: each `event.agent.bytes` chunk is
     /// matched, decoded, and routed exactly once instead of being cloned into every mounted
@@ -33,6 +35,7 @@ impl AppState {
         Self {
             client: OnceCell::new(),
             connection: RwLock::new(ConnectionSnapshot::starting(&endpoint)),
+            manual_stop: Arc::new(AtomicBool::new(false)),
             terminal_watches: Arc::new(Mutex::new(HashMap::new())),
             terminal_routes: Arc::new(Mutex::new(HashMap::new())),
             ui_events: broadcast::channel(256).0,

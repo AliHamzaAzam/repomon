@@ -44,6 +44,8 @@ function phaseLabel(phase: ConnectionPhase): string {
       return "Connected";
     case "retrying":
       return "Retrying";
+    case "stopped":
+      return "Stopped";
   }
 }
 

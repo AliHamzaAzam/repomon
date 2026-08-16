@@ -21,6 +21,8 @@ export default function ActionModals(props: { actions: ActionsStore; notificatio
           onConfigSaved={props.notifications.setConfig}
           onPreviewSound={props.notifications.preview}
           onUpdateAvailable={(version) => void props.notifications.notifyUpdateReady(version)}
+          fleet={actions.fleet}
+          actions={actions}
         />
       </Show>
       <Show when={actions.spawnLane()}>

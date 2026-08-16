@@ -49,6 +49,10 @@ impl ConnectionSnapshot {
         Self::new("retrying", endpoint, Some(message.into()), None)
     }
 
+    pub fn stopped(endpoint: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new("stopped", endpoint, Some(message.into()), None)
+    }
+
     fn new(
         phase: &str,
         endpoint: impl Into<String>,
@@ -73,9 +77,29 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
     publish(&app, ConnectionSnapshot::connecting(&endpoint)).await;
 
     let client = loop {
+        if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+            publish(
+                &app,
+                ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+
         match repomon_core::launch::ensure_daemon(&config, socket_override.clone()).await {
             Ok(client) => break client,
             Err(error) => {
+                if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    publish(
+                        &app,
+                        ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+
                 publish(
                     &app,
                     ConnectionSnapshot::retrying(&endpoint, error.to_string()),
@@ -91,6 +115,16 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
     let _ = state.client.set(client);
 
     loop {
+        if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+            publish(
+                &app,
+                ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+
         let client = app
             .state::<AppState>()
             .client
@@ -100,10 +134,22 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
 
         match fetch_daemon_status(&client).await {
             Ok(status) => {
-                publish(&app, ConnectionSnapshot::connected(&endpoint, status)).await;
+                if !app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    publish(&app, ConnectionSnapshot::connected(&endpoint, status)).await;
+                }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(error) => {
+                if app.state::<AppState>().manual_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    publish(
+                        &app,
+                        ConnectionSnapshot::stopped(&endpoint, "Daemon is stopped"),
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+
                 publish(
                     &app,
                     ConnectionSnapshot::retrying(&endpoint, error.to_string()),
@@ -119,7 +165,7 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
     }
 }
 
-async fn publish(app: &AppHandle, snapshot: ConnectionSnapshot) {
+pub async fn publish(app: &AppHandle, snapshot: ConnectionSnapshot) {
     let state = app.state::<AppState>();
     *state.connection.write().unwrap() = snapshot.clone();
     let _ = app.emit(CONNECTION_EVENT, snapshot);

@@ -136,6 +136,44 @@ describe("lane operations", () => {
       dispose();
     });
   });
+
+  it("restoreAllAgents bulk-adopts external or windowless sessions across lanes", async () => {
+    await createRoot(async (dispose) => {
+      const lane1 = {
+        ...lane(),
+        id: 10,
+        agent_sessions: [
+          { session_id: "s1", agent: "claude-code", external: true, tmux_window: null } as AgentSession,
+          { session_id: "s2", agent: "claude-code", external: false, tmux_window: "lane-10-1" } as AgentSession,
+        ],
+      };
+      const lane2 = {
+        ...lane(),
+        id: 20,
+        agent_sessions: [
+          { session_id: "s3", agent: "antigravity", external: false, tmux_window: null } as AgentSession,
+        ],
+      };
+      const fleet = {
+        ...fleetStub(),
+        lanes: () => [lane1, lane2],
+      };
+      const actions = createActionsStore(fleet);
+
+      const restored = await actions.restoreAllAgents();
+      expect(restored).toBe(2);
+      expect(calls.list).toContainEqual({
+        method: "agent.adopt",
+        params: { lane_id: 10, session_id: "s1", agent: "claude-code" },
+      });
+      expect(calls.list).toContainEqual({
+        method: "agent.adopt",
+        params: { lane_id: 20, session_id: "s3", agent: "antigravity" },
+      });
+      expect(fleet.refresh).toHaveBeenCalled();
+      dispose();
+    });
+  });
 });
 
 describe("settings modal tab", () => {

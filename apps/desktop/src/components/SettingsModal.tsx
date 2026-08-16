@@ -53,6 +53,8 @@ interface SettingsModalProps {
   onConfigSaved?: (config: ConfigView) => void;
   onPreviewSound?: (cue: SoundCue, volume: number, profile?: SoundProfile) => boolean;
   onUpdateAvailable?: (version: string) => void;
+  fleet?: import("../stores/fleet").FleetStore;
+  actions?: import("../stores/actions").ActionsStore;
 }
 
 const TABS: Array<{ id: SettingsTab; label: string }> = [
@@ -154,6 +156,34 @@ export default function SettingsModal(props: SettingsModalProps) {
     });
     void daemonCall("agent.detect").then(setAgents).catch(() => undefined);
   });
+
+  // Daemon & Recovery state
+  const [daemonInfo, setDaemonInfo] = createSignal<{ service_managed: boolean; status: string } | null>(null);
+  const [daemonBusy, setDaemonBusy] = createSignal(false);
+  const [restoreBusy, setRestoreBusy] = createSignal(false);
+  const [restoreResult, setRestoreResult] = createSignal<string | null>(null);
+  const [confirmRestart, setConfirmRestart] = createSignal(false);
+
+  // Load daemon service info on mount when fleet prop is available
+  createEffect(() => {
+    if (tab() === "general" && props.fleet) {
+      import("../ipc/daemonControl").then(({ getDaemonServiceInfo }) => {
+        getDaemonServiceInfo().then(setDaemonInfo).catch(() => undefined);
+      });
+    }
+  });
+
+  // Count orphaned/external sessions across all lanes
+  const orphanCount = () => {
+    if (!props.fleet) return 0;
+    let count = 0;
+    for (const lane of props.fleet.lanes()) {
+      for (const sess of lane.agent_sessions) {
+        if (sess.external || (!sess.tmux_window && sess.session_id)) count++;
+      }
+    }
+    return count;
+  };
 
   const [saveStatus, setSaveStatus] = createSignal<"idle" | "saving" | "saved" | "error">("idle");
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -451,6 +481,179 @@ export default function SettingsModal(props: SettingsModalProps) {
                   </Show>
                 </div>
               </section>
+
+              <Show when={props.fleet}>
+                <section class="space-y-4 border-t border-line/70 pt-5">
+                  <p class="section-label">Daemon & Recovery</p>
+
+                  {/* Stop / Start Daemon */}
+                  <div class="rounded-xl border border-line/80 bg-surface/50 p-4 space-y-3">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-xs font-medium text-foreground">Background Daemon</p>
+                        <p class="mt-0.5 text-[11px] text-muted leading-snug">
+                          The daemon streams terminal state and manages agent sessions.
+                          {daemonInfo()?.service_managed
+                            ? " Running as a system service (launchd/systemd)."
+                            : " Running as an unmanaged background process."}
+                        </p>
+                      </div>
+                      <div class="flex items-center gap-2 shrink-0">
+                        <Show when={daemonInfo()}>
+                          <span class={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-medium ${
+                            daemonInfo()!.service_managed
+                              ? "bg-signal/10 text-signal"
+                              : "bg-muted/10 text-muted"
+                          }`}>
+                            {daemonInfo()!.service_managed ? "service" : "process"}
+                          </span>
+                        </Show>
+                        <button
+                          type="button"
+                          class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-raised disabled:opacity-50"
+                          disabled={daemonBusy()}
+                          onClick={async () => {
+                            setDaemonBusy(true);
+                            try {
+                              const { stopDaemon } = await import("../ipc/daemonControl");
+                              // TODO: determine current phase from connection store;
+                              // for now always offer stop since modal is only reachable when connected
+                              await stopDaemon();
+                              setDaemonInfo((prev) => prev ? { ...prev, status: "stopped" } : prev);
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : String(e));
+                            } finally {
+                              setDaemonBusy(false);
+                            }
+                          }}
+                        >
+                          {daemonBusy() ? "Working…" : "Stop Daemon"}
+                        </button>
+                        <button
+                          type="button"
+                          class="focus-ring rounded-lg border border-signal/40 bg-signal/10 px-3.5 py-1.5 text-xs font-medium text-signal transition-colors hover:bg-signal/20 disabled:opacity-50"
+                          disabled={daemonBusy()}
+                          onClick={async () => {
+                            setDaemonBusy(true);
+                            try {
+                              const { startDaemon } = await import("../ipc/daemonControl");
+                              await startDaemon();
+                              setDaemonInfo((prev) => prev ? { ...prev, status: "running" } : prev);
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : String(e));
+                            } finally {
+                              setDaemonBusy(false);
+                            }
+                          }}
+                        >
+                          Start Daemon
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Reset Daemon */}
+                  <div class="rounded-xl border border-line/80 bg-surface/50 p-4 space-y-3">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-xs font-medium text-foreground">Reset Daemon</p>
+                        <p class="mt-0.5 text-[11px] text-muted leading-snug">
+                          Restart the background daemon and clear all in-memory caches (overlay state, prompt caches,
+                          known sessions). Use when agents stop showing up or the sidebar looks stale.
+                        </p>
+                      </div>
+                      <Show when={!confirmRestart()} fallback={
+                        <div class="flex items-center gap-2 shrink-0">
+                          <span class="text-[11px] text-attention">Lanes will briefly disconnect.</span>
+                          <button
+                            type="button"
+                            class="focus-ring rounded-lg border border-attention/40 bg-attention/10 px-3.5 py-1.5 text-xs font-semibold text-attention transition-colors hover:bg-attention/20 disabled:opacity-50"
+                            disabled={daemonBusy()}
+                            onClick={async () => {
+                              setDaemonBusy(true);
+                              setConfirmRestart(false);
+                              try {
+                                const { restartDaemon } = await import("../ipc/daemonControl");
+                                await restartDaemon();
+                              } catch (e) {
+                                setError(e instanceof Error ? e.message : String(e));
+                              } finally {
+                                setDaemonBusy(false);
+                              }
+                            }}
+                          >
+                            {daemonBusy() ? "Restarting…" : "Confirm Reset"}
+                          </button>
+                          <button
+                            type="button"
+                            class="focus-ring rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised"
+                            onClick={() => setConfirmRestart(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      }>
+                        <button
+                          type="button"
+                          class="focus-ring rounded-lg border border-attention/40 bg-attention/10 px-3.5 py-1.5 text-xs font-medium text-attention transition-colors hover:bg-attention/20 disabled:opacity-50 shrink-0"
+                          disabled={daemonBusy()}
+                          onClick={() => setConfirmRestart(true)}
+                        >
+                          Reset Daemon
+                        </button>
+                      </Show>
+                    </div>
+                  </div>
+
+                  {/* Restore Orphaned Agents */}
+                  <div class="rounded-xl border border-line/80 bg-surface/50 p-4 space-y-3">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-xs font-medium text-foreground">Restore Orphaned Agents</p>
+                        <p class="mt-0.5 text-[11px] text-muted leading-snug">
+                          Re-adopt external or disconnected agent sessions back into tmux management.
+                          Use after a tmux crash or when agents disappear from the sidebar.
+                        </p>
+                      </div>
+                      <div class="flex items-center gap-2 shrink-0">
+                        <Show when={orphanCount() > 0}>
+                          <span class="inline-flex items-center rounded-md bg-attention/10 px-2 py-0.5 text-[10px] font-medium text-attention">
+                            {orphanCount()} orphaned
+                          </span>
+                        </Show>
+                        <Show when={restoreResult()}>
+                          <span class="text-[11px] text-signal">{restoreResult()}</span>
+                        </Show>
+                        <button
+                          type="button"
+                          class="focus-ring rounded-lg border border-signal/40 bg-signal/10 px-3.5 py-1.5 text-xs font-medium text-signal transition-colors hover:bg-signal/20 disabled:opacity-50"
+                          disabled={restoreBusy() || orphanCount() === 0}
+                          onClick={async () => {
+                            if (!props.actions) return;
+                            setRestoreBusy(true);
+                            setRestoreResult(null);
+                            try {
+                              const restored = await props.actions.restoreAllAgents();
+                              setRestoreResult(`Restored ${restored} session${restored !== 1 ? "s" : ""}`);
+                              setTimeout(() => setRestoreResult(null), 5000);
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : String(e));
+                            } finally {
+                              setRestoreBusy(false);
+                            }
+                          }}
+                        >
+                          {restoreBusy()
+                            ? "Restoring…"
+                            : orphanCount() === 0
+                              ? "No orphans detected"
+                              : `Restore ${orphanCount()} Agent${orphanCount() !== 1 ? "s" : ""}`}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </Show>
             </Show>
 
             <Show when={tab() === "agents"}>

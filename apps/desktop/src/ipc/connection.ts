@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ConnectionPhase = "starting" | "connecting" | "connected" | "retrying";
+export type ConnectionPhase = "starting" | "connecting" | "connected" | "retrying" | "stopped";
 
 export interface DaemonStatus {
   uptime_secs: number;

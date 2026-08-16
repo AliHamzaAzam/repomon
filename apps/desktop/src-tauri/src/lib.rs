@@ -1,4 +1,5 @@
 mod connection;
+mod control;
 mod ipc;
 mod state;
 mod terminal;
@@ -51,6 +52,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             connection_status,
+            control::daemon_service_info,
+            control::daemon_stop,
+            control::daemon_start,
+            control::daemon_restart,
             ipc::daemon_call,
             ipc::daemon_subscribe,
             terminal::term_watch,

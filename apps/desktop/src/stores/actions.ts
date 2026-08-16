@@ -162,6 +162,39 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     }
   }
 
+  /// Bulk-adopt every orphaned/external session across all lanes in one click.
+  /// Returns the number of sessions that were successfully restored.
+  async function restoreAllAgents(): Promise<number> {
+    setError(null);
+    const allLanes = fleet.lanes();
+    const candidates: Array<{ lane: Lane; session: AgentSession }> = [];
+
+    for (const lane of allLanes) {
+      for (const sess of lane.agent_sessions) {
+        if (sess.external || (!sess.tmux_window && sess.session_id)) {
+          candidates.push({ lane, session: sess });
+        }
+      }
+    }
+
+    let restored = 0;
+    for (const { lane, session } of candidates) {
+      try {
+        await daemonCall("agent.adopt", {
+          lane_id: lane.id,
+          session_id: session.session_id ?? undefined,
+          agent: session.agent,
+        });
+        restored++;
+      } catch {
+        // Continue with remaining sessions even if one fails
+      }
+    }
+
+    await fleet.refresh();
+    return restored;
+  }
+
   return {
     fleet,
     error,
@@ -210,6 +243,7 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     deleteLane,
     stopAgent,
     adoptAgent,
+    restoreAllAgents,
   };
 }
 
