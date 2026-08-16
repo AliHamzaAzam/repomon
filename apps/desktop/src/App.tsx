@@ -96,6 +96,10 @@ function App(props: AppProps) {
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const [appVersion, setAppVersion] = createSignal("");
+  // E5: Debounced sustained-disconnect banner. The footer pill signals blips; this banner only
+  // appears after the daemon has been unreachable for a continuous 5 seconds, so transient
+  // reconnect cycles during daemon restart don't produce noise.
+  const [sustainedDisconnect, setSustainedDisconnect] = createSignal(false);
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const workspace = createWorkspaceStore(fleet);
@@ -348,6 +352,19 @@ function App(props: AppProps) {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
+  // E5: Debounced 5 s sustained-disconnect banner. React immediately on reconnect; only show
+  // the banner if the daemon has been continuously unreachable for at least 5 seconds so that
+  // transient blips during daemon restart don't produce noise.
+  createEffect(() => {
+    const phase = connection().phase;
+    if (phase === "connected") {
+      setSustainedDisconnect(false);
+      return;
+    }
+    const timer = setTimeout(() => setSustainedDisconnect(true), 5000);
+    onCleanup(() => clearTimeout(timer));
+  });
+
   const navigateFleet = (event: KeyboardEvent) => {
     const target = event.target;
     if (
@@ -435,6 +452,29 @@ function App(props: AppProps) {
           </button>
         </div>
       </header>
+
+      {/* E5: Sustained-disconnect banner — only after ≥5 s of continuous disconnection.
+          Rendered as a fixed overlay (non-blocking) so the main layout never shifts.
+          The footer pill stays visible for shorter blips. */}
+      <Show when={sustainedDisconnect()}>
+        <div
+          role="alert"
+          aria-live="assertive"
+          class="fixed inset-x-0 top-[35px] z-50 flex items-center justify-between gap-3 border-b border-attention/40 bg-attention/10 px-4 py-2 text-[11px] text-attention backdrop-blur-sm"
+        >
+          <span class="flex items-center gap-2 font-medium">
+            <span class="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-attention" aria-hidden="true" />
+            Daemon unreachable — reconnecting…
+          </span>
+          <button
+            type="button"
+            class="focus-ring rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-attention hover:bg-attention/20 transition-colors"
+            onClick={() => actions.openSettingsTab("system")}
+          >
+            Settings › System
+          </button>
+        </div>
+      </Show>
 
       <div class={`mission-grid ${repomindOpen() ? "is-repomind-open" : ""}`}>
         <nav
