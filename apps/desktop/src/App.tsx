@@ -87,9 +87,11 @@ function App(props: AppProps) {
   const [repomindFull, setRepomindFull] = createSignal(false);
   // C1: which right-rail tab is currently showing, and a one-shot command to switch to it — see
   // RightPanelHost's `requestTab`/`onActiveTabChange` props for why this isn't just local state.
+  // Shared by every panel.* shortcut (git for C1, editor for D4), since RightPanelHost's
+  // `requestTab` prop is a single slot, not one per tab id.
   const [rightPanelTab, setRightPanelTab] = createSignal("repomind");
-  const [gitTabRequest, setGitTabRequest] = createSignal<{ id: string; token: number } | null>(null);
-  let gitTabRequestToken = 0;
+  const [panelTabRequest, setPanelTabRequest] = createSignal<{ id: string; token: number } | null>(null);
+  let panelTabRequestToken = 0;
   const [onboardingOpen, setOnboardingOpen] = createSignal(false);
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
@@ -214,7 +216,7 @@ function App(props: AppProps) {
           // Closed → open already on the git tab. RightPanelHost consults `requestTab.id` on its
           // very first render, so bumping this in the same tick as opening is enough — no need to
           // wait for the panel to mount before it takes effect.
-          setGitTabRequest({ id: "git", token: ++gitTabRequestToken });
+          setPanelTabRequest({ id: "git", token: ++panelTabRequestToken });
           setRepomindOpen(true);
           persistRepomindOpen(true);
         } else if (rightPanelTab() === "git") {
@@ -223,8 +225,22 @@ function App(props: AppProps) {
           setRepomindOpen(false);
           persistRepomindOpen(false);
         } else {
-          // Open on some other tab (Repomind): switch to git without closing.
-          setGitTabRequest({ id: "git", token: ++gitTabRequestToken });
+          // Open on some other tab (Repomind or Editor): switch to git without closing.
+          setPanelTabRequest({ id: "git", token: ++panelTabRequestToken });
+        }
+        break;
+      }
+      case "panel.editor": {
+        // D4: same open/switch/toggle-close feel as panel.git above, targeting the editor tab.
+        if (!repomindOpen()) {
+          setPanelTabRequest({ id: "editor", token: ++panelTabRequestToken });
+          setRepomindOpen(true);
+          persistRepomindOpen(true);
+        } else if (rightPanelTab() === "editor") {
+          setRepomindOpen(false);
+          persistRepomindOpen(false);
+        } else {
+          setPanelTabRequest({ id: "editor", token: ++panelTabRequestToken });
         }
         break;
       }
@@ -479,7 +495,7 @@ function App(props: AppProps) {
                 <RightPanelHost
                   onToggleFullscreen={() => setRepomindFull(true)}
                   fleet={fleet}
-                  requestTab={gitTabRequest()}
+                  requestTab={panelTabRequest()}
                   onActiveTabChange={setRightPanelTab}
                 />
               </div>

@@ -1,8 +1,9 @@
 import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 
+import FileEditorPanel from "./FileEditorPanel";
 import GitExplorerPanel from "./GitExplorerPanel";
 import RepomindPanel from "./RepomindPanel";
-import { IconGitBranch, IconSparkles, type IconProps } from "./icons";
+import { IconGitBranch, IconLayers, IconSparkles, type IconProps } from "./icons";
 import { readRightPanelActiveTab, saveRightPanelActiveTab } from "../stores/uiSettings";
 import type { FleetStore } from "../stores/fleet";
 
@@ -10,9 +11,9 @@ import type { FleetStore } from "../stores/fleet";
  * F2: the right rail generalizes from "the Repomind panel" into a tabbed host any number of
  * panels can register into. `RightPanelTabDef` is that registration contract — id, label, icon,
  * and a zero-arg `component` factory (closures over whatever the panel needs, e.g. Repomind's
- * fullscreen toggle) — so a future panel (Git status/diff for C1, an inline file editor for D4)
- * is added by appending one entry to `buildDefaultPanels`, never by touching this file's layout
- * or tab-switching logic.
+ * fullscreen toggle) — so a new panel (Git status/diff for C1, the inline file editor for D4) is
+ * added by appending one entry to `buildDefaultPanels`, never by touching this file's layout or
+ * tab-switching logic.
  */
 export interface RightPanelTabDef {
   id: string;
@@ -62,9 +63,8 @@ function buildDefaultPanels(onToggleFullscreen: () => void, fleet?: FleetStore):
     // C1: git status/diff for the active lane.
     { id: "git", label: "Git", icon: IconGitBranch, component: () => <GitExplorerPanel fleet={fleet} /> },
 
-    // Registered by D4: inline file editor for the active lane. Same deal — uncomment when
-    // EditorPanel ships.
-    // { id: "editor", label: "Editor", icon: IconLayers, component: () => <EditorPanel /> },
+    // D4: file tree + multi-tab editor for the active lane's worktree.
+    { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} /> },
   ];
 }
 
