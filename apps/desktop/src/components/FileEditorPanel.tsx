@@ -576,7 +576,12 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
 
   return (
     <div class="flex h-full flex-col bg-surface">
-      <div class="flex h-10 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5">
+      {/* h-10 / px-3.5 / border-b border-line / bg-surface/95 mirrors TerminalWorkspace.tsx's own
+          tab-strip header row (App.tsx mounts this panel in the right rail, directly beside the
+          terminal bay's column, at the same y-offset) - min-w-0 + backdrop-blur were the two
+          values that header row carries and this one didn't, so the two read as one continuous
+          band across the seam instead of the editor's row looking subtly heavier. */}
+      <div class="flex h-10 min-w-0 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
         <div class="flex min-w-0 items-center gap-2">
           <span class="text-xs font-semibold text-foreground">Editor</span>
           <Show when={lane()} keyed>
