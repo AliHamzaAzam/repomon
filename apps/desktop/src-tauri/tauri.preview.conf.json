@@ -1,7 +1,7 @@
 {
   "bundle": {
     "createUpdaterArtifacts": false,
-    "externalBin": ["binaries/repomond"],
+    "externalBin": ["binaries/repomond", "binaries/tmux"],
     "targets": ["app"]
   }
 }

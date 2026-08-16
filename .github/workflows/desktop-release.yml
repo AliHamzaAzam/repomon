@@ -60,22 +60,12 @@ jobs:
           '.plugins.updater.pubkey = $key'
           "${{ matrix.config }}"
           > apps/desktop/src-tauri/tauri.signed.conf.json
-      - name: Build daemon sidecar
-        shell: bash
-        run: |
-          cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
-          mkdir -p apps/desktop/src-tauri/binaries
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "target/${{ matrix.target }}/release/repomond.exe" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe"
-          else
-            cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
-          fi
-      - name: Build agent-host sidecar (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          cargo build --release --locked -p repomon-host --target "${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/repomon-agent-host.exe" "apps/desktop/src-tauri/binaries/repomon-agent-host-${{ matrix.target }}.exe"
+      - name: Prepare sidecars
+        working-directory: apps/desktop
+        env:
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+          CI: "true"
+        run: bun run sidecar:prepare
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
