@@ -208,18 +208,19 @@ renamed until their transcript appears.) See `session.rename` in `docs/protocol.
 
 ## Fleet mail for managed agents
 
-Managed Claude, Codex, OpenCode, and Antigravity sessions receive a restricted local `repomon`
-MCP server at spawn or adopt time. It exposes `fleet_status`, `message_send`, `message_inbox`, and
-`message_mark_read`. It does not expose repomind's mutating fleet tools. The agent process
-inherits a one-time identity token; only its SHA-256 hash is stored, and the generated MCP config
-contains no token.
+Managed Claude, Codex, OpenCode, Antigravity, and Cursor sessions receive a restricted local
+`repomon` MCP server at spawn or adopt time. It exposes `fleet_status`, `message_send`,
+`message_inbox`, and `message_mark_read`. It does not expose repomind's mutating fleet tools. The
+agent process inherits a one-time identity token; only its SHA-256 hash is stored, and the
+generated MCP config contains no token.
 
 OpenCode receives the registration through the runtime-only `OPENCODE_CONFIG_CONTENT` merge, so
 managed settings with higher precedence remain authoritative. Antigravity requires its global
-`~/.gemini/config/mcp_config.json` registration. repomon merges only
-`mcpServers.repomon`, never writes `.agents/mcp_config.json` in a repository, and keeps identity
-in the managed process environment. Antigravity may still show its normal workspace trust and
-tool permission prompts.
+`~/.gemini/config/mcp_config.json` registration. Cursor requires its global `~/.cursor/mcp.json`
+registration. repomon merges only `mcpServers.repomon`, never writes `.agents/mcp_config.json` in
+a repository, and keeps identity in the managed process environment. Antigravity may still show its
+normal workspace trust and tool permission prompts; Cursor's `--approve-mcps` flag is available for
+headless/non-interactive workflows.
 
 Messages are durable in the daemon database. Terminal injection is only attempted when the
 recipient has a live managed window and is waiting, idle, or at an ended turn with no dialog,
