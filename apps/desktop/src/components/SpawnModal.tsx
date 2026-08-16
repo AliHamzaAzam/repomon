@@ -141,6 +141,24 @@ export default function SpawnModal(props: {
                 <span class="mt-0.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-fault" />
                 <p class="flex-1 font-medium leading-snug">{err().friendly}</p>
               </div>
+              {/* E8: If the spawn failed because a binary is missing, link to Settings > System
+                  where the user can see installation instructions (the same target E4 uses for the
+                  per-card "missing ↗" link). Shown only when the handler is wired up (always true
+                  in the real app; may be absent in tests that don't pass onOpenSettingsTab). */}
+              <Show when={err().isMissingBinary && props.onOpenSettingsTab}>
+                <div class="pt-0.5">
+                  <button
+                    type="button"
+                    class="focus-ring rounded bg-fault/10 hover:bg-fault/20 border border-fault/30 px-2 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault transition-colors cursor-pointer"
+                    onClick={() => {
+                      props.onClose();
+                      props.onOpenSettingsTab?.("system");
+                    }}
+                  >
+                    View install instructions in Settings › System ↗
+                  </button>
+                </div>
+              </Show>
               <Show when={err().raw && err().raw !== err().friendly}>
                 <details class="group mt-1 pt-1 border-t border-fault/20">
                   <summary class="cursor-pointer select-none text-[11px] font-normal text-fault/75 hover:text-fault transition-colors outline-none">
