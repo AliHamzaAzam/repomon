@@ -1,6 +1,7 @@
 import { For, Show, createSignal, onMount } from "solid-js";
 
 import type { AgentChoice, Lane } from "../bindings";
+import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall } from "../ipc/rpc";
 import { AgentIcon } from "./icons";
 import Modal from "./Modal";
@@ -10,7 +11,7 @@ export default function SpawnModal(props: { lane: Lane; onClose: () => void; onD
   const [agent, setAgent] = createSignal("");
   const [task, setTask] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<TranslatedError | null>(null);
 
   onMount(() => {
     void daemonCall("agent.detect")
@@ -21,7 +22,7 @@ export default function SpawnModal(props: { lane: Lane; onClose: () => void; onD
           ?? detected[0];
         setAgent(preferred?.name ?? "claude-code");
       })
-      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+      .catch((cause: unknown) => setError(translateError(cause)));
   });
 
   async function spawn() {
@@ -33,38 +34,36 @@ export default function SpawnModal(props: { lane: Lane; onClose: () => void; onD
       await props.onDone();
       props.onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(translateError(cause, { binary: "tmux" }));
     } finally {
       setBusy(false);
     }
   }
-
-  const footer = (
-    <>
-      <button
-        type="button"
-        class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
-        onClick={props.onClose}
-      >
-        Cancel
-      </button>
-      <button
-        type="button"
-        class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
-        disabled={busy() || !agent()}
-        onClick={() => void spawn()}
-      >
-        {busy() ? "Spawning…" : "Spawn Agent"}
-      </button>
-    </>
-  );
 
   return (
     <Modal
       title="Spawn agent"
       subtitle={`${props.lane.repo.name} / ${props.lane.worktree.branch ?? props.lane.worktree.name}`}
       onClose={props.onClose}
-      footer={footer}
+      footer={
+        <>
+          <button
+            type="button"
+            class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+            onClick={props.onClose}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
+            disabled={busy() || !agent()}
+            onClick={() => void spawn()}
+          >
+            {busy() ? "Spawning…" : "Spawn Agent"}
+          </button>
+        </>
+      }
     >
       <div class="space-y-4">
         <div>
@@ -110,7 +109,24 @@ export default function SpawnModal(props: { lane: Lane; onClose: () => void; onD
           />
         </label>
         <Show when={error()}>
-          <p class="rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>
+          {(err) => (
+            <div class="rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault space-y-1.5">
+              <div class="flex items-start gap-2">
+                <span class="mt-0.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-fault" />
+                <p class="flex-1 font-medium leading-snug">{err().friendly}</p>
+              </div>
+              <Show when={err().raw && err().raw !== err().friendly}>
+                <details class="group mt-1 pt-1 border-t border-fault/20">
+                  <summary class="cursor-pointer select-none text-[11px] font-normal text-fault/75 hover:text-fault transition-colors outline-none">
+                    Technical details
+                  </summary>
+                  <pre class="mt-1 max-h-24 overflow-x-auto whitespace-pre-wrap rounded bg-background/50 p-2 font-mono text-[10px] text-muted">
+                    {err().raw}
+                  </pre>
+                </details>
+              </Show>
+            </div>
+          )}
         </Show>
       </div>
     </Modal>
