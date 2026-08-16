@@ -12,6 +12,38 @@ pub use reader::{
 };
 pub use worktree::{WorktreeEntry, parse_porcelain};
 
+/// Probe git availability, version, and path.
+pub fn probe() -> crate::model::GitDoctorInfo {
+    let path = crate::exec::find_in_path("git");
+    match path {
+        Some(p) => match std::process::Command::new(&p).arg("--version").output() {
+            Ok(out) if out.status.success() => {
+                let version_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                crate::model::GitDoctorInfo {
+                    available: true,
+                    version: if version_str.is_empty() {
+                        None
+                    } else {
+                        Some(version_str)
+                    },
+                    path: Some(p.to_string_lossy().into_owned()),
+                }
+            }
+            _ => crate::model::GitDoctorInfo {
+                available: false,
+                version: None,
+                path: Some(p.to_string_lossy().into_owned()),
+            },
+        },
+        None => crate::model::GitDoctorInfo {
+            available: false,
+            version: None,
+            path: None,
+        },
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +151,15 @@ mod tests {
 
         worktree::remove(p, &wt_path, false).unwrap();
         assert_eq!(worktree::list(p).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn probe_reports_git_health() {
+        let probe = super::probe();
+        assert!(probe.available);
+        assert!(probe.version.is_some());
+        assert!(probe.path.is_some());
+        let version = probe.version.unwrap();
+        assert!(version.starts_with("git version") || version.contains("git"));
     }
 }

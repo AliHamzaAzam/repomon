@@ -865,6 +865,64 @@ pub struct FanoutSummary {
     pub skipped_lanes: Vec<SkippedLane>,
 }
 
+/// Where the detected tmux binary originates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum TmuxDoctorSource {
+    System,
+    Bundled,
+}
+
+/// Machine health and probe info for `tmux`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct TmuxDoctorInfo {
+    pub available: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub source: Option<TmuxDoctorSource>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Machine health and probe info for `git`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct GitDoctorInfo {
+    pub available: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Detected agent choice and probe info for doctor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct AgentDoctorInfo {
+    pub kind: String,
+    pub name: String,
+    pub command: String,
+    pub detected: bool,
+}
+
+/// Result of the `system.doctor` machine-health check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SystemDoctorResult {
+    pub tmux: TmuxDoctorInfo,
+    pub git: GitDoctorInfo,
+    pub agents: Vec<AgentDoctorInfo>,
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

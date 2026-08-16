@@ -48,14 +48,45 @@ impl TmuxRuntime {
         }
     }
 
+    /// Probe tmux availability, version, source, and path.
+    pub fn probe() -> crate::model::TmuxDoctorInfo {
+        let path = crate::exec::find_in_path("tmux");
+        match path {
+            Some(p) => match Command::new(&p).arg("-V").output() {
+                Ok(out) if out.status.success() => {
+                    let version_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    crate::model::TmuxDoctorInfo {
+                        available: true,
+                        version: if version_str.is_empty() {
+                            None
+                        } else {
+                            Some(version_str)
+                        },
+                        source: Some(crate::model::TmuxDoctorSource::System),
+                        path: Some(p.to_string_lossy().into_owned()),
+                    }
+                }
+                _ => crate::model::TmuxDoctorInfo {
+                    available: false,
+                    version: None,
+                    source: None,
+                    path: Some(p.to_string_lossy().into_owned()),
+                },
+            },
+            None => crate::model::TmuxDoctorInfo {
+                available: false,
+                version: None,
+                source: None,
+                path: None,
+            },
+        }
+    }
+
     /// Is tmux installed and runnable?
     pub fn available() -> bool {
-        Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        Self::probe().available
     }
+
 
     pub fn session(&self) -> &str {
         &self.session
@@ -1454,5 +1485,19 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["-L", rt.session(), "kill-server"])
             .output();
+    }
+
+    #[test]
+    fn tmux_probe_reports_expected_shape() {
+        let probe = TmuxRuntime::probe();
+        if probe.available {
+            assert!(probe.version.is_some());
+            assert_eq!(probe.source, Some(crate::model::TmuxDoctorSource::System));
+            assert!(probe.path.is_some());
+            assert!(probe.version.unwrap().starts_with("tmux"));
+        } else {
+            assert!(probe.version.is_none());
+            assert!(probe.source.is_none());
+        }
     }
 }

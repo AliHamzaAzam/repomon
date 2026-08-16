@@ -7,8 +7,9 @@ use repomon_core::agent::backend::{CaptureOpts, ScrollEvent, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
 use repomon_core::git::{diff, reader};
 use repomon_core::model::{
-    AgentAddress, AgentChoice, AgentKind, AgentSession, AgentStatus, BrowseEntry, BrowseResult,
-    Commit, CreateLaneParams, Lane, RemoteDevice, RepoId, ResolvedAgentAddress, TimeRange,
+    AgentAddress, AgentChoice, AgentDoctorInfo, AgentKind, AgentSession, AgentStatus, BrowseEntry,
+    BrowseResult, Commit, CreateLaneParams, Lane, RemoteDevice, RepoId, ResolvedAgentAddress,
+    SystemDoctorResult, TimeRange,
 };
 use repomon_core::protocol::RpcError;
 use repomon_core::{Indexer, TmuxRuntime, analytics, config, session};
@@ -2220,45 +2221,16 @@ pub async fn dispatch(
             let cfg = ctx.config.read().await;
             let default = cfg.default_agent.clone();
             let is_default = |name: &str| default.as_deref() == Some(name);
-            let mut choices: Vec<AgentChoice> = Vec::new();
-            // One Claude entry per detected config dir (default + ~/.claude-* + $CLAUDE_CONFIG_DIR).
-            for (name, command) in agent::claude::agent_variants() {
-                choices.push(AgentChoice {
-                    detected: on_path(&command),
-                    default: is_default(&name),
-                    name,
-                    command,
-                    custom: false,
-                });
-            }
-            for kind in [
-                AgentKind::Codex,
-                AgentKind::OpenCode,
-                AgentKind::Antigravity,
-                AgentKind::Aider,
-                AgentKind::Cursor,
-            ] {
-                let command = kind.command().to_string();
-                let name = kind.as_str().into_owned();
-                choices.push(AgentChoice {
-                    detected: on_path(&command),
-                    default: is_default(&name),
-                    name,
-                    command,
-                    custom: false,
-                });
-            }
-            let mut customs: Vec<_> = cfg.agents.iter().collect();
-            customs.sort_by_key(|(name, _)| name.to_string());
-            for (name, command) in customs {
-                choices.push(AgentChoice {
-                    detected: on_path(command),
-                    default: is_default(name),
-                    name: name.clone(),
-                    command: command.clone(),
-                    custom: true,
-                });
-            }
+            let choices: Vec<AgentChoice> = detect_all_agents(&cfg)
+                .into_iter()
+                .map(|a| AgentChoice {
+                    default: is_default(&a.name),
+                    detected: a.detected,
+                    name: a.name,
+                    command: a.command,
+                    custom: a.custom,
+                })
+                .collect();
             to_value(choices)
         }
         "agent.add" => {
@@ -3521,6 +3493,23 @@ pub async fn dispatch(
         "daemon.shutdown" => {
             ctx.request_shutdown();
             Ok(Value::Null)
+        }
+
+        // ---- system / machine health ----
+        "system.doctor" => {
+            let cfg = ctx.config.read().await;
+            let tmux = repomon_core::agent::tmux::TmuxRuntime::probe();
+            let git = repomon_core::git::probe();
+            let agents: Vec<AgentDoctorInfo> = detect_all_agents(&cfg)
+                .into_iter()
+                .map(|a| AgentDoctorInfo {
+                    kind: a.kind,
+                    name: a.name,
+                    command: a.command,
+                    detected: a.detected,
+                })
+                .collect();
+            to_value(SystemDoctorResult { tmux, git, agents })
         }
 
         // ---- usage ----
@@ -5574,6 +5563,57 @@ fn on_path(command: &str) -> bool {
         return Path::new(prog).exists();
     }
     repomon_core::exec::find_in_path(prog).is_some()
+}
+
+struct RawDetectedAgent {
+    kind: String,
+    name: String,
+    command: String,
+    detected: bool,
+    custom: bool,
+}
+
+fn detect_all_agents(cfg: &repomon_core::Config) -> Vec<RawDetectedAgent> {
+    let mut agents = Vec::new();
+    // One Claude entry per detected config dir (default + ~/.claude-* + $CLAUDE_CONFIG_DIR).
+    for (name, command) in agent::claude::agent_variants() {
+        agents.push(RawDetectedAgent {
+            kind: AgentKind::ClaudeCode.as_str().into_owned(),
+            detected: on_path(&command),
+            name,
+            command,
+            custom: false,
+        });
+    }
+    for kind in [
+        AgentKind::Codex,
+        AgentKind::OpenCode,
+        AgentKind::Antigravity,
+        AgentKind::Aider,
+        AgentKind::Cursor,
+    ] {
+        let command = kind.command().to_string();
+        let name = kind.as_str().into_owned();
+        agents.push(RawDetectedAgent {
+            kind: kind.as_str().into_owned(),
+            detected: on_path(&command),
+            name,
+            command,
+            custom: false,
+        });
+    }
+    let mut customs: Vec<_> = cfg.agents.iter().collect();
+    customs.sort_by_key(|(name, _)| name.to_string());
+    for (name, command) in customs {
+        agents.push(RawDetectedAgent {
+            kind: "custom".to_string(),
+            detected: on_path(command),
+            name: name.clone(),
+            command: command.clone(),
+            custom: true,
+        });
+    }
+    agents
 }
 
 async fn repo_names(ctx: &Ctx) -> HashMap<RepoId, String> {

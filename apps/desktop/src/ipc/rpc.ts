@@ -16,6 +16,7 @@ import type {
   Schedule,
   PendingDialog,
   Repo,
+  SystemDoctorResult,
   TimelineData,
   TranscriptItem,
   WorkSession,
@@ -180,6 +181,7 @@ interface RpcMap {
   sessions: { params: { from_iso: string; to_iso: string }; result: WorkSession[] };
   "config.get": { params: undefined; result: ConfigView };
   "config.set": { params: Partial<ConfigView>; result: ConfigView };
+  "system.doctor": { params: undefined; result: SystemDoctorResult };
   "usage.get": { params: undefined; result: AccountUsage[] };
   "orchestrator.status": { params: undefined; result: OrchestratorStatus };
   "orchestrator.transcript": { params: { limit?: number }; result: TranscriptItem[] };

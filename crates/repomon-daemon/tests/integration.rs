@@ -664,6 +664,75 @@ async fn agent_detect_lists_builtins_and_customs() {
 }
 
 #[tokio::test]
+async fn system_doctor_reports_machine_health_and_agents() {
+    let mut config = Config::default();
+    config.agents.insert(
+        "yolo".into(),
+        "claude --dangerously-skip-permissions".into(),
+    );
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+    let sock = std::env::temp_dir().join(format!("repomon-doctor-it-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let r = call(&mut stream, 1, "system.doctor", None).await;
+    let res = r.result.expect("system.doctor result");
+
+    // git probe
+    let git = &res["git"];
+    assert_eq!(git["available"], json!(true));
+    assert!(git["version"].as_str().unwrap().contains("git"));
+    assert!(git["path"].as_str().is_some());
+
+    // tmux probe
+    let tmux = &res["tmux"];
+    assert!(tmux["available"].is_boolean());
+    if tmux["available"].as_bool().unwrap() {
+        assert!(tmux["version"].as_str().unwrap().starts_with("tmux"));
+        assert_eq!(tmux["source"], json!("system"));
+        assert!(tmux["path"].as_str().is_some());
+    }
+
+    // agents probe
+    let agents = res["agents"].as_array().expect("agents array");
+    let names: Vec<&str> = agents
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"claude-code"));
+    assert!(names.contains(&"codex"));
+    assert!(names.contains(&"opencode"));
+    assert!(names.contains(&"antigravity"));
+    assert!(names.contains(&"aider"));
+    assert!(names.contains(&"cursor"));
+    assert!(names.contains(&"yolo"));
+
+    let cursor = agents.iter().find(|a| a["name"] == "cursor").unwrap();
+    assert_eq!(cursor["kind"], json!("cursor"));
+    assert_eq!(cursor["command"], json!("cursor-agent"));
+    assert!(cursor["detected"].is_boolean());
+
+    let claude = agents.iter().find(|a| a["name"] == "claude-code").unwrap();
+    assert_eq!(claude["kind"], json!("claude-code"));
+    assert!(claude["command"].as_str().unwrap().contains("claude"));
+    assert!(claude["detected"].is_boolean());
+
+    let yolo = agents.iter().find(|a| a["name"] == "yolo").unwrap();
+    assert_eq!(yolo["kind"], json!("custom"));
+    assert_eq!(yolo["command"], json!("claude --dangerously-skip-permissions"));
+    assert!(yolo["detected"].is_boolean());
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
 async fn agent_spawn_uses_custom_command() {
     if !TmuxRuntime::available() {
         eprintln!("tmux not available; skipping custom-command spawn test");

@@ -49,9 +49,10 @@ impl Drop for ConnGuard {
 /// (including any future RPC) is rejected over the network, so the bridge can't be used to reach
 /// past what's listed. Paired devices get full fleet control: read the fleet, drive existing
 /// agents, and now spawn/stop/adopt agents and create/delete/merge lanes too. Still blocked:
-/// daemon lifecycle (`daemon.shutdown`), config/secrets (`config.get` can carry the remote token,
-/// `config.set`), host terminal + filesystem access (`terminal.open/close/target`, `fs.browse`),
-/// and credential minting (`remote.*`, local-only). The local Unix socket is unaffected.
+/// daemon lifecycle (`daemon.shutdown`), host diagnostics (`system.doctor`, local machine health),
+/// config/secrets (`config.get` can carry the remote token, `config.set`), host terminal + filesystem
+/// access (`terminal.open/close/target`, `fs.browse`), and credential minting (`remote.*`, local-only).
+/// The local Unix socket is unaffected.
 fn remote_method_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -667,6 +668,8 @@ mod tests {
             "terminal.target",
             "fs.browse",
             "daemon.shutdown",
+            // system.doctor is intentionally local-only (machine health / dependency check of the host)
+            "system.doctor",
             "watcher.park",
             "orchestrator.resize",
             "orchestrator.start",
