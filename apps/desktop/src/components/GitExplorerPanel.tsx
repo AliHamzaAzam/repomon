@@ -5,7 +5,15 @@ import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall, type LaneDiff } from "../ipc/rpc";
 import type { FleetStore } from "../stores/fleet";
 import { formatRelativeTime } from "./relativeTime";
-import { IconArrowDown, IconArrowUp, IconGitBranch, IconGitCommit, IconRefresh } from "./icons";
+import {
+  IconArrowDown,
+  IconArrowUp,
+  IconChevronDown,
+  IconChevronRight,
+  IconGitBranch,
+  IconGitCommit,
+  IconRefresh,
+} from "./icons";
 
 const HISTORY_LIMIT = 30;
 
@@ -43,6 +51,125 @@ function dirtyCount(lane: Lane): number {
   return dirty.staged + dirty.unstaged + dirty.untracked;
 }
 
+export interface StatFileRow {
+  /// Post-rename path (or the only path, for a non-rename). Brace-form renames
+  /// ("src/{old => new}/mod.rs") are expanded back to the full new path.
+  path: string;
+  /// The pre-rename path, present only when the line described a rename/move.
+  renamedFrom?: string;
+  /// Count of literal `+`/`-` characters in the stat bar. For small diffs this equals the real
+  /// insertion/deletion counts; `git diff --stat` scales the bar for large diffs to fit its
+  /// column width, so past that point these become proportional, not exact. `--stat` is what the
+  /// daemon sends (see `LaneDiff.uncommitted_stat` in crates/repomon-core/src/git/diff.rs) — an
+  /// exact split would need `--numstat` instead, which isn't part of the RPC surface today.
+  adds: number;
+  dels: number;
+  binary: boolean;
+}
+
+/// Splits a rename's `raw` path column into its `{ path, renamedFrom }`, handling both the plain
+/// form (`old/path.ts => new/path.ts`) and the brace form git uses when a common prefix and/or
+/// suffix survive the move (`src/{old => new}/mod.rs`). Returns `raw` unchanged when it isn't a
+/// rename at all.
+function parseStatPath(raw: string): { path: string; renamedFrom?: string } {
+  const brace = raw.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
+  if (brace) {
+    const [, prefix, from, to, suffix] = brace;
+    return { path: `${prefix}${to}${suffix}`, renamedFrom: `${prefix}${from}${suffix}` };
+  }
+  const plain = raw.match(/^(.*) => (.*)$/);
+  if (plain) {
+    const [, from, to] = plain;
+    return { path: to, renamedFrom: from };
+  }
+  return { path: raw };
+}
+
+/// Parses `git diff --stat`'s per-file lines (as sent verbatim in `LaneDiff.uncommitted_stat` and
+/// `committed_stat`) into structured rows. Every file line has the shape `path | rest` (a literal
+/// " | " column separator that git always emits, even though the padding around it varies with the
+/// longest path in the block); the trailing summary line ("3 files changed, ...") never contains
+/// "|", so filtering on that separator is enough to drop it without a second pass. `rest` is either
+/// `Bin <old> -> <new> bytes` for a binary file or `N <bar>` for text, where `<bar>` is `+`/`-`
+/// characters (see `StatFileRow.adds`/`dels` for the scaling caveat); a content-free rename reports
+/// `0` with an empty bar, which naturally parses to zero adds/dels.
+export function parseStatFiles(stat: string): StatFileRow[] {
+  return stat
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.includes(" | "))
+    .map((line) => {
+      const sep = line.indexOf(" | ");
+      const rawPath = line.slice(0, sep).trim();
+      const rest = line.slice(sep + 3).trim();
+      const { path, renamedFrom } = parseStatPath(rawPath);
+      const binary = rest.startsWith("Bin");
+      const adds = binary ? 0 : (rest.match(/\+/g) ?? []).length;
+      const dels = binary ? 0 : (rest.match(/-/g) ?? []).length;
+      return { path, renamedFrom, adds, dels, binary };
+    });
+}
+
+/// Splits a path into its muted directory prefix (trailing slash kept) and emphasized basename,
+/// for the dir-muted/basename-emphasized row treatment.
+function splitPath(path: string): { dir: string; base: string } {
+  const idx = path.lastIndexOf("/");
+  return idx === -1 ? { dir: "", base: path } : { dir: path.slice(0, idx + 1), base: path.slice(idx + 1) };
+}
+
+function StatFileRowView(props: { file: StatFileRow }) {
+  const parts = () => splitPath(props.file.path);
+  return (
+    <li class="flex items-center gap-1.5 rounded-lg px-1.5 py-1 hover:bg-raised/60">
+      <span class="min-w-0 flex-1 truncate font-mono text-xs">
+        <span class="text-muted/70">{parts().dir}</span>
+        <span class="text-foreground">{parts().base}</span>
+        <Show when={props.file.renamedFrom} keyed>
+          {(from) => <span class="text-muted/50"> ← {from}</span>}
+        </Show>
+      </span>
+      <Show
+        when={!props.file.binary}
+        fallback={<span class="shrink-0 text-[10px] text-muted/60">binary</span>}
+      >
+        <span class="shrink-0 text-[10px] tabular-nums">
+          <Show when={props.file.adds > 0}>
+            <span class="text-signal">+{props.file.adds}</span>
+          </Show>
+          <Show when={props.file.adds > 0 && props.file.dels > 0}> </Show>
+          <Show when={props.file.dels > 0}>
+            <span class="text-fault">-{props.file.dels}</span>
+          </Show>
+        </span>
+      </Show>
+    </li>
+  );
+}
+
+/// A muted "not tracked" marker for the untracked-files summary row — see the comment on the
+/// "Untracked" group in the Working tree section for why this is a count, not a file list.
+function UntrackedGlyph() {
+  return (
+    <span
+      class="flex size-4 shrink-0 items-center justify-center rounded bg-muted/10 font-mono text-[9px] font-semibold text-muted/70"
+      aria-hidden="true"
+    >
+      U
+    </span>
+  );
+}
+
+function GroupCountBadge(props: { count: number; tone: "attention" | "muted" }) {
+  const dot = () => (props.tone === "attention" ? "bg-attention" : "bg-muted/50");
+  const text = () => (props.tone === "attention" ? "text-attention" : "text-muted");
+  return (
+    <span class={`inline-flex items-center gap-0.5 text-[10px] font-semibold leading-none ${text()}`}>
+      <span class={`size-1.5 rounded-full ${dot()}`} />
+      <span>{props.count}</span>
+    </span>
+  );
+}
+
 function RowSkeleton(props: { rows: number }) {
   return (
     <div class="animate-pulse space-y-1.5">
@@ -68,6 +195,10 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   const [history, setHistory] = createSignal<Commit[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<TranslatedError | null>(null);
+  // Hoisted above the branchData Show block (rather than declared inside it) so it survives the
+  // panel's 1.2s poll-driven refetches instead of collapsing back open every time git state
+  // changes; session-local only, per C3 — no localStorage persistence needed here.
+  const [changesExpanded, setChangesExpanded] = createSignal(true);
 
   let epoch = 0;
 
@@ -244,6 +375,89 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                       </Show>
                     </Show>
                   </div>
+                );
+              }}
+            </Show>
+          </section>
+
+          <section>
+            <p class="section-label mb-2">Working tree</p>
+            <Show
+              when={branchData()}
+              keyed
+              fallback={loading() ? <RowSkeleton rows={2} /> : <p class="text-xs text-muted">Git status unavailable.</p>}
+            >
+              {(diff) => {
+                // Counts here are sourced from `lane().state.dirty` (gix's live status walk,
+                // reader.rs `dirty_state`) rather than `diff.untracked`/parsed file rows, so this
+                // section always agrees with the header's dirty badge — same lane, same field.
+                //
+                // Grouping: `uncommitted_stat` is `git diff HEAD --stat`, which diffs the worktree
+                // straight against HEAD and so already mixes staged and unstaged hunks into one
+                // per-file line (see LaneDiff.uncommitted_stat in diff.rs) — there's no way to tell,
+                // from that text, which lines are staged. So file rows fall under a single honest
+                // "Changes" group, with the staged/unstaged split shown only as the header's
+                // aggregate counts, not as a per-file split the data can't support.
+                //
+                // "Untracked" is a count-only row, not a file list, for the same reason: neither
+                // `lane.diff` (LaneDiff.untracked, diff.rs) nor the live dirty walk exposes
+                // untracked *filenames* — both only ever return a usize. There is currently no RPC
+                // that lists them by name, so an honest UI shows the count and nothing invented.
+                const dirty = () => lane()?.state.dirty ?? { staged: 0, unstaged: 0, untracked: 0 };
+                const changesCount = () => dirty().staged + dirty().unstaged;
+                const files = () => parseStatFiles(diff.uncommitted_stat);
+                return (
+                  <Show
+                    when={changesCount() > 0 || dirty().untracked > 0}
+                    fallback={<p class="text-xs text-muted">Working tree clean</p>}
+                  >
+                    <div class="space-y-3">
+                      <Show when={changesCount() > 0}>
+                        <div>
+                          <button
+                            type="button"
+                            class="focus-ring flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-raised/40"
+                            onClick={() => setChangesExpanded((v) => !v)}
+                            aria-expanded={changesExpanded()}
+                          >
+                            <Show when={changesExpanded()} fallback={<IconChevronRight size={10} class="shrink-0 text-muted/50" />}>
+                              <IconChevronDown size={10} class="shrink-0 text-muted/50" />
+                            </Show>
+                            <span class="section-label">Changes</span>
+                            <GroupCountBadge count={changesCount()} tone="attention" />
+                            <span class="text-[10px] text-muted/70">
+                              {dirty().staged} staged · {dirty().unstaged} unstaged
+                            </span>
+                          </button>
+                          <Show when={changesExpanded()}>
+                            <Show
+                              when={files().length > 0}
+                              fallback={<p class="px-1 py-1 text-xs text-muted">No per-file details available.</p>}
+                            >
+                              <ul class="space-y-0.5">
+                                <For each={files()}>{(f) => <StatFileRowView file={f} />}</For>
+                              </ul>
+                            </Show>
+                          </Show>
+                        </div>
+                      </Show>
+
+                      <Show when={dirty().untracked > 0}>
+                        <div>
+                          <div class="flex items-center gap-1.5 px-1 py-0.5">
+                            <span class="section-label">Untracked</span>
+                            <GroupCountBadge count={dirty().untracked} tone="muted" />
+                          </div>
+                          <div class="flex items-center gap-1.5 rounded-lg px-1.5 py-1">
+                            <UntrackedGlyph />
+                            <span class="text-xs text-muted">
+                              {dirty().untracked} file{dirty().untracked === 1 ? "" : "s"} not tracked by git
+                            </span>
+                          </div>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
                 );
               }}
             </Show>
