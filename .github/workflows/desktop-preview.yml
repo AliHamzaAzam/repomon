@@ -129,6 +129,12 @@ jobs:
           if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
             TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin bun run sidecar:prepare
             TAURI_ENV_TARGET_TRIPLE=x86_64-apple-darwin bun run sidecar:prepare
+            # The final bundling step (as opposed to each arch's compile step) looks for the
+            # universal-suffixed external binary directly, same as the daemon sidecar below.
+            lipo -create -output src-tauri/binaries/tmux-universal-apple-darwin \
+              src-tauri/binaries/tmux-aarch64-apple-darwin \
+              src-tauri/binaries/tmux-x86_64-apple-darwin
+            chmod +x src-tauri/binaries/tmux-universal-apple-darwin
           else
             TAURI_ENV_TARGET_TRIPLE=${{ matrix.target }} bun run sidecar:prepare
           fi
