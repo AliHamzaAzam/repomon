@@ -138,6 +138,18 @@ jobs:
           else
             TAURI_ENV_TARGET_TRIPLE=${{ matrix.target }} bun run sidecar:prepare
           fi
+      # tauri.preview.conf.json (shared by macOS/Linux) has createUpdaterArtifacts: false, so
+      # those two platforms never emit a .sig and tauri-action's uploadVersionJSON silently
+      # skips them -- latest.json ends up with only the Windows entry and the cleanup job's
+      # all-three-platforms check fails. It was `true` (and working) before eeb1819 flipped it
+      # while wiring up tmux; patched here at build time rather than in the committed config so
+      # this fix stays scoped to the workflow file.
+      - name: Enable updater artifacts for this platform's config
+        if: runner.os != 'Windows'
+        working-directory: apps/desktop
+        run: |
+          jq '.bundle.createUpdaterArtifacts = true' src-tauri/tauri.preview.conf.json > src-tauri/tauri.preview.conf.json.tmp
+          mv src-tauri/tauri.preview.conf.json.tmp src-tauri/tauri.preview.conf.json
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
