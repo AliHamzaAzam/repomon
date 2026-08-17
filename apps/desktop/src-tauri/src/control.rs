@@ -16,6 +16,23 @@ pub struct DaemonServiceInfo {
     pub status: String,
 }
 
+/// Poll `socket` until nothing answers a connect, or `timeout` elapses. A shut-down daemon's
+/// listener can take longer than a fixed sleep to actually close (SQLite/watcher teardown,
+/// system load) — spawning a replacement before that happens used to race the still-dying
+/// process's socket bind, which either failed the respawn outright or (before the transport-level
+/// fix) let the new daemon silently steal the socket file out from under a still-running orphan.
+/// Polling for a real disconnect makes restart wait exactly as long as the old process needs,
+/// no more.
+async fn wait_until_unreachable(socket: &PathBuf, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if DaemonClient::connect(socket).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 pub fn service_is_installed(status: &str) -> bool {
     let normalized = status.trim().to_lowercase();
     !normalized.is_empty() && !normalized.contains("not installed")
@@ -43,14 +60,15 @@ pub async fn daemon_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(
     let endpoint = state.endpoint().to_string();
     let service_managed = is_service_managed();
 
-    // 1. Call daemon.shutdown RPC
+    // 1. Call daemon.shutdown RPC and wait for the listener to actually go away, not just a
+    // fixed delay (see `wait_until_unreachable`).
     let socket = PathBuf::from(&endpoint);
     if let Ok(client) = DaemonClient::connect(&socket).await {
         let _ = client.call("daemon.shutdown", None).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     } else if let Some(client) = state.client.get() {
         let _ = client.call("daemon.shutdown", None).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 
     // 2. If service-managed, stop service so launchd/systemd KeepAlive doesn't revive it
@@ -89,23 +107,24 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
     let endpoint = state.endpoint().to_string();
     let service_managed = is_service_managed();
 
-    // 1. Gracefully shut down current daemon
+    // 1. Gracefully shut down the current daemon and wait for the listener to actually go away
+    // (see `wait_until_unreachable`) — spawning the replacement before the old one has released
+    // the socket used to race its bind.
     let socket = PathBuf::from(&endpoint);
     if let Ok(client) = DaemonClient::connect(&socket).await {
         let _ = client.call("daemon.shutdown", None).await;
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     } else if let Some(client) = state.client.get() {
         let _ = client.call("daemon.shutdown", None).await;
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 
     // 2. Restart service or re-spawn process
     if service_managed {
         let _ = service::stop();
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        wait_until_unreachable(&socket, Duration::from_secs(3)).await;
         service::start().map_err(|e| e.to_string())?;
     } else {
-        tokio::time::sleep(Duration::from_millis(350)).await;
         let _ = repomon_core::launch::spawn_daemon(&socket);
     }
 

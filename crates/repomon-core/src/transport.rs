@@ -122,6 +122,25 @@ pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
                 let _ = std::fs::create_dir_all(parent);
             }
             if path.exists() {
+                // A stale socket file from a crashed/killed previous run is safe to clear, but a
+                // *live* daemon still listening on it must never be silently evicted: unlinking
+                // out from under it lets a second `repomond` bind the same path while the first
+                // keeps running as an unreachable orphan, invisible to `ps`-level checks and still
+                // polling/stamping the shared tmux server — the two instances' independent
+                // discovery caches then race each other, and whichever client is still connected
+                // to the orphan sees agents flicker or vanish with no way to recover short of
+                // finding and killing it by hand. Windows already refuses this via
+                // `first_pipe_instance`; probe with a real connect so unix matches that guarantee
+                // instead of trusting the path's mere existence.
+                if tokio::net::UnixStream::connect(path).await.is_ok() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!(
+                            "another repomond is already listening on {}",
+                            path.display()
+                        ),
+                    ));
+                }
                 let _ = std::fs::remove_file(path);
             }
             Ok(IpcListener {
@@ -330,6 +349,39 @@ mod tests {
             assert_eq!(got, vec![b'0' + i]);
         }
         server.await.unwrap();
+    }
+
+    /// A second `listen()` on a path a live listener still owns must fail, not evict it — the
+    /// blind `remove_file` this replaces let a slow-to-exit (or merely racing) old daemon get its
+    /// socket silently stolen out from under it, leaving it running forever as an unreachable
+    /// orphan while a client stayed connected to its now-stale state. Unix-only: Windows already
+    /// gets this for free from `first_pipe_instance`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_to_steal_a_live_listeners_socket() {
+        let ep = test_endpoint("live");
+        let _first = listen(&ep).await.unwrap(); // still held: this is the "live" listener
+
+        match listen(&ep).await {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::AddrInUse),
+            Ok(_) => panic!("expected AddrInUse, got a second listener on the same socket"),
+        }
+    }
+
+    /// A socket file left behind by a crashed/killed daemon (nothing answers a connect) must
+    /// still be reclaimed, so a stale file never permanently blocks the next real daemon start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reclaims_a_stale_socket_file_with_no_live_listener() {
+        let ep = test_endpoint("stale");
+        {
+            // Bind once, then drop without going through `serve`'s graceful-shutdown unlink —
+            // `IpcListener` itself has no `Drop` impl that removes the file, so this leaves
+            // exactly what a crash leaves: a socket file on disk with nothing listening on it.
+            let _dead = listen(&ep).await.unwrap();
+        }
+
+        listen(&ep).await.expect("a stale, unconnectable socket file must not block a fresh bind");
     }
 
     /// The in-memory pair used by unit tests behaves like a connected socket.
