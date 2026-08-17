@@ -111,6 +111,27 @@ jobs:
         run: |
           cargo build --release --locked -p repomon-host --target "${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/repomon-agent-host.exe" "apps/desktop/src-tauri/binaries/repomon-agent-host-${{ matrix.target }}.exe"
+      # tauri.preview.conf.json lists `binaries/tmux` as an externalBin on macOS/Linux, so tauri
+      # build fails with "resource path ... doesn't exist" unless it's prepared here. Reuses
+      # prepare-sidecar.ts (also relied on by desktop-release.yml) rather than duplicating the
+      # acquisition logic: downloads a static binary on Linux, source-builds a portable one on
+      # macOS (once per arch slice, since the universal build needs both to lipo together), and
+      # no-ops on Windows (ConPTY host is used instead of tmux there).
+      - name: Install macOS build tools for bundled tmux
+        if: matrix.apple_universal
+        run: brew install autoconf automake pkg-config
+      - name: Prepare tmux sidecar
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          CI: "true"
+        run: |
+          if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
+            TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin bun run sidecar:prepare
+            TAURI_ENV_TARGET_TRIPLE=x86_64-apple-darwin bun run sidecar:prepare
+          else
+            TAURI_ENV_TARGET_TRIPLE=${{ matrix.target }} bun run sidecar:prepare
+          fi
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
