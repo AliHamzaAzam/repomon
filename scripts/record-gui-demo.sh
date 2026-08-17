@@ -25,7 +25,7 @@
 #      socket than your real Repomon.app, so your real fleet is never touched), drives a
 #      short AppleScript tour centered on the live agent terminal (fleet + agent hero shot
 #      -> git panel -> editor panel -> settings/system -> back to the agent terminal),
-#      records ~48s at 1440x900, and converts it to an optimized GIF at docs/gui-demo.gif.
+#      records ~48s of the full display (menu bar excluded), and converts it to an optimized GIF at docs/gui-demo.gif.
 #   6. Cleans up: kills the sandbox daemon and app, removes the sandbox temp dir. Verifies
 #      your real daemon's PID is unchanged before and after.
 #
@@ -596,7 +596,15 @@ XDG_CONFIG_HOME="$CONFIG_HOME" REPOMON_DATA_DIR="$DATA_DIR" REPOMON_SOCKET="$SOC
 APP_PID=$!
 sleep 4
 
-WIN_X=80 WIN_Y=80 WIN_W=1440 WIN_H=900
+# Full-screen recording: size the window to fill the display below the menu bar and record
+# exactly that region. The menu bar itself is excluded on purpose - it carries the user's own
+# status items (clock, battery, third-party widgets), which do not belong in a product demo.
+MENUBAR_H=25
+read -r SCREEN_W SCREEN_H < <(osascript -e 'tell application "Finder" to get bounds of window of desktop' | awk -F", " '{print $3, $4}')
+if [[ -z "${SCREEN_W:-}" || -z "${SCREEN_H:-}" ]]; then
+  SCREEN_W=1440 SCREEN_H=925  # conservative fallback
+fi
+WIN_X=0 WIN_Y=$MENUBAR_H WIN_W=$SCREEN_W WIN_H=$((SCREEN_H - MENUBAR_H))
 osascript <<OSA
 tell application "System Events"
   set frontmost of first process whose unix id is $APP_PID to true
