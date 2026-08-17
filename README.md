@@ -17,6 +17,8 @@ waiting on you float to the top, and you can approve a prompt from your phone.
   <img alt="For Claude Code · Codex · Antigravity · OpenCode · Cursor · Aider" src="https://img.shields.io/badge/for-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Antigravity%20%C2%B7%20OpenCode%20%C2%B7%20Cursor%20%C2%B7%20Aider-8A2BE2">
 </p>
 
+**Install now:** [download the app](https://github.com/AliHamzaAzam/repomon/releases/latest), open it, add a repo. Nothing else to set up. Details below.
+
 <!-- Hero demo GIF: docs/gui-demo.gif, produced by scripts/record-gui-demo.sh from a
      sandboxed instance of the desktop app with throwaway fake repos (no real data ever
      appears in it). If this image is missing or blank, the gif hasn't been recorded yet on
@@ -50,10 +52,11 @@ with one-click-copy install commands for anything missing.
   have open, you get a conflict banner (reload or keep mine) instead of a silent overwrite.
 - **Self-service recovery.** Settings can stop, start, or reset the daemon and bulk-restore
   orphaned agent sessions, without a terminal.
-- **Any agent kind can orchestrate any other.** repomind (the fleet orchestrator) can now run as
-  Claude Code, Codex, Antigravity, or OpenCode, and manage agents of every kind underneath it.
-  Every managed session gets fleet mail: address one agent, a whole lane (`lane-12/*`), or the
-  whole fleet (`*`), with per-recipient delivery results.
+- **Fleet mail between agents.** Address one agent, a whole lane (`lane-12/*`), or the whole
+  fleet (`*`), with per-recipient delivery results.
+- **repomind (work in progress).** An orchestrator agent that can run as Claude Code, Codex,
+  Antigravity, or OpenCode and manage agents of every kind underneath it. Functional, still
+  rough at the edges. See the [repomind section](#repomind-fleet-orchestrator-work-in-progress) below.
 
 See [docs/desktop.md](docs/desktop.md) for the full keyboard reference and every setting.
 
@@ -91,83 +94,67 @@ at once. Five crates, plus the desktop app:
 
 ## Install
 
-**Download Mission Control** from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest):
+### Desktop app (recommended)
 
-| Platform | File |
-|---|---|
-| macOS (Apple silicon or Intel) | `Repomon_<version>_aarch64.dmg` / `Repomon_<version>_x64.dmg` |
-| Windows | `Repomon_<version>_x64-setup.exe` |
-| Linux | `Repomon_<version>_amd64.AppImage`, `.deb`, or `.rpm` |
+**macOS**
+1. Download `Repomon_<version>_universal.dmg` from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest) (one build, Apple silicon and Intel)
+2. Open it, drag Repomon to Applications
+3. Add a repo, go
 
-Open it, add a repo, go. The bundle carries its own daemon and its own portable `tmux`, so
-nothing else needs installing first, and it updates itself after the first download (**Settings
-> General > Check for updates**). See [docs/desktop.md](docs/desktop.md).
+**Windows**
+1. Download `Repomon_<version>_x64-setup.exe` from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest)
+2. Run it
+3. Add a repo, go
 
-**Prefer the command line?** The TUI and headless `repomon` commands install the same way they
-always have:
+**Linux**
+1. Download the `.AppImage`, `.deb`, or `.rpm` from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest)
+2. AppImage: `chmod +x` it and run. Deb: `sudo apt install ./Repomon_<version>_amd64.deb`
+3. Add a repo, go
+
+The bundle carries its own daemon and its own portable `tmux`. Nothing else to install first. It
+updates itself after the first download (**Settings > General > Check for updates**). See
+[docs/desktop.md](docs/desktop.md).
+
+### Command line (TUI + headless `repomon`)
+
+macOS / Linux:
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
 ```
 
-**Homebrew** (macOS):
+Homebrew (macOS):
 
 ```sh
 brew install AliHamzaAzam/tap/repomon      # or: brew tap AliHamzaAzam/tap && brew install repomon
 brew services start repomon                # optional: run the daemon at login
 ```
 
-Or grab a tarball from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest):
-per-arch (`aarch64`/`x86_64`) or the `universal` build, then extract, and put `repomon` and `repomond`
-on your `PATH`.
+Needs `tmux` and `git` on the system (the desktop bundle ships its own; the CLI does not). No
+tmux? `brew install tmux` (macOS), `sudo apt install tmux` (Debian/Ubuntu/WSL2),
+`sudo dnf install tmux` (Fedora), `sudo pacman -S tmux` (Arch).
 
-**From source**: any platform with the Rust toolchain (anywhere without a prebuilt binary):
+No prebuilt binary for your platform: `cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon`.
+
+Enable cd-on-exit (optional): add to `~/.zshrc` or `~/.bashrc`:
 
 ```sh
-cargo install --git https://github.com/AliHamzaAzam/repomon repomon-tui repomon-daemon
+eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repomon shell-init fish
 ```
 
-On macOS and Linux the CLI (unlike the desktop bundle) needs `tmux` and `git` on the system.
-Don't have `tmux`? Install it: `brew install tmux` (macOS), `sudo apt install tmux` (Debian / Ubuntu / WSL2), `sudo dnf install tmux` (Fedora), `sudo pacman -S tmux` (Arch).
-
-**Windows** (native, no WSL, no tmux):
-
-Native Windows support has landed. There is currently a **preview build on the
-`release/windows-preview` branch** and **no published GitHub release yet**, so the
-`irm | iex` one-liner below will only work once a Windows release is tagged.
-
-Until then, build from source with the Rust toolchain (edition 2024, toolchain 1.95.0) and
-a Git for Windows install:
-
-```powershell
-git clone https://github.com/AliHamzaAzam/repomon
-cd repomon
-git switch release/windows-preview
-cargo build --release
-# repomon.exe, repomond.exe and repomon-agent-host.exe land in target\release\.
-# Copy all three into one directory on your PATH (they must live together).
-```
-
-Once a release is tagged, the installer downloads prebuilt binaries (no Rust toolchain
-needed) and puts the three exes in `%LOCALAPPDATA%\Programs\repomon` on your user PATH:
+**Windows CLI**, PowerShell:
 
 ```powershell
 irm https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.ps1 | iex
 ```
 
-Env overrides mirror `install.sh`: `REPOMON_INSTALL_DIR` (install location) and
-`REPOMON_VERSION` (a tag to pin instead of latest).
-
-Then enable cd-on-exit by adding to your PowerShell profile (`$PROFILE`):
+Puts `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe` in
+`%LOCALAPPDATA%\Programs\repomon` on your user PATH (env overrides: `REPOMON_INSTALL_DIR`,
+`REPOMON_VERSION` to pin a tag instead of latest). Then enable cd-on-exit by adding to your
+PowerShell profile (`$PROFILE`):
 
 ```powershell
 repomon shell-init powershell | Out-String | Invoke-Expression
-```
-
-Then enable cd-on-exit by adding to your `~/.zshrc` (or `~/.bashrc`):
-
-```sh
-eval "$(repomon shell-init zsh)"
 ```
 
 ### Run the daemon as a service (optional)
@@ -230,7 +217,12 @@ force in-process always, or manage the daemon with
 > **Building from source?** After a rebuild, run `repomon daemon restart` so the new code is
 > served (the daemon outlives the UI). The dev build runs from `./target/debug/repomon`.
 
-## repomind (fleet orchestrator)
+## repomind (fleet orchestrator, work in progress)
+
+**Status: functional, not polished.** repomind works today, but expect rough edges: guardrail
+behavior under real-world load isn't fully proven, and the UX (panel, notifications, dashboard)
+is still catching up to the daemon-side feature set. Treat it as an early feature, not a
+finished one.
 
 repomind is an orchestrator agent for the fleet: a coding-agent session (Claude Code, Codex,
 Antigravity, or OpenCode) wired to repomon's own MCP server, so it can read every lane's status
@@ -356,18 +348,23 @@ repomon shell-init powershell | Out-String | Invoke-Expression
 
 ## Status
 
-Mission Control (fleet, git explorer, in-app editor, onboarding, System Health, self-service
-daemon recovery), the TUI (fleet/today, the agent multiplexer, the history dashboard), the
-remote access layer (WebSocket bridge + APNs + pairing), and repomind (cross-kind
-orchestration, fleet mail, playbooks, approval memory, standing orchestrations) are all in, on
-macOS, Linux, and Windows. Each platform has native paths for the service, notifications,
-clipboard, and process/agent liveness. **Native Windows support has landed** (code-complete and
-CI-green on `x86_64-pc-windows-msvc`): a `SessionBackend` trait with a tmux backend on Unix and
-a host-process backend on Windows, named-pipe IPC, and `repomon-agent-host.exe` for durability
-parity. It still awaits a physical Windows 11 end-to-end pass and binary signing before a
-Windows release is tagged (see [docs/windows-validation.md](docs/windows-validation.md)). The
-iOS companion app is built and ships once an Apple Developer account is in place. Deferred: a
-web dashboard.
+**Done:** Mission Control (fleet, git explorer, in-app editor, onboarding, System Health,
+self-service daemon recovery), the TUI (fleet/today, the agent multiplexer, the history
+dashboard), the remote access layer (WebSocket bridge + APNs + pairing). All on macOS, Linux,
+and Windows, each with native service/notification/clipboard/liveness paths.
+
+**Work in progress:** repomind (cross-kind orchestration, fleet mail, playbooks, approval
+memory, standing orchestrations) - functional, see the [repomind section](#repomind-fleet-orchestrator-work-in-progress).
+
+**Windows: released, validation catching up.** CLI and desktop app both ship in every release
+(`repomon-<version>-{aarch64,x86_64}-pc-windows-msvc.zip`, `Repomon_<version>_x64-setup.exe`): a
+host-process backend (`repomon-agent-host.exe`) in place of tmux, named-pipe IPC, durability
+parity with Unix. What's still pending: a physical Windows 11 end-to-end validation pass and
+binary signing (see [docs/windows-validation.md](docs/windows-validation.md)) - until that
+lands, treat Windows as newer and less battle-tested than macOS/Linux.
+
+**Not started / deferred:** the iOS companion app (built, ships once an Apple Developer account
+is in place), a web dashboard.
 
 ---
 
