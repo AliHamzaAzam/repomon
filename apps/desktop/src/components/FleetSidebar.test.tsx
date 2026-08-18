@@ -262,6 +262,14 @@ describe("fleet sidebar hiding", () => {
   });
 
   it("shows a reset-time tooltip only for windows that carry reset_at (E9)", () => {
+    // Pin "now" to a fixed local instant so the 5h window's reset_at (a few hours later, same
+    // local day) resolves to the time-only same-day form deterministically, regardless of the
+    // machine's timezone or the date this test happens to run on.
+    vi.useFakeTimers();
+    const now = new Date(2026, 7, 18, 12, 0, 0); // Aug 18, 2026, 12:00 local
+    vi.setSystemTime(now);
+    const sameDayReset = new Date(2026, 7, 18, 18, 30, 0).toISOString();
+
     const alpha = repo(1, "alpha");
     const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
     (fleet as any).focusedUsage = () => ({
@@ -269,7 +277,7 @@ describe("fleet sidebar hiding", () => {
       age_secs: 15,
       report: {
         windows: [
-          { label: "5h", pct_used: 12, reset_at: "2026-08-17T18:30:00Z" },
+          { label: "5h", pct_used: 12, reset_at: sameDayReset },
           { label: "wk", pct_used: 85, reset_at: null },
           { label: "mo", pct_used: 40, reset_at: "not-a-real-date" },
         ],
@@ -278,7 +286,7 @@ describe("fleet sidebar hiding", () => {
 
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
-    // Window with a valid reset_at gets a tooltip mentioning the reset time.
+    // Window with a valid, same-day reset_at gets a time-only tooltip clause.
     expect(screen.getByText("12%").parentElement?.getAttribute("title")).toMatch(/resets at/);
     // Window with no reset_at omits the reset clause entirely rather than showing nothing useful.
     const weeklyTitle = screen.getByText("85%").parentElement?.getAttribute("title");
@@ -287,6 +295,8 @@ describe("fleet sidebar hiding", () => {
     // Window with an unparsable reset_at is treated the same as absent (formatResetAt returns null).
     const monthlyTitle = screen.getByText("40%").parentElement?.getAttribute("title");
     expect(monthlyTitle).not.toMatch(/resets at/);
+
+    vi.useRealTimers();
   });
 
   it("wires the Rate Limits refresh button to fleet.refresh with a spinning affordance", async () => {

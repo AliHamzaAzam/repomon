@@ -10,6 +10,7 @@ import {
   notifyLayoutChanged,
 } from "../stores/uiSettings";
 import { primarySession } from "./agentLabel";
+import { formatResetAt } from "./resetTime";
 import RepoExtMenu from "./RepoExtMenu";
 import {
   AgentIcon,
@@ -71,19 +72,6 @@ function usageTone(pct: number): string {
   if (pct >= 95) return "text-fault font-semibold";
   if (pct >= 75) return "text-attention font-semibold";
   return "text-foreground";
-}
-
-/// Format a reset_at ISO timestamp as a short local time string for E9 tooltips.
-/// Returns null when reset_at is absent (omit the tooltip rather than showing nothing).
-function formatResetAt(resetAt: string | null | undefined): string | null {
-  if (!resetAt) return null;
-  try {
-    const d = new Date(resetAt);
-    if (isNaN(d.getTime())) return null;
-    return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  } catch {
-    return null;
-  }
 }
 
 function LaneRow(props: {
@@ -783,7 +771,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                     // E9: show reset time in tooltip when the daemon captured it; omit otherwise.
                     const resetStr = formatResetAt(window.reset_at);
                     const tooltipText = resetStr
-                      ? `${formatUsageWindow(window.label)}: ${window.pct_used}% used · resets at ${resetStr}`
+                      ? `${formatUsageWindow(window.label)}: ${window.pct_used}% used · resets ${resetStr}`
                       : `${formatUsageWindow(window.label)}: ${window.pct_used}% used`;
                     return (
                       <div
