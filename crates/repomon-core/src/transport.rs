@@ -381,7 +381,9 @@ mod tests {
             let _dead = listen(&ep).await.unwrap();
         }
 
-        listen(&ep).await.expect("a stale, unconnectable socket file must not block a fresh bind");
+        listen(&ep)
+            .await
+            .expect("a stale, unconnectable socket file must not block a fresh bind");
     }
 
     /// The in-memory pair used by unit tests behaves like a connected socket.

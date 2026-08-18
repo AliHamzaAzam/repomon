@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use repomon_core::client::DaemonClient;
 use repomon_core::service;
+use repomon_core::transport::{self, Endpoint};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -16,17 +17,35 @@ pub struct DaemonServiceInfo {
     pub status: String,
 }
 
+/// Send `daemon.shutdown` with a hard ceiling. `DaemonClient::call`'s 15s timeout only bounds
+/// the *response* wait — the send side (queuing the request onto the writer task's channel) has
+/// no timeout of its own, so a writer stalled against a socket that's mid-death can block this
+/// indefinitely. The frontend's Stop/Start buttons share one `daemonBusy` flag that only clears
+/// when this command's promise settles, so an unbounded hang here doesn't just fail one click —
+/// it permanently disables both buttons, with no way to recover from the GUI. The shutdown
+/// itself is fire-and-forget already (`let _ = ...`), so timing it out and moving on to the
+/// unreachability poll costs nothing.
+async fn send_shutdown(client: &DaemonClient) {
+    let _ =
+        tokio::time::timeout(Duration::from_secs(3), client.call("daemon.shutdown", None)).await;
+}
+
 /// Poll `socket` until nothing answers a connect, or `timeout` elapses. A shut-down daemon's
 /// listener can take longer than a fixed sleep to actually close (SQLite/watcher teardown,
 /// system load) — spawning a replacement before that happens used to race the still-dying
 /// process's socket bind, which either failed the respawn outright or (before the transport-level
 /// fix) let the new daemon silently steal the socket file out from under a still-running orphan.
 /// Polling for a real disconnect makes restart wait exactly as long as the old process needs,
-/// no more.
+/// no more. Probes with a bare transport connect, not a full `DaemonClient` — a `DaemonClient`
+/// spawns reader/writer/keepalive tasks per attempt, and hammering a daemon that is *actively
+/// mid-shutdown* with dozens of those (one every 50ms) is exactly the kind of extra connection
+/// churn that can widen the shutdown-notify race in `repomon-daemon`'s accept loop instead of
+/// helping it along.
 async fn wait_until_unreachable(socket: &PathBuf, timeout: Duration) {
+    let endpoint = Endpoint::from_path(socket);
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
-        if DaemonClient::connect(socket).await.is_err() {
+        if transport::connect(&endpoint).await.is_err() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -64,10 +83,10 @@ pub async fn daemon_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(
     // fixed delay (see `wait_until_unreachable`).
     let socket = PathBuf::from(&endpoint);
     if let Ok(client) = DaemonClient::connect(&socket).await {
-        let _ = client.call("daemon.shutdown", None).await;
+        send_shutdown(&client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     } else if let Some(client) = state.client.get() {
-        let _ = client.call("daemon.shutdown", None).await;
+        send_shutdown(&client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 
@@ -112,10 +131,10 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
     // the socket used to race its bind.
     let socket = PathBuf::from(&endpoint);
     if let Ok(client) = DaemonClient::connect(&socket).await {
-        let _ = client.call("daemon.shutdown", None).await;
+        send_shutdown(&client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     } else if let Some(client) = state.client.get() {
-        let _ = client.call("daemon.shutdown", None).await;
+        send_shutdown(&client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 
