@@ -41,6 +41,23 @@ pub struct WindowMeta {
     pub agent_kind: Option<String>,
 }
 
+/// Field separator used in every tmux `-F` probe format string ([`TmuxRuntime::list_windows_meta`],
+/// [`TmuxRuntime::list_windows_with_activity`]). tmux vis-sanitizes control characters in `-F`
+/// output — including a literal tab (0x09) — down to `_` whenever the tmux CLIENT process runs in
+/// the C/POSIX locale. That's exactly what a daemon spawned by the desktop GUI (Finder/launchd)
+/// inherits: neither sets `LANG`/`LC_*`, so tmux falls back to C/POSIX and every tab in a probe
+/// line collapses to `_`, merging all fields into one unparsable blob (`TERM` has no effect on
+/// this). A daemon launched from an interactive shell never hits it, because login shells export
+/// a real `LANG`/`LC_*` — which is why this bug only ever showed up "GUI doesn't show agents, TUI
+/// works". A printable, multi-char sentinel survives vis-sanitization in every locale tmux
+/// supports, so it can't be collapsed the way a single control character can. None of the fields
+/// these probes emit — window names of repomon-managed windows, `@<id>` window ids, transcript
+/// session uuids, agent-kind strings, or worktree paths — ever contain this sequence in practice,
+/// so it's safe as a delimiter. (See also [`locale_override`], the defense-in-depth companion fix
+/// that gives the tmux client a real locale so other output paths, e.g. `capture-pane`, aren't
+/// exposed to the same sanitization.)
+const PROBE_FIELD_SEP: &str = "%#%";
+
 /// Where a resolved tmux binary originates and what path was resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTmux {
@@ -131,6 +148,41 @@ pub fn tmux_program() -> PathBuf {
     resolved_tmux()
         .map(|r| r.path)
         .unwrap_or_else(|| PathBuf::from("tmux"))
+}
+
+/// Pure decision: should the tmux CLIENT process be handed a locale override, and what should it
+/// be? Defense in depth alongside [`PROBE_FIELD_SEP`] — switching the `-F` probes to a sentinel
+/// separator stops *our* parsing from depending on a tab surviving, but every other tmux output
+/// path (`capture-pane` in particular) is still vis-sanitized whenever the client runs in the
+/// C/POSIX locale, which is exactly what a daemon spawned by the desktop GUI (Finder/launchd)
+/// gets — neither sets `LANG`/`LC_*`. So: if the process has NONE of `LC_ALL`, `LC_CTYPE`, or
+/// `LANG` set, hand the tmux client a real UTF-8 locale via `LC_ALL` (the highest-precedence
+/// locale variable, so setting only it is enough). If ANY of the three is already set, leave the
+/// environment alone — that's a real locale choice (the user's shell, or ours from a previous
+/// call) and overriding it would be wrong. Takes the three env values as parameters rather than
+/// reading `std::env` itself so the decision is a pure function and can be unit-tested without
+/// racing other tests that touch process environment (see `locale_env`, the thin real-env
+/// wrapper actually used by `run`/`run_allow_absent`).
+fn locale_override(
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> Option<(&'static str, &'static str)> {
+    if lc_all.is_none() && lc_ctype.is_none() && lang.is_none() {
+        Some(("LC_ALL", "en_US.UTF-8"))
+    } else {
+        None
+    }
+}
+
+/// [`locale_override`] applied to the daemon's actual environment — the value `run`/
+/// `run_allow_absent` add to the tmux client's `Command` when set.
+fn locale_env() -> Option<(&'static str, &'static str)> {
+    locale_override(
+        std::env::var("LC_ALL").ok().as_deref(),
+        std::env::var("LC_CTYPE").ok().as_deref(),
+        std::env::var("LANG").ok().as_deref(),
+    )
 }
 
 impl TmuxRuntime {
@@ -285,10 +337,12 @@ impl TmuxRuntime {
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(tmux_program())
-            .args(self.full_args(args))
-            .output()
-            .map_err(Error::Io)?;
+        let mut cmd = Command::new(tmux_program());
+        cmd.args(self.full_args(args));
+        if let Some((key, value)) = locale_env() {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().map_err(Error::Io)?;
         if !out.status.success() {
             return Err(Error::Agent(format!(
                 "tmux {} failed: {}",
@@ -304,10 +358,12 @@ impl TmuxRuntime {
     /// skip a `has-session`/`has_named` preflight fork (the single biggest CPU win): a vanished
     /// target means "nothing to show", while a *real* tmux fault still propagates as `Err`.
     fn run_allow_absent(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(tmux_program())
-            .args(self.full_args(args))
-            .output()
-            .map_err(Error::Io)?;
+        let mut cmd = Command::new(tmux_program());
+        cmd.args(self.full_args(args));
+        if let Some((key, value)) = locale_env() {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().map_err(Error::Io)?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
@@ -389,17 +445,19 @@ impl TmuxRuntime {
     /// renumbered worktree), and the activity time lets it spare a window whose agent is still
     /// actively producing output.
     pub fn list_windows_with_activity(&self) -> Result<Vec<(String, PathBuf, i64)>> {
-        let out = self.run_allow_absent(&[
-            "list-windows",
-            "-t",
-            &self.session,
-            "-F",
-            "#{window_name}\t#{pane_current_path}\t#{window_activity}",
-        ])?;
-        Ok(out
-            .lines()
+        let fmt = format!(
+            "#{{window_name}}{sep}#{{pane_current_path}}{sep}#{{window_activity}}",
+            sep = PROBE_FIELD_SEP
+        );
+        let out = self.run_allow_absent(&["list-windows", "-t", &self.session, "-F", &fmt])?;
+        Ok(Self::parse_windows_activity(&out))
+    }
+
+    /// Parse `list_windows_with_activity` probe lines (`name%#%cwd%#%activity`).
+    fn parse_windows_activity(out: &str) -> Vec<(String, PathBuf, i64)> {
+        out.lines()
             .filter_map(|l| {
-                let mut it = l.splitn(3, '\t');
+                let mut it = l.splitn(3, PROBE_FIELD_SEP);
                 let name = it.next()?.to_string();
                 let path = PathBuf::from(it.next()?);
                 let activity = it
@@ -408,7 +466,7 @@ impl TmuxRuntime {
                     .unwrap_or(0);
                 Some((name, path, activity))
             })
-            .collect())
+            .collect()
     }
 
     /// One window as the overlay probes it: name, tmux's window id, the transcript
@@ -416,21 +474,19 @@ impl TmuxRuntime {
     /// option `@repomon_agent_kind`, if bound.
     pub fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
         // Same single fork the overlay already pays for `list_windows`, richer format string.
-        let out = self.run_allow_absent(&[
-            "list-windows",
-            "-t",
-            &self.session,
-            "-F",
-            "#{window_name}\t#{window_id}\t#{@repomon_session}\t#{@repomon_agent_kind}",
-        ])?;
+        let fmt = format!(
+            "#{{window_name}}{sep}#{{window_id}}{sep}#{{@repomon_session}}{sep}#{{@repomon_agent_kind}}",
+            sep = PROBE_FIELD_SEP
+        );
+        let out = self.run_allow_absent(&["list-windows", "-t", &self.session, "-F", &fmt])?;
         Ok(Self::parse_windows_meta(&out))
     }
 
-    /// Parse `list_windows_meta` probe lines (`name\t@id\tsession?\tagent_kind?`).
+    /// Parse `list_windows_meta` probe lines (`name%#%@id%#%session?%#%agent_kind?`).
     fn parse_windows_meta(out: &str) -> Vec<WindowMeta> {
         out.lines()
             .filter_map(|l| {
-                let mut it = l.splitn(4, '\t');
+                let mut it = l.splitn(4, PROBE_FIELD_SEP);
                 let name = it.next()?.to_string();
                 let wid = it
                     .next()
@@ -1272,11 +1328,15 @@ mod tests {
 
     #[test]
     fn parses_windows_meta_lines() {
-        // `name\t@id\tsession?\tagent_kind?` — fields 3 and 4 are empty when options are unset.
-        let out =
-            "lane-1\t@3\tabc-123\tclaude-code\nlane-1-2\t@7\t\tantigravity\norchestrator\t@1\t\t\n";
+        // `name%#%@id%#%session?%#%agent_kind?` — fields 3 and 4 are empty when options are
+        // unset. `%#%` (not tab) is the separator so the probe survives tmux's C/POSIX-locale
+        // vis-sanitization of control characters — see `PROBE_FIELD_SEP`.
+        let sep = PROBE_FIELD_SEP;
+        let out = format!(
+            "lane-1{sep}@3{sep}abc-123{sep}claude-code\nlane-1-2{sep}@7{sep}{sep}antigravity\norchestrator{sep}@1{sep}{sep}\n"
+        );
         assert_eq!(
-            TmuxRuntime::parse_windows_meta(out),
+            TmuxRuntime::parse_windows_meta(&out),
             vec![
                 WindowMeta {
                     name: "lane-1".into(),
@@ -1300,11 +1360,96 @@ mod tests {
         );
         // A malformed window id sorts last (u64::MAX), never panics.
         assert_eq!(
-            TmuxRuntime::parse_windows_meta("w\tbogus\t\t\n")[0].wid,
+            TmuxRuntime::parse_windows_meta(&format!("w{sep}bogus{sep}{sep}\n"))[0].wid,
             u64::MAX
         );
         // Empty probe (no server) → no windows.
         assert!(TmuxRuntime::parse_windows_meta("").is_empty());
+    }
+
+    #[test]
+    fn parse_windows_meta_survives_locale_sanitized_output() {
+        // The new sentinel-separated probe line — exactly what tmux now emits regardless of the
+        // tmux CLIENT's locale, because `%#%` (unlike a bare tab) is never vis-sanitized away.
+        let out = format!(
+            "lane-81{sep}@5{sep}sid-123{sep}claude-code\n",
+            sep = PROBE_FIELD_SEP
+        );
+        let metas = TmuxRuntime::parse_windows_meta(&out);
+        assert_eq!(
+            metas,
+            vec![WindowMeta {
+                name: "lane-81".into(),
+                wid: 5,
+                session: Some("sid-123".into()),
+                agent_kind: Some("claude-code".into()),
+            }]
+        );
+        assert_eq!(
+            TmuxRuntime::lane_windows_meta(&metas, 81).len(),
+            1,
+            "sentinel-separated probe line must parse as a lane-81 window"
+        );
+
+        // Documents the OLD failure shape this fix eliminates: under the old tab separator, a
+        // tmux client running in the C/POSIX locale (exactly what Finder/launchd hand a
+        // GUI-spawned daemon) vis-sanitized every tab to `_`, so the whole line degenerated into
+        // one unsplittable field. `name` swallowed everything, and a name like that can never
+        // parse as `lane-<id>` — which is why every agent rendered as external/invisible in the
+        // GUI. With the sentinel separator this garbling can no longer happen, but the shape is
+        // still worth asserting so a regression back to a sanitizable separator would be caught.
+        let garbled_old_style = "lane-81_@0_sid_claude-code\n";
+        let garbled = TmuxRuntime::parse_windows_meta(garbled_old_style);
+        assert_eq!(garbled.len(), 1);
+        assert_eq!(garbled[0].name, "lane-81_@0_sid_claude-code");
+        assert!(
+            TmuxRuntime::parse_lane_window(&garbled[0].name).is_none(),
+            "a fully garbled old-style line must NOT parse as a lane window"
+        );
+    }
+
+    #[test]
+    fn parses_windows_activity_lines() {
+        let sep = PROBE_FIELD_SEP;
+        let out = format!(
+            "lane-1{sep}/repo/worktree{sep}1700000000\nlane-1-2{sep}/repo/wt2{sep}1700000005\n"
+        );
+        assert_eq!(
+            TmuxRuntime::parse_windows_activity(&out),
+            vec![
+                (
+                    "lane-1".to_string(),
+                    PathBuf::from("/repo/worktree"),
+                    1700000000
+                ),
+                (
+                    "lane-1-2".to_string(),
+                    PathBuf::from("/repo/wt2"),
+                    1700000005
+                ),
+            ]
+        );
+        // Empty probe (no server) → no windows.
+        assert!(TmuxRuntime::parse_windows_activity("").is_empty());
+    }
+
+    #[test]
+    fn locale_override_decision() {
+        // No locale vars set at all — the GUI/launchd context that triggers the bug — hands the
+        // tmux client a real UTF-8 locale.
+        assert_eq!(
+            locale_override(None, None, None),
+            Some(("LC_ALL", "en_US.UTF-8"))
+        );
+        // Any one of the three already set means a real locale choice exists (the user's shell,
+        // or ours from an earlier call) — never override it.
+        assert_eq!(locale_override(Some("en_US.UTF-8"), None, None), None);
+        assert_eq!(locale_override(None, Some("C"), None), None);
+        assert_eq!(locale_override(None, None, Some("en_GB.UTF-8")), None);
+        assert_eq!(
+            locale_override(Some("en_US.UTF-8"), Some("C"), Some("en_GB.UTF-8")),
+            None
+        );
     }
 
     #[test]
