@@ -4482,8 +4482,13 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // whenever two agents swapped activity rank, which moved names, panes, and usage
             // accounts between rows.
             let pairing = pair_transcripts_to_windows(&summaries, &lane_windows, now);
-            if !pairing.new_bindings.is_empty() {
-                stamp_batches.push((pairing.new_bindings, pairing.probe));
+            if !pairing.new_bindings.is_empty() || !pairing.duplicate_stamps.is_empty() {
+                stamp_batches.push((
+                    pairing.new_bindings,
+                    pairing.probe,
+                    managed_n,
+                    pairing.duplicate_stamps,
+                ));
             }
             let mut ext_slots_remaining = alive.map(|a| a.saturating_sub(managed_n));
             for (s, win) in summaries.into_iter().zip(pairing.assignment) {
@@ -4699,22 +4704,23 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     if probe_ok && !stamp_batches.is_empty() {
         let tmux = ctx.backend.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            for (cands, probe) in stamp_batches {
+            for (cands, probe, lane_window_count, duplicate_stamps) in stamp_batches {
                 let confirmed = if cands.iter().any(|c| c.needle.is_some()) {
                     let panes: Vec<(u64, String, String)> = probe
                         .iter()
                         .map(|(wid, name)| {
                             let text = tmux
-                                .capture_named(name, CaptureOpts::last(60))
+                                .capture_named(name, CaptureOpts::last(STAMP_CONFIRM_CAPTURE_LINES))
                                 .unwrap_or_default();
                             (*wid, name.clone(), normalize_fingerprint(&text))
                         })
                         .collect();
                     confirmed_stamps(&cands, &panes)
-                } else if cands.len() == 1 && probe.len() == 1 {
-                    // Exactly 1 candidate and 1 unclaimed probe window in this lane with no competing claimants:
-                    // bind them directly so agents without long text fingerprints (e.g. Antigravity) are stamped
-                    // and never surface as phantom external adoptables.
+                } else if direct_bind_allowed(cands.len(), probe.len(), lane_window_count) {
+                    // Exactly 1 candidate and 1 unclaimed probe window, AND this is the lane's
+                    // ONLY window (see `direct_bind_allowed`): bind them directly so agents
+                    // without long text fingerprints (e.g. Antigravity) are stamped and never
+                    // surface as phantom external adoptables.
                     vec![(
                         probe[0].0,
                         probe[0].1.clone(),
@@ -4724,6 +4730,17 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 } else {
                     Vec::new()
                 };
+                // Clear any window whose stamp lost the pass-1 claim race this tick (duplicate
+                // `@repomon_session`) — writing an empty value is `list_windows_meta`'s parse for
+                // "no stamp", so the window falls back to placeholder / honest re-confirmation
+                // instead of permanently wedging as a second claimant of the same identity.
+                for (wid, name) in &duplicate_stamps {
+                    if let Err(e) = tmux.set_window_session_by_id(*wid, "") {
+                        tracing::warn!(
+                            "failed to clear duplicate @repomon_session on {name} (@{wid}): {e}"
+                        );
+                    }
+                }
                 for (wid, name, sid, kind) in confirmed {
                     if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
                         tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
@@ -4965,8 +4982,16 @@ struct BindingCandidate {
     kind: AgentKind,
 }
 
-/// One lane's binding candidates plus the probe-window pool they may stamp onto.
-type StampBatch = (Vec<BindingCandidate>, Vec<(u64, String)>);
+/// One lane's binding candidates plus the probe-window pool they may stamp onto, the lane's
+/// total live window count (gates the no-evidence direct-bind fallback — see
+/// [`pair_transcripts_to_windows`]), and any windows whose `@repomon_session` stamp lost the
+/// pass-1 claim race this tick and should be cleared.
+type StampBatch = (
+    Vec<BindingCandidate>,
+    Vec<(u64, String)>,
+    usize,
+    Vec<(u64, String)>,
+);
 
 /// A lane's transcript↔window pairing for one overlay tick ([`pair_transcripts_to_windows`]).
 struct Pairing {
@@ -4982,8 +5007,16 @@ struct Pairing {
     /// Live managed windows no evidence-backed transcript claimed, newest (highest window id)
     /// first. The first is the placeholder target while a just-spawned agent's transcript is
     /// absent or still awaiting pane confirmation (at most one, per the `SessKey::Fallback`
-    /// model).
+    /// model). Also where a duplicate-stamped LOSER window (below) surfaces, so it renders as a
+    /// placeholder instead of vanishing.
     unpaired: Vec<String>,
+    /// Windows whose `@repomon_session` names a sid an EARLIER window (in `windows` order)
+    /// already claimed this tick — sticky identity is supposed to be 1:1, so a second live
+    /// window carrying the same stamp is a bug (duplicate stamp), not a legitimate second home
+    /// for the transcript. `(window_id, name)`, in `windows` order. The caller clears these
+    /// stamps so the window falls back to placeholder / honest re-confirmation instead of
+    /// wedging as a permanent phantom claimant.
+    duplicate_stamps: Vec<(u64, String)>,
 }
 
 /// Collapse text to lowercase ASCII alphanumerics. Makes fingerprint matching immune to
@@ -5001,6 +5034,15 @@ const FINGERPRINT_MIN: usize = 24;
 /// How much of the normalized TAIL to keep — after a long reply scrolls, its tail is what
 /// stays visible above the input box.
 const FINGERPRINT_LEN: usize = 64;
+/// How far back into scrollback the stamp-confirmation probe captures a candidate's window,
+/// looking for its fingerprint. A fast, tool-call-heavy agent (long Bash/Read output between
+/// two messages) can push its own last message hundreds of lines up the scrollback within a
+/// single overlay tick — a shallow capture here means the candidate never confirms and the
+/// window stays permanently unbound (surfaces as "external" forever, never as a managed
+/// session), even though the agent is right there. This only runs for lanes that still have an
+/// unconfirmed candidate, and reading further into tmux's in-memory scrollback is cheap, so
+/// there's no real cost to looking well past what a single tick could plausibly need.
+const STAMP_CONFIRM_CAPTURE_LINES: u32 = 500;
 
 /// The pane fingerprint of a transcript's last message, or `None` when there is no message
 /// or it is too short to be distinctive.
@@ -5050,6 +5092,26 @@ fn confirmed_stamps(
         .collect()
 }
 
+/// Whether the no-evidence, headcount-only direct bind (see the call site in `overlay_agents`)
+/// may fire for a lane this tick.
+///
+/// The original condition was just "exactly 1 candidate and exactly 1 window `pair_transcripts_to_windows`
+/// left unclaimed THIS TICK" (`cands_len == 1 && probe_len == 1`). That is not the same claim as
+/// "this sid is not bound anywhere else": `probe`/`cands` are computed from whatever window
+/// snapshot this tick saw, which can legitimately (a transient tmux probe hiccup reusing a
+/// stale `last_good` snapshot, a notify race) omit a window that in the REAL, live tmux server
+/// still carries this exact sid's stamp. Binding on headcount alone in that situation stamps a
+/// SECOND window with the same `@repomon_session` — sticky identity is supposed to be 1:1, so a
+/// live incident produced three windows all stamped with one resumed session's id.
+///
+/// Requiring the lane to hold exactly one window in total closes that gap: with only one window
+/// in the whole lane there is nothing else the sid could already be (or later become) bound to,
+/// so the direct bind can never create a duplicate. Every multi-window lane must earn its stamp
+/// through `confirmed_stamps`'s pane-evidence match instead.
+fn direct_bind_allowed(cands_len: usize, probe_len: usize, lane_window_count: usize) -> bool {
+    cands_len == 1 && probe_len == 1 && lane_window_count == 1
+}
+
 /// Pair a lane's kept transcripts (newest-first) with its live managed windows by STICKY
 /// IDENTITY first, position last.
 ///
@@ -5074,8 +5136,25 @@ fn pair_transcripts_to_windows(
     // `@repomon_session` names.
     let mut claim: Vec<Option<usize>> = vec![None; windows.len()];
     let mut claimed = vec![false; summaries.len()];
+    // Sticky identity is supposed to be 1:1 (one window per sid): the first window (in
+    // `windows` order) to carry a given `@repomon_session` stamp is its home; any LATER window
+    // carrying the exact same stamp is a duplicate — evidence of a stale direct-bind or a
+    // concurrent resume — and gets queued for clearing rather than silently accepted as a
+    // second claimant. Tracked by the raw stamp text, independent of whether the sid still
+    // matches a kept transcript, so a duplicate is caught even if one copy's transcript aged out.
+    let mut first_window_for_sid: HashMap<&str, usize> = HashMap::new();
+    let mut duplicate_stamps: Vec<(u64, String)> = Vec::new();
     for (wi, w) in windows.iter().enumerate() {
         let Some(sid) = &w.session else { continue };
+        match first_window_for_sid.entry(sid.as_str()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(wi);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                duplicate_stamps.push((w.wid, w.name.clone()));
+                continue;
+            }
+        }
         if let Some(si) = summaries
             .iter()
             .position(|s| s.session_id.as_deref() == Some(sid.as_str()))
@@ -5202,6 +5281,7 @@ fn pair_transcripts_to_windows(
         new_bindings,
         probe,
         unpaired: unpaired.into_iter().map(|w| w.name.clone()).collect(),
+        duplicate_stamps,
     }
 }
 
@@ -7785,6 +7865,64 @@ mod tests {
         assert_eq!(p.assignment, vec![None, None]);
         assert_eq!(candidate_sids(&p), vec!["x"]);
         assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
+    }
+
+    #[test]
+    fn duplicate_stamp_on_a_second_window_is_flagged_for_clearing_and_still_placeholders() {
+        // Live incident: a resumed transcript's sid ended up stamped on THREE separate windows
+        // at once (should be structurally impossible — sticky identity is 1:1). Pass 1 must
+        // only let the FIRST window (in `windows` order) claim the transcript for display; the
+        // others must (a) be reported so their stale stamp can be cleared, and (b) still surface
+        // as placeholders — never silently vanish from the lane.
+        let windows = vec![
+            wm("lane-81-5", 20, Some("dup")),
+            wm("lane-81-6", 58, Some("dup")),
+            wm("lane-81-9", 65, Some("dup")),
+        ];
+        let p = pair_transcripts_to_windows(&[tsum("dup", t(0))], &windows, t(100));
+        // Only the first window displays the transcript…
+        assert_eq!(p.assignment, vec![Some("lane-81-5".to_string())]);
+        // …the other two are flagged as duplicate stamps to clear…
+        assert_eq!(
+            p.duplicate_stamps,
+            vec![(58, "lane-81-6".to_string()), (65, "lane-81-9".to_string())]
+        );
+        // …and STILL surface (as placeholders), not vanish from the lane.
+        let mut unpaired = p.unpaired.clone();
+        unpaired.sort();
+        assert_eq!(
+            unpaired,
+            vec!["lane-81-6".to_string(), "lane-81-9".to_string()]
+        );
+        // No fresh binding is nominated for a sid whose window is already (over-)claimed.
+        assert!(p.new_bindings.is_empty());
+    }
+
+    #[test]
+    fn direct_bind_allowed_requires_the_lanes_only_window() {
+        // The bug: the no-evidence direct bind used to fire whenever exactly one candidate and
+        // one FREE window existed THIS TICK, even in a lane that has other, already-claimed
+        // windows — if the window snapshot that tick ever lagged reality (a stale `last_good`
+        // reuse, a notify race) and momentarily "forgot" one of those claims, the same sid could
+        // get stamped a second time, producing the duplicate-stamp incident reproduced above.
+        // Requiring the lane to have exactly one window in total closes that gap: with nothing
+        // else in the lane, there is nothing the sid could already be bound to.
+        assert!(
+            direct_bind_allowed(1, 1, 1),
+            "single-window lane: safe to bind directly"
+        );
+        assert!(
+            !direct_bind_allowed(1, 1, 2),
+            "a second window exists in the lane — the sid could already be bound to it"
+        );
+        assert!(
+            !direct_bind_allowed(1, 1, 7),
+            "matches the live incident's lane shape: 1 unclaimed candidate, 1 free window, 7 total"
+        );
+        // Headcount mismatches are still always rejected regardless of lane size.
+        assert!(!direct_bind_allowed(2, 1, 1));
+        assert!(!direct_bind_allowed(1, 2, 1));
+        assert!(!direct_bind_allowed(0, 0, 1));
     }
 
     #[test]
