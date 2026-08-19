@@ -343,6 +343,7 @@ repomon shell-init powershell | Out-String | Invoke-Expression
 - [docs/desktop.md](docs/desktop.md): Mission Control, its keyboard shortcuts, and settings.
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC socket reference.
 - [docs/agents.md](docs/agents.md): how agents run and how status is detected.
+- [docs/agent-supervision.md](docs/agent-supervision.md): autonomous permission handling, wake-on-mail, and stall nudges for supervised lanes.
 - [docs/windows-validation.md](docs/windows-validation.md): the manual Windows 11 end-to-end validation gate.
 - [crates/repomon-host/PROTOCOL.md](crates/repomon-host/PROTOCOL.md): the frozen Windows agent-host control protocol.
 
