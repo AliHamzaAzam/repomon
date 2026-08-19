@@ -9,6 +9,7 @@ pub mod bytes_stream;
 pub mod conn;
 pub mod ext;
 pub mod files;
+pub mod inject;
 pub mod mail;
 pub mod notify_watch;
 pub mod path_env;
@@ -322,6 +323,8 @@ pub struct Ctx {
     pub remote_mutate_lock: Mutex<()>,
     /// In-flight local LLM session naming tasks, keyed by transcript session_id, to prevent duplicate background workers.
     pub in_flight_naming: Arc<Mutex<HashSet<String>>>,
+    /// Anti-thrashing latch for supervision injection: window -> (expectation fingerprint, when).
+    pub inject_latch: Mutex<HashMap<String, (String, Instant)>>,
     pub shutdown: Notify,
 }
 
@@ -356,8 +359,6 @@ impl Ctx {
         config_path: PathBuf,
         notes_dir: PathBuf,
     ) -> Arc<Self> {
-        let registry = Registry::new(store.clone());
-        let lanes = Lanes::new(store.clone(), config.clone());
         #[cfg(unix)]
         let backend: Arc<dyn SessionBackend> =
             Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
@@ -376,6 +377,20 @@ impl Ctx {
                 config::data_dir(),
             ))
         };
+        Self::new_with_backend(store, config, db_path, config_path, notes_dir, backend)
+    }
+
+    /// Construct [`Ctx`] with an explicit backend implementation (used by injection tests).
+    pub fn new_with_backend(
+        store: Store,
+        config: Config,
+        db_path: Option<PathBuf>,
+        config_path: PathBuf,
+        notes_dir: PathBuf,
+        backend: Arc<dyn SessionBackend>,
+    ) -> Arc<Self> {
+        let registry = Registry::new(store.clone());
+        let lanes = Lanes::new(store.clone(), config.clone());
         // Make any already-running session attach-native (mouse, clipboard, deep scrollback);
         // spawns reapply it, but an existing backend server (a tmux server, or detached
         // Windows host processes) outlives a daemon restart — on Windows this scan is the
@@ -424,6 +439,7 @@ impl Ctx {
             remote_tokens: std::sync::RwLock::new(Vec::new()),
             remote_mutate_lock: Mutex::new(()),
             in_flight_naming: Arc::new(Mutex::new(HashSet::new())),
+            inject_latch: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
     }

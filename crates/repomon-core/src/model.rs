@@ -315,7 +315,7 @@ pub struct SupervisionEntry {
     pub policy_source: Option<PolicySource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<Vec<String>>, // keys actually sent; None when nothing was sent
-    pub outcome: String, // "sent" | "skipped" | "failed"
+    pub outcome: String, // "sent" | "skipped" | "failed" | "held"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

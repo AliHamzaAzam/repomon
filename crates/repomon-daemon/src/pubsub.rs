@@ -29,7 +29,11 @@ pub mod topic {
     pub const ORCHESTRATOR_OUTPUT: &str = "event.orchestrator.output";
     /// The repomind orchestrator started/stopped (its `{running, agent, model, window}` status).
     pub const ORCHESTRATOR_STATUS: &str = "event.orchestrator.status";
+    /// A supervision action was evaluated and acted on (or held/skipped).
+    pub const SUPERVISION_ACTED: &str = "event.supervision.acted";
 }
+
+pub const SUPERVISION_ACTED: &str = topic::SUPERVISION_ACTED;
 
 /// Whether a connection with the given per-connection filter state should receive `value`.
 ///
