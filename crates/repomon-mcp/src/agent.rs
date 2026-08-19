@@ -100,6 +100,36 @@ impl AgentServer {
             .await
             .map_err(|error| error.to_string())
     }
+
+    /// Read-only: this agent's own supervision status. The daemon resolves `identity_token` to
+    /// this agent's lane and filters the fleet-wide snapshot down to just that row server-side —
+    /// the worker never sees another lane's supervision state.
+    async fn supervision_status(&self, _args: Value) -> Result<Value, String> {
+        let token = self.require_identity()?;
+        self.client
+            .call(
+                "supervision.status",
+                Some(json!({ "identity_token": token })),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Read-only: this agent's own supervision audit log. The daemon forces the lane filter to
+    /// the identity's own lane; there is no `lane_id` argument here to conflict with it.
+    async fn supervision_audit(&self, args: Value) -> Result<Value, String> {
+        let token = self.require_identity()?;
+        self.client
+            .call(
+                "supervision.audit",
+                Some(json!({
+                    "limit": args.get("limit"),
+                    "identity_token": token,
+                })),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[async_trait::async_trait]
@@ -114,6 +144,8 @@ impl ToolHandler for AgentServer {
             "message_send" => self.message_send(args).await,
             "message_inbox" => self.message_inbox(args).await,
             "message_mark_read" => self.message_mark_read(args).await,
+            "supervision_status" => self.supervision_status(args).await,
+            "supervision_audit" => self.supervision_audit(args).await,
             other => Err(format!("unknown tool: {other}")),
         };
         match result {
@@ -186,6 +218,25 @@ pub fn agent_tool_catalog() -> Vec<ToolDef> {
             description: "Mark one message in this agent's inbox read.",
             input_schema: object(json!({ "id": { "type": "string" } }), &["id"]),
         },
+        ToolDef {
+            name: "supervision_status",
+            description: "Read this agent's own supervision status: whether the fleet master \
+                switch is on and, if this lane is actively supervised, its last logged decision. \
+                Read-only; this worker-only server cannot change or nudge supervision policy.",
+            input_schema: object(json!({}), &[]),
+        },
+        ToolDef {
+            name: "supervision_audit",
+            description: "Read this agent's own supervision audit log (recent auto-approve / \
+                auto-deny / nudge decisions for this lane). Always scoped to this agent's own \
+                lane; read-only, cannot change or nudge supervision policy.",
+            input_schema: object(
+                json!({
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                }),
+                &[],
+            ),
+        },
     ]
 }
 
@@ -202,10 +253,31 @@ mod tests {
                 "fleet_status",
                 "message_send",
                 "message_inbox",
-                "message_mark_read"
+                "message_mark_read",
+                "supervision_status",
+                "supervision_audit",
             ]
         );
         assert!(!names.contains(&"spawn_agent"));
         assert!(!names.contains(&"merge_lane"));
+    }
+
+    /// No approval/nudge/set power is reachable from the worker catalog: no tool name is
+    /// backed by `supervision.set` or `supervision.nudge`, and `AgentServer::call`'s match has
+    /// no arm for either of those tool names (or any spelling of them) — an attempt falls
+    /// through to the `unknown tool` arm, same as any other name it doesn't recognize.
+    #[test]
+    fn supervision_tools_are_read_only() {
+        let names: Vec<&str> = agent_tool_catalog().iter().map(|tool| tool.name).collect();
+        for forbidden in [
+            "supervision_set",
+            "supervision_nudge",
+            "supervision.set",
+            "supervision.nudge",
+        ] {
+            assert!(!names.contains(&forbidden), "catalog exposes {forbidden}");
+        }
+        assert!(names.contains(&"supervision_status"));
+        assert!(names.contains(&"supervision_audit"));
     }
 }

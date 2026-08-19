@@ -969,6 +969,14 @@ struct SupervisionAudit {
     limit: Option<usize>,
     #[serde(default)]
     before_id: Option<i64>,
+    #[serde(default)]
+    identity_token: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SupervisionStatus {
+    #[serde(default)]
+    identity_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4389,14 +4397,34 @@ pub async fn dispatch(
         "supervision.audit" => {
             let p: SupervisionAudit = parse_opt(params)?;
             let limit = p.limit.unwrap_or(50).min(200);
+            // A worker's own MCP identity forces the filter to its own lane, ignoring (or
+            // rejecting, on conflict) any explicit `lane_id` — mirrors the ownership check
+            // `message.mark_read` does around resolving the caller's identity.
+            let lane_id = if let Some(token) = p.identity_token {
+                let identity = message_sender(ctx, Some(token), None).await?;
+                let own_lane = identity
+                    .lane_id
+                    .ok_or_else(|| RpcError::invalid_params("identity is not bound to a lane"))?;
+                if let Some(requested) = p.lane_id {
+                    if requested != own_lane {
+                        return Err(RpcError::invalid_params(
+                            "lane_id does not match this identity's lane",
+                        ));
+                    }
+                }
+                Some(own_lane)
+            } else {
+                p.lane_id
+            };
             let entries = ctx
                 .store
-                .supervision_log(p.lane_id, limit, p.before_id)
+                .supervision_log(lane_id, limit, p.before_id)
                 .await
                 .map_err(internal)?;
             Ok(json!({ "entries": entries }))
         }
         "supervision.status" => {
+            let p: SupervisionStatus = parse_opt(params)?;
             let snapshot = ctx.supervision.read().await.clone();
             let mut lane_statuses = Vec::new();
             for &lane_id in snapshot.lanes.keys() {
@@ -4412,6 +4440,16 @@ pub async fn dispatch(
                 }));
             }
             lane_statuses.sort_by_key(|l| l.get("lane_id").and_then(Value::as_i64).unwrap_or(0));
+            // A worker's own MCP identity narrows the fleet-wide snapshot to its own lane, so a
+            // restricted worker can never observe another lane's supervision state.
+            if let Some(token) = p.identity_token {
+                let identity = message_sender(ctx, Some(token), None).await?;
+                let own_lane = identity
+                    .lane_id
+                    .ok_or_else(|| RpcError::invalid_params("identity is not bound to a lane"))?;
+                lane_statuses
+                    .retain(|l| l.get("lane_id").and_then(Value::as_i64) == Some(own_lane));
+            }
             Ok(json!({
                 "master": snapshot.master,
                 "lanes": lane_statuses,
@@ -9801,6 +9839,160 @@ mod tests {
         .unwrap();
         let all_entries = audit_all["entries"].as_array().unwrap();
         assert_eq!(all_entries.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn supervision_audit_with_identity_forces_own_lane() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let config = repomon_core::Config::default();
+        let ctx = Ctx::new(store, config, None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+
+        for i in 1..=3 {
+            let entry = repomon_core::model::SupervisionEntry {
+                id: 0,
+                at: chrono::Utc::now(),
+                lane_id: 1,
+                window: "window-1".to_string(),
+                session_id: None,
+                agent_kind: None,
+                trigger: format!("trigger_{i}"),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "approve".to_string(),
+                policy_source: None,
+                keys: None,
+                outcome: "sent".to_string(),
+                reason: None,
+                subject: None,
+                pane_excerpt: None,
+            };
+            ctx.store.append_supervision(entry).await.unwrap();
+        }
+        for i in 1..=2 {
+            let entry = repomon_core::model::SupervisionEntry {
+                id: 0,
+                at: chrono::Utc::now(),
+                lane_id: 2,
+                window: "window-2".to_string(),
+                session_id: None,
+                agent_kind: None,
+                trigger: format!("trigger_{i}"),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "approve".to_string(),
+                policy_source: None,
+                keys: None,
+                outcome: "sent".to_string(),
+                reason: None,
+                subject: None,
+                pane_excerpt: None,
+            };
+            ctx.store.append_supervision(entry).await.unwrap();
+        }
+
+        let identity = repomon_core::model::ResolvedAgentAddress {
+            address: repomon_core::model::AgentAddress::new("lane-1/1"),
+            lane_id: Some(1),
+            slot: Some(1),
+            window: None,
+            session_id: None,
+            agent_kind: None,
+        };
+        let token = ctx.store.create_mcp_identity(identity).await.unwrap();
+
+        // Identity for lane 1 + an explicit conflicting lane_id 2 => error.
+        let err = dispatch(
+            &ctx,
+            &sess,
+            "supervision.audit",
+            Some(json!({ "identity_token": token, "lane_id": 2 })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+
+        // Identity alone (no explicit lane_id) => only lane 1's rows come back, ignoring lane 2.
+        let audit = dispatch(
+            &ctx,
+            &sess,
+            "supervision.audit",
+            Some(json!({ "identity_token": token })),
+        )
+        .await
+        .unwrap();
+        let entries = audit["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        for e in entries {
+            assert_eq!(e["lane_id"], json!(1));
+        }
+
+        // An invalid identity token is rejected outright.
+        let err = dispatch(
+            &ctx,
+            &sess,
+            "supervision.audit",
+            Some(json!({ "identity_token": "not-a-real-token" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    #[tokio::test]
+    async fn supervision_status_with_identity_filters_to_own_lane() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let mut config = repomon_core::Config::default();
+        config.supervision.enabled = true;
+        let ctx = Ctx::new(store, config, None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+
+        dispatch(
+            &ctx,
+            &sess,
+            "supervision.set",
+            Some(json!({ "lane_id": 1, "enabled": true })),
+        )
+        .await
+        .unwrap();
+        dispatch(
+            &ctx,
+            &sess,
+            "supervision.set",
+            Some(json!({ "lane_id": 2, "enabled": true })),
+        )
+        .await
+        .unwrap();
+
+        // Without an identity, the fleet-wide snapshot carries both lanes.
+        let status_all = dispatch(&ctx, &sess, "supervision.status", None)
+            .await
+            .unwrap();
+        assert_eq!(status_all["lanes"].as_array().unwrap().len(), 2);
+
+        let identity = repomon_core::model::ResolvedAgentAddress {
+            address: repomon_core::model::AgentAddress::new("lane-1/1"),
+            lane_id: Some(1),
+            slot: Some(1),
+            window: None,
+            session_id: None,
+            agent_kind: None,
+        };
+        let token = ctx.store.create_mcp_identity(identity).await.unwrap();
+
+        // With the lane-1 identity, only lane 1's row is visible; the master flag still shows.
+        let status_lane1 = dispatch(
+            &ctx,
+            &sess,
+            "supervision.status",
+            Some(json!({ "identity_token": token })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status_lane1["master"], json!(true));
+        let lanes = status_lane1["lanes"].as_array().unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0]["lane_id"], json!(1));
     }
 
     #[tokio::test]

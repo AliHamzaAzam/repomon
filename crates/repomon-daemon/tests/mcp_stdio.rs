@@ -233,7 +233,9 @@ async fn mcp_stdio_agent_mode_is_restricted_and_requires_identity_for_mail() {
             "fleet_status",
             "message_send",
             "message_inbox",
-            "message_mark_read"
+            "message_mark_read",
+            "supervision_status",
+            "supervision_audit"
         ]
     );
     assert!(!names.contains(&"spawn_agent"));
@@ -251,6 +253,43 @@ async fn mcp_stdio_agent_mode_is_restricted_and_requires_identity_for_mail() {
     let (text, is_error) = tool_result(&response);
     assert!(is_error);
     assert!(text.contains("invalid or revoked MCP identity"), "{text}");
+
+    // The two new supervision tools are reachable but still gated on a valid identity, same as
+    // the message tools above.
+    let mut next_id = 4u64;
+    for name in ["supervision_status", "supervision_audit"] {
+        mcp_request(
+            &mut stdin,
+            next_id,
+            "tools/call",
+            json!({ "name": name, "arguments": {} }),
+        )
+        .await;
+        next_id += 1;
+        let response = mcp_read(&mut lines).await;
+        let (text, is_error) = tool_result(&response);
+        assert!(is_error, "{name} should require a valid identity");
+        assert!(text.contains("invalid or revoked MCP identity"), "{text}");
+    }
+
+    // No approval/nudge/set power is reachable from the restricted worker catalog: these tool
+    // names have no arm in `AgentServer::call` and fall through to its `unknown tool` case,
+    // regardless of identity.
+    for name in ["supervision_set", "supervision_nudge"] {
+        mcp_request(
+            &mut stdin,
+            next_id,
+            "tools/call",
+            json!({ "name": name, "arguments": {} }),
+        )
+        .await;
+        next_id += 1;
+        let response = mcp_read(&mut lines).await;
+        let (text, is_error) = tool_result(&response);
+        assert!(is_error, "{name} should not be callable");
+        assert!(text.contains(&format!("unknown tool: {name}")), "{text}");
+    }
+
     shutdown_mcp_child(child, stdin).await;
 }
 
