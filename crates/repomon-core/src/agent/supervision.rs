@@ -704,10 +704,232 @@ fn extract_command_from_question(question: &str) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Option Mapping (approve_option / deny_option)
+// ---------------------------------------------------------------------------
+
+/// Substrings that permanently disqualify an option from single-shot approval.
+const APPROVE_BLACKLIST: &[&str] = &[
+    "always allow",
+    "always",
+    "for this session",
+    "don't ask again",
+    "dont ask again",
+    "persist",
+    "remember this choice",
+    "in settings",
+    "settings.json",
+    "in this conversation",
+];
+
+/// Candidate phrases for single-shot approval, ordered for prefix matching.
+const APPROVE_PHRASES: &[&str] = &[
+    "yes, i trust this folder",
+    "allow once",
+    "run the tool",
+    "yes",
+    "allow",
+    "proceed",
+    "approve",
+];
+
+/// Candidate phrases for denial/rejection, ordered for prefix matching.
+const DENY_PHRASES: &[&str] = &[
+    "no, and tell",
+    "don't allow",
+    "dont allow",
+    "do not allow",
+    "no, exit",
+    "no",
+    "cancel",
+    "reject",
+    "exit",
+    "deny",
+];
+
+/// Whether option text contains any blacklist token that grants standing permission.
+fn is_blacklisted_approve(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    APPROVE_BLACKLIST.iter().any(|&b| lower.contains(b))
+}
+
+/// Check if `text` starts with `phrase` as a leading word/phrase at a boundary.
+fn starts_with_phrase(text: &str, phrase: &str) -> bool {
+    let t = text.trim();
+    if t.len() < phrase.len() {
+        return false;
+    }
+    if !t[..phrase.len()].eq_ignore_ascii_case(phrase) {
+        return false;
+    }
+    if t.len() == phrase.len() {
+        return true;
+    }
+    let next_char = t[phrase.len()..].chars().next().unwrap();
+    !next_char.is_alphanumeric()
+}
+
+/// Whether an approve option is an exact/plainer match (Level 1) rather than a qualified option (Level 2).
+fn is_level_1_approve(text: &str, matched_phrase: &str) -> bool {
+    let t = text.trim();
+    let clean = t.trim_end_matches(['.', '!', ':', ',']).trim();
+    if clean.eq_ignore_ascii_case(matched_phrase) {
+        return true;
+    }
+    if t.len() > matched_phrase.len() {
+        let rest = &t[matched_phrase.len()..];
+        if rest.starts_with("  ") || rest.starts_with('\t') {
+            return true;
+        }
+    }
+    if matched_phrase == "yes, i trust this folder"
+        || matched_phrase == "allow once"
+        || matched_phrase == "run the tool"
+    {
+        return true;
+    }
+    if clean.eq_ignore_ascii_case("yes, proceed") {
+        return true;
+    }
+    false
+}
+
+/// Whether a deny option is an exact/plainer match (Level 1) rather than a qualified option (Level 2).
+fn is_level_1_deny(text: &str, matched_phrase: &str) -> bool {
+    let t = text.trim();
+    let clean = t.trim_end_matches(['.', '!', ':', ',']).trim();
+    if clean.eq_ignore_ascii_case(matched_phrase) {
+        return true;
+    }
+    if t.len() > matched_phrase.len() {
+        let rest = &t[matched_phrase.len()..];
+        if rest.starts_with("  ") || rest.starts_with('\t') {
+            return true;
+        }
+    }
+    if clean.eq_ignore_ascii_case("no, exit")
+        || clean.eq_ignore_ascii_case("no, and tell claude what to do")
+        || clean.eq_ignore_ascii_case("no, and tell")
+        || clean.eq_ignore_ascii_case("no, tell claude what to do")
+    {
+        return true;
+    }
+    if matched_phrase == "no, and tell"
+        || matched_phrase == "don't allow"
+        || matched_phrase == "dont allow"
+        || matched_phrase == "do not allow"
+    {
+        return true;
+    }
+    false
+}
+
+struct MatchCandidate {
+    index: usize,
+    level: u8,
+    text_len: usize,
+}
+
+fn resolve_candidates(candidates: Vec<MatchCandidate>) -> Option<usize> {
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates[0].index);
+    }
+    let level_1_candidates: Vec<&MatchCandidate> =
+        candidates.iter().filter(|c| c.level == 1).collect();
+
+    if level_1_candidates.is_empty() {
+        return None;
+    }
+
+    if level_1_candidates.len() == 1 {
+        return Some(level_1_candidates[0].index);
+    }
+
+    let min_len = level_1_candidates.iter().map(|c| c.text_len).min().unwrap();
+    let shortest: Vec<&&MatchCandidate> = level_1_candidates
+        .iter()
+        .filter(|c| c.text_len == min_len)
+        .collect();
+
+    if shortest.len() == 1 {
+        Some(shortest[0].index)
+    } else {
+        None
+    }
+}
+
+/// Determine which option index in [`PendingDialog`] represents a single-shot approval ("approve once"),
+/// with a hard guarantee that standing/persisted grants (e.g. "always allow", "for this session") are never selected.
+pub fn approve_option(d: &PendingDialog, _kind: AgentKind) -> Option<usize> {
+    let mut candidates = Vec::new();
+
+    for (i, opt) in d.options.iter().enumerate() {
+        let text = opt.text.trim();
+        if is_blacklisted_approve(text) {
+            continue;
+        }
+
+        let mut best_match: Option<&'static str> = None;
+        for &phrase in APPROVE_PHRASES {
+            if starts_with_phrase(text, phrase)
+                && (best_match.is_none() || phrase.len() > best_match.unwrap().len())
+            {
+                best_match = Some(phrase);
+            }
+        }
+
+        if let Some(phrase) = best_match {
+            let level = if is_level_1_approve(text, phrase) {
+                1
+            } else {
+                2
+            };
+            candidates.push(MatchCandidate {
+                index: i,
+                level,
+                text_len: text.len(),
+            });
+        }
+    }
+
+    resolve_candidates(candidates)
+}
+
+/// Determine which option index in [`PendingDialog`] represents denying or rejecting the dialog.
+pub fn deny_option(d: &PendingDialog, _kind: AgentKind) -> Option<usize> {
+    let mut candidates = Vec::new();
+
+    for (i, opt) in d.options.iter().enumerate() {
+        let text = opt.text.trim();
+        let mut best_match: Option<&'static str> = None;
+        for &phrase in DENY_PHRASES {
+            if starts_with_phrase(text, phrase)
+                && (best_match.is_none() || phrase.len() > best_match.unwrap().len())
+            {
+                best_match = Some(phrase);
+            }
+        }
+
+        if let Some(phrase) = best_match {
+            let level = if is_level_1_deny(text, phrase) { 1 } else { 2 };
+            candidates.push(MatchCandidate {
+                index: i,
+                level,
+                text_len: text.len(),
+            });
+        }
+    }
+
+    resolve_candidates(candidates)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::prompt::DialogOption;
+    use crate::agent::prompt::{DialogOption, detect_dialog, dialog_select_keys};
 
     fn test_scope() -> DialogScope {
         DialogScope {
@@ -988,5 +1210,187 @@ Do you want to proceed?
         let c2 = classify_dialog(&d2, AgentKind::Aider, &scope);
         assert_eq!(c2.class, DialogClass::CredentialAccess);
         assert!(!c2.repo_scoped);
+    }
+
+    const FIXTURE_CLAUDE_BASH: &str = "● Running cargo test…\n\
+        ╭──────────────────────────────────────────────╮\n\
+        │ Bash command                                 │\n\
+        │                                              │\n\
+        │   cargo install --path crates/repomon-tui    │\n\
+        │   Install the repomon TUI                    │\n\
+        │                                              │\n\
+        │ Do you want to proceed?                      │\n\
+        │ ❯ 1. Yes                                     │\n\
+        │   2. Yes, and don't ask again for cargo      │\n\
+        │   3. No, and tell Claude what to do          │\n\
+        ╰──────────────────────────────────────────────╯";
+
+    const FIXTURE_CLAUDE_EDIT: &str = "╭──────────────────────────────────────────────╮\n\
+        │ Edit file                                    │\n\
+        │                                              │\n\
+        │   crates/repomon-core/src/agent/mod.rs       │\n\
+        │                                              │\n\
+        │ Do you want to make this edit to mod.rs?     │\n\
+        │ ❯ 1. Yes                                     │\n\
+        │   2. Yes, and don't ask again for this file  │\n\
+        │   3. No, and tell Claude what to do          │\n\
+        ╰──────────────────────────────────────────────╯";
+
+    const FIXTURE_CODEX_MCP: &str = "  Field 1/1\n\
+          Allow the repomon MCP server to run tool \"fleet_status\"?\n\
+          › 1. Allow                   Run the tool and continue.\n\
+            2. Allow for this session  Run the tool and remember this choice for this session.\n\
+            3. Always allow            Run the tool and remember this choice for future tool calls.\n\
+            4. Cancel                  Cancel this tool call\n\
+          enter to submit | esc to cancel";
+
+    const FIXTURE_ANTIGRAVITY: &str = "Requesting permission for:\n\
+   ps aux | grep -i repomon\n\
+\n\
+Do you want to proceed?\n\
+> 1. Yes\n\
+  2. Yes, and always allow in this conversation\n\
+  3. Yes, and always allow in settings\n\
+  4. No\n";
+
+    const FIXTURE_CLAUDE_TRUST: &str = " Security guide\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel";
+
+    #[test]
+    fn test_1_claude_boxed_bash_permission_dialog_option_mapping() {
+        let d = detect_dialog(FIXTURE_CLAUDE_BASH).expect("Claude bash dialog");
+        assert_eq!(approve_option(&d, AgentKind::ClaudeCode), Some(0));
+        assert_eq!(deny_option(&d, AgentKind::ClaudeCode), Some(2));
+        // The "don't ask again"-style option (index 1) is never returned by approve_option
+        assert_ne!(approve_option(&d, AgentKind::ClaudeCode), Some(1));
+    }
+
+    #[test]
+    fn test_2_claude_edit_file_3_option_dialog_option_mapping() {
+        let d = detect_dialog(FIXTURE_CLAUDE_EDIT).expect("Claude edit dialog");
+        assert_eq!(approve_option(&d, AgentKind::ClaudeCode), Some(0));
+        assert_eq!(deny_option(&d, AgentKind::ClaudeCode), Some(2));
+        assert_ne!(approve_option(&d, AgentKind::ClaudeCode), Some(1));
+    }
+
+    #[test]
+    fn test_3_codex_boxless_mcp_tool_approval_option_mapping() {
+        let d = detect_dialog(FIXTURE_CODEX_MCP).expect("Codex MCP dialog");
+        assert_eq!(approve_option(&d, AgentKind::Codex), Some(0));
+        assert_eq!(deny_option(&d, AgentKind::Codex), Some(3));
+        // Indices 1 (for this session) and 2 (always allow) are never returned
+        assert_ne!(approve_option(&d, AgentKind::Codex), Some(1));
+        assert_ne!(approve_option(&d, AgentKind::Codex), Some(2));
+    }
+
+    #[test]
+    fn test_4_antigravity_4_option_permission_menu_option_mapping() {
+        let d = detect_dialog(FIXTURE_ANTIGRAVITY).expect("Antigravity dialog");
+        assert_eq!(approve_option(&d, AgentKind::Antigravity), Some(0));
+        assert_eq!(deny_option(&d, AgentKind::Antigravity), Some(3));
+        // Indices 1 (in this conversation) and 2 (in settings) are never returned
+        assert_ne!(approve_option(&d, AgentKind::Antigravity), Some(1));
+        assert_ne!(approve_option(&d, AgentKind::Antigravity), Some(2));
+    }
+
+    #[test]
+    fn test_5_claude_folder_trust_dialog_option_mapping() {
+        let d = detect_dialog(FIXTURE_CLAUDE_TRUST).expect("Claude trust dialog");
+        assert_eq!(approve_option(&d, AgentKind::ClaudeCode), Some(0));
+        assert_eq!(deny_option(&d, AgentKind::ClaudeCode), Some(1));
+    }
+
+    #[test]
+    fn test_6_synthetic_ambiguity_and_blacklisted_affirmative_options() {
+        // 6a: Dialog with two equally plain Yes ... rows at same rank returns None
+        let pane_ambiguous = "Do you want to proceed?\n❯ 1. Yes, deploy to staging\n  2. Yes, deploy to production\n  3. No";
+        let d_amb = detect_dialog(pane_ambiguous).expect("ambiguous dialog");
+        assert_eq!(approve_option(&d_amb, AgentKind::ClaudeCode), None);
+        assert_eq!(deny_option(&d_amb, AgentKind::ClaudeCode), Some(2));
+
+        // 6b: Dialog whose only affirmative options are all blacklisted returns None
+        let pane_blacklisted =
+            "Allow the tool to run?\n❯ 1. Always allow\n  2. Allow for this session\n  3. Cancel";
+        let d_black = detect_dialog(pane_blacklisted).expect("blacklisted dialog");
+        assert_eq!(approve_option(&d_black, AgentKind::Codex), None);
+        assert_eq!(deny_option(&d_black, AgentKind::Codex), Some(2));
+
+        // 6c: Dialog with two identical Yes rows returns None
+        let pane_identical_yes = "Do you want to proceed?\n❯ 1. Yes\n  2. Yes\n  3. No";
+        let d_id = detect_dialog(pane_identical_yes).expect("identical yes dialog");
+        assert_eq!(approve_option(&d_id, AgentKind::ClaudeCode), None);
+        assert_eq!(deny_option(&d_id, AgentKind::ClaudeCode), Some(2));
+
+        // 6d: Decision-class prompt with non-affirmative options
+        let pane_decision = "Which auth method should we use?\n❯ 1. OAuth\n  2. API keys";
+        let d_dec = detect_dialog(pane_decision).expect("decision dialog");
+        assert_eq!(approve_option(&d_dec, AgentKind::ClaudeCode), None);
+        assert_eq!(deny_option(&d_dec, AgentKind::ClaudeCode), None);
+    }
+
+    #[test]
+    fn test_7_round_trip_dialog_select_keys_for_fixtures_1_to_4() {
+        // Fixture 1: Claude Bash
+        let d1 = detect_dialog(FIXTURE_CLAUDE_BASH).unwrap();
+        let app1 = approve_option(&d1, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(dialog_select_keys(&d1, app1), vec!["Enter".to_string()]);
+        let den1 = deny_option(&d1, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(
+            dialog_select_keys(&d1, den1),
+            vec!["Down".to_string(), "Down".to_string(), "Enter".to_string()]
+        );
+
+        // Fixture 2: Claude Edit
+        let d2 = detect_dialog(FIXTURE_CLAUDE_EDIT).unwrap();
+        let app2 = approve_option(&d2, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(dialog_select_keys(&d2, app2), vec!["Enter".to_string()]);
+        let den2 = deny_option(&d2, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(
+            dialog_select_keys(&d2, den2),
+            vec!["Down".to_string(), "Down".to_string(), "Enter".to_string()]
+        );
+
+        // Fixture 3: Codex MCP
+        let d3 = detect_dialog(FIXTURE_CODEX_MCP).unwrap();
+        let app3 = approve_option(&d3, AgentKind::Codex).unwrap();
+        assert_eq!(dialog_select_keys(&d3, app3), vec!["Enter".to_string()]);
+        let den3 = deny_option(&d3, AgentKind::Codex).unwrap();
+        assert_eq!(
+            dialog_select_keys(&d3, den3),
+            vec![
+                "Down".to_string(),
+                "Down".to_string(),
+                "Down".to_string(),
+                "Enter".to_string()
+            ]
+        );
+
+        // Fixture 4: Antigravity
+        let d4 = detect_dialog(FIXTURE_ANTIGRAVITY).unwrap();
+        let app4 = approve_option(&d4, AgentKind::Antigravity).unwrap();
+        assert_eq!(dialog_select_keys(&d4, app4), vec!["Enter".to_string()]);
+        let den4 = deny_option(&d4, AgentKind::Antigravity).unwrap();
+        assert_eq!(
+            dialog_select_keys(&d4, den4),
+            vec![
+                "Down".to_string(),
+                "Down".to_string(),
+                "Down".to_string(),
+                "Enter".to_string()
+            ]
+        );
+
+        // Digit fallback where the fixture has no visible cursor (selected == None)
+        let mut d_no_cur = d1.clone();
+        d_no_cur.selected = None;
+        let app_nc = approve_option(&d_no_cur, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(
+            dialog_select_keys(&d_no_cur, app_nc),
+            vec!["1".to_string(), "Enter".to_string()]
+        );
+        let den_nc = deny_option(&d_no_cur, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(
+            dialog_select_keys(&d_no_cur, den_nc),
+            vec!["3".to_string(), "Enter".to_string()]
+        );
     }
 }
