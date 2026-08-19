@@ -205,6 +205,9 @@ async fn run() {
     // live (config.set) starts/stops it without a restart.
     tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));
 
+    // Supervision watcher: policy-driven dialog answering and hold recording for supervised lanes.
+    tokio::spawn(repomon_daemon::supervision::supervision_watch(ctx.clone()));
+
     // Deliver queued fleet mail only when the resolved managed recipient is safe to interrupt.
     tokio::spawn(repomon_daemon::mail::delivery_worker(ctx.clone()));
 
