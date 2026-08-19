@@ -7,6 +7,7 @@ import type {
   BrowseResult,
   Commit,
   CommitShow,
+  DialogClass,
   ExtSnapshot,
   FanoutSummary,
   FileListResult,
@@ -15,11 +16,17 @@ import type {
   JournalEntry,
   Lane,
   FleetMessage,
+  MailDeliveryMode,
   MessagePage,
-  Playbook,
-  Schedule,
   PendingDialog,
+  Playbook,
+  PolicyAction,
   Repo,
+  Schedule,
+  SupervisionConfig,
+  SupervisionEntry,
+  SupervisionOverrides,
+  SupervisionPolicy,
   SystemDoctorResult,
   TimelineData,
   TranscriptItem,
@@ -90,6 +97,7 @@ export interface ConfigView {
   orchestrator_agent?: string | null;
   orchestrator_model?: string | null;
   agent_icons?: Record<string, string>;
+  supervision: SupervisionConfig;
   [key: string]: unknown;
 }
 
@@ -273,6 +281,42 @@ interface RpcMap {
   "skill.read": { params: { path: string }; result: { content: string } };
   "skill.write": { params: { path: string; content: string }; result: { ok: boolean; fanout: FanoutSummary | null } };
   "skill.delete": { params: { name: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
+  "supervision.get": {
+    params: { lane_id?: number };
+    result: {
+      defaults: SupervisionConfig;
+      lane: SupervisionOverrides | null;
+      effective: SupervisionPolicy | null;
+    };
+  };
+  "supervision.set": {
+    params: {
+      lane_id: number;
+      enabled?: boolean;
+      classes?: Partial<Record<DialogClass, PolicyAction>>;
+      mail_mode?: MailDeliveryMode;
+      nudge_text?: string;
+      stall_mins?: number;
+      nudge_retries?: number;
+      expect_work?: boolean;
+    };
+    result: { effective: SupervisionPolicy };
+  };
+  "supervision.audit": {
+    params: { lane_id?: number; limit?: number; before_id?: number };
+    result: { entries: SupervisionEntry[] };
+  };
+  "supervision.status": {
+    params: undefined;
+    result: {
+      master: boolean;
+      lanes: Array<{ lane_id: number; enabled: boolean; last: SupervisionEntry | null }>;
+    };
+  };
+  "supervision.nudge": {
+    params: { lane_id: number; window?: string; text?: string };
+    result: { outcome: string; entry_id: number; keys: string[] | null };
+  };
 }
 
 export type RpcMethod = keyof RpcMap;

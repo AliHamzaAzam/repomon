@@ -121,6 +121,14 @@ const config: ConfigView = {
   expand_agents: true,
   sort_repos_by_activity: true,
   embedded_pty: true,
+  supervision: {
+    enabled: false,
+    nudge_text: "Repomon: checking in on this lane.",
+    mail_mode: "nudge",
+    stall_mins: 15,
+    nudge_retries: 2,
+    classes: {},
+  },
 };
 
 afterEach(() => {

@@ -29,4 +29,8 @@ options: Array<DialogOption>,
 /**
  * Index into `options` of the row the selection cursor sits on, if visible.
  */
-selected?: number | null, };
+selected?: number | null, 
+/**
+ * Context lines above the question (for boxless or boxed dialogs), capped at [`CONTEXT_MAX_LINES`].
+ */
+context?: Array<string>, };

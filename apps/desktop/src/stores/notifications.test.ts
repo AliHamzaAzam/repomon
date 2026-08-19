@@ -58,6 +58,14 @@ const config = (): ConfigView => ({
   embedded_pty: true,
   orchestrator_agent: null,
   orchestrator_model: null,
+  supervision: {
+    enabled: false,
+    nudge_text: "Repomon: checking in on this lane.",
+    mail_mode: "nudge",
+    stall_mins: 15,
+    nudge_retries: 2,
+    classes: {},
+  },
 });
 
 function fakeSound(result = true) {
