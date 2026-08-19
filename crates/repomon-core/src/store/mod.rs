@@ -14,6 +14,7 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, Row, params};
 use sha2::{Digest, Sha256};
 
+use crate::agent::supervision::{MailDeliveryMode, SupervisionOverrides};
 use crate::error::{Error, Result};
 use crate::model::*;
 
@@ -52,6 +53,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         17,
         include_str!("../../migrations/0017_session_generated_labels.sql"),
     ),
+    (18, include_str!("../../migrations/0018_supervision.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -1390,6 +1392,193 @@ impl Store {
         })
         .await
     }
+
+    // ---- agent supervision ---------------------------------------------------
+
+    pub async fn lane_policy(&self, lane: LaneId) -> Result<Option<SupervisionOverrides>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {LANE_POLICY_COLS} FROM lane_policies WHERE lane_id = ?1"
+            ))?;
+            let mut rows = stmt.query_map(params![lane], lane_policy_from_row)?;
+            match rows.next() {
+                Some(r) => Ok(Some(r?)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    pub async fn lane_policies(&self) -> Result<Vec<SupervisionOverrides>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {LANE_POLICY_COLS} FROM lane_policies ORDER BY lane_id"
+            ))?;
+            let rows = stmt.query_map([], lane_policy_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    pub async fn set_lane_policy(&self, p: SupervisionOverrides) -> Result<()> {
+        self.call(move |c| {
+            let classes_json =
+                serde_json::to_string(&p.classes).unwrap_or_else(|_| "{}".to_string());
+            let mail_mode_str = p.mail_mode.map(|m| match m {
+                MailDeliveryMode::Nudge => "nudge",
+                MailDeliveryMode::FullBody => "full_body",
+            });
+            c.execute(
+                "INSERT INTO lane_policies(lane_id, enabled, classes, mail_mode, nudge_text, stall_mins, nudge_retries, expect_work, updated_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(lane_id) DO UPDATE SET
+                     enabled       = excluded.enabled,
+                     classes       = excluded.classes,
+                     mail_mode     = excluded.mail_mode,
+                     nudge_text    = excluded.nudge_text,
+                     stall_mins    = excluded.stall_mins,
+                     nudge_retries = excluded.nudge_retries,
+                     expect_work   = excluded.expect_work,
+                     updated_at    = excluded.updated_at",
+                params![
+                    p.lane_id,
+                    if p.enabled { 1 } else { 0 },
+                    classes_json,
+                    mail_mode_str,
+                    p.nudge_text,
+                    p.stall_mins.map(|v| v as i64),
+                    p.nudge_retries.map(|v| v as i64),
+                    if p.expect_work { 1 } else { 0 },
+                    to_iso(&p.updated_at),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn delete_lane_policy(&self, lane: LaneId) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "DELETE FROM lane_policies WHERE lane_id = ?1",
+                params![lane],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn append_supervision(&self, e: SupervisionEntry) -> Result<i64> {
+        self.call(move |c| {
+            let dialog_class_str = e.dialog_class.map(|dc| {
+                serde_json::to_string(&dc)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string()
+            });
+            let policy_source_str = e.policy_source.map(|ps| {
+                serde_json::to_string(&ps)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string()
+            });
+            let keys_json = e.keys.and_then(|k| serde_json::to_string(&k).ok());
+            let pane_excerpt = e
+                .pane_excerpt
+                .map(|s| truncate_char_boundary(&s, 800).to_string());
+
+            c.execute(
+                "INSERT INTO supervision_log(at, lane_id, window, session_id, agent_kind, trigger, dialog_class, repo_scoped, decision, policy_source, keys, outcome, reason, subject, pane_excerpt)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    to_iso(&e.at),
+                    e.lane_id,
+                    e.window,
+                    e.session_id,
+                    e.agent_kind,
+                    e.trigger,
+                    dialog_class_str,
+                    e.repo_scoped.map(|b| if b { 1 } else { 0 }),
+                    e.decision,
+                    policy_source_str,
+                    keys_json,
+                    e.outcome,
+                    e.reason,
+                    e.subject,
+                    pane_excerpt,
+                ],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .await
+    }
+
+    pub async fn supervision_log(
+        &self,
+        lane: Option<LaneId>,
+        limit: usize,
+        before_id: Option<i64>,
+    ) -> Result<Vec<SupervisionEntry>> {
+        self.call(move |c| {
+            let (query, params_vec): (String, Vec<rusqlite::types::Value>) = match (lane, before_id) {
+                (Some(l), Some(bid)) => (
+                    format!("SELECT {SUPERVISION_COLS} FROM supervision_log WHERE lane_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3"),
+                    vec![l.into(), bid.into(), (limit as i64).into()],
+                ),
+                (Some(l), None) => (
+                    format!("SELECT {SUPERVISION_COLS} FROM supervision_log WHERE lane_id = ?1 ORDER BY id DESC LIMIT ?2"),
+                    vec![l.into(), (limit as i64).into()],
+                ),
+                (None, Some(bid)) => (
+                    format!("SELECT {SUPERVISION_COLS} FROM supervision_log WHERE id < ?1 ORDER BY id DESC LIMIT ?2"),
+                    vec![bid.into(), (limit as i64).into()],
+                ),
+                (None, None) => (
+                    format!("SELECT {SUPERVISION_COLS} FROM supervision_log ORDER BY id DESC LIMIT ?1"),
+                    vec![(limit as i64).into()],
+                ),
+            };
+            let mut stmt = c.prepare(&query)?;
+            let params_slice: Vec<&dyn rusqlite::ToSql> = params_vec
+                .iter()
+                .map(|v| v as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt.query_map(&params_slice[..], supervision_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    pub async fn supervision_last(&self, lane: LaneId) -> Result<Option<SupervisionEntry>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {SUPERVISION_COLS} FROM supervision_log WHERE lane_id = ?1 ORDER BY id DESC LIMIT 1"
+            ))?;
+            let mut rows = stmt.query_map(params![lane], supervision_from_row)?;
+            match rows.next() {
+                Some(r) => Ok(Some(r?)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    pub async fn trim_supervision_log(&self, keep: usize) -> Result<()> {
+        self.call(move |c| {
+            if keep == 0 {
+                c.execute("DELETE FROM supervision_log", [])?;
+            } else {
+                c.execute(
+                    "DELETE FROM supervision_log WHERE id NOT IN (
+                         SELECT id FROM supervision_log ORDER BY id DESC LIMIT ?1
+                     )",
+                    params![keep as i64],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+    }
 }
 
 // ---- connection init + migrations --------------------------------------------
@@ -1824,9 +2013,96 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
     })
 }
 
+const LANE_POLICY_COLS: &str = "lane_id, enabled, classes, mail_mode, nudge_text, stall_mins, nudge_retries, expect_work, updated_at";
+
+fn lane_policy_from_row(row: &Row) -> rusqlite::Result<SupervisionOverrides> {
+    let lane_id: i64 = row.get(0)?;
+    let enabled_int: i64 = row.get(1)?;
+    let classes_str: String = row.get(2)?;
+    let mail_mode_str: Option<String> = row.get(3)?;
+    let nudge_text: Option<String> = row.get(4)?;
+    let stall_mins: Option<u32> = row.get::<_, Option<i64>>(5)?.map(|v| v as u32);
+    let nudge_retries: Option<u32> = row.get::<_, Option<i64>>(6)?.map(|v| v as u32);
+    let expect_work_int: i64 = row.get(7)?;
+    let updated_at = dt_col(row, 8)?;
+
+    let classes = serde_json::from_str(&classes_str).unwrap_or_default();
+    let mail_mode = match mail_mode_str.as_deref() {
+        Some("nudge") => Some(MailDeliveryMode::Nudge),
+        Some("full_body") => Some(MailDeliveryMode::FullBody),
+        _ => None,
+    };
+
+    Ok(SupervisionOverrides {
+        lane_id,
+        enabled: enabled_int != 0,
+        classes,
+        mail_mode,
+        nudge_text,
+        stall_mins,
+        nudge_retries,
+        expect_work: expect_work_int != 0,
+        updated_at,
+    })
+}
+
+const SUPERVISION_COLS: &str = "id, at, lane_id, window, session_id, agent_kind, trigger, dialog_class, repo_scoped, decision, policy_source, keys, outcome, reason, subject, pane_excerpt";
+
+fn supervision_from_row(row: &Row) -> rusqlite::Result<SupervisionEntry> {
+    let id: i64 = row.get(0)?;
+    let at = dt_col(row, 1)?;
+    let lane_id: i64 = row.get(2)?;
+    let window: String = row.get(3)?;
+    let session_id: Option<String> = row.get(4)?;
+    let agent_kind: Option<String> = row.get(5)?;
+    let trigger: String = row.get(6)?;
+    let dialog_class_str: Option<String> = row.get(7)?;
+    let repo_scoped_int: Option<i64> = row.get(8)?;
+    let decision: String = row.get(9)?;
+    let policy_source_str: Option<String> = row.get(10)?;
+    let keys_str: Option<String> = row.get(11)?;
+    let outcome: String = row.get(12)?;
+    let reason: Option<String> = row.get(13)?;
+    let subject: Option<String> = row.get(14)?;
+    let pane_excerpt: Option<String> = row.get(15)?;
+
+    let dialog_class =
+        dialog_class_str.and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok());
+    let policy_source =
+        policy_source_str.and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok());
+    let keys = keys_str.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+
+    Ok(SupervisionEntry {
+        id,
+        at,
+        lane_id,
+        window,
+        session_id,
+        agent_kind,
+        trigger,
+        dialog_class,
+        repo_scoped: repo_scoped_int.map(|v| v != 0),
+        decision,
+        policy_source,
+        keys,
+        outcome,
+        reason,
+        subject,
+        pane_excerpt,
+    })
+}
+
+fn truncate_char_boundary(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        None => s,
+        Some((idx, _)) => &s[..idx],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::supervision::{DialogClass, PolicyAction, PolicySource};
 
     fn oid(n: u8) -> gix::ObjectId {
         format!("{n:040x}").parse().unwrap()
@@ -2828,5 +3104,303 @@ mod tests {
         assert_eq!(reply.reply_to.as_deref(), Some(inbound.id.as_str()));
         assert_eq!(reply.thread_id, inbound.thread_id);
         assert_eq!(reply.remaining_hops, inbound.remaining_hops - 1);
+    }
+
+    #[test]
+    fn migration_18_applies_fresh_and_from_17() {
+        // Fresh DB reaches version 18
+        let mut c = Connection::open_in_memory().unwrap();
+        init(&mut c).unwrap();
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 18);
+
+        // Staged DB from version 17
+        let mut c17 = Connection::open_in_memory().unwrap();
+        for (target, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+            let tx = c17.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", target).unwrap();
+            tx.commit().unwrap();
+        }
+        let v17: i64 = c17
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v17, 17);
+
+        // Run migrations -> reaches 18 and tables exist
+        run_migrations(&mut c17).unwrap();
+        let v18: i64 = c17
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v18, 18);
+
+        let lp_exists: i64 = c17
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lane_policies'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lp_exists, 1);
+
+        let sl_exists: i64 = c17
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='supervision_log'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sl_exists, 1);
+    }
+
+    #[tokio::test]
+    async fn lane_policy_upsert_read_delete_roundtrip() {
+        let s = store().await;
+        assert_eq!(s.lane_policy(10).await.unwrap(), None);
+
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(DialogClass::CommandExec, PolicyAction::AutoApprove);
+        classes.insert(DialogClass::Deletion, PolicyAction::AutoDeny);
+
+        let p = SupervisionOverrides {
+            lane_id: 10,
+            enabled: true,
+            classes,
+            mail_mode: Some(MailDeliveryMode::FullBody),
+            nudge_text: Some("nudge lane".to_string()),
+            stall_mins: Some(15),
+            nudge_retries: Some(3),
+            expect_work: true,
+            updated_at: Utc::now(),
+        };
+
+        s.set_lane_policy(p.clone()).await.unwrap();
+
+        let read = s.lane_policy(10).await.unwrap().expect("policy exists");
+        assert_eq!(read.lane_id, 10);
+        assert!(read.enabled);
+        assert_eq!(read.classes.len(), 2);
+        assert_eq!(
+            read.classes.get(&DialogClass::CommandExec),
+            Some(&PolicyAction::AutoApprove)
+        );
+        assert_eq!(
+            read.classes.get(&DialogClass::Deletion),
+            Some(&PolicyAction::AutoDeny)
+        );
+        assert_eq!(read.mail_mode, Some(MailDeliveryMode::FullBody));
+        assert_eq!(read.nudge_text.as_deref(), Some("nudge lane"));
+        assert_eq!(read.stall_mins, Some(15));
+        assert_eq!(read.nudge_retries, Some(3));
+        assert!(read.expect_work);
+        assert_eq!(read.updated_at.timestamp(), p.updated_at.timestamp());
+
+        let all = s.lane_policies().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].lane_id, 10);
+
+        // Update existing policy
+        let mut p_updated = p;
+        p_updated.enabled = false;
+        p_updated.classes.clear();
+        p_updated.mail_mode = None;
+        s.set_lane_policy(p_updated).await.unwrap();
+
+        let read2 = s.lane_policy(10).await.unwrap().unwrap();
+        assert!(!read2.enabled);
+        assert!(read2.classes.is_empty());
+        assert_eq!(read2.mail_mode, None);
+
+        // Delete policy
+        s.delete_lane_policy(10).await.unwrap();
+        assert_eq!(s.lane_policy(10).await.unwrap(), None);
+        assert!(s.lane_policies().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn supervision_log_append_paginate_lane_filter() {
+        let s = store().await;
+
+        let make_entry = |lane_id: LaneId, trigger: &str, decision: &str| SupervisionEntry {
+            id: 0,
+            at: Utc::now(),
+            lane_id,
+            window: "repomon:1".to_string(),
+            session_id: Some("sess-1".to_string()),
+            agent_kind: Some("claude-code".to_string()),
+            trigger: trigger.to_string(),
+            dialog_class: Some(DialogClass::CommandExec),
+            repo_scoped: Some(true),
+            decision: decision.to_string(),
+            policy_source: Some(PolicySource::ApprovalRule),
+            keys: Some(vec!["Enter".to_string()]),
+            outcome: "sent".to_string(),
+            reason: Some("auto approved".to_string()),
+            subject: Some("cargo test".to_string()),
+            pane_excerpt: Some("test pane output".to_string()),
+        };
+
+        // Insert 5 entries across 2 lanes: 3 on lane 1, 2 on lane 2
+        let id1 = s
+            .append_supervision(make_entry(1, "dialog", "approve"))
+            .await
+            .unwrap();
+        let id2 = s
+            .append_supervision(make_entry(2, "dialog", "deny"))
+            .await
+            .unwrap();
+        let id3 = s
+            .append_supervision(make_entry(1, "stall", "nudge"))
+            .await
+            .unwrap();
+        let id4 = s
+            .append_supervision(make_entry(2, "mail", "nudge"))
+            .await
+            .unwrap();
+        let id5 = s
+            .append_supervision(make_entry(1, "dialog", "approve"))
+            .await
+            .unwrap();
+
+        assert_eq!(vec![id1, id2, id3, id4, id5], vec![1, 2, 3, 4, 5]);
+
+        // Query all, newest first
+        let all = s.supervision_log(None, 10, None).await.unwrap();
+        assert_eq!(all.len(), 5);
+        assert_eq!(
+            all.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![5, 4, 3, 2, 1]
+        );
+
+        // Lane filter: lane 1
+        let l1 = s.supervision_log(Some(1), 10, None).await.unwrap();
+        assert_eq!(l1.len(), 3);
+        assert_eq!(l1.iter().map(|e| e.id).collect::<Vec<_>>(), vec![5, 3, 1]);
+
+        // Lane filter: lane 2
+        let l2 = s.supervision_log(Some(2), 10, None).await.unwrap();
+        assert_eq!(l2.len(), 2);
+        assert_eq!(l2.iter().map(|e| e.id).collect::<Vec<_>>(), vec![4, 2]);
+
+        // Cursor pagination with before_id
+        let page1 = s.supervision_log(None, 2, None).await.unwrap();
+        assert_eq!(page1.iter().map(|e| e.id).collect::<Vec<_>>(), vec![5, 4]);
+
+        let page2 = s
+            .supervision_log(None, 2, Some(page1.last().unwrap().id))
+            .await
+            .unwrap();
+        assert_eq!(page2.iter().map(|e| e.id).collect::<Vec<_>>(), vec![3, 2]);
+
+        let page3 = s
+            .supervision_log(None, 2, Some(page2.last().unwrap().id))
+            .await
+            .unwrap();
+        assert_eq!(page3.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1]);
+
+        // supervision_last
+        let last1 = s.supervision_last(1).await.unwrap().expect("last exists");
+        assert_eq!(last1.id, 5);
+        let last2 = s.supervision_last(2).await.unwrap().expect("last exists");
+        assert_eq!(last2.id, 4);
+        let last3 = s.supervision_last(999).await.unwrap();
+        assert!(last3.is_none());
+    }
+
+    #[tokio::test]
+    async fn supervision_log_trim_keeps_newest() {
+        let s = store().await;
+
+        let make_entry = |idx: usize| SupervisionEntry {
+            id: 0,
+            at: Utc::now(),
+            lane_id: 1,
+            window: "w".to_string(),
+            session_id: None,
+            agent_kind: None,
+            trigger: "dialog".to_string(),
+            dialog_class: None,
+            repo_scoped: None,
+            decision: "approve".to_string(),
+            policy_source: None,
+            keys: None,
+            outcome: "sent".to_string(),
+            reason: Some(format!("entry {idx}")),
+            subject: None,
+            pane_excerpt: None,
+        };
+
+        for i in 1..=10 {
+            s.append_supervision(make_entry(i)).await.unwrap();
+        }
+        assert_eq!(s.supervision_log(None, 20, None).await.unwrap().len(), 10);
+
+        s.trim_supervision_log(3).await.unwrap();
+        let remaining = s.supervision_log(None, 20, None).await.unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(
+            remaining.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![10, 9, 8]
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_excerpt_truncated_to_800() {
+        let s = store().await;
+
+        let long_excerpt = "a".repeat(1200);
+        let e = SupervisionEntry {
+            id: 0,
+            at: Utc::now(),
+            lane_id: 1,
+            window: "w".to_string(),
+            session_id: None,
+            agent_kind: None,
+            trigger: "dialog".to_string(),
+            dialog_class: None,
+            repo_scoped: None,
+            decision: "approve".to_string(),
+            policy_source: None,
+            keys: None,
+            outcome: "sent".to_string(),
+            reason: None,
+            subject: None,
+            pane_excerpt: Some(long_excerpt),
+        };
+
+        let rowid = s.append_supervision(e).await.unwrap();
+        let fetched = s.supervision_last(1).await.unwrap().unwrap();
+        assert_eq!(fetched.id, rowid);
+        let stored_excerpt = fetched.pane_excerpt.unwrap();
+        assert_eq!(stored_excerpt.len(), 800);
+        assert_eq!(stored_excerpt, "a".repeat(800));
+
+        // Multibyte unicode test
+        let unicode_long = "🦀".repeat(1000); // each emoji is 4 bytes
+        let e2 = SupervisionEntry {
+            id: 0,
+            at: Utc::now(),
+            lane_id: 2,
+            window: "w".to_string(),
+            session_id: None,
+            agent_kind: None,
+            trigger: "dialog".to_string(),
+            dialog_class: None,
+            repo_scoped: None,
+            decision: "approve".to_string(),
+            policy_source: None,
+            keys: None,
+            outcome: "sent".to_string(),
+            reason: None,
+            subject: None,
+            pane_excerpt: Some(unicode_long),
+        };
+        s.append_supervision(e2).await.unwrap();
+        let fetched2 = s.supervision_last(2).await.unwrap().unwrap();
+        let stored_unicode = fetched2.pane_excerpt.unwrap();
+        assert_eq!(stored_unicode.chars().count(), 800);
+        assert_eq!(stored_unicode, "🦀".repeat(800));
     }
 }
