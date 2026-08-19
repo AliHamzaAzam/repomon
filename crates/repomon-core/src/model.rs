@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::agent::supervision::{DialogClass, PolicySource};
+
 pub type RepoId = i64;
 pub type WorktreeId = i64;
 pub type LaneId = i64;
@@ -284,6 +286,42 @@ pub struct JournalEntry {
     /// Error text or a short result digest (truncated at write time).
     #[serde(default)]
     pub detail: Option<String>,
+}
+
+/// An audit entry recording an agent supervision event, decision, and outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SupervisionEntry {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub lane_id: LaneId,
+    pub window: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    pub trigger: String, // "dialog" | "mail" | "stall" | "manual_nudge" | "legacy_rule"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog_class: Option<DialogClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_scoped: Option<bool>,
+    pub decision: String, // "approve" | "deny" | "hold" | "nudge" | "skip" | "error"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_source: Option<PolicySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>, // keys actually sent; None when nothing was sent
+    pub outcome: String, // "sent" | "skipped" | "failed"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_excerpt: Option<String>,
 }
 
 /// A playbook: procedural memory drafted by the orchestrator, inert until a human approves it.

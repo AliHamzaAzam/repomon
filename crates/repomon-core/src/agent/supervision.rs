@@ -4,16 +4,18 @@
 //! extracts subject entities (commands, file paths, hosts), and conservatively evaluates
 //! whether an action is provably scoped to the repo worktree.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::approval;
-use crate::agent::prompt::PendingDialog;
-use crate::model::AgentKind;
+use crate::agent::prompt::{PendingDialog, PromptClass};
+use crate::model::{AgentKind, LaneId};
 
 /// Semantic category of a permission dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -27,6 +29,295 @@ pub enum DialogClass {
     Install,
     DeviceAccess,
     Unknown,
+}
+
+/// The action to take when evaluating a permission dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum PolicyAction {
+    AutoApprove,
+    AutoDeny,
+    Hold,
+}
+
+/// Delivery mode for agent supervisor nudges / mail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum MailDeliveryMode {
+    #[default]
+    Nudge,
+    FullBody,
+}
+
+/// Origin / rationale for the resolved policy decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum PolicySource {
+    LaneClass,
+    GlobalClass,
+    ApprovalRule,
+    AlwaysEscalate,
+    DecisionClass,
+    AmbiguousOptions,
+    NotRepoScoped,
+    Default,
+}
+
+/// Global defaults for agent supervision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SupervisionConfig {
+    pub enabled: bool,
+    pub nudge_text: String,
+    pub mail_mode: MailDeliveryMode,
+    pub stall_mins: u32,
+    pub nudge_retries: u32,
+    pub classes: BTreeMap<DialogClass, PolicyAction>,
+}
+
+impl Default for SupervisionConfig {
+    fn default() -> Self {
+        let mut classes = BTreeMap::new();
+        classes.insert(DialogClass::CommandExec, PolicyAction::AutoApprove);
+        classes.insert(DialogClass::FileWrite, PolicyAction::AutoApprove);
+        classes.insert(DialogClass::NetworkAccess, PolicyAction::Hold);
+        classes.insert(DialogClass::CredentialAccess, PolicyAction::Hold);
+        classes.insert(DialogClass::Deletion, PolicyAction::Hold);
+        classes.insert(DialogClass::PushRemote, PolicyAction::Hold);
+        classes.insert(DialogClass::Install, PolicyAction::Hold);
+        classes.insert(DialogClass::DeviceAccess, PolicyAction::Hold);
+        classes.insert(DialogClass::Unknown, PolicyAction::Hold);
+
+        Self {
+            enabled: false,
+            nudge_text: "Check your repomon mail and act on it.".to_string(),
+            mail_mode: MailDeliveryMode::Nudge,
+            stall_mins: 20,
+            nudge_retries: 2,
+            classes,
+        }
+    }
+}
+
+/// One lane's stored policy row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SupervisionOverrides {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub lane_id: LaneId,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classes: BTreeMap<DialogClass, PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_mode: Option<MailDeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_mins: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge_retries: Option<u32>,
+    pub expect_work: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Effective, fully resolved supervision policy used by the daemon loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct SupervisionPolicy {
+    pub enabled: bool,
+    pub classes: BTreeMap<DialogClass, PolicyAction>,
+    pub mail_mode: MailDeliveryMode,
+    pub nudge_text: String,
+    pub stall_mins: u32,
+    pub nudge_retries: u32,
+    pub expect_work: bool,
+}
+
+/// Evaluation outcome for a classified dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct Decision {
+    pub action: PolicyAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<usize>,
+    pub source: PolicySource,
+    pub reason: String,
+}
+
+/// Fully resolve effective supervision policy from global config defaults and optional lane overrides.
+pub fn resolve(
+    defaults: &SupervisionConfig,
+    lane: Option<&SupervisionOverrides>,
+) -> SupervisionPolicy {
+    let mut default_classes = SupervisionConfig::default().classes;
+    for (k, v) in &defaults.classes {
+        default_classes.insert(*k, *v);
+    }
+
+    let enabled = defaults.enabled && lane.is_some_and(|l| l.enabled);
+    let mut classes = default_classes;
+    let mut mail_mode = defaults.mail_mode;
+    let mut nudge_text = defaults.nudge_text.clone();
+    let mut stall_mins = defaults.stall_mins;
+    let mut nudge_retries = defaults.nudge_retries;
+    let mut expect_work = false;
+
+    if let Some(l) = lane {
+        for (k, v) in &l.classes {
+            classes.insert(*k, *v);
+        }
+        if let Some(m) = l.mail_mode {
+            mail_mode = m;
+        }
+        if let Some(ref n) = l.nudge_text {
+            nudge_text = n.clone();
+        }
+        if let Some(s) = l.stall_mins {
+            stall_mins = s;
+        }
+        if let Some(r) = l.nudge_retries {
+            nudge_retries = r;
+        }
+        expect_work = l.expect_work;
+    }
+
+    SupervisionPolicy {
+        enabled,
+        classes,
+        mail_mode,
+        nudge_text,
+        stall_mins,
+        nudge_retries,
+        expect_work,
+    }
+}
+
+/// Purely evaluate what action to take on a classified dialog under the given effective policy.
+pub fn evaluate(
+    policy: &SupervisionPolicy,
+    c: &Classification,
+    d: &PendingDialog,
+    kind: AgentKind,
+    extra_allow: bool,
+) -> Decision {
+    // 1. Always escalate check on subject
+    if c.subject
+        .as_deref()
+        .is_some_and(approval::is_always_escalate)
+    {
+        return Decision {
+            action: PolicyAction::Hold,
+            choice: None,
+            source: PolicySource::AlwaysEscalate,
+            reason: "Subject matched always-escalate pattern".to_string(),
+        };
+    }
+
+    // 2. Decision questions are never auto-answered
+    if d.class() == PromptClass::Decision {
+        return Decision {
+            action: PolicyAction::Hold,
+            choice: None,
+            source: PolicySource::DecisionClass,
+            reason: "Prompt requires human decision".to_string(),
+        };
+    }
+
+    // 3. Look up policy action for dialog class
+    let map_action = policy
+        .classes
+        .get(&c.class)
+        .copied()
+        .unwrap_or(PolicyAction::Hold);
+
+    let (mut action, mut source) = match c.class {
+        DialogClass::Unknown => (PolicyAction::Hold, PolicySource::GlobalClass),
+        DialogClass::CommandExec | DialogClass::FileWrite | DialogClass::Deletion => {
+            if map_action == PolicyAction::AutoApprove && !c.repo_scoped {
+                (PolicyAction::Hold, PolicySource::NotRepoScoped)
+            } else {
+                (map_action, PolicySource::GlobalClass)
+            }
+        }
+        _ => (map_action, PolicySource::GlobalClass),
+    };
+
+    // 4. Learned approval rule: extra_allow lifts a Hold to AutoApprove ONLY when
+    // c.class == CommandExec && c.repo_scoped and rule 1 did not fire.
+    if action == PolicyAction::Hold
+        && extra_allow
+        && c.class == DialogClass::CommandExec
+        && c.repo_scoped
+    {
+        action = PolicyAction::AutoApprove;
+        source = PolicySource::ApprovalRule;
+    }
+
+    // 5. Option index mapping & outcome construction
+    match action {
+        PolicyAction::AutoApprove => {
+            if let Some(idx) = approve_option(d, kind) {
+                Decision {
+                    action: PolicyAction::AutoApprove,
+                    choice: Some(idx),
+                    source,
+                    reason: format!("Auto-approved {:?}", c.class),
+                }
+            } else {
+                Decision {
+                    action: PolicyAction::Hold,
+                    choice: None,
+                    source: PolicySource::AmbiguousOptions,
+                    reason: "No unambiguous single-shot approve option found".to_string(),
+                }
+            }
+        }
+        PolicyAction::AutoDeny => {
+            if let Some(idx) = deny_option(d, kind) {
+                Decision {
+                    action: PolicyAction::AutoDeny,
+                    choice: Some(idx),
+                    source,
+                    reason: format!("Auto-denied {:?}", c.class),
+                }
+            } else {
+                Decision {
+                    action: PolicyAction::Hold,
+                    choice: None,
+                    source: PolicySource::AmbiguousOptions,
+                    reason: "No unambiguous deny option found".to_string(),
+                }
+            }
+        }
+        PolicyAction::Hold => {
+            let reason = match source {
+                PolicySource::NotRepoScoped => {
+                    "Action is not verified to be repo-scoped".to_string()
+                }
+                _ => format!("Policy for {:?} is Hold", c.class),
+            };
+            Decision {
+                action: PolicyAction::Hold,
+                choice: None,
+                source,
+                reason,
+            }
+        }
+    }
 }
 
 /// The filesystem scope of the repository and worktree against which actions are evaluated.
@@ -1392,5 +1683,327 @@ Do you want to proceed?\n\
             dialog_select_keys(&d_no_cur, den_nc),
             vec!["3".to_string(), "Enter".to_string()]
         );
+    }
+
+    #[test]
+    fn always_escalate_beats_auto_approve() {
+        let d = detect_dialog(FIXTURE_CLAUDE_BASH).unwrap();
+        let mut policy = SupervisionPolicy {
+            enabled: true,
+            classes: BTreeMap::new(),
+            mail_mode: MailDeliveryMode::Nudge,
+            nudge_text: "test".into(),
+            stall_mins: 20,
+            nudge_retries: 2,
+            expect_work: false,
+        };
+        policy
+            .classes
+            .insert(DialogClass::CommandExec, PolicyAction::AutoApprove);
+
+        let c = Classification {
+            class: DialogClass::CommandExec,
+            repo_scoped: true,
+            subject: Some("rm -rf /".to_string()),
+            evidence: vec!["rm -rf".to_string()],
+        };
+        let dec = evaluate(&policy, &c, &d, AgentKind::ClaudeCode, false);
+        assert_eq!(dec.action, PolicyAction::Hold);
+        assert_eq!(dec.choice, None);
+        assert_eq!(dec.source, PolicySource::AlwaysEscalate);
+    }
+
+    #[test]
+    fn decision_class_is_never_answered() {
+        let pane = "Which auth method should we use?\n❯ 1. OAuth\n  2. API keys";
+        let d = detect_dialog(pane).unwrap();
+        let policy = resolve(
+            &SupervisionConfig {
+                enabled: true,
+                classes: {
+                    let mut m = BTreeMap::new();
+                    for c in [
+                        DialogClass::CommandExec,
+                        DialogClass::FileWrite,
+                        DialogClass::NetworkAccess,
+                        DialogClass::CredentialAccess,
+                        DialogClass::Deletion,
+                        DialogClass::PushRemote,
+                        DialogClass::Install,
+                        DialogClass::DeviceAccess,
+                        DialogClass::Unknown,
+                    ] {
+                        m.insert(c, PolicyAction::AutoApprove);
+                    }
+                    m
+                },
+                ..Default::default()
+            },
+            Some(&SupervisionOverrides {
+                lane_id: 1,
+                enabled: true,
+                classes: BTreeMap::new(),
+                mail_mode: None,
+                nudge_text: None,
+                stall_mins: None,
+                nudge_retries: None,
+                expect_work: false,
+                updated_at: Utc::now(),
+            }),
+        );
+
+        let c = Classification {
+            class: DialogClass::Unknown,
+            repo_scoped: false,
+            subject: None,
+            evidence: vec![],
+        };
+        let dec = evaluate(&policy, &c, &d, AgentKind::ClaudeCode, false);
+        assert_eq!(dec.action, PolicyAction::Hold);
+        assert_eq!(dec.choice, None);
+        assert_eq!(dec.source, PolicySource::DecisionClass);
+    }
+
+    #[test]
+    fn out_of_worktree_write_holds() {
+        let d = detect_dialog(FIXTURE_CLAUDE_EDIT).unwrap();
+        let mut policy = resolve(&SupervisionConfig::default(), None);
+        policy
+            .classes
+            .insert(DialogClass::FileWrite, PolicyAction::AutoApprove);
+
+        let c = Classification {
+            class: DialogClass::FileWrite,
+            repo_scoped: false,
+            subject: Some("/etc/hosts".to_string()),
+            evidence: vec!["edit file".to_string()],
+        };
+        let dec = evaluate(&policy, &c, &d, AgentKind::ClaudeCode, false);
+        assert_eq!(dec.action, PolicyAction::Hold);
+        assert_eq!(dec.choice, None);
+        assert_eq!(dec.source, PolicySource::NotRepoScoped);
+    }
+
+    #[test]
+    fn learned_rule_only_lifts_repo_scoped_command_exec() {
+        let d_bash = detect_dialog(FIXTURE_CLAUDE_BASH).unwrap();
+        let d_edit = detect_dialog(FIXTURE_CLAUDE_EDIT).unwrap();
+
+        // Sub-assert 1: lifts repo-scoped CommandExec when policy is Hold
+        let mut policy_hold = resolve(&SupervisionConfig::default(), None);
+        policy_hold
+            .classes
+            .insert(DialogClass::CommandExec, PolicyAction::Hold);
+        let c1 = Classification {
+            class: DialogClass::CommandExec,
+            repo_scoped: true,
+            subject: Some("cargo install --path crates/repomon-tui".to_string()),
+            evidence: vec!["cargo install".to_string()],
+        };
+        let dec1 = evaluate(&policy_hold, &c1, &d_bash, AgentKind::ClaudeCode, true);
+        assert_eq!(dec1.action, PolicyAction::AutoApprove);
+        assert_eq!(dec1.choice, Some(0));
+        assert_eq!(dec1.source, PolicySource::ApprovalRule);
+
+        // Sub-assert 2: does NOT lift non-repo-scoped CommandExec
+        let policy_auto = resolve(&SupervisionConfig::default(), None); // CommandExec is AutoApprove by default
+        let c2 = Classification {
+            class: DialogClass::CommandExec,
+            repo_scoped: false,
+            subject: Some("ps aux | grep -i repomon".to_string()),
+            evidence: vec!["ps aux".to_string()],
+        };
+        let dec2 = evaluate(&policy_auto, &c2, &d_bash, AgentKind::ClaudeCode, true);
+        assert_eq!(dec2.action, PolicyAction::Hold);
+        assert_eq!(dec2.choice, None);
+        assert_eq!(dec2.source, PolicySource::NotRepoScoped);
+
+        // Sub-assert 3: does NOT lift FileWrite
+        let mut policy_edit = resolve(&SupervisionConfig::default(), None);
+        policy_edit
+            .classes
+            .insert(DialogClass::FileWrite, PolicyAction::Hold);
+        let c3 = Classification {
+            class: DialogClass::FileWrite,
+            repo_scoped: true,
+            subject: Some("crates/repomon-core/src/agent/mod.rs".to_string()),
+            evidence: vec!["edit file".to_string()],
+        };
+        let dec3 = evaluate(&policy_edit, &c3, &d_edit, AgentKind::ClaudeCode, true);
+        assert_eq!(dec3.action, PolicyAction::Hold);
+        assert_eq!(dec3.choice, None);
+        assert_eq!(dec3.source, PolicySource::GlobalClass);
+    }
+
+    #[test]
+    fn ambiguous_options_hold() {
+        let pane = "Do you want to proceed?\n❯ 1. Yes, deploy to staging\n  2. Yes, deploy to production\n  3. No";
+        let d = detect_dialog(pane).unwrap();
+        let mut policy = resolve(&SupervisionConfig::default(), None);
+        policy
+            .classes
+            .insert(DialogClass::CommandExec, PolicyAction::AutoApprove);
+
+        let c = Classification {
+            class: DialogClass::CommandExec,
+            repo_scoped: true,
+            subject: Some("cargo deploy".to_string()),
+            evidence: vec!["cargo".to_string()],
+        };
+        let dec = evaluate(&policy, &c, &d, AgentKind::ClaudeCode, false);
+        assert_eq!(dec.action, PolicyAction::Hold);
+        assert_eq!(dec.choice, None);
+        assert_eq!(dec.source, PolicySource::AmbiguousOptions);
+    }
+
+    #[test]
+    fn unknown_class_holds_even_if_map_says_approve() {
+        let d = detect_dialog(FIXTURE_CLAUDE_BASH).unwrap();
+        let mut policy = resolve(&SupervisionConfig::default(), None);
+        policy
+            .classes
+            .insert(DialogClass::Unknown, PolicyAction::AutoApprove);
+
+        let c = Classification {
+            class: DialogClass::Unknown,
+            repo_scoped: false,
+            subject: None,
+            evidence: vec![],
+        };
+        let dec = evaluate(&policy, &c, &d, AgentKind::ClaudeCode, false);
+        assert_eq!(dec.action, PolicyAction::Hold);
+        assert_eq!(dec.choice, None);
+    }
+
+    #[test]
+    fn auto_deny_selects_deny_option() {
+        let d = detect_dialog(FIXTURE_CLAUDE_BASH).unwrap();
+        let mut policy = resolve(&SupervisionConfig::default(), None);
+        policy
+            .classes
+            .insert(DialogClass::CommandExec, PolicyAction::AutoDeny);
+
+        let c = Classification {
+            class: DialogClass::CommandExec,
+            repo_scoped: true,
+            subject: Some("cargo test".to_string()),
+            evidence: vec!["cargo".to_string()],
+        };
+        let dec = evaluate(&policy, &c, &d, AgentKind::ClaudeCode, false);
+        assert_eq!(dec.action, PolicyAction::AutoDeny);
+        assert_eq!(dec.choice, Some(2));
+        assert_eq!(dec.source, PolicySource::GlobalClass);
+    }
+
+    #[test]
+    fn resolve_merges_sparse_lane_overrides() {
+        let defaults = SupervisionConfig {
+            enabled: true,
+            nudge_text: "default nudge".to_string(),
+            mail_mode: MailDeliveryMode::Nudge,
+            stall_mins: 20,
+            nudge_retries: 2,
+            classes: BTreeMap::new(),
+        };
+        let mut lane_classes = BTreeMap::new();
+        lane_classes.insert(DialogClass::Deletion, PolicyAction::AutoDeny);
+
+        let lane = SupervisionOverrides {
+            lane_id: 42,
+            enabled: true,
+            classes: lane_classes,
+            mail_mode: None,
+            nudge_text: Some("lane nudge".to_string()),
+            stall_mins: None,
+            nudge_retries: None,
+            expect_work: true,
+            updated_at: Utc::now(),
+        };
+
+        let p = resolve(&defaults, Some(&lane));
+        assert!(p.enabled);
+        assert_eq!(p.classes.len(), 9);
+        assert_eq!(
+            p.classes.get(&DialogClass::Deletion),
+            Some(&PolicyAction::AutoDeny)
+        );
+        assert_eq!(
+            p.classes.get(&DialogClass::CommandExec),
+            Some(&PolicyAction::AutoApprove)
+        );
+        assert_eq!(
+            p.classes.get(&DialogClass::FileWrite),
+            Some(&PolicyAction::AutoApprove)
+        );
+        assert_eq!(
+            p.classes.get(&DialogClass::NetworkAccess),
+            Some(&PolicyAction::Hold)
+        );
+        assert_eq!(p.nudge_text, "lane nudge");
+        assert_eq!(p.mail_mode, MailDeliveryMode::Nudge);
+        assert_eq!(p.stall_mins, 20);
+        assert_eq!(p.nudge_retries, 2);
+        assert!(p.expect_work);
+    }
+
+    #[test]
+    fn master_off_forces_lane_disabled() {
+        let defaults = SupervisionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let lane = SupervisionOverrides {
+            lane_id: 1,
+            enabled: true,
+            classes: BTreeMap::new(),
+            mail_mode: None,
+            nudge_text: None,
+            stall_mins: None,
+            nudge_retries: None,
+            expect_work: false,
+            updated_at: Utc::now(),
+        };
+        let p = resolve(&defaults, Some(&lane));
+        assert!(!p.enabled);
+    }
+
+    #[test]
+    fn no_lane_row_means_disabled() {
+        let defaults = SupervisionConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let p = resolve(&defaults, None);
+        assert!(!p.enabled);
+    }
+
+    #[test]
+    fn default_config_matches_spec() {
+        let def = SupervisionConfig::default();
+        assert!(!def.enabled);
+        assert_eq!(def.nudge_text, "Check your repomon mail and act on it.");
+        assert_eq!(def.mail_mode, MailDeliveryMode::Nudge);
+        assert_eq!(def.stall_mins, 20);
+        assert_eq!(def.nudge_retries, 2);
+        assert_eq!(def.classes.len(), 9);
+        assert_eq!(
+            def.classes.get(&DialogClass::CommandExec),
+            Some(&PolicyAction::AutoApprove)
+        );
+        assert_eq!(
+            def.classes.get(&DialogClass::FileWrite),
+            Some(&PolicyAction::AutoApprove)
+        );
+        for other in [
+            DialogClass::NetworkAccess,
+            DialogClass::CredentialAccess,
+            DialogClass::Deletion,
+            DialogClass::PushRemote,
+            DialogClass::Install,
+            DialogClass::DeviceAccess,
+            DialogClass::Unknown,
+        ] {
+            assert_eq!(def.classes.get(&other), Some(&PolicyAction::Hold));
+        }
     }
 }
