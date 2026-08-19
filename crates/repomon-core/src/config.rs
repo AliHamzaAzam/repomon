@@ -164,6 +164,9 @@ pub struct Config {
     /// bounded triage orchestration (context + recommendation in the push). `None` disables the
     /// trigger (the default): an unattended run costs real tokens and must be opted into.
     pub triage_after_mins: Option<u64>,
+    /// Agent supervision configuration (autonomous auto-approval and intervention policies).
+    #[serde(default)]
+    pub supervision: crate::agent::supervision::SupervisionConfig,
 }
 
 impl Default for Config {
@@ -213,6 +216,7 @@ impl Default for Config {
             embedded_pty: true,
             standing_timeout_secs: 600,
             triage_after_mins: None,
+            supervision: crate::agent::supervision::SupervisionConfig::default(),
         }
     }
 }
@@ -581,5 +585,130 @@ mod tests {
         assert_eq!(data_dir(), PathBuf::from("/tmp/repomon-data-override-test"));
         // SAFETY: single-threaded test; nothing else reads the environment here.
         unsafe { std::env::remove_var("REPOMON_DATA_DIR") };
+    }
+
+    #[test]
+    fn config_without_supervision_table_gets_defaults() {
+        let toml_str = r#"
+            tmux_session = "custom"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse config");
+        assert!(!cfg.supervision.enabled);
+        assert_eq!(
+            cfg.supervision.nudge_text,
+            "Check your repomon mail and act on it."
+        );
+        assert_eq!(
+            cfg.supervision.mail_mode,
+            crate::agent::supervision::MailDeliveryMode::Nudge
+        );
+        assert_eq!(cfg.supervision.stall_mins, 20);
+        assert_eq!(cfg.supervision.nudge_retries, 2);
+        assert_eq!(
+            cfg.supervision.classes,
+            crate::agent::supervision::SupervisionConfig::default().classes
+        );
+    }
+
+    #[test]
+    fn partial_supervision_classes_fill_from_defaults() {
+        let toml_str = r#"
+            [supervision]
+            enabled = true
+
+            [supervision.classes]
+            command_exec = "hold"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse partial config");
+        assert!(cfg.supervision.enabled);
+        // Serde deserializes sparse map
+        assert_eq!(
+            cfg.supervision
+                .classes
+                .get(&crate::agent::supervision::DialogClass::CommandExec),
+            Some(&crate::agent::supervision::PolicyAction::Hold)
+        );
+        assert_eq!(cfg.supervision.classes.len(), 1);
+
+        // After resolve(), totality is established: CommandExec is Hold, FileWrite is AutoApprove, rest are Hold
+        let effective = crate::agent::supervision::resolve(
+            &cfg.supervision,
+            Some(&crate::agent::supervision::SupervisionOverrides {
+                lane_id: 1,
+                enabled: true,
+                classes: std::collections::BTreeMap::new(),
+                mail_mode: None,
+                nudge_text: None,
+                stall_mins: None,
+                nudge_retries: None,
+                expect_work: false,
+                updated_at: chrono::Utc::now(),
+            }),
+        );
+        assert_eq!(effective.classes.len(), 9);
+        assert_eq!(
+            effective
+                .classes
+                .get(&crate::agent::supervision::DialogClass::CommandExec),
+            Some(&crate::agent::supervision::PolicyAction::Hold)
+        );
+        assert_eq!(
+            effective
+                .classes
+                .get(&crate::agent::supervision::DialogClass::FileWrite),
+            Some(&crate::agent::supervision::PolicyAction::AutoApprove)
+        );
+        assert_eq!(
+            effective
+                .classes
+                .get(&crate::agent::supervision::DialogClass::Deletion),
+            Some(&crate::agent::supervision::PolicyAction::Hold)
+        );
+    }
+
+    #[test]
+    fn supervision_config_roundtrips() {
+        let dir = std::env::temp_dir().join(format!(
+            "repomon-supervision-cfg-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+
+        let mut c = Config::default();
+        c.supervision.enabled = true;
+        c.supervision.stall_mins = 45;
+        c.supervision.nudge_retries = 5;
+        c.supervision.nudge_text = "Custom nudge message".to_string();
+        c.supervision.mail_mode = crate::agent::supervision::MailDeliveryMode::FullBody;
+        c.supervision.classes.insert(
+            crate::agent::supervision::DialogClass::Deletion,
+            crate::agent::supervision::PolicyAction::AutoDeny,
+        );
+
+        c.save_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.supervision.enabled);
+        assert_eq!(loaded.supervision.stall_mins, 45);
+        assert_eq!(loaded.supervision.nudge_retries, 5);
+        assert_eq!(loaded.supervision.nudge_text, "Custom nudge message");
+        assert_eq!(
+            loaded.supervision.mail_mode,
+            crate::agent::supervision::MailDeliveryMode::FullBody
+        );
+        assert_eq!(
+            loaded
+                .supervision
+                .classes
+                .get(&crate::agent::supervision::DialogClass::Deletion),
+            Some(&crate::agent::supervision::PolicyAction::AutoDeny)
+        );
+        assert_eq!(loaded.supervision, c.supervision);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
