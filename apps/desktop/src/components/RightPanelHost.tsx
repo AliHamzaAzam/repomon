@@ -3,8 +3,10 @@ import { For, createEffect, createMemo, createSignal, type JSX } from "solid-js"
 import FileEditorPanel from "./FileEditorPanel";
 import GitExplorerPanel from "./GitExplorerPanel";
 import RepomindPanel from "./RepomindPanel";
-import { IconGitBranch, IconLayers, IconSparkles, type IconProps } from "./icons";
+import SupervisionPanel from "./SupervisionPanel";
+import { IconGitBranch, IconLayers, IconShield, IconSparkles, type IconProps } from "./icons";
 import { readRightPanelActiveTab, saveRightPanelActiveTab } from "../stores/uiSettings";
+import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 
 /**
@@ -38,6 +40,8 @@ export interface RightPanelHostProps {
    * host with a synthetic `panels` list and never touches the real registry) keeps compiling.
    */
   fleet?: FleetStore;
+  /** Threaded to SupervisionPanel for deep-linking into settings tabs. */
+  actions?: ActionsStore;
   /**
    * One-shot activation command some external shortcut can push to select a tab even after the
    * host has already mounted — e.g. App.tsx's `panel.git` binding switching away from an
@@ -51,7 +55,11 @@ export interface RightPanelHostProps {
   onActiveTabChange?: (id: string) => void;
 }
 
-function buildDefaultPanels(onToggleFullscreen: () => void, fleet?: FleetStore): RightPanelTabDef[] {
+function buildDefaultPanels(
+  onToggleFullscreen: () => void,
+  fleet?: FleetStore,
+  actions?: ActionsStore,
+): RightPanelTabDef[] {
   return [
     {
       id: "repomind",
@@ -65,6 +73,14 @@ function buildDefaultPanels(onToggleFullscreen: () => void, fleet?: FleetStore):
 
     // D4: file tree + multi-tab editor for the active lane's worktree.
     { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} /> },
+
+    // E1: agent supervision policies and live audit log for the active lane.
+    {
+      id: "supervision",
+      label: "Supervision",
+      icon: IconShield,
+      component: () => <SupervisionPanel fleet={fleet} actions={actions} />,
+    },
   ];
 }
 
@@ -76,7 +92,9 @@ export const RIGHT_PANEL_MAX_WIDTH_PX = 640; // 40rem
 export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 320; // 20rem — matches the pre-F2 fixed .repomind-panel width.
 
 export default function RightPanelHost(props: RightPanelHostProps) {
-  const panels = createMemo(() => props.panels ?? buildDefaultPanels(props.onToggleFullscreen, props.fleet));
+  const panels = createMemo(() =>
+    props.panels ?? buildDefaultPanels(props.onToggleFullscreen, props.fleet, props.actions),
+  );
 
   const [activeId, setActiveId] = createSignal((() => {
     const requested = props.requestTab?.id;

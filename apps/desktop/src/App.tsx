@@ -555,6 +555,7 @@ function App(props: AppProps) {
                 <RightPanelHost
                   onToggleFullscreen={() => setRepomindFull(true)}
                   fleet={fleet}
+                  actions={actions}
                   requestTab={panelTabRequest()}
                   onActiveTabChange={setRightPanelTab}
                 />
