@@ -33,6 +33,8 @@ pub fn detect_pending_prompt(pane: &str) -> Option<String> {
 /// How many content lines of the dialog's body (the command being approved, the edit summary)
 /// [`detect_dialog`] keeps — enough for a peek popup, small enough to ride in `lane.list`.
 const BODY_MAX_LINES: usize = 8;
+/// Maximum number of non-empty context lines collected above a question.
+const CONTEXT_MAX_LINES: usize = 12;
 
 /// A fully parsed interactive dialog: what the agent is asking and the choices it offers.
 /// [`detect_dialog`] extracts it from pane text; [`detect_pending_prompt`] remains the
@@ -57,6 +59,9 @@ pub struct PendingDialog {
     /// Index into `options` of the row the selection cursor sits on, if visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<usize>,
+    /// Context lines above the question (for boxless or boxed dialogs), capped at [`CONTEXT_MAX_LINES`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
 }
 
 /// One selectable dialog row: its printed number (if any) and its text.
@@ -129,13 +134,14 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
                 })
                 .collect();
             let selected = block.iter().position(|(c, _, _)| *c);
-            if let Some((title, question, body)) = describe(&stripped, &cleaned, start) {
+            if let Some((title, question, body, context)) = describe(&stripped, &cleaned, start) {
                 return Some(PendingDialog {
                     title,
                     question,
                     body,
                     options: opts,
                     selected,
+                    context,
                 });
             }
             // Claude's folder-trust dialog ("Security guide" / "Yes, I trust this folder").
@@ -151,6 +157,7 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
                     body: Vec::new(),
                     options: opts,
                     selected,
+                    context: Vec::new(),
                 });
             }
             return None;
@@ -181,14 +188,17 @@ pub fn dialog_select_keys(dialog: &PendingDialog, target: usize) -> Vec<String> 
     }
 }
 
+type DialogDescription = (Option<String>, String, Vec<String>, Vec<String>);
+
 /// Describe the dialog whose menu starts at line `menu_start`: the question line just above
-/// it, the header (the first content line under the box's `╭` border), and the body lines
-/// between header and question (capped at [`BODY_MAX_LINES`]).
+/// it, the header (the first content line under the box's `╭` border), the body lines
+/// between header and question (capped at [`BODY_MAX_LINES`]), and context lines above the
+/// question (capped at [`CONTEXT_MAX_LINES`]).
 fn describe(
     stripped: &[String],
     cleaned: &[String],
     menu_start: usize,
-) -> Option<(Option<String>, String, Vec<String>)> {
+) -> Option<DialogDescription> {
     let q_idx = (menu_start.saturating_sub(QUESTION_REACH)..menu_start)
         .rev()
         .find(|&i| is_question(&cleaned[i]))?;
@@ -212,7 +222,38 @@ fn describe(
             .collect(),
         None => Vec::new(),
     };
-    Some((title, question, body))
+
+    let mut raw_context = Vec::new();
+    let mut blank_run = 0;
+    if q_idx > 0 {
+        for i in (0..q_idx).rev() {
+            let s = stripped[i].trim_start();
+            if s.starts_with('╭')
+                || s.starts_with('╰')
+                || stripped[i].contains('╭')
+                || stripped[i].contains('╰')
+            {
+                break;
+            }
+            let c = cleaned[i].trim();
+            if c.is_empty() {
+                blank_run += 1;
+                if blank_run >= 2 {
+                    break;
+                }
+            } else {
+                blank_run = 0;
+                raw_context.push(truncate(c, 120));
+                if raw_context.len() >= CONTEXT_MAX_LINES {
+                    break;
+                }
+            }
+        }
+    }
+    raw_context.reverse();
+    let context = raw_context;
+
+    Some((title, question, body, context))
 }
 
 /// A line that reads as the dialog's question: the explicit ask phrasings, or any line ending
@@ -427,7 +468,7 @@ pub fn detect_subagent_running(pane: &str) -> Option<String> {
 /// Parse an individual subagent row (e.g. `◯ general-purpose  Editing interruption defaults in main.py  6m 54s · ↓ 134.9k tokens`)
 fn parse_subagent_row(line: &str) -> Option<(String, Option<String>)> {
     let clean = line.trim();
-    let circle_idx = clean.find(|c| c == '◯' || c == '○')?;
+    let circle_idx = clean.find(['◯', '○'])?;
     let rest = clean[circle_idx + '◯'.len_utf8()..].trim();
     if rest.is_empty() || rest.starts_with("main") || rest.eq_ignore_ascii_case("main") {
         return None;
@@ -873,6 +914,7 @@ mod tests {
                 },
             ],
             selected: Some(0),
+            context: vec![],
         };
         assert_eq!(dialog_select_keys(&d, 2), vec!["Down", "Down", "Enter"]);
         assert_eq!(dialog_select_keys(&d, 0), vec!["Enter"]);
@@ -900,6 +942,7 @@ mod tests {
                 },
             ],
             selected: None,
+            context: vec![],
         };
         assert_eq!(dialog_select_keys(&d, 1), vec!["2", "Enter"]);
     }
@@ -927,6 +970,13 @@ Do you want to proceed?
         assert_eq!(dialog.question, "Do you want to proceed?");
         assert_eq!(dialog.selected, Some(0));
         assert_eq!(dialog.options.len(), 4);
+        assert_eq!(
+            dialog.context,
+            vec![
+                "Requesting permission for:".to_string(),
+                "ps aux | grep -i repomon".to_string()
+            ]
+        );
     }
 
     #[test]

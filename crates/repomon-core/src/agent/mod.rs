@@ -15,6 +15,7 @@ pub mod gate;
 pub mod limit;
 pub mod opencode;
 pub mod prompt;
+pub mod supervision;
 pub mod text;
 pub mod tmux;
 pub mod usage;

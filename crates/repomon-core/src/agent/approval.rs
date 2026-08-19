@@ -64,6 +64,7 @@ mod tests {
                 },
             ],
             selected: Some(0),
+            context: vec![],
         }
     }
 
