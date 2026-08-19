@@ -12,7 +12,7 @@ use repomon_core::agent::supervision::{
     Decision, DialogClass, DialogScope, MailDeliveryMode, PolicyAction, SupervisionPolicy,
     classify_dialog, evaluate, resolve,
 };
-use repomon_core::model::{AgentSession, FleetMessage, Lane, LaneId};
+use repomon_core::model::{AgentSession, AgentStatus, FleetMessage, Lane, LaneId};
 use serde_json::json;
 
 use crate::Ctx;
@@ -263,12 +263,13 @@ pub async fn supervision_watch(ctx: Arc<Ctx>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut held_cache: HashMap<String, String> = HashMap::new();
     let mut mail_scheds: HashMap<String, MailSched> = HashMap::new();
+    let mut stall_scheds: HashMap<String, StallSched> = HashMap::new();
 
     loop {
         tokio::select! {
             _ = ctx.shutdown.notified() => break,
             _ = tick.tick() => {
-                supervision_step(&ctx, &mut held_cache, &mut mail_scheds).await;
+                supervision_step(&ctx, &mut held_cache, &mut mail_scheds, &mut stall_scheds).await;
             }
         }
     }
@@ -278,6 +279,7 @@ async fn supervision_step(
     ctx: &Ctx,
     held_cache: &mut HashMap<String, String>,
     mail_scheds: &mut HashMap<String, MailSched>,
+    stall_scheds: &mut HashMap<String, StallSched>,
 ) {
     refresh(ctx).await;
     let snapshot = ctx.supervision.read().await.clone();
@@ -314,6 +316,11 @@ async fn supervision_step(
     // Mail phase runs AFTER the dialog phase — a dialog on screen blocks injection anyway, and
     // `injection_eligible` re-checks pane state for each candidate session regardless.
     mail_phase(ctx, &lanes, &snapshot, mail_scheds, Utc::now()).await;
+
+    // Stall phase runs AFTER the mail phase: a session nudged for mail this tick is exactly
+    // the case the stall watchdog should also consider (outstanding work + idle pane), and
+    // `verified_send`'s own re-verification means there's no harm running both in one tick.
+    stall_phase(ctx, &lanes, &snapshot, stall_scheds, Utc::now()).await;
 }
 
 // ---- supervised wake-on-mail (T9) -----------------------------------------------------------
@@ -564,6 +571,241 @@ async fn give_up_mail_group(
     if let Some(first) = msgs.first() {
         let address = first.recipient.address.as_str();
         ctx.broadcast("event.notification", mail_give_up_payload(lane, address));
+    }
+}
+
+// ---- supervised stall nudge & escalation (T10) ----------------------------------------------
+
+/// How long a supervised agent's own pane must sit unchanged (evidence-of-freeze) before a
+/// stalled session's idle time is trusted — mirrors how `rpc.rs::stall_since` trusts
+/// `ctx.pane_seen` for the unsupervised stall watchdog.
+const NUDGE_SPACING: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Loop-local retry state for one supervised window's stall episode.
+#[derive(Debug, Clone, Copy)]
+pub struct StallSched {
+    nudges_sent: u32,
+    last_nudge_at: Option<DateTime<Utc>>,
+    escalated: bool,
+}
+
+/// Action decided for one supervised window by [`decide_stall`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallAction {
+    Nudge,
+    Escalate,
+    Nothing,
+}
+
+/// Pure decision router for the supervised stall nudge/escalate state machine: no outstanding
+/// work, or the agent hasn't been idle long enough, is always Nothing; an `escalated` sched
+/// latches Nothing forever; a fresh episode (no sched, or a sched whose first nudge hasn't
+/// happened yet) nudges immediately; after the first nudge, [`NUDGE_SPACING`] must elapse before
+/// the next nudge or the escalation decision, which fires once `nudge_retries` nudges have gone
+/// out.
+pub fn decide_stall(
+    sched: Option<&StallSched>,
+    idle_mins: i64,
+    outstanding: bool,
+    policy_stall_mins: u32,
+    policy_retries: u32,
+    now: DateTime<Utc>,
+) -> StallAction {
+    if !outstanding || idle_mins < policy_stall_mins as i64 {
+        return StallAction::Nothing;
+    }
+    let Some(sched) = sched else {
+        return StallAction::Nudge;
+    };
+    if sched.escalated {
+        return StallAction::Nothing;
+    }
+    if sched.nudges_sent == 0 {
+        return StallAction::Nudge;
+    }
+    let spacing_elapsed = sched
+        .last_nudge_at
+        .is_none_or(|last| now - last >= NUDGE_SPACING);
+    if !spacing_elapsed {
+        return StallAction::Nothing;
+    }
+    if sched.nudges_sent < policy_retries {
+        StallAction::Nudge
+    } else {
+        StallAction::Escalate
+    }
+}
+
+/// Record that a stall nudge attempt for `window` was made (sent, skipped, or failed — any
+/// `verified_send` outcome consumes the attempt, same as the mail phase's `bump_sched`).
+fn bump_stall_sched(scheds: &mut HashMap<String, StallSched>, window: &str, now: DateTime<Utc>) {
+    let entry = scheds.entry(window.to_string()).or_insert(StallSched {
+        nudges_sent: 0,
+        last_nudge_at: None,
+        escalated: false,
+    });
+    entry.nudges_sent += 1;
+    entry.last_nudge_at = Some(now);
+}
+
+/// Only a non-external, windowed session with no dialog on screen, that is not mid-generation,
+/// can be considered stalled here. `AgentStatus::Running` counts only once its turn has ended
+/// (mirrors `mail.rs::injection_eligible`) — an agent still generating is the existing
+/// `stall_since` watchdog's job, not this feature's.
+fn stall_eligible(session: &AgentSession) -> bool {
+    if session.external || session.tmux_window.is_none() || session.pending_dialog.is_some() {
+        return false;
+    }
+    matches!(session.status, AgentStatus::Waiting | AgentStatus::Idle)
+        || (session.status == AgentStatus::Running && session.ended_turn)
+}
+
+/// Cheapest available check for "does this lane have unread mail addressed to it" — `list_messages`
+/// is the store's only query surface for this, so ask for at most one unread row scoped to the lane.
+async fn lane_has_unread_mail(ctx: &Ctx, lane_id: LaneId) -> bool {
+    match ctx
+        .store
+        .list_messages(None, Some(lane_id), true, 1, None, false)
+        .await
+    {
+        Ok(page) => !page.messages.is_empty(),
+        Err(error) => {
+            tracing::warn!("stall phase failed to check unread mail for lane {lane_id}: {error:?}");
+            false
+        }
+    }
+}
+
+/// Whether `window`'s pane has sat unchanged for at least `stall_mins` — no recorded change at
+/// all means no evidence of a freeze, so (mirroring `rpc.rs::stall_since`'s `None` case) it does
+/// NOT count as quiet.
+async fn pane_quiet_for(ctx: &Ctx, window: &str, stall_mins: u32, now: DateTime<Utc>) -> bool {
+    let seen = ctx.pane_seen.lock().await;
+    match seen.get(window) {
+        Some(&(_, changed_at)) => now - changed_at >= chrono::Duration::minutes(stall_mins as i64),
+        None => false,
+    }
+}
+
+/// The `event.notification` payload for a stall escalation, mirroring the field set
+/// `mail_give_up_payload` broadcasts for the analogous mail give-up.
+fn stall_escalate_payload(lane: &Lane, idle_mins: i64) -> serde_json::Value {
+    json!({
+        "kind": "needs_you",
+        "title": format!("{} needs you", lane.repo.name),
+        "body": format!("agent has been idle {idle_mins}m with outstanding work despite nudges"),
+        "lane_id": lane.id,
+    })
+}
+
+/// Supervised stall handling: per eligible session in a supervised lane, when it has been idle
+/// past the policy's `stall_mins` with outstanding assigned work (unread mail or
+/// `policy.expect_work`) AND its pane has independently sat quiet that long, send one nudge; if
+/// nudges keep failing to unstick it, raise attention once and hold until the agent shows
+/// activity again. Runs after the mail phase in the same tick.
+async fn stall_phase(
+    ctx: &Ctx,
+    lanes: &[Lane],
+    snapshot: &PolicySnapshot,
+    scheds: &mut HashMap<String, StallSched>,
+    now: DateTime<Utc>,
+) {
+    for lane in lanes {
+        let Some(policy) = snapshot.lane(lane.id) else {
+            continue;
+        };
+        let lane_unread = lane_has_unread_mail(ctx, lane.id).await;
+        for session in &lane.agent_sessions {
+            if !stall_eligible(session) {
+                continue;
+            }
+            let Some(window) = session.tmux_window.clone() else {
+                continue;
+            };
+            let outstanding = lane_unread || policy.expect_work;
+
+            // Activity reset: drop a stale episode's bookkeeping once the agent has moved
+            // (activity past the last nudge) or there's no longer any outstanding work, so a
+            // future stall episode for this window starts fresh.
+            if let Some(sched) = scheds.get(&window) {
+                let activity_moved = sched
+                    .last_nudge_at
+                    .is_some_and(|last| session.last_activity_at > last);
+                if activity_moved || !outstanding {
+                    scheds.remove(&window);
+                }
+            }
+
+            if !outstanding {
+                continue;
+            }
+            if !pane_quiet_for(ctx, &window, policy.stall_mins, now).await {
+                continue;
+            }
+
+            let idle_mins = (now - session.last_activity_at).num_minutes();
+            let action = decide_stall(
+                scheds.get(&window),
+                idle_mins,
+                outstanding,
+                policy.stall_mins,
+                policy.nudge_retries,
+                now,
+            );
+
+            match action {
+                StallAction::Nothing => {}
+                StallAction::Nudge => {
+                    let seed = AuditSeed {
+                        lane_id: lane.id,
+                        window: window.clone(),
+                        session_id: session.session_id.clone(),
+                        agent_kind: Some(session.agent.as_str().to_string()),
+                        trigger: "stall".to_string(),
+                        dialog_class: None,
+                        repo_scoped: None,
+                        decision: "nudge".to_string(),
+                        policy_source: None,
+                        reason: None,
+                        subject: None,
+                        pane_excerpt: None,
+                    };
+                    let _ = inject::verified_send(
+                        ctx,
+                        Expectation::IdleNoDialog,
+                        Payload::Line(policy.nudge_text.clone()),
+                        seed,
+                    )
+                    .await;
+                    bump_stall_sched(scheds, &window, now);
+                }
+                StallAction::Escalate => {
+                    let nudges_sent = scheds.get(&window).map(|s| s.nudges_sent).unwrap_or(0);
+                    if let Some(sched) = scheds.get_mut(&window) {
+                        sched.escalated = true;
+                    }
+                    let seed = AuditSeed {
+                        lane_id: lane.id,
+                        window: window.clone(),
+                        session_id: session.session_id.clone(),
+                        agent_kind: Some(session.agent.as_str().to_string()),
+                        trigger: "stall".to_string(),
+                        dialog_class: None,
+                        repo_scoped: None,
+                        decision: "hold".to_string(),
+                        policy_source: None,
+                        reason: Some(format!("escalated after {nudges_sent} nudges")),
+                        subject: None,
+                        pane_excerpt: None,
+                    };
+                    inject::record_hold(ctx, seed).await;
+                    ctx.broadcast(
+                        "event.notification",
+                        stall_escalate_payload(lane, idle_mins),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1419,5 +1661,281 @@ mod tests {
             }
         }
         assert_eq!(notifications, 1, "give-up must notify exactly once");
+    }
+
+    // ---- Supervised stall nudge & escalation (T10) ----
+
+    fn stall_policy_overrides(
+        lane_id: LaneId,
+        stall_mins: u32,
+        nudge_retries: u32,
+        expect_work: bool,
+    ) -> SupervisionOverrides {
+        SupervisionOverrides {
+            lane_id,
+            enabled: true,
+            classes: std::collections::BTreeMap::new(),
+            mail_mode: None,
+            nudge_text: Some("please continue".into()),
+            stall_mins: Some(stall_mins),
+            nudge_retries: Some(nudge_retries),
+            expect_work,
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn decide_stall_table() {
+        let now = Utc::now();
+
+        // No outstanding work: Nothing regardless of idle time.
+        assert_eq!(
+            decide_stall(None, 1000, false, 5, 2, now),
+            StallAction::Nothing
+        );
+
+        // Outstanding, but under the idle threshold: Nothing.
+        assert_eq!(decide_stall(None, 2, true, 5, 2, now), StallAction::Nothing);
+
+        // Outstanding, over threshold, no prior sched: first nudge.
+        assert_eq!(decide_stall(None, 10, true, 5, 2, now), StallAction::Nudge);
+
+        // One nudge already sent, still inside NUDGE_SPACING: Nothing.
+        let within_spacing = StallSched {
+            nudges_sent: 1,
+            last_nudge_at: Some(now - chrono::Duration::minutes(2)),
+            escalated: false,
+        };
+        assert_eq!(
+            decide_stall(Some(&within_spacing), 10, true, 5, 2, now),
+            StallAction::Nothing
+        );
+
+        // Spacing elapsed, retries remain: nudge again.
+        let spacing_elapsed = StallSched {
+            nudges_sent: 1,
+            last_nudge_at: Some(now - chrono::Duration::minutes(6)),
+            escalated: false,
+        };
+        assert_eq!(
+            decide_stall(Some(&spacing_elapsed), 10, true, 5, 2, now),
+            StallAction::Nudge
+        );
+
+        // Retries exhausted: escalate.
+        let retries_exhausted = StallSched {
+            nudges_sent: 2,
+            last_nudge_at: Some(now - chrono::Duration::minutes(6)),
+            escalated: false,
+        };
+        assert_eq!(
+            decide_stall(Some(&retries_exhausted), 10, true, 5, 2, now),
+            StallAction::Escalate
+        );
+
+        // Escalated latch: Nothing, forever.
+        let escalated = StallSched {
+            nudges_sent: 2,
+            last_nudge_at: Some(now - chrono::Duration::minutes(100)),
+            escalated: true,
+        };
+        assert_eq!(
+            decide_stall(Some(&escalated), 10, true, 5, 2, now),
+            StallAction::Nothing
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_nudge_sends_and_journals() {
+        let backend = Arc::new(ScriptedBackend::new(vec![]));
+        let ctx = make_ctx(backend.clone());
+
+        ctx.store
+            .set_lane_policy(stall_policy_overrides(1, 5, 2, true))
+            .await
+            .unwrap();
+        refresh(&ctx).await;
+        let snapshot = ctx.supervision.read().await.clone();
+
+        let mut session = sample_session(None);
+        session.status = AgentStatus::Waiting;
+        let now = Utc::now();
+        session.last_activity_at = now - chrono::Duration::minutes(30);
+
+        ctx.pane_seen.lock().await.insert(
+            "win-lane-1".to_string(),
+            (1u64, now - chrono::Duration::minutes(10)),
+        );
+
+        let lane = lane_with_session(1, session);
+        let mut scheds = HashMap::new();
+
+        stall_phase(&ctx, &[lane], &snapshot, &mut scheds, now).await;
+
+        let sent = backend.sent_text.lock().unwrap().clone();
+        assert_eq!(
+            sent,
+            vec![("win-lane-1".to_string(), "please continue".to_string())]
+        );
+
+        let sched = scheds.get("win-lane-1").expect("sched recorded");
+        assert_eq!(sched.nudges_sent, 1);
+        assert!(!sched.escalated);
+
+        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].trigger, "stall");
+        assert_eq!(log[0].decision, "nudge");
+        assert_eq!(log[0].outcome, "sent");
+    }
+
+    #[tokio::test]
+    async fn escalation_notifies_once_and_latches() {
+        let backend = Arc::new(ScriptedBackend::new(vec![]));
+        let ctx = make_ctx(backend.clone());
+        let mut events = ctx.events.subscribe();
+
+        // nudge_retries = 1: the second nudge attempt (after spacing) finds retries exhausted.
+        ctx.store
+            .set_lane_policy(stall_policy_overrides(1, 5, 1, true))
+            .await
+            .unwrap();
+        refresh(&ctx).await;
+        let snapshot = ctx.supervision.read().await.clone();
+
+        let mut session = sample_session(None);
+        session.status = AgentStatus::Waiting;
+        let t0 = Utc::now();
+        session.last_activity_at = t0 - chrono::Duration::minutes(30);
+
+        ctx.pane_seen.lock().await.insert(
+            "win-lane-1".to_string(),
+            (1u64, t0 - chrono::Duration::minutes(1000)),
+        );
+
+        let lane = lane_with_session(1, session);
+        let mut scheds = HashMap::new();
+
+        // Tick 1: fresh episode -> nudge.
+        stall_phase(
+            &ctx,
+            std::slice::from_ref(&lane),
+            &snapshot,
+            &mut scheds,
+            t0,
+        )
+        .await;
+        assert_eq!(scheds.get("win-lane-1").unwrap().nudges_sent, 1);
+        assert!(!scheds.get("win-lane-1").unwrap().escalated);
+
+        // Tick 2: spacing elapsed, retries (1) exhausted -> escalate.
+        let t1 = t0 + chrono::Duration::minutes(6);
+        stall_phase(
+            &ctx,
+            std::slice::from_ref(&lane),
+            &snapshot,
+            &mut scheds,
+            t1,
+        )
+        .await;
+        assert!(scheds.get("win-lane-1").unwrap().escalated);
+
+        // Tick 3 (extra tick, well past spacing again): the escalation latch must not repeat.
+        let t2 = t1 + chrono::Duration::minutes(6);
+        stall_phase(&ctx, &[lane], &snapshot, &mut scheds, t2).await;
+
+        let mut notifications = 0;
+        while let Ok(value) = events.try_recv() {
+            if value["method"] == "event.notification" {
+                notifications += 1;
+                assert_eq!(value["params"]["kind"], "needs_you");
+            }
+        }
+        assert_eq!(notifications, 1, "escalation must notify exactly once");
+
+        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
+        let holds: Vec<_> = log
+            .iter()
+            .filter(|e| e.trigger == "stall" && e.decision == "hold")
+            .collect();
+        assert_eq!(holds.len(), 1, "escalation must journal exactly once");
+        assert_eq!(holds[0].outcome, "held");
+    }
+
+    #[tokio::test]
+    async fn activity_clears_stall_sched() {
+        let backend = Arc::new(ScriptedBackend::new(vec![]));
+        let ctx = make_ctx(backend.clone());
+
+        ctx.store
+            .set_lane_policy(stall_policy_overrides(1, 5, 2, true))
+            .await
+            .unwrap();
+        refresh(&ctx).await;
+        let snapshot = ctx.supervision.read().await.clone();
+
+        let mut session = sample_session(None);
+        session.status = AgentStatus::Waiting;
+        let t0 = Utc::now();
+        session.last_activity_at = t0 - chrono::Duration::minutes(30);
+
+        // Pane frozen well past any threshold used in this test — quiet throughout.
+        ctx.pane_seen.lock().await.insert(
+            "win-lane-1".to_string(),
+            (1u64, t0 - chrono::Duration::minutes(1000)),
+        );
+
+        let mut scheds = HashMap::new();
+
+        // Episode 1: idle past threshold -> nudge sent, sched recorded.
+        let lane1 = lane_with_session(1, session.clone());
+        stall_phase(
+            &ctx,
+            std::slice::from_ref(&lane1),
+            &snapshot,
+            &mut scheds,
+            t0,
+        )
+        .await;
+        assert_eq!(scheds.get("win-lane-1").unwrap().nudges_sent, 1);
+
+        // Activity: the session's last_activity_at moves past the last nudge time.
+        session.last_activity_at = t0 + chrono::Duration::minutes(1);
+        let t1 = t0 + chrono::Duration::minutes(2);
+        let lane2 = lane_with_session(1, session.clone());
+        stall_phase(
+            &ctx,
+            std::slice::from_ref(&lane2),
+            &snapshot,
+            &mut scheds,
+            t1,
+        )
+        .await;
+        assert!(
+            !scheds.contains_key("win-lane-1"),
+            "activity past the last nudge must drop the sched"
+        );
+
+        // Episode 2: idle again -> a fresh episode nudges again (nudges_sent restarts at 1).
+        session.last_activity_at = t1 - chrono::Duration::minutes(30);
+        let t2 = t1 + chrono::Duration::minutes(1);
+        let lane3 = lane_with_session(1, session);
+        stall_phase(&ctx, &[lane3], &snapshot, &mut scheds, t2).await;
+        assert_eq!(
+            scheds.get("win-lane-1").unwrap().nudges_sent,
+            1,
+            "fresh episode restarts the nudge count"
+        );
+
+        // Two distinct stall episodes each made one attempt (the second may be latch-skipped by
+        // `inject.rs`'s own anti-thrash cooldown, since it's the same window/text within the same
+        // wall-clock second — that's a separate, correct safety net, not this feature's concern).
+        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
+        let stall_rows: Vec<_> = log.iter().filter(|e| e.trigger == "stall").collect();
+        assert_eq!(
+            stall_rows.len(),
+            2,
+            "each episode makes exactly one attempt"
+        );
     }
 }
