@@ -12,13 +12,15 @@ use chrono::{DateTime, Utc};
 use repomon_core::Config;
 use repomon_core::agent;
 use repomon_core::agent::backend::CaptureOpts;
-use repomon_core::model::{AgentStatus, LaneId};
+use repomon_core::agent::supervision::{DialogClass, PolicySource};
+use repomon_core::model::{AgentSession, AgentStatus, Lane, LaneId};
 use repomon_core::notify::{
     NotifKind, SessKey, SessState, activity_allows_refire, compose, diff_session_transitions,
     session_by_key, session_statuses, slot_by_key,
 };
 use serde_json::json;
 
+use crate::inject::{self, AuditSeed, Expectation, Payload, SendOutcome};
 use crate::{Ctx, ORCHESTRATOR_WINDOW, push, rpc};
 
 /// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
@@ -233,65 +235,16 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 continue;
             };
             let sess = session_by_key(lane, &key, subagents);
-            // Approval-policy auto-approve: a routine Bash permission matching a confirmed
-            // per-repo rule is answered by the daemon itself (the default-approve key, same
-            // assumption as approve_agent's choice=None) and the alert is suppressed — the
-            // acceptance is precisely "the fourth cargo test never reaches your phone". The
-            // hardcoded always-escalate sniffer wins over any learned rule.
-            if kind == NotifKind::NeedsYou {
-                use repomon_core::agent::approval;
-                let auto = match sess {
-                    Some(s) => match (s.pending_dialog.as_ref(), s.tmux_window.clone()) {
-                        (Some(dialog), Some(window)) => approval::dialog_command(dialog)
-                            .map(|cmd| (approval::command_pattern(&cmd), cmd, window)),
-                        _ => None,
-                    },
-                    None => None,
-                };
-                if let Some((pattern, cmd, window)) = auto {
-                    let allowed = !approval::is_always_escalate(&cmd)
-                        && ctx
-                            .store
-                            .has_approval_rule(lane.repo.name.clone(), pattern.clone())
-                            .await
-                            .unwrap_or(false);
-                    if allowed {
-                        tracing::info!(
-                            lane = lane_id,
-                            pattern = %pattern,
-                            "auto-approving allowlisted permission"
-                        );
-                        let tmux = ctx.backend.clone();
-                        let win = window.clone();
-                        let sent =
-                            tokio::task::spawn_blocking(move || tmux.send_key_named(&win, "Enter"))
-                                .await;
-                        if matches!(sent, Ok(Ok(_))) {
-                            rpc::mark_input(&ctx, lane_id, &window).await;
-                            let _ = ctx
-                                .store
-                                .append_journal(repomon_core::model::JournalEntry {
-                                    id: 0,
-                                    at: chrono::Utc::now(),
-                                    session: format!("auto-approve-{lane_id}"),
-                                    action: "auto_approve".into(),
-                                    lane_id: Some(lane_id),
-                                    repo: Some(lane.repo.name.clone()),
-                                    params: Some(
-                                        json!({ "pattern": pattern, "command": cmd }).to_string(),
-                                    ),
-                                    outcome: "ok".into(),
-                                    detail: None,
-                                })
-                                .await;
-                            continue;
-                        }
-                        tracing::warn!(
-                            lane = lane_id,
-                            "auto-approve key send failed; escalating normally"
-                        );
-                    }
-                }
+            // Legacy approval-policy auto-approve: a routine Bash permission matching a
+            // confirmed per-repo rule is answered by the daemon itself and the alert is
+            // suppressed — the acceptance is precisely "the fourth cargo test never reaches
+            // your phone". Routed through `inject::verified_send` (T11) so it shares the one
+            // audited, re-verified send path with supervision; supervised lanes opt out here
+            // entirely, since their own loop already carries this same learned rule.
+            if kind == NotifKind::NeedsYou
+                && legacy_rule_auto_approve(&ctx, lane_id, lane, sess).await
+            {
+                continue;
             }
             let (title, body) = compose(
                 kind,
@@ -360,6 +313,99 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 );
             }
         }
+    }
+}
+
+/// Legacy learned-rule auto-approve (pre-dates supervision): a routine Bash permission dialog
+/// whose `(repo, command_pattern)` has a confirmed `ApprovalRule` is answered by the daemon
+/// itself — the acceptance is precisely "the fourth cargo test never reaches your phone". The
+/// hardcoded always-escalate sniffer wins over any learned rule. Returns `true` when the alert
+/// should be suppressed (this block fully handled the dialog); `false` to fall through to
+/// normal notification handling — including when the send was skipped or failed, so the human
+/// still gets notified.
+///
+/// A lane under active supervision opts out here entirely: the supervision loop owns answering
+/// there and carries this same learned rule via its own `extra_allow` input
+/// (`supervision::handle_session`), so this legacy path must never race it.
+async fn legacy_rule_auto_approve(
+    ctx: &Ctx,
+    lane_id: LaneId,
+    lane: &Lane,
+    sess: Option<&AgentSession>,
+) -> bool {
+    if crate::supervision::supervised(ctx, lane_id).await.is_some() {
+        return false;
+    }
+
+    use repomon_core::agent::approval;
+    let auto = match sess {
+        Some(s) => match (s.pending_dialog.as_ref(), s.tmux_window.clone()) {
+            (Some(dialog), Some(window)) => approval::dialog_command(dialog)
+                .map(|cmd| (approval::command_pattern(&cmd), cmd, window, dialog.clone())),
+            _ => None,
+        },
+        None => None,
+    };
+    let Some((pattern, cmd, window, dialog)) = auto else {
+        return false;
+    };
+    let allowed = !approval::is_always_escalate(&cmd)
+        && ctx
+            .store
+            .has_approval_rule(lane.repo.name.clone(), pattern.clone())
+            .await
+            .unwrap_or(false);
+    if !allowed {
+        return false;
+    }
+
+    tracing::info!(
+        lane = lane_id,
+        pattern = %pattern,
+        "auto-approving allowlisted permission"
+    );
+
+    let seed = AuditSeed {
+        lane_id,
+        window: window.clone(),
+        session_id: sess.and_then(|s| s.session_id.clone()),
+        agent_kind: sess.map(|s| s.agent.as_str().to_string()),
+        trigger: "legacy_rule".to_string(),
+        dialog_class: Some(DialogClass::CommandExec),
+        repo_scoped: None,
+        decision: "approve".to_string(),
+        policy_source: Some(PolicySource::ApprovalRule),
+        reason: Some(format!("learned rule matched pattern '{pattern}'")),
+        subject: Some(cmd.clone()),
+        pane_excerpt: None,
+    };
+    let outcome = inject::verified_send(
+        ctx,
+        Expectation::DialogSummary(dialog.summary()),
+        Payload::Keys(vec!["Enter".into()]),
+        seed,
+    )
+    .await;
+
+    match outcome {
+        SendOutcome::Sent { .. } => {
+            let _ = ctx
+                .store
+                .append_journal(repomon_core::model::JournalEntry {
+                    id: 0,
+                    at: chrono::Utc::now(),
+                    session: format!("auto-approve-{lane_id}"),
+                    action: "auto_approve".into(),
+                    lane_id: Some(lane_id),
+                    repo: Some(lane.repo.name.clone()),
+                    params: Some(json!({ "pattern": pattern, "command": cmd }).to_string()),
+                    outcome: "ok".into(),
+                    detail: None,
+                })
+                .await;
+            true
+        }
+        SendOutcome::Skipped { .. } | SendOutcome::Failed { .. } => false,
     }
 }
 
@@ -654,5 +700,360 @@ mod attention_tests {
     fn short_message_tail_is_unchanged() {
         assert_eq!(tail("hello", 140), "hello");
         assert_eq!(tail("  padded  ", 140), "padded");
+    }
+}
+
+#[cfg(test)]
+mod legacy_auto_approve_tests {
+    use super::*;
+    use repomon_core::agent::backend::{
+        AttachCommand, ByteStream, OwnerState, ScrollEvent, SessionBackend, SpawnSpec,
+        WindowActivity,
+    };
+    use repomon_core::agent::prompt::detect_dialog;
+    use repomon_core::agent::supervision::{PolicyAction, SupervisionOverrides};
+    use repomon_core::model::{AgentKind, Repo, Worktree, WorktreeState};
+    use repomon_core::{Config, Store};
+    use std::path::PathBuf;
+    use std::sync::Mutex as StdMutex;
+
+    struct ScriptedBackend {
+        captures: StdMutex<Vec<String>>,
+        sent_keys: StdMutex<Vec<(String, String)>>,
+        capture_calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl ScriptedBackend {
+        fn new(captures: Vec<String>) -> Self {
+            Self {
+                captures: StdMutex::new(captures),
+                sent_keys: StdMutex::new(Vec::new()),
+                capture_calls: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl SessionBackend for ScriptedBackend {
+        fn available(&self) -> bool {
+            true
+        }
+        fn label(&self) -> String {
+            "scripted".to_string()
+        }
+        fn session_exists(&self) -> bool {
+            true
+        }
+        fn claim_or_verify_owner(&self, _me: &str) -> OwnerState {
+            OwnerState::Owned
+        }
+        fn list_windows(&self) -> repomon_core::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn list_windows_with_activity(&self) -> repomon_core::Result<Vec<WindowActivity>> {
+            Ok(vec![])
+        }
+        fn spawn(&self, _lane: LaneId, _spec: &SpawnSpec) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn spawn_named(&self, _window: &str, _spec: &SpawnSpec) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn open_named(
+            &self,
+            _window: &str,
+            _cwd: &std::path::Path,
+        ) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn capture_named(&self, _window: &str, _opts: CaptureOpts) -> repomon_core::Result<String> {
+            self.capture_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = self.captures.lock().unwrap();
+            if c.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(c.remove(0))
+            }
+        }
+        fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
+            None
+        }
+        fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
+            Some((80, 24))
+        }
+        fn resize_named(&self, _window: &str, _cols: u16, _rows: u16) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn follow_client_named(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn alternate_on_named(&self, _window: &str) -> bool {
+            false
+        }
+        fn scroll_wheel_named(
+            &self,
+            _window: &str,
+            _event: ScrollEvent,
+        ) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_literal_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_text_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_key_named(&self, window: &str, key: &str) -> repomon_core::Result<()> {
+            self.sent_keys
+                .lock()
+                .unwrap()
+                .push((window.to_string(), key.to_string()));
+            Ok(())
+        }
+        fn kill_named(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn configure(&self) {}
+        fn target_named(&self, window: &str) -> String {
+            window.to_string()
+        }
+        fn exact_target_named(&self, window: &str) -> String {
+            window.to_string()
+        }
+        fn attach_command(&self, target: &str) -> AttachCommand {
+            AttachCommand {
+                program: "tmux".into(),
+                args: vec!["attach".into(), "-t".into(), target.into()],
+            }
+        }
+        fn open_byte_stream(&self, _window: &str) -> repomon_core::Result<ByteStream> {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok(ByteStream { rx })
+        }
+        fn close_byte_stream(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_ctx(backend: Arc<dyn SessionBackend>) -> Arc<Ctx> {
+        let store = Store::open_in_memory().unwrap();
+        Ctx::new_with_backend(
+            store,
+            Config::default(),
+            None,
+            PathBuf::from("/tmp/config.toml"),
+            PathBuf::from("/tmp/repo-notes"),
+            backend,
+        )
+    }
+
+    const DIALOG_A: &str = "● Running cargo install…\n\
+        ╭──────────────────────────────────────────────╮\n\
+        │ Bash command                                 │\n\
+        │                                              │\n\
+        │   cargo install --path crates/repomon-tui    │\n\
+        │   Install the repomon TUI                    │\n\
+        │                                              │\n\
+        │ Do you want to proceed?                      │\n\
+        │ ❯ 1. Yes                                     │\n\
+        │   2. Yes, and don't ask again for cargo      │\n\
+        │   3. No, and tell Claude what to do          │\n\
+        ╰──────────────────────────────────────────────╯";
+
+    const IDLE_PANE: &str = "azaleas@macbook repomon % cargo check\n    \
+        Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s\n\
+        azaleas@macbook repomon % ";
+
+    fn sample_lane(session: AgentSession) -> Lane {
+        let head = "0000000000000000000000000000000000000000".parse().unwrap();
+        Lane {
+            id: 1,
+            repo: Repo {
+                id: 1,
+                path: PathBuf::from("/code/alpha"),
+                name: "test-repo".into(),
+                added_at: Utc::now(),
+                worktree_root_template: None,
+                hidden: false,
+            },
+            worktree: Worktree {
+                id: 1,
+                repo_id: 1,
+                path: PathBuf::from("/code/alpha"),
+                branch: Some("main".into()),
+                head,
+                is_main: true,
+                name: "main".into(),
+            },
+            state: WorktreeState {
+                worktree_id: 1,
+                head,
+                branch: Some("feat/x".into()),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                dirty: Default::default(),
+                last_commit_at: None,
+                locked: false,
+                prunable: false,
+                last_change_at: None,
+            },
+            agent_sessions: vec![session],
+            last_activity_at: Utc::now(),
+            pinned: false,
+        }
+    }
+
+    fn sample_session(dialog: repomon_core::agent::prompt::PendingDialog) -> AgentSession {
+        AgentSession {
+            id: 1,
+            agent: AgentKind::ClaudeCode,
+            repo_id: 1,
+            worktree_id: Some(1),
+            started_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            ended_at: None,
+            manifest_path: PathBuf::from("/repo/.manifest"),
+            tool_call_count: 5,
+            title: Some("test session".into()),
+            status: AgentStatus::Waiting,
+            external: false,
+            session_id: Some("sess-legacy".into()),
+            resume_at: None,
+            inferred: false,
+            tmux_window: Some("win-lane-1".into()),
+            last_message: None,
+            pending_prompt: Some(dialog.summary()),
+            pending_dialog: Some(dialog),
+            stale: false,
+            stalled_since: None,
+            subagent_running: None,
+            ended_turn: false,
+            gate: None,
+            config_dir: None,
+            custom_label: None,
+            generated_label: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_rule_still_approves_when_unsupervised() {
+        let backend = Arc::new(ScriptedBackend::new(vec![DIALOG_A.to_string()]));
+        let ctx = make_ctx(backend.clone());
+
+        ctx.store
+            .add_approval_rule("test-repo".into(), "cargo install".into())
+            .await
+            .unwrap();
+
+        let dialog = detect_dialog(DIALOG_A).expect("dialog detected");
+        let session = sample_session(dialog);
+        let lane = sample_lane(session.clone());
+
+        let suppressed = legacy_rule_auto_approve(&ctx, lane.id, &lane, Some(&session)).await;
+        assert!(
+            suppressed,
+            "unsupervised matching rule must suppress the alert"
+        );
+
+        let sent = backend.sent_keys.lock().unwrap().clone();
+        assert_eq!(sent, vec![("win-lane-1".to_string(), "Enter".to_string())]);
+
+        let journal = ctx.store.recent_journal(10).await.unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].action, "auto_approve");
+        assert_eq!(journal[0].lane_id, Some(1));
+
+        let log = ctx.store.supervision_log(None, 10, None).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].outcome, "sent");
+        assert_eq!(log[0].trigger, "legacy_rule");
+    }
+
+    #[tokio::test]
+    async fn legacy_rule_skips_when_dialog_changed() {
+        // The dialog is gone by send time (idle pane instead): verified_send must skip rather
+        // than type a stray Enter, and the alert must NOT be suppressed — the one documented
+        // deviation from the old raw-send behavior.
+        let backend = Arc::new(ScriptedBackend::new(vec![IDLE_PANE.to_string()]));
+        let ctx = make_ctx(backend.clone());
+
+        ctx.store
+            .add_approval_rule("test-repo".into(), "cargo install".into())
+            .await
+            .unwrap();
+
+        let dialog = detect_dialog(DIALOG_A).expect("dialog detected");
+        let session = sample_session(dialog);
+        let lane = sample_lane(session.clone());
+
+        let suppressed = legacy_rule_auto_approve(&ctx, lane.id, &lane, Some(&session)).await;
+        assert!(!suppressed, "a vanished dialog must not suppress the alert");
+
+        assert!(backend.sent_keys.lock().unwrap().is_empty());
+
+        let journal = ctx.store.recent_journal(10).await.unwrap();
+        assert!(journal.is_empty(), "no auto_approve journal row on a skip");
+
+        let log = ctx.store.supervision_log(None, 10, None).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].outcome, "skipped");
+    }
+
+    #[tokio::test]
+    async fn legacy_block_inert_for_supervised_lane() {
+        let backend = Arc::new(ScriptedBackend::new(vec![DIALOG_A.to_string()]));
+        let ctx = make_ctx(backend.clone());
+        ctx.config.write().await.supervision.enabled = true;
+
+        ctx.store
+            .add_approval_rule("test-repo".into(), "cargo install".into())
+            .await
+            .unwrap();
+
+        let p = SupervisionOverrides {
+            lane_id: 1,
+            enabled: true,
+            classes: [(DialogClass::CommandExec, PolicyAction::AutoApprove)]
+                .into_iter()
+                .collect(),
+            mail_mode: None,
+            nudge_text: None,
+            stall_mins: None,
+            nudge_retries: None,
+            expect_work: true,
+            updated_at: Utc::now(),
+        };
+        ctx.store.set_lane_policy(p).await.unwrap();
+        crate::supervision::refresh(&ctx).await;
+        assert!(crate::supervision::supervised(&ctx, 1).await.is_some());
+
+        let dialog = detect_dialog(DIALOG_A).expect("dialog detected");
+        let session = sample_session(dialog);
+        let lane = sample_lane(session.clone());
+
+        let suppressed = legacy_rule_auto_approve(&ctx, lane.id, &lane, Some(&session)).await;
+        assert!(
+            !suppressed,
+            "a supervised lane's legacy block must be a no-op"
+        );
+
+        assert_eq!(
+            backend
+                .capture_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "supervised opt-out must happen before any pane capture"
+        );
+        assert!(backend.sent_keys.lock().unwrap().is_empty());
+
+        let journal = ctx.store.recent_journal(10).await.unwrap();
+        assert!(journal.is_empty());
+
+        let log = ctx.store.supervision_log(None, 10, None).await.unwrap();
+        assert!(
+            log.is_empty(),
+            "zero backend sends attributable to the legacy block"
+        );
     }
 }
