@@ -110,6 +110,12 @@ fn remote_method_allowed(method: &str) -> bool {
         | "agent.pin" | "session.rename"
         // companion self-registration for push
         | "push.register" | "push.unregister"
+        // supervision: read-only lane observability (supervision.get, supervision.audit,
+        // supervision.status, same posture as lane.diff), and manual nudge (supervision.nudge,
+        // strictly weaker than the already-allowed agent.send_input).
+        // supervision.set stays local-only: grants standing auto-approval authority, so policy
+        // mutation stays local-only like config.set.
+        | "supervision.get" | "supervision.audit" | "supervision.status" | "supervision.nudge"
     )
 }
 
@@ -700,6 +706,8 @@ mod tests {
             "orchestrator.resize",
             "orchestrator.start",
             "orchestrator.stop",
+            // supervision.set grants standing auto-approval authority — strictly local-only.
+            "supervision.set",
             // upcoming local-only credential-minting RPCs (task A2) — must never be reachable
             // over the remote bridge.
             "remote.pair",
@@ -709,5 +717,14 @@ mod tests {
         ] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
         }
+    }
+
+    #[test]
+    fn supervision_set_is_not_remote_reachable() {
+        assert!(!remote_method_allowed("supervision.set"));
+        assert!(remote_method_allowed("supervision.get"));
+        assert!(remote_method_allowed("supervision.audit"));
+        assert!(remote_method_allowed("supervision.status"));
+        assert!(remote_method_allowed("supervision.nudge"));
     }
 }

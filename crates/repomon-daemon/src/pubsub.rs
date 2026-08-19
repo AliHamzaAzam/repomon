@@ -31,9 +31,12 @@ pub mod topic {
     pub const ORCHESTRATOR_STATUS: &str = "event.orchestrator.status";
     /// A supervision action was evaluated and acted on (or held/skipped).
     pub const SUPERVISION_ACTED: &str = "event.supervision.acted";
+    /// A supervision policy was updated.
+    pub const SUPERVISION_CHANGED: &str = "event.supervision.changed";
 }
 
 pub const SUPERVISION_ACTED: &str = topic::SUPERVISION_ACTED;
+pub const SUPERVISION_CHANGED: &str = topic::SUPERVISION_CHANGED;
 
 /// Whether a connection with the given per-connection filter state should receive `value`.
 ///

@@ -33,6 +33,13 @@ fn parse<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcError> {
         .map_err(|e| RpcError::invalid_params(e.to_string()))
 }
 
+fn parse_opt<T: DeserializeOwned + Default>(params: Option<Value>) -> Result<T, RpcError> {
+    match params {
+        None | Some(Value::Null) => Ok(T::default()),
+        Some(v) => serde_json::from_value(v).map_err(|e| RpcError::invalid_params(e.to_string())),
+    }
+}
+
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
     serde_json::to_value(v).map_err(internal)
 }
@@ -169,6 +176,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
         "agent_icons": cfg.agent_icons,
+        "supervision": cfg.supervision,
     })
 }
 
@@ -919,7 +927,59 @@ struct ConfigSet {
     orchestrator_model: Option<String>,
     #[serde(default)]
     agent_icons: Option<HashMap<String, String>>,
+    #[serde(default)]
+    supervision: Option<repomon_core::agent::supervision::SupervisionConfig>,
 }
+
+#[derive(Deserialize, Default)]
+struct SupervisionGet {
+    #[serde(default)]
+    lane_id: Option<repomon_core::model::LaneId>,
+}
+
+#[derive(Deserialize)]
+struct SupervisionSet {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    classes: Option<
+        std::collections::BTreeMap<
+            repomon_core::agent::supervision::DialogClass,
+            repomon_core::agent::supervision::PolicyAction,
+        >,
+    >,
+    #[serde(default)]
+    mail_mode: Option<repomon_core::agent::supervision::MailDeliveryMode>,
+    #[serde(default)]
+    nudge_text: Option<String>,
+    #[serde(default)]
+    stall_mins: Option<u32>,
+    #[serde(default)]
+    nudge_retries: Option<u32>,
+    #[serde(default)]
+    expect_work: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct SupervisionAudit {
+    #[serde(default)]
+    lane_id: Option<repomon_core::model::LaneId>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SupervisionNudge {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct PushDevice {
     device_token: String,
@@ -1298,7 +1358,12 @@ pub async fn dispatch(
     // itself only when it actually applies a resize (see its handler).
     if matches!(
         method,
-        "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll" | "agent.answer"
+        "agent.send_input"
+            | "agent.signal"
+            | "agent.key"
+            | "agent.scroll"
+            | "agent.answer"
+            | "supervision.nudge"
     ) {
         *sess.last_interaction.lock().await = Some(std::time::Instant::now());
     }
@@ -1836,6 +1901,8 @@ pub async fn dispatch(
                 .delete(p.lane_id, p.also_delete_branch)
                 .await
                 .map_err(internal)?;
+            let _ = ctx.store.delete_lane_policy(p.lane_id).await;
+            crate::supervision::refresh(ctx).await;
             ctx.broadcast(
                 crate::pubsub::topic::LANE_DELETED,
                 json!({ "lane_id": p.lane_id }),
@@ -2785,9 +2852,17 @@ pub async fn dispatch(
                 if let Some(icons) = p.agent_icons {
                     cfg.agent_icons = icons;
                 }
+                let had_supervision = p.supervision.is_some();
+                if let Some(s) = p.supervision {
+                    cfg.supervision = s;
+                }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
                     return Err(internal(e));
+                }
+                if had_supervision {
+                    drop(cfg);
+                    crate::supervision::refresh(ctx).await;
                 }
             }
             let cfg = ctx.config.read().await;
@@ -4238,6 +4313,164 @@ pub async fn dispatch(
                 .map_err(internal)?
                 .map_err(internal)?;
             Ok(Value::Null)
+        }
+        // ---- supervision ----
+        "supervision.get" => {
+            let p: SupervisionGet = parse_opt(params)?;
+            let defaults = ctx.config.read().await.supervision.clone();
+            let (lane, effective) = match p.lane_id {
+                Some(lid) => {
+                    let lane_row = ctx.store.lane_policy(lid).await.map_err(internal)?;
+                    let eff =
+                        repomon_core::agent::supervision::resolve(&defaults, lane_row.as_ref());
+                    (lane_row, Some(eff))
+                }
+                None => (None, None),
+            };
+            Ok(json!({
+                "defaults": defaults,
+                "lane": lane,
+                "effective": effective,
+            }))
+        }
+        "supervision.set" => {
+            let p: SupervisionSet = parse(params)?;
+            let mut existing = ctx
+                .store
+                .lane_policy(p.lane_id)
+                .await
+                .map_err(internal)?
+                .unwrap_or_else(|| repomon_core::agent::supervision::SupervisionOverrides {
+                    lane_id: p.lane_id,
+                    enabled: false,
+                    classes: std::collections::BTreeMap::new(),
+                    mail_mode: None,
+                    nudge_text: None,
+                    stall_mins: None,
+                    nudge_retries: None,
+                    expect_work: false,
+                    updated_at: chrono::Utc::now(),
+                });
+            if let Some(enabled) = p.enabled {
+                existing.enabled = enabled;
+            }
+            if let Some(classes) = p.classes {
+                existing.classes = classes;
+            }
+            if p.mail_mode.is_some() {
+                existing.mail_mode = p.mail_mode;
+            }
+            if p.nudge_text.is_some() {
+                existing.nudge_text = p.nudge_text;
+            }
+            if p.stall_mins.is_some() {
+                existing.stall_mins = p.stall_mins;
+            }
+            if p.nudge_retries.is_some() {
+                existing.nudge_retries = p.nudge_retries;
+            }
+            if let Some(expect_work) = p.expect_work {
+                existing.expect_work = expect_work;
+            }
+            existing.updated_at = chrono::Utc::now();
+            ctx.store
+                .set_lane_policy(existing.clone())
+                .await
+                .map_err(internal)?;
+            crate::supervision::refresh(ctx).await;
+            ctx.broadcast(
+                crate::pubsub::SUPERVISION_CHANGED,
+                json!({ "lane_id": p.lane_id }),
+            );
+            let defaults = ctx.config.read().await.supervision.clone();
+            let effective = repomon_core::agent::supervision::resolve(&defaults, Some(&existing));
+            Ok(json!({ "effective": effective }))
+        }
+        "supervision.audit" => {
+            let p: SupervisionAudit = parse_opt(params)?;
+            let limit = p.limit.unwrap_or(50).min(200);
+            let entries = ctx
+                .store
+                .supervision_log(p.lane_id, limit, p.before_id)
+                .await
+                .map_err(internal)?;
+            Ok(json!({ "entries": entries }))
+        }
+        "supervision.status" => {
+            let snapshot = ctx.supervision.read().await.clone();
+            let mut lane_statuses = Vec::new();
+            for &lane_id in snapshot.lanes.keys() {
+                let last = ctx
+                    .store
+                    .supervision_last(lane_id)
+                    .await
+                    .map_err(internal)?;
+                lane_statuses.push(json!({
+                    "lane_id": lane_id,
+                    "enabled": true,
+                    "last": last,
+                }));
+            }
+            lane_statuses.sort_by_key(|l| l.get("lane_id").and_then(Value::as_i64).unwrap_or(0));
+            Ok(json!({
+                "master": snapshot.master,
+                "lanes": lane_statuses,
+            }))
+        }
+        "supervision.nudge" => {
+            let p: SupervisionNudge = parse(params)?;
+            let lane = p.lane_id;
+            let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            let text = match p.text {
+                Some(t) => t,
+                None => {
+                    let defaults = ctx.config.read().await.supervision.clone();
+                    let lane_row = ctx.store.lane_policy(lane).await.map_err(internal)?;
+                    let effective =
+                        repomon_core::agent::supervision::resolve(&defaults, lane_row.as_ref());
+                    effective.nudge_text
+                }
+            };
+            let seed = crate::inject::AuditSeed {
+                lane_id: lane,
+                window: window.clone(),
+                session_id: None,
+                agent_kind: None,
+                trigger: "manual_nudge".to_string(),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "nudge".to_string(),
+                policy_source: None,
+                reason: Some("manual nudge from operator".to_string()),
+                subject: None,
+                pane_excerpt: None,
+            };
+            let outcome = crate::inject::verified_send(
+                ctx,
+                crate::inject::Expectation::IdleNoDialog,
+                crate::inject::Payload::Line(text),
+                seed,
+            )
+            .await;
+            match outcome {
+                crate::inject::SendOutcome::Sent { keys, entry_id } => Ok(json!({
+                    "outcome": "sent",
+                    "entry_id": entry_id,
+                    "keys": keys,
+                })),
+                crate::inject::SendOutcome::Skipped { reason, entry_id } => Ok(json!({
+                    "outcome": "skipped",
+                    "entry_id": entry_id,
+                    "reason": reason.as_str(),
+                    "keys": Value::Null,
+                })),
+                crate::inject::SendOutcome::Failed { error, entry_id } => Ok(json!({
+                    "outcome": "failed",
+                    "entry_id": entry_id,
+                    "error": error,
+                    "keys": Value::Null,
+                })),
+            }
         }
 
         other => Err(RpcError::method_not_found(other)),
@@ -9430,5 +9663,240 @@ mod tests {
         };
         assert!(is_ext_live);
         assert_eq!(ext_slots_remaining, Some(0));
+    }
+
+    #[tokio::test]
+    async fn supervision_get_set_roundtrip() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let mut config = repomon_core::Config::default();
+        config.supervision.enabled = true;
+        let ctx = Ctx::new(store, config, None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+
+        // 1. Initial get without lane_id returns defaults, no lane, no effective
+        let get_init = dispatch(&ctx, &sess, "supervision.get", None)
+            .await
+            .unwrap();
+        assert_eq!(get_init["defaults"]["enabled"], json!(true));
+        assert!(get_init["lane"].is_null());
+        assert!(get_init["effective"].is_null());
+
+        // 2. Set enabled + one class override + stall_mins
+        let set_res = dispatch(
+            &ctx,
+            &sess,
+            "supervision.set",
+            Some(json!({
+                "lane_id": 42,
+                "enabled": true,
+                "classes": { "command_exec": "auto_approve" },
+                "stall_mins": 15,
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(set_res["effective"]["enabled"], json!(true));
+        assert_eq!(
+            set_res["effective"]["classes"]["command_exec"],
+            json!("auto_approve")
+        );
+        assert_eq!(set_res["effective"]["stall_mins"], json!(15));
+
+        // 3. Get with lane_id returns merged effective policy
+        let get_lane = dispatch(
+            &ctx,
+            &sess,
+            "supervision.get",
+            Some(json!({ "lane_id": 42 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(get_lane["lane"]["lane_id"], json!(42));
+        assert_eq!(get_lane["lane"]["enabled"], json!(true));
+        assert_eq!(get_lane["effective"]["enabled"], json!(true));
+        assert_eq!(
+            get_lane["effective"]["classes"]["command_exec"],
+            json!("auto_approve")
+        );
+        assert_eq!(get_lane["effective"]["stall_mins"], json!(15));
+
+        // 4. In-memory snapshot is refreshed and contains the lane
+        assert!(ctx.supervision.read().await.lane(42).is_some());
+    }
+
+    #[tokio::test]
+    async fn supervision_audit_caps_limit_and_filters_lane() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let config = repomon_core::Config::default();
+        let ctx = Ctx::new(store, config, None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+
+        // Insert 3 entries for lane 1, 2 entries for lane 2
+        for i in 1..=3 {
+            let entry = repomon_core::model::SupervisionEntry {
+                id: 0,
+                at: chrono::Utc::now(),
+                lane_id: 1,
+                window: "window-1".to_string(),
+                session_id: None,
+                agent_kind: None,
+                trigger: format!("trigger_{i}"),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "approve".to_string(),
+                policy_source: None,
+                keys: None,
+                outcome: "sent".to_string(),
+                reason: None,
+                subject: None,
+                pane_excerpt: None,
+            };
+            ctx.store.append_supervision(entry).await.unwrap();
+        }
+        for i in 1..=2 {
+            let entry = repomon_core::model::SupervisionEntry {
+                id: 0,
+                at: chrono::Utc::now(),
+                lane_id: 2,
+                window: "window-2".to_string(),
+                session_id: None,
+                agent_kind: None,
+                trigger: format!("trigger_{i}"),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "approve".to_string(),
+                policy_source: None,
+                keys: None,
+                outcome: "sent".to_string(),
+                reason: None,
+                subject: None,
+                pane_excerpt: None,
+            };
+            ctx.store.append_supervision(entry).await.unwrap();
+        }
+
+        // Filter lane 1
+        let audit_lane1 = dispatch(
+            &ctx,
+            &sess,
+            "supervision.audit",
+            Some(json!({ "lane_id": 1 })),
+        )
+        .await
+        .unwrap();
+        let entries1 = audit_lane1["entries"].as_array().unwrap();
+        assert_eq!(entries1.len(), 3);
+        for e in entries1 {
+            assert_eq!(e["lane_id"], json!(1));
+        }
+
+        // All lanes, limit capped
+        let audit_all = dispatch(
+            &ctx,
+            &sess,
+            "supervision.audit",
+            Some(json!({ "limit": 500 })),
+        )
+        .await
+        .unwrap();
+        let all_entries = audit_all["entries"].as_array().unwrap();
+        assert_eq!(all_entries.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn supervision_set_missing_lane_field_errors() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let config = repomon_core::Config::default();
+        let ctx = Ctx::new(store, config, None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+
+        let err = dispatch(
+            &ctx,
+            &sess,
+            "supervision.set",
+            Some(json!({ "enabled": true })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[tokio::test]
+    async fn lane_delete_removes_policy_row() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let mut config = repomon_core::Config::default();
+        config.supervision.enabled = true;
+        let ctx = Ctx::new(store, config, None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+
+        // Create a real repo with initial commit
+        let repo_dir = tempfile::tempdir().unwrap();
+        git(repo_dir.path(), &["init", "-b", "main"]);
+        git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
+
+        let repo = ctx.registry.add(repo_dir.path()).await.unwrap();
+
+        // Create a lane
+        let lane_val = dispatch(
+            &ctx,
+            &sess,
+            "lane.create",
+            Some(json!({
+                "repo_id": repo.id,
+                "branch": "feat/supervision-test",
+            })),
+        )
+        .await
+        .unwrap();
+        let lane_id = lane_val["id"].as_i64().unwrap();
+
+        // Set policy on this lane
+        dispatch(
+            &ctx,
+            &sess,
+            "supervision.set",
+            Some(json!({
+                "lane_id": lane_id,
+                "enabled": true,
+            })),
+        )
+        .await
+        .unwrap();
+
+        assert!(ctx.store.lane_policy(lane_id).await.unwrap().is_some());
+        assert!(ctx.supervision.read().await.lane(lane_id).is_some());
+
+        // Delete the lane
+        dispatch(
+            &ctx,
+            &sess,
+            "lane.delete",
+            Some(json!({
+                "lane_id": lane_id,
+                "also_delete_branch": true,
+            })),
+        )
+        .await
+        .unwrap();
+
+        // Policy row is deleted and snapshot is refreshed
+        assert!(ctx.store.lane_policy(lane_id).await.unwrap().is_none());
+        assert!(ctx.supervision.read().await.lane(lane_id).is_none());
     }
 }

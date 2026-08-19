@@ -20,6 +20,7 @@ pub mod remote;
 pub mod rpc;
 pub mod socket;
 pub mod standing;
+pub mod supervision;
 pub mod usage_watch;
 
 use std::collections::{HashMap, HashSet};
@@ -325,6 +326,8 @@ pub struct Ctx {
     pub in_flight_naming: Arc<Mutex<HashSet<String>>>,
     /// Anti-thrashing latch for supervision injection: window -> (expectation fingerprint, when).
     pub inject_latch: Mutex<HashMap<String, (String, Instant)>>,
+    /// Cached snapshot of active supervision policies across all enabled lanes.
+    pub supervision: RwLock<supervision::PolicySnapshot>,
     pub shutdown: Notify,
 }
 
@@ -440,6 +443,7 @@ impl Ctx {
             remote_mutate_lock: Mutex::new(()),
             in_flight_naming: Arc::new(Mutex::new(HashSet::new())),
             inject_latch: Mutex::new(HashMap::new()),
+            supervision: RwLock::new(supervision::PolicySnapshot::default()),
             shutdown: Notify::new(),
         })
     }
