@@ -568,16 +568,28 @@ pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) 
         };
     }
 
-    // 8. CommandExec: title starting bash, or run command, run tool, requesting permission, wants to run
+    // 8. CommandExec: title starting bash, a boxless "Bash command" header line (Claude Code
+    // v2.1.235+ draws its Bash approval dialog with no box, so the header lands in body/context
+    // instead of `title` — see the live fixture in the tests below), or run command, run tool,
+    // requesting permission, wants to run, requires approval
     let mut cmd_evidence = Vec::new();
     if title_lower.starts_with("bash") {
         cmd_evidence.push("bash".to_string());
+    }
+    let has_boxless_bash_header = d
+        .body
+        .iter()
+        .chain(d.context.iter())
+        .any(|l| l.trim().eq_ignore_ascii_case("bash command"));
+    if has_boxless_bash_header {
+        cmd_evidence.push("bash command".to_string());
     }
     for &m in &[
         "run command",
         "run tool",
         "requesting permission",
         "wants to run",
+        "requires approval",
     ] {
         if full_text_lower.contains(m) {
             cmd_evidence.push(m.to_string());
@@ -905,6 +917,16 @@ fn extract_subject(d: &PendingDialog, class: DialogClass) -> Option<String> {
         return Some(tool);
     }
 
+    // Boxless "Bash command" dialog whose header landed in `context`/`body` instead of `title`
+    // (no `╭` border for `describe` to anchor on): the subject is the first real content line
+    // after that header, not an arbitrary earlier context line from unrelated transcript above.
+    if let Some(subj) = subject_after_bash_header(&d.context) {
+        return Some(subj);
+    }
+    if let Some(subj) = subject_after_bash_header(&d.body) {
+        return Some(subj);
+    }
+
     if class == DialogClass::FileWrite {
         if let Some(path) = extract_file_path_from_dialog(d) {
             return Some(path);
@@ -951,6 +973,37 @@ fn is_header_or_label_line(line: &str) -> bool {
         || l.starts_with("field ")
         || l.starts_with("security guide")
         || l.starts_with("───")
+}
+
+/// Agent transcript narration glyphs (Claude Code's `⏺`/`⎿`/`✻`, others' `●`) that prefix
+/// log/status lines — never a dialog subject even when they land in `context` alongside a
+/// recognized header.
+const TRANSCRIPT_GLYPHS: [char; 4] = ['⏺', '⎿', '✻', '●'];
+
+/// Whether `line` is agent transcript narration rather than dialog content.
+fn is_transcript_line(line: &str) -> bool {
+    line.trim_start()
+        .chars()
+        .next()
+        .is_some_and(|c| TRANSCRIPT_GLYPHS.contains(&c))
+}
+
+/// For a boxless dialog whose "Bash command" header line landed in `context` or `body` (no `╭`
+/// border for [`crate::agent::prompt::detect_dialog`]'s `describe` to anchor a `title` on), find
+/// the first real content line after that header — skipping further marker/heading lines and
+/// transcript narration — and use it as the subject. Strips a leading `$ ` if present.
+fn subject_after_bash_header(lines: &[String]) -> Option<String> {
+    let header_idx = lines
+        .iter()
+        .position(|l| l.trim().eq_ignore_ascii_case("bash command"))?;
+    lines[header_idx + 1..].iter().find_map(|l| {
+        let t = l.trim();
+        if t.is_empty() || is_header_or_label_line(t) || is_transcript_line(t) {
+            None
+        } else {
+            Some(t.strip_prefix("$ ").unwrap_or(t).to_string())
+        }
+    })
 }
 
 /// Extract target file path from dialog body, question, or context.
@@ -1006,6 +1059,7 @@ const APPROVE_BLACKLIST: &[&str] = &[
     "always",
     "for this session",
     "don't ask again",
+    "don\u{2019}t ask again",
     "dont ask again",
     "persist",
     "remember this choice",
@@ -1547,6 +1601,12 @@ Do you want to proceed?\n\
 
     const FIXTURE_CLAUDE_TRUST: &str = " Security guide\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel";
 
+    /// Ground-truth pane capture from Claude Code v2.1.235, which draws its Bash approval
+    /// dialog BOXLESS (no ╭/│ glyphs). See `.briefs/live-fixture-claude-bash-approval.txt`.
+    /// Includes the unrelated preceding agent-transcript lines (mail check, acceptance-test
+    /// reply) that used to get mis-picked as the subject.
+    const FIXTURE_LIVE_CLAUDE_BOXLESS_BASH: &str = " ⚠ 4 MCP servers need authentication · run /mcp\n\n❯ Check your repomon mail and act on it.\n\n⏺ I'll check your repomon messages and handle any pending items.\n\n  Called repomon\n\n⏺ You have one acceptance test message. I'll mark it read and respond.\n\n  Called repomon 2 times\n\n⏺ Done. Checked your inbox and replied to acceptance test A1 with \"DONE-A1\". The message is queued for delivery to the operator.\n\n✻ Crunched for 14s\n\n❯ Run this exact shell command now: cargo --version\n\n  Checking cargo version\n  ⎿  $ cargo --version\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n Bash command\n\n   cargo --version\n   Check cargo version\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don\u{2019}t ask again for: cargo *\n   3. No\n\n Esc to cancel · Tab to amend · ctrl+e to explain";
+
     #[test]
     fn test_1_claude_boxed_bash_permission_dialog_option_mapping() {
         let d = detect_dialog(FIXTURE_CLAUDE_BASH).expect("Claude bash dialog");
@@ -1589,6 +1649,26 @@ Do you want to proceed?\n\
         let d = detect_dialog(FIXTURE_CLAUDE_TRUST).expect("Claude trust dialog");
         assert_eq!(approve_option(&d, AgentKind::ClaudeCode), Some(0));
         assert_eq!(deny_option(&d, AgentKind::ClaudeCode), Some(1));
+    }
+
+    #[test]
+    fn live_claude_boxless_bash_approval_dialog() {
+        let d = detect_dialog(FIXTURE_LIVE_CLAUDE_BOXLESS_BASH)
+            .expect("live boxless Claude bash dialog");
+        // Boxless: no ╭ border, so no title and no body — the header landed in `context`.
+        assert_eq!(d.title, None);
+        assert!(d.body.is_empty());
+
+        let scope = test_scope();
+        let c = classify_dialog(&d, AgentKind::ClaudeCode, &scope);
+        assert_eq!(c.class, DialogClass::CommandExec);
+        assert_eq!(c.subject.as_deref(), Some("cargo --version"));
+        assert!(c.repo_scoped);
+
+        assert_eq!(approve_option(&d, AgentKind::ClaudeCode), Some(0));
+        assert_eq!(deny_option(&d, AgentKind::ClaudeCode), Some(2));
+        // The "don't ask again" standing-grant option (index 1) is never returned.
+        assert_ne!(approve_option(&d, AgentKind::ClaudeCode), Some(1));
     }
 
     #[test]
