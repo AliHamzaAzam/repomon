@@ -44,7 +44,30 @@ pub fn injection_eligible(session: &AgentSession) -> bool {
             && session.ended_turn
 }
 
-async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
+pub(crate) fn resolve_recipient_session<'a>(
+    lane: &'a repomon_core::model::Lane,
+    message: &FleetMessage,
+) -> Option<&'a AgentSession> {
+    let slot = message.recipient.slot?;
+    let session = message
+        .recipient
+        .window
+        .as_deref()
+        .and_then(|window| {
+            lane.agent_sessions
+                .iter()
+                .find(|session| session.tmux_window.as_deref() == Some(window))
+        })
+        .or_else(|| lane.agent_sessions.get(slot.saturating_sub(1) as usize))?;
+
+    let window = session.tmux_window.as_deref()?;
+    if message.recipient.window.as_deref() != Some(window) {
+        return None;
+    }
+    Some(session)
+}
+
+pub(crate) async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
     let inject = {
         let config = ctx.config.read().await;
         if message.sender.lane_id.is_some() {
@@ -59,9 +82,9 @@ async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
     let Some(lane_id) = message.recipient.lane_id else {
         return;
     };
-    let Some(slot) = message.recipient.slot else {
+    if crate::supervision::supervised(ctx, lane_id).await.is_some() {
         return;
-    };
+    }
     let lanes = match crate::rpc::lanes_with_agents(ctx).await {
         Ok(lanes) => lanes,
         Err(error) => {
@@ -72,22 +95,10 @@ async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
             return;
         }
     };
-    let Some(session) = lanes
-        .iter()
-        .find(|lane| lane.id == lane_id)
-        .and_then(|lane| {
-            message
-                .recipient
-                .window
-                .as_deref()
-                .and_then(|window| {
-                    lane.agent_sessions
-                        .iter()
-                        .find(|session| session.tmux_window.as_deref() == Some(window))
-                })
-                .or_else(|| lane.agent_sessions.get(slot.saturating_sub(1) as usize))
-        })
-    else {
+    let Some(lane) = lanes.iter().find(|l| l.id == lane_id) else {
+        return;
+    };
+    let Some(session) = resolve_recipient_session(lane, &message) else {
         return;
     };
     if !injection_eligible(session) {
@@ -96,9 +107,6 @@ async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
     let Some(window) = session.tmux_window.clone() else {
         return;
     };
-    if message.recipient.window.as_deref() != Some(window.as_str()) {
-        return;
-    }
     let line = injection_line(&message);
     let backend = ctx.backend.clone();
     let result = tokio::task::spawn_blocking(move || backend.send_text_named(&window, &line)).await;
@@ -146,10 +154,17 @@ pub async fn delivery_worker(ctx: Arc<Ctx>) {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use repomon_core::agent::backend::{
+        AttachCommand, ByteStream, CaptureOpts, OwnerState, ScrollEvent, SessionBackend, SpawnSpec,
+        WindowActivity,
+    };
+    use repomon_core::agent::supervision::SupervisionOverrides;
     use repomon_core::model::{
         AgentAddress, AgentKind, MessageDeliveryState, MessageReadState, ResolvedAgentAddress,
     };
+    use repomon_core::{Config, Store};
     use std::path::PathBuf;
+    use std::sync::Mutex as StdMutex;
 
     fn message(body: &str) -> FleetMessage {
         FleetMessage {
@@ -239,5 +254,199 @@ mod tests {
         let mut ended = session(AgentStatus::Running);
         ended.ended_turn = true;
         assert!(injection_eligible(&ended));
+    }
+
+    // ---- supervised-lane handoff (T9) ----
+
+    struct ScriptedBackend {
+        sent_keys: StdMutex<Vec<(String, String)>>,
+        sent_text: StdMutex<Vec<(String, String)>>,
+    }
+
+    impl ScriptedBackend {
+        fn new() -> Self {
+            Self {
+                sent_keys: StdMutex::new(Vec::new()),
+                sent_text: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SessionBackend for ScriptedBackend {
+        fn available(&self) -> bool {
+            true
+        }
+        fn label(&self) -> String {
+            "scripted".to_string()
+        }
+        fn session_exists(&self) -> bool {
+            true
+        }
+        fn claim_or_verify_owner(&self, _me: &str) -> OwnerState {
+            OwnerState::Owned
+        }
+        fn list_windows(&self) -> repomon_core::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn list_windows_with_activity(&self) -> repomon_core::Result<Vec<WindowActivity>> {
+            Ok(vec![])
+        }
+        fn spawn(
+            &self,
+            _lane: repomon_core::model::LaneId,
+            _spec: &SpawnSpec,
+        ) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn spawn_named(&self, _window: &str, _spec: &SpawnSpec) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn open_named(
+            &self,
+            _window: &str,
+            _cwd: &std::path::Path,
+        ) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn capture_named(&self, _window: &str, _opts: CaptureOpts) -> repomon_core::Result<String> {
+            Ok(String::new())
+        }
+        fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
+            None
+        }
+        fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
+            Some((80, 24))
+        }
+        fn resize_named(&self, _window: &str, _cols: u16, _rows: u16) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn follow_client_named(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn alternate_on_named(&self, _window: &str) -> bool {
+            false
+        }
+        fn scroll_wheel_named(
+            &self,
+            _window: &str,
+            _event: ScrollEvent,
+        ) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_literal_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_text_named(&self, window: &str, text: &str) -> repomon_core::Result<()> {
+            self.sent_text
+                .lock()
+                .unwrap()
+                .push((window.to_string(), text.to_string()));
+            Ok(())
+        }
+        fn send_key_named(&self, window: &str, key: &str) -> repomon_core::Result<()> {
+            self.sent_keys
+                .lock()
+                .unwrap()
+                .push((window.to_string(), key.to_string()));
+            Ok(())
+        }
+        fn kill_named(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn configure(&self) {}
+        fn target_named(&self, window: &str) -> String {
+            window.to_string()
+        }
+        fn exact_target_named(&self, window: &str) -> String {
+            window.to_string()
+        }
+        fn attach_command(&self, target: &str) -> AttachCommand {
+            AttachCommand {
+                program: "tmux".into(),
+                args: vec!["attach".into(), "-t".into(), target.into()],
+            }
+        }
+        fn open_byte_stream(&self, _window: &str) -> repomon_core::Result<ByteStream> {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok(ByteStream { rx })
+        }
+        fn close_byte_stream(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_mail_ctx(backend: Arc<dyn SessionBackend>) -> Arc<Ctx> {
+        let store = Store::open_in_memory().unwrap();
+        let mut config = Config::default();
+        config.supervision.enabled = true;
+        Ctx::new_with_backend(
+            store,
+            config,
+            None,
+            PathBuf::from("/tmp/config.toml"),
+            PathBuf::from("/tmp/repo-notes"),
+            backend,
+        )
+    }
+
+    /// `try_deliver`'s ONE early return for T9: a supervised lane's mail is owned entirely by
+    /// `supervision.rs`'s mail phase, so the plain delivery worker must never touch it — the
+    /// message stays queued and untouched by the backend.
+    #[tokio::test]
+    async fn supervised_lane_is_skipped_by_delivery_worker() {
+        let backend = Arc::new(ScriptedBackend::new());
+        let ctx = make_mail_ctx(backend.clone());
+
+        let policy = SupervisionOverrides {
+            lane_id: 2,
+            enabled: true,
+            classes: std::collections::BTreeMap::new(),
+            mail_mode: None,
+            nudge_text: None,
+            stall_mins: None,
+            nudge_retries: None,
+            expect_work: true,
+            updated_at: Utc::now(),
+        };
+        ctx.store.set_lane_policy(policy).await.unwrap();
+        crate::supervision::refresh(&ctx).await;
+        assert!(crate::supervision::supervised(&ctx, 2).await.is_some());
+
+        let queued = ctx
+            .store
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                ResolvedAgentAddress {
+                    address: AgentAddress::new("operator"),
+                    lane_id: None,
+                    slot: None,
+                    window: None,
+                    session_id: None,
+                    agent_kind: None,
+                },
+                ResolvedAgentAddress {
+                    address: AgentAddress::new("lane-2/1"),
+                    lane_id: Some(2),
+                    slot: Some(1),
+                    window: Some("lane-2".into()),
+                    session_id: Some("session-2".into()),
+                    agent_kind: Some("claude-code".into()),
+                },
+                "please look at this".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        try_deliver(&ctx, queued.clone()).await;
+
+        assert!(backend.sent_text.lock().unwrap().is_empty());
+        assert!(backend.sent_keys.lock().unwrap().is_empty());
+
+        let refreshed = ctx.store.get_message(queued.id.clone()).await.unwrap();
+        assert!(
+            refreshed.delivered_at.is_none(),
+            "supervised lane delivery is owned by the mail phase, not the worker"
+        );
     }
 }
