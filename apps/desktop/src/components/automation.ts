@@ -1,5 +1,6 @@
-import type { ApprovalRule, PendingDialog, Playbook } from "../bindings";
+import type { ApprovalRule, DialogClass, PendingDialog, Playbook, PolicyAction, SupervisionConfig } from "../bindings";
 import { DaemonRpcError } from "../ipc/rpc";
+import type { SelectOption } from "./controls/Select";
 
 export const JOURNAL_LIMIT = 200;
 
@@ -44,4 +45,50 @@ export function replacementDialog(error: unknown): PendingDialog | null | undefi
 
 export function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+/** Dialog classes shown in the global supervision defaults grid, in a fixed display order. */
+export const SUPERVISION_DIALOG_CLASSES: Array<{ id: DialogClass; label: string; description: string }> = [
+  { id: "command_exec", label: "Command execution", description: "Terminal bash and shell execution" },
+  { id: "file_write", label: "File modification", description: "Creating, editing, or replacing files" },
+  { id: "deletion", label: "File deletion", description: "Removing files or worktrees" },
+  { id: "network_access", label: "Network access", description: "Outbound network requests and fetches" },
+  { id: "credential_access", label: "Credential access", description: "Reading secrets, auth tokens, and keys" },
+  { id: "push_remote", label: "Push to remote", description: "Git push and remote branch mutations" },
+  { id: "install", label: "Package installation", description: "Installing package dependencies" },
+  { id: "device_access", label: "Device access", description: "Interacting with hardware or external devices" },
+  { id: "unknown", label: "Other dialogs", description: "Unclassified or ambiguous prompts" },
+];
+
+export const SUPERVISION_ACTION_OPTIONS: SelectOption[] = [
+  { value: "auto_approve", label: "Auto-approve" },
+  { value: "auto_deny", label: "Auto-deny" },
+  { value: "hold", label: "Hold for human" },
+];
+
+export const SUPERVISION_MAIL_MODE_OPTIONS: SelectOption[] = [
+  { value: "nudge", label: "Nudge" },
+  { value: "full_body", label: "Full body" },
+];
+
+export function supervisionClassActionColor(action: PolicyAction): string {
+  switch (action) {
+    case "auto_approve":
+      return "text-signal";
+    case "auto_deny":
+      return "text-fault";
+    case "hold":
+      return "text-attention";
+    default:
+      return "text-muted";
+  }
+}
+
+/** Returns a copy of a supervision class map with a single dialog class's action changed, all others preserved. */
+export function updatedSupervisionClasses(
+  current: SupervisionConfig["classes"] | undefined,
+  cls: DialogClass,
+  action: PolicyAction,
+): SupervisionConfig["classes"] {
+  return { ...current, [cls]: action };
 }

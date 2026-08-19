@@ -1,14 +1,21 @@
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { ApprovalRule, JournalEntry, Playbook, Schedule } from "../bindings";
-import { daemonCall } from "../ipc/rpc";
+import type { ApprovalRule, JournalEntry, MailDeliveryMode, Playbook, PolicyAction, Schedule, SupervisionConfig } from "../bindings";
+import { daemonCall, subscribeDaemon, type ConfigView } from "../ipc/rpc";
 import {
   formatTime,
   groupApprovalRules,
   journalQueryParams,
   playbookState,
   scheduleAddParams,
+  SUPERVISION_ACTION_OPTIONS,
+  SUPERVISION_DIALOG_CLASSES,
+  SUPERVISION_MAIL_MODE_OPTIONS,
+  supervisionClassActionColor,
+  updatedSupervisionClasses,
 } from "./automation";
+import Select from "./controls/Select";
+import Switch from "./controls/Switch";
 import { IconCheck, IconClose, IconPlus, IconRefresh, IconSearch } from "./icons";
 
 interface AutomationSettingsProps {
@@ -16,7 +23,7 @@ interface AutomationSettingsProps {
 }
 
 export default function AutomationSettings(props: AutomationSettingsProps) {
-  const [activeSubTab, setActiveSubTab] = createSignal<"playbooks" | "schedules" | "approvals" | "journal">("playbooks");
+  const [activeSubTab, setActiveSubTab] = createSignal<"playbooks" | "schedules" | "approvals" | "supervision" | "journal">("playbooks");
   const [playbooks, setPlaybooks] = createSignal<Playbook[]>([]);
   const [openPlaybook, setOpenPlaybook] = createSignal<string | null>(null);
   const [schedules, setSchedules] = createSignal<Schedule[]>([]);
@@ -29,25 +36,94 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
   const [busy, setBusy] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
+  // Global supervision defaults
+  const [supervision, setSupervision] = createSignal<SupervisionConfig | null>(null);
+  const [supervisionSaveStatus, setSupervisionSaveStatus] = createSignal<"idle" | "saving" | "saved" | "error">("idle");
+  let supervisionSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let supervisionDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+
   async function loadData() {
     try {
-      const [pbRes, schRes, appRes, jRes] = await Promise.all([
+      const [pbRes, schRes, appRes, jRes, cfgRes] = await Promise.all([
         daemonCall("playbook.list").catch(() => ({ playbooks: [] })),
         daemonCall("schedule.list").catch(() => ({ schedules: [] })),
         daemonCall("approval.list").catch(() => ({ rules: [] })),
         daemonCall("journal.query", journalQueryParams(journalSearch())).catch(() => ({ entries: [] })),
+        daemonCall("config.get").catch(() => null),
       ]);
       setPlaybooks(pbRes.playbooks ?? []);
       setSchedules(schRes.schedules ?? []);
       setApprovals(appRes.rules ?? []);
       setJournal(jRes.entries ?? []);
+      if (cfgRes) setSupervision(cfgRes.supervision ?? null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }
 
+  async function persistSupervision(next: SupervisionConfig) {
+    setSupervisionSaveStatus("saving");
+    try {
+      const saved = await daemonCall("config.set", { supervision: next });
+      setSupervision(saved.supervision);
+      setSupervisionSaveStatus("saved");
+      if (supervisionSaveTimer) clearTimeout(supervisionSaveTimer);
+      supervisionSaveTimer = setTimeout(() => setSupervisionSaveStatus("idle"), 2000);
+    } catch (cause) {
+      setSupervisionSaveStatus("error");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  // Optimistic patch + debounce, mirroring SettingsModal's patch() for text/number fields;
+  // switches and selects go through the instant (non-debounced) path.
+  function patchSupervision(next: Partial<SupervisionConfig>, debounce = false) {
+    const current = supervision();
+    if (!current) return;
+    const merged: SupervisionConfig = { ...current, ...next };
+    setSupervision(merged);
+
+    if (debounce) {
+      if (supervisionDebounceTimer) clearTimeout(supervisionDebounceTimer);
+      setSupervisionSaveStatus("saving");
+      supervisionDebounceTimer = setTimeout(() => {
+        supervisionDebounceTimer = undefined;
+        void persistSupervision(merged);
+      }, 400);
+    } else {
+      if (supervisionDebounceTimer) clearTimeout(supervisionDebounceTimer);
+      supervisionDebounceTimer = undefined;
+      void persistSupervision(merged);
+    }
+  }
+
   onMount(() => {
     void loadData();
+
+    let active = true;
+    let stopConfig: (() => void) | undefined;
+    void subscribeDaemon((event) => {
+      if (!active) return;
+      if (event.method === "event.config.changed") {
+        const params = event.params as Partial<ConfigView> | null;
+        // Skip while a local edit is still debouncing so we don't clobber unsaved input.
+        if (params?.supervision && !supervisionDebounceTimer) {
+          setSupervision(params.supervision);
+        }
+      }
+    })
+      .then((unsub) => {
+        if (active) stopConfig = unsub;
+        else unsub();
+      })
+      .catch(() => undefined);
+
+    onCleanup(() => {
+      active = false;
+      stopConfig?.();
+      if (supervisionSaveTimer) clearTimeout(supervisionSaveTimer);
+      if (supervisionDebounceTimer) clearTimeout(supervisionDebounceTimer);
+    });
   });
 
   async function actOnPlaybook(method: "playbook.approve" | "playbook.delete", name: string) {
@@ -184,6 +260,17 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
           onClick={() => setActiveSubTab("approvals")}
         >
           Approvals ({approvals().length})
+        </button>
+        <button
+          type="button"
+          class={`focus-ring flex-1 rounded-lg py-1.5 text-xs font-medium transition-colors ${
+            activeSubTab() === "supervision"
+              ? "bg-surface text-foreground shadow-xs font-semibold"
+              : "text-muted hover:text-foreground"
+          }`}
+          onClick={() => setActiveSubTab("supervision")}
+        >
+          Supervision
         </button>
         <button
           type="button"
@@ -393,7 +480,141 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
         </div>
       </Show>
 
-      {/* 4. ACTIVITY JOURNAL */}
+      {/* 4. SUPERVISION DEFAULTS */}
+      <Show when={activeSubTab() === "supervision"}>
+        <Show
+          when={supervision()}
+          fallback={<p class="py-6 text-center text-xs text-muted">Loading supervision defaults…</p>}
+        >
+          {(sup) => (
+            <div class="space-y-4">
+              <div class="flex items-start justify-between gap-3">
+                <p class="text-xs text-muted">
+                  Global defaults for automated permission handling. Individual lanes can override these in their
+                  own Supervision panel.
+                </p>
+                <Show when={supervisionSaveStatus() === "saving"}>
+                  <span class="flex shrink-0 items-center gap-1.5 font-mono text-[11px] text-muted">
+                    <IconRefresh size={11} class="animate-spin text-signal" />
+                    <span>Saving…</span>
+                  </span>
+                </Show>
+                <Show when={supervisionSaveStatus() === "saved"}>
+                  <span class="flex shrink-0 items-center gap-1.5 font-mono text-[11px] text-signal">
+                    <IconCheck size={12} strokeWidth={2.5} />
+                    <span>Saved</span>
+                  </span>
+                </Show>
+              </div>
+
+              <div class="space-y-1.5">
+                <Switch
+                  label="Enable supervision"
+                  checked={sup().enabled}
+                  onChange={(value) => patchSupervision({ enabled: value })}
+                />
+                <p class="text-[11px] text-muted">
+                  Lanes must also opt in individually before Repomon will act on their behalf.
+                </p>
+              </div>
+
+              <div class="space-y-2">
+                <div>
+                  <p class="section-label">Default permission policies</p>
+                  <p class="mt-0.5 text-[11px] text-muted">Applied to any lane that has not set its own override.</p>
+                </div>
+                <div class="space-y-1.5 rounded-xl border border-line bg-raised/20 p-2.5">
+                  <For each={SUPERVISION_DIALOG_CLASSES}>
+                    {(cls) => {
+                      const action = () => sup().classes?.[cls.id] ?? "hold";
+                      return (
+                        <div class="flex items-center justify-between gap-2 rounded-lg bg-surface/60 px-2.5 py-1.5">
+                          <span class="truncate text-xs font-medium text-foreground">{cls.label}</span>
+                          <div class="shrink-0">
+                            <Select
+                              ariaLabel={`${cls.label} default policy`}
+                              size="sm"
+                              options={SUPERVISION_ACTION_OPTIONS}
+                              value={action()}
+                              class={`w-36 ${supervisionClassActionColor(action())}`}
+                              onChange={(val) =>
+                                patchSupervision({
+                                  classes: updatedSupervisionClasses(sup().classes, cls.id, val as PolicyAction),
+                                })
+                              }
+                            />
+                          </div>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+              </div>
+
+              <div class="space-y-3 rounded-xl border border-line bg-raised/20 p-3">
+                <div>
+                  <p class="section-label">Delivery and thresholds</p>
+                  <p class="mt-0.5 text-[11px] text-muted">
+                    Defaults for mail mode, nudge messaging, and stall detection.
+                  </p>
+                </div>
+
+                <div class="space-y-1.5">
+                  <span class="section-label block">Default mail delivery mode</span>
+                  <Select
+                    ariaLabel="Default mail delivery mode"
+                    size="sm"
+                    options={SUPERVISION_MAIL_MODE_OPTIONS}
+                    value={sup().mail_mode}
+                    onChange={(val) => patchSupervision({ mail_mode: val as MailDeliveryMode })}
+                  />
+                </div>
+
+                <div class="space-y-1.5">
+                  <span class="section-label block">Default nudge message text</span>
+                  <input
+                    type="text"
+                    placeholder="Repomon: checking in on this lane."
+                    class="focus-ring w-full rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-foreground outline-none placeholder:text-muted/60"
+                    value={sup().nudge_text}
+                    onInput={(e) => patchSupervision({ nudge_text: e.currentTarget.value }, true)}
+                  />
+                </div>
+
+                <div class="grid grid-cols-2 gap-2.5">
+                  <div class="space-y-1.5">
+                    <span class="section-label block">Default stall threshold (mins)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="1440"
+                      class="focus-ring w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-foreground outline-none"
+                      value={sup().stall_mins}
+                      onInput={(e) => patchSupervision({ stall_mins: Number(e.currentTarget.value) }, true)}
+                    />
+                  </div>
+
+                  <div class="space-y-1.5">
+                    <span class="section-label block">Default max nudge retries</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="10"
+                      class="focus-ring w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-foreground outline-none"
+                      value={sup().nudge_retries}
+                      onInput={(e) => patchSupervision({ nudge_retries: Number(e.currentTarget.value) }, true)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <p class="text-[11px] text-muted">Per-lane overrides live in the lane's Supervision panel.</p>
+            </div>
+          )}
+        </Show>
+      </Show>
+
+      {/* 5. ACTIVITY JOURNAL */}
       <Show when={activeSubTab() === "journal"}>
         <div class="space-y-3">
           <form class="flex gap-2" onSubmit={searchJournal}>
