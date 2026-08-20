@@ -1,6 +1,6 @@
 {
   "name": "@repomon/desktop",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Repomon mission control desktop app",
   "private": true,
   "packageManager": "bun@1.3.14",
