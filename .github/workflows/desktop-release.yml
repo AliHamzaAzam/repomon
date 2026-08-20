@@ -1,8 +1,14 @@
 name: desktop release
 
+# Disabled for now: every run fails on missing Apple code-signing secrets
+# (APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD, plus the Windows signing
+# equivalents) that haven't been provisioned yet. Re-enable the `push` trigger
+# once those repo secrets are set; `workflow_dispatch` is left so it can still
+# be run by hand to check.
 on:
-  push:
-    tags: ["v*"]
+  # push:
+  #   tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write

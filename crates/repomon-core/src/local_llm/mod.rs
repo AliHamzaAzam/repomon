@@ -230,8 +230,10 @@ pub fn format_naming_prompt(user_prompt: &str) -> String {
 /// Generates a concise, meaningful session slug from a developer prompt using the local LLM.
 pub fn generate_session_slug(user_prompt: &str) -> Result<String> {
     let prompt = format_naming_prompt(user_prompt);
-    let mut cfg = LocalLlmConfig::default();
-    cfg.max_tokens = 14;
+    let cfg = LocalLlmConfig {
+        max_tokens: 14,
+        ..LocalLlmConfig::default()
+    };
 
     let raw = generate_oneshot(&prompt, Some(&cfg))?;
     sanitize_session_slug(&raw).ok_or_else(|| {
