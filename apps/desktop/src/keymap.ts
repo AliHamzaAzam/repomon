@@ -28,6 +28,7 @@ export const BINDINGS: Binding[] = [
   { id: "panel.repomindFull", chord: "mod+shift+5", label: "Repomind full screen", section: "Panels" },
   { id: "panel.theme", chord: "mod+6", label: "Cycle theme", section: "Panels" },
   { id: "panel.editor", chord: "mod+7", label: "Toggle the editor panel", section: "Panels" },
+  { id: "panel.supervision", chord: "mod+8", label: "Toggle the supervision panel", section: "Panels" },
 
   { id: "layout.focused", chord: "mod+shift+1", label: "Focused layout", section: "Layout" },
   { id: "layout.split", chord: "mod+shift+2", label: "Split layout", section: "Layout" },

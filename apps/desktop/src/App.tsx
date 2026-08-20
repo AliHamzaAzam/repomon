@@ -34,7 +34,7 @@ import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
-import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconSettings, IconSparkles } from "./components/icons";
+import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -195,10 +195,10 @@ function App(props: AppProps) {
     notifyLayoutChanged();
   });
 
-  // Shared open/switch/toggle-close behavior for the git and editor right-rail tabs, used by both
-  // the mod+3 / mod+7 shortcuts and their header icon-button counterparts (item 4) so the two entry
-  // points can never drift apart.
-  const openPanelTab = (id: "repomind" | "git" | "editor") => {
+  // Shared open/switch/toggle-close behavior for the git, editor, and supervision right-rail
+  // tabs, used by both the mod+3 / mod+7 / mod+8 shortcuts and their header icon-button
+  // counterparts (item 4) so the entry points can never drift apart.
+  const openPanelTab = (id: "repomind" | "git" | "editor" | "supervision") => {
     if (!repomindOpen()) {
       // Closed → open already on the requested tab. RightPanelHost consults `requestTab.id` on its
       // very first render, so bumping this in the same tick as opening is enough — no need to wait
@@ -239,6 +239,7 @@ function App(props: AppProps) {
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
       case "panel.git": openPanelTab("git"); break;
       case "panel.editor": openPanelTab("editor"); break;
+      case "panel.supervision": openPanelTab("supervision"); break;
       case "panel.repomind":
         openPanelTab("repomind");
         break;
@@ -437,6 +438,21 @@ function App(props: AppProps) {
           >
             <IconLayers size={13} />
             <span>Editor</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              repomindOpen() && rightPanelTab() === "supervision"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => openPanelTab("supervision")}
+            aria-pressed={repomindOpen() && rightPanelTab() === "supervision"}
+            title="Supervision (⌘8)"
+          >
+            <IconShield size={13} />
+            <span>Supervision</span>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
