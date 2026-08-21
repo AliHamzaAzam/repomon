@@ -1324,7 +1324,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                 </section>
 
                 {/* 3. Terminal Pane Customization & Background Tint */}
-                <section class="space-y-3 border-t border-line/70 pt-5">
+                <section class="space-y-4 border-t border-line/70 pt-5">
                   <div>
                     <p class="section-label">Terminal Pane Appearance</p>
                     <p class="mt-0.5 text-xs text-muted">
@@ -1332,69 +1332,107 @@ export default function SettingsModal(props: SettingsModalProps) {
                     </p>
                   </div>
 
-                  <div class="grid gap-3 sm:grid-cols-2">
-                    <Switch
-                      label="Tint terminal background with accent"
-                      checked={terminalApp().tintEnabled}
-                      onChange={(value) => {
-                        const next = { ...terminalApp(), tintEnabled: value };
-                        setTerminalApp(next);
-                        saveTerminalAppearance(next);
-                      }}
-                    />
-                    <label class="block">
-                      <span class="text-xs text-muted">Tint Intensity ({Math.round(terminalApp().tintOpacity * 100)}%)</span>
-                      <input
-                        class="mt-1.5 w-full accent-signal"
-                        type="range"
-                        min="0.01"
-                        max="0.25"
-                        step="0.01"
-                        value={terminalApp().tintOpacity}
-                        disabled={!terminalApp().tintEnabled}
-                        onInput={(e) => {
-                          const next = { ...terminalApp(), tintOpacity: Number(e.currentTarget.value) };
-                          setTerminalApp(next);
-                          saveTerminalAppearance(next);
-                        }}
-                      />
-                    </label>
+                  {/* Live preview: renders exactly what a pane will look like (same tint formula
+                      the terminal renderer applies), so changes read instantly without opening a lane. */}
+                  <div
+                    class="rounded-xl border border-line p-3 font-mono text-xs leading-relaxed"
+                    style={{
+                      "background-color": terminalApp().tintEnabled
+                        ? `color-mix(in srgb, var(--signal) ${Math.round(terminalApp().tintOpacity * 100)}%, var(--background))`
+                        : "var(--background)",
+                      "font-family": terminalApp().fontFamily,
+                      "font-size": `${terminalApp().fontSize}px`,
+                    }}
+                    aria-label="Terminal appearance preview"
+                  >
+                    <div class="flex items-center gap-1.5">
+                      <span class="size-1.5 rounded-full bg-signal" aria-hidden="true" />
+                      <span class="text-foreground font-semibold">claude-code</span>
+                      <span class="text-muted">· lane-81</span>
+                    </div>
+                    <p class="mt-1.5 text-muted">
+                      The quick brown fox jumps over the lazy dog 0123456789
+                    </p>
+                    <p class="mt-0.5 flex items-center gap-2 text-foreground">
+                      <span class="text-signal">$</span>
+                      <span>Waiting for your input</span>
+                      <span class="inline-block h-3.5 w-[7px] animate-pulse bg-signal" aria-hidden="true" />
+                    </p>
                   </div>
 
-                  <div class="grid gap-3 sm:grid-cols-2">
-                    <label class="block">
-                      <span class="text-xs text-muted">Terminal Font Family</span>
-                      <select
-                        class="mt-1 w-full rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-foreground focus:border-signal outline-none"
-                        value={terminalApp().fontFamily}
-                        onChange={(e) => {
-                          const next = { ...terminalApp(), fontFamily: e.currentTarget.value };
-                          setTerminalApp(next);
-                          saveTerminalAppearance(next);
-                        }}
-                      >
-                        <For each={TERMINAL_FONT_FAMILIES}>
-                          {(font) => <option value={font.id}>{font.label}</option>}
-                        </For>
-                      </select>
-                    </label>
-
-                    <label class="block">
-                      <span class="text-xs text-muted">Terminal Font Size ({terminalApp().fontSize}px)</span>
-                      <input
-                        class="mt-1.5 w-full accent-signal"
-                        type="range"
-                        min="10"
-                        max="18"
-                        step="1"
-                        value={terminalApp().fontSize}
-                        onInput={(e) => {
-                          const next = { ...terminalApp(), fontSize: Number(e.currentTarget.value) };
+                  <div class="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+                    <div class="space-y-3">
+                      <p class="text-xs font-medium text-foreground">Background Tint</p>
+                      <Switch
+                        label="Tint with theme accent"
+                        checked={terminalApp().tintEnabled}
+                        onChange={(value) => {
+                          const next = { ...terminalApp(), tintEnabled: value };
                           setTerminalApp(next);
                           saveTerminalAppearance(next);
                         }}
                       />
-                    </label>
+                      <label class="block">
+                        <span class="flex items-center justify-between text-xs text-muted">
+                          <span>Tint Intensity</span>
+                          <span
+                            class={`font-mono ${terminalApp().tintEnabled ? "text-foreground" : "text-muted/50"}`}
+                          >
+                            {Math.round(terminalApp().tintOpacity * 100)}%
+                          </span>
+                        </span>
+                        <input
+                          class="mt-1.5 w-full accent-signal disabled:opacity-40"
+                          type="range"
+                          min="0.01"
+                          max="0.25"
+                          step="0.01"
+                          value={terminalApp().tintOpacity}
+                          disabled={!terminalApp().tintEnabled}
+                          onInput={(e) => {
+                            const next = { ...terminalApp(), tintOpacity: Number(e.currentTarget.value) };
+                            setTerminalApp(next);
+                            saveTerminalAppearance(next);
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    <div class="space-y-3">
+                      <p class="text-xs font-medium text-foreground">Typeface</p>
+                      <Select
+                        label="Font Family"
+                        value={terminalApp().fontFamily}
+                        options={TERMINAL_FONT_FAMILIES.map((font) => ({
+                          value: font.id,
+                          label: font.label,
+                        }))}
+                        onChange={(value) => {
+                          const next = { ...terminalApp(), fontFamily: value };
+                          setTerminalApp(next);
+                          saveTerminalAppearance(next);
+                        }}
+                      />
+                      <label class="block">
+                        <span class="flex items-center justify-between text-xs text-muted">
+                          <span>Font Size</span>
+                          <span class="font-mono text-foreground">{terminalApp().fontSize}px</span>
+                        </span>
+                        <input
+                          class="mt-1.5 w-full accent-signal"
+                          type="range"
+                          min="10"
+                          max="18"
+                          step="1"
+                          value={terminalApp().fontSize}
+                          onInput={(e) => {
+                            const next = { ...terminalApp(), fontSize: Number(e.currentTarget.value) };
+                            setTerminalApp(next);
+                            saveTerminalAppearance(next);
+                          }}
+                        />
+                      </label>
+                    </div>
                   </div>
                 </section>
 
