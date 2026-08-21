@@ -22,6 +22,8 @@ const MAX_PENDING: usize = 1024 * 1024;
 /// scrollback capture (held under the host's dispatcher lock) ~60x/s. One attempt per 100ms
 /// still repaints within a frame or two of the pane going quiet.
 const RESYNC_RETRY: Duration = Duration::from_millis(100);
+const CHANNEL_BYTES: u8 = 0;
+const CHANNEL_GRID: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TermWatchAck {
@@ -52,18 +54,21 @@ pub struct ByteChunk {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct GridChange {
+    cursor: StreamCursor,
+    cols: u16,
+    rows: u16,
+}
+
 /// One routed item on a window's byte channel: a decoded chunk, or notice that the upstream
 /// daemon subscription lagged (every receiver must resync — chunks were dropped).
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteFrame {
     Chunk(ByteChunk),
+    Grid(GridChange),
     Lagged,
-    /// Force an authoritative capture repaint after the frontend has applied a new pane grid.
-    Resync,
 }
-
-type RouteMap =
-    std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<Arc<RouteFrame>>>>;
 
 /// Match and decode one `event.agent.bytes` notification into `(window, chunk)`. Base64 is
 /// decoded exactly once, in the demux — panes receive ready bytes instead of each scanning
@@ -86,6 +91,28 @@ fn event_chunk(event: &Notification) -> Option<(String, ByteChunk)> {
                 sequence,
             },
             bytes,
+        },
+    ))
+}
+
+fn event_grid(event: &Notification) -> Option<(String, GridChange)> {
+    if event.method != "event.agent.grid" {
+        return None;
+    }
+    let window = event.params.get("window").and_then(Value::as_str)?;
+    let generation = event.params.get("generation").and_then(Value::as_u64)?;
+    let sequence = event.params.get("sequence").and_then(Value::as_u64)?;
+    let cols = event.params.get("cols").and_then(Value::as_u64)? as u16;
+    let rows = event.params.get("rows").and_then(Value::as_u64)? as u16;
+    Some((
+        window.to_string(),
+        GridChange {
+            cursor: StreamCursor {
+                generation,
+                sequence,
+            },
+            cols,
+            rows,
         },
     ))
 }
@@ -119,6 +146,13 @@ pub(crate) async fn ensure_demux(state: &State<'_, AppState>) -> Result<(), RpcF
                                 if let Some(tx) = tx {
                                     let _ = tx.send(Arc::new(RouteFrame::Chunk(chunk)));
                                 }
+                            } else if let Some((window, grid)) = event_grid(&event) {
+                                let tx = routes.lock().unwrap().get(&window).cloned();
+                                if let Some(tx) = tx {
+                                    let _ = tx.send(Arc::new(RouteFrame::Grid(grid)));
+                                }
+                                // Non-terminal consumers still receive the additive grid event.
+                                let _ = ui_events.send(event);
                             } else {
                                 let _ = ui_events.send(event);
                             }
@@ -189,7 +223,22 @@ fn flush(channel: &Channel<InvokeResponseBody>, pending: &mut Vec<u8>) -> bool {
     // Swap in a pre-sized buffer: `mem::take` would leave capacity 0 and re-grow every tick.
     let bytes = std::mem::replace(pending, Vec::with_capacity(FLUSH_BYTES));
     log_term_trace("FLUSH_TO_TAURI", "term", None, &bytes);
-    channel.send(InvokeResponseBody::Raw(bytes)).is_ok()
+    send_bytes(channel, bytes)
+}
+
+fn send_bytes(channel: &Channel<InvokeResponseBody>, bytes: Vec<u8>) -> bool {
+    let mut frame = Vec::with_capacity(bytes.len() + 1);
+    frame.push(CHANNEL_BYTES);
+    frame.extend_from_slice(&bytes);
+    channel.send(InvokeResponseBody::Raw(frame)).is_ok()
+}
+
+fn send_grid(channel: &Channel<InvokeResponseBody>, cols: u16, rows: u16) -> bool {
+    let mut frame = Vec::with_capacity(5);
+    frame.push(CHANNEL_GRID);
+    frame.extend_from_slice(&cols.to_be_bytes());
+    frame.extend_from_slice(&rows.to_be_bytes());
+    channel.send(InvokeResponseBody::Raw(frame)).is_ok()
 }
 
 /// Assemble a resync repaint: clear the visible screen and position each captured row explicitly.
@@ -223,42 +272,51 @@ async fn capture_resync(
     lane_id: i64,
     window: &str,
 ) -> Option<Resync> {
-    let capture = client
-        .call(
-            "agent.capture",
-            Some(json!({
-                "lane_id": lane_id,
-                "window": window,
-                "include_state": true
-            })),
-        )
-        .await;
-    let Ok(value) = capture else { return None };
-    let content = value.get("content").and_then(Value::as_str)?;
-    let alternate = value.get("alternate").and_then(Value::as_bool)?;
-    let cursor = value.get("cursor").and_then(|cursor| {
-        Some((
-            cursor.get("col")?.as_u64()? as u16,
-            cursor.get("row")?.as_u64()? as u16,
-        ))
-    });
-    let repaint_cursor = StreamCursor {
-        generation: value.get("generation").and_then(Value::as_u64)?,
-        sequence: value.get("sequence").and_then(Value::as_u64)?,
-    };
-    let frame_bytes = resync_frame(content, alternate, cursor);
-    log_term_trace(
-        "RESYNC_FRAME",
-        window,
-        Some(repaint_cursor.sequence),
-        &frame_bytes,
-    );
-    channel
-        .send(InvokeResponseBody::Raw(frame_bytes))
-        .is_ok()
-        .then_some(Resync {
+    for _ in 0..10 {
+        let capture = client
+            .call(
+                "agent.capture",
+                Some(json!({
+                    "lane_id": lane_id,
+                    "window": window,
+                    "include_state": true
+                })),
+            )
+            .await;
+        let Ok(value) = capture else { return None };
+        if value.get("stable").and_then(Value::as_bool) != Some(true) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        }
+        let content = value.get("content").and_then(Value::as_str)?;
+        let alternate = value.get("alternate").and_then(Value::as_bool)?;
+        let cols = value.get("cols").and_then(Value::as_u64)? as u16;
+        let rows = value.get("rows").and_then(Value::as_u64)? as u16;
+        let cursor = value.get("cursor").and_then(|cursor| {
+            Some((
+                cursor.get("col")?.as_u64()? as u16,
+                cursor.get("row")?.as_u64()? as u16,
+            ))
+        });
+        let repaint_cursor = StreamCursor {
+            generation: value.get("generation").and_then(Value::as_u64)?,
+            sequence: value.get("sequence").and_then(Value::as_u64)?,
+        };
+        let frame_bytes = resync_frame(content, alternate, cursor);
+        log_term_trace(
+            "RESYNC_FRAME",
+            window,
+            Some(repaint_cursor.sequence),
+            &frame_bytes,
+        );
+        if !send_grid(channel, cols, rows) || !send_bytes(channel, frame_bytes) {
+            return None;
+        }
+        return Some(Resync {
             cursor: repaint_cursor,
-        })
+        });
+    }
+    None
 }
 
 #[tauri::command]
@@ -318,7 +376,7 @@ pub async fn term_watch(
     }
 
     // Start the stream first, then capture a sequenced checkpoint and ignore every queued chunk
-    // already represented by that repaint. Unix needs this because pipe-pane is future-only;
+    // already represented by that repaint. Unix needs this because control-mode output is future-only;
     // Windows uses the same contract so a raced first replay frame cannot leave the pane blank.
     let Some(repaint) = capture_resync(&client, &on_bytes, lane_id, &window).await else {
         let _ = client
@@ -350,7 +408,6 @@ pub async fn term_watch(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending = Vec::with_capacity(FLUSH_BYTES);
         let mut resync = initial_resync;
-        let mut force_resync = false;
         let mut last_resync = std::time::Instant::now();
         let mut cancelled = None;
 
@@ -363,14 +420,23 @@ pub async fn term_watch(
                 frame = route_rx.recv() => match frame {
                     Ok(frame) => match frame.as_ref() {
                         RouteFrame::Lagged => resync = true,
-                        RouteFrame::Resync => {
-                            pending.clear();
-                            force_resync = true;
-                        }
-                        RouteFrame::Chunk(chunk) => {
-                            if force_resync {
+                        RouteFrame::Grid(grid) => {
+                            let contiguous = grid.cursor.generation == stream_cursor.generation
+                                && grid.cursor.sequence == stream_cursor.sequence + 1;
+                            if !contiguous {
+                                pending.clear();
+                                resync = true;
                                 continue;
                             }
+                            if !flush(&on_bytes, &mut pending)
+                                || !send_grid(&on_bytes, grid.cols, grid.rows)
+                            {
+                                break;
+                            }
+                            stream_cursor = grid.cursor;
+                            resync = false;
+                        }
+                        RouteFrame::Chunk(chunk) => {
                             // Events queued before a repaint are already visible in it. A later
                             // generation or sequence gap means terminal-relative state is unsafe,
                             // so stop applying bytes until an authoritative repaint replaces it.
@@ -411,8 +477,8 @@ pub async fn term_watch(
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = ticker.tick() => {
-                    if force_resync || resync {
-                        if !force_resync && last_resync.elapsed() < RESYNC_RETRY {
+                    if resync {
+                        if last_resync.elapsed() < RESYNC_RETRY {
                             continue;
                         }
                         last_resync = std::time::Instant::now();
@@ -424,7 +490,6 @@ pub async fn term_watch(
                         };
                         stream_cursor = repaint.cursor;
                         resync = false;
-                        force_resync = false;
                     } else if !flush(&on_bytes, &mut pending) {
                         break;
                     }
@@ -448,19 +513,6 @@ pub async fn term_watch(
     Ok(ack)
 }
 
-fn enqueue_resync(routes: &RouteMap, window: &str) -> bool {
-    let tx = routes.lock().unwrap().get(window).cloned();
-    tx.is_some_and(|tx| tx.send(Arc::new(RouteFrame::Resync)).is_ok())
-}
-
-#[tauri::command]
-pub async fn term_resync(state: State<'_, AppState>, window: String) -> Result<(), RpcFailure> {
-    // A grid event can race a pane unmount. A vanished route needs no repaint; otherwise queue a
-    // forced checkpoint that cannot be canceled by the next contiguous byte chunk.
-    let _ = enqueue_resync(state.terminal_routes.as_ref(), &window);
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn term_unwatch(state: State<'_, AppState>, window: String) -> Result<(), RpcFailure> {
     let cancel = state.terminal_watches.lock().unwrap().remove(&window);
@@ -475,18 +527,14 @@ pub async fn term_unwatch(state: State<'_, AppState>, window: String) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use repomon_core::protocol::Notification;
     use serde_json::json;
-    use tokio::sync::broadcast;
 
     use super::{
-        MAX_PENDING, RouteFrame, StreamCursor, append_pending, dimensions, enqueue_resync,
-        event_chunk, resync_frame,
+        MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, event_grid,
+        resync_frame,
     };
 
     #[test]
@@ -503,27 +551,6 @@ mod tests {
         let frame = String::from_utf8(resync_frame("shell\nprompt", false, None)).unwrap();
         assert!(frame.starts_with("\x1b[?1049l\x1b[?25l\x1b[?7h\x1b[H\x1b[2J"));
         assert!(frame.contains("\x1b[1;1H\x1b[2Kshell\x1b[2;1H\x1b[2Kprompt"));
-    }
-
-    #[tokio::test]
-    async fn resync_request_reaches_only_the_matching_terminal_route() {
-        let (lane_one, mut lane_one_rx) = broadcast::channel(4);
-        let (lane_two, mut lane_two_rx) = broadcast::channel(4);
-        let routes = Arc::new(Mutex::new(HashMap::from([
-            ("lane-1".to_string(), lane_one),
-            ("lane-2".to_string(), lane_two),
-        ])));
-
-        assert!(enqueue_resync(routes.as_ref(), "lane-1"));
-        assert!(matches!(
-            lane_one_rx.recv().await.unwrap().as_ref(),
-            RouteFrame::Resync
-        ));
-        assert!(matches!(
-            lane_two_rx.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
-        assert!(!enqueue_resync(routes.as_ref(), "lane-missing"));
     }
 
     #[test]
@@ -557,6 +584,36 @@ mod tests {
         // Non-bytes events route to the UI event channel, not a pane.
         let other = Notification::new("event.notification", json!({ "window": "lane-7" }));
         assert!(event_chunk(&other).is_none());
+    }
+
+    #[test]
+    fn event_grid_requires_an_ordered_stream_cursor() {
+        let ordered = Notification::new(
+            "event.agent.grid",
+            json!({
+                "window": "lane-7",
+                "generation": 3,
+                "sequence": 9,
+                "cols": 120,
+                "rows": 40
+            }),
+        );
+        let (window, grid) = event_grid(&ordered).unwrap();
+        assert_eq!(window, "lane-7");
+        assert_eq!(
+            grid.cursor,
+            StreamCursor {
+                generation: 3,
+                sequence: 9
+            }
+        );
+        assert_eq!((grid.cols, grid.rows), (120, 40));
+
+        let unsequenced = Notification::new(
+            "event.agent.grid",
+            json!({ "window": "lane-7", "cols": 120, "rows": 40 }),
+        );
+        assert!(event_grid(&unsequenced).is_none());
     }
 
     #[test]

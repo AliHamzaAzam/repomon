@@ -1061,8 +1061,8 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         json!({ "lane_id": 2, "window": "lane-2", "cols": 101, "rows": 31 })
     );
 
-    // A raw tmux attach/direct resize bypasses both mediated RPCs. Once output flows at that new
-    // grid, the shared byte watch must discover it and announce it to every renderer.
+    // A raw tmux attach/direct resize bypasses both mediated RPCs. The control-mode byte stream
+    // must announce its layout change in the same generation/sequence as pane output.
     rpc::dispatch(
         &ctx,
         &a,
@@ -1084,23 +1084,24 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     })
     .await
     .expect("external grid-change event timeout");
-    assert_eq!(
-        external_event["params"],
-        json!({ "lane_id": 2, "window": "lane-2", "cols": 111, "rows": 32 })
-    );
+    assert_eq!(external_event["params"]["lane_id"], json!(2));
+    assert_eq!(external_event["params"]["window"], json!("lane-2"));
+    assert_eq!(external_event["params"]["cols"], json!(111));
+    assert_eq!(external_event["params"]["rows"], json!(32));
+    assert!(external_event["params"]["generation"].is_u64());
+    assert!(external_event["params"]["sequence"].is_u64());
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])
         .output();
 }
 
-/// The `agent.watch_bytes` handler through real dispatch: `on:true` starts real pipes and records
+/// The `agent.watch_bytes` handler through real dispatch: `on:true` starts real streams and records
 /// the windows in the session; `{lane_id, on:false}` with NO window (the TUI's stop path) releases
 /// exactly this session's watches on that lane — matched by the WatchEntry.lane field, so a
 /// non-default window is found too — while another lane's watch survives. Also covers the
 /// stale-name purge: a watched name whose registry entry already died is dropped from
-/// `watched_bytes` so later window-name reuse can't deliver unrequested bytes. tmux-gated (the
-/// on:true path runs mkfifo + pipe-pane against real windows).
+/// `watched_bytes` so later window-name reuse can't deliver unrequested bytes. tmux-gated.
 #[tokio::test]
 async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     if !TmuxRuntime::available() {
@@ -1124,6 +1125,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     }
 
     let sess = ctx.open_session(ConnKind::Local).await;
+    let second_viewer = ctx.open_session(ConnKind::Local).await;
 
     // Watch both lane-1 windows and the lane-2 window through the real handler.
     for (lane, window) in [(1, "lane-1"), (1, "lane-1-2"), (2, "lane-2")] {
@@ -1150,6 +1152,17 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         let watched = sess.watched_bytes.lock().unwrap();
         assert_eq!(watched.len(), 3, "on:true records each window: {watched:?}");
     }
+
+    // A second viewer joins lane-2's existing generation instead of replacing its stream.
+    let second_ack = rpc::dispatch(
+        &ctx,
+        &second_viewer,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 2, "window": "lane-2", "on": true })),
+    )
+    .await
+    .expect("second viewer joins lane-2");
+    assert!(second_ack["generation"].is_u64());
     {
         let map = ctx.bytes_watches.lock().await;
         assert_eq!(map.len(), 3);
@@ -1159,6 +1172,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         for w in ["lane-1", "lane-1-2", "lane-2"] {
             assert!(map[w].refs.contains(&sess.id), "{w} holds this conn's ref");
         }
+        assert!(map["lane-2"].refs.contains(&second_viewer.id));
     }
 
     // A stale name: watched by the session, but its registry entry already died (EOF-cleaned).
@@ -1190,6 +1204,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         );
         let survivor = map.get("lane-2").expect("lane 2's watch survives");
         assert!(survivor.refs.contains(&sess.id));
+        assert!(survivor.refs.contains(&second_viewer.id));
     }
     {
         let watched = sess.watched_bytes.lock().unwrap();
@@ -1199,6 +1214,27 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
             "watched_bytes reflects the release, including the purged stale name"
         );
     }
+
+    // Releasing the first viewer leaves the shared control stream alive; releasing the second
+    // removes it. This is the two-live-viewer lifecycle that originally exposed corruption.
+    rpc::dispatch(
+        &ctx,
+        &sess,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 2, "window": "lane-2", "on": false })),
+    )
+    .await
+    .unwrap();
+    assert!(ctx.bytes_watches.lock().await.contains_key("lane-2"));
+    rpc::dispatch(
+        &ctx,
+        &second_viewer,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 2, "window": "lane-2", "on": false })),
+    )
+    .await
+    .unwrap();
+    assert!(!ctx.bytes_watches.lock().await.contains_key("lane-2"));
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())
         .args(["-L", &session, "kill-server"])

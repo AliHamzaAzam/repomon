@@ -1,16 +1,15 @@
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearMocks } from "@tauri-apps/api/mocks";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
   createTerminalFrameGate,
-  resyncTerminal,
+  decodeTerminalChannelFrame,
   isTerminalReleaseChord,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
-  watchTerminalGrid,
   wheelLines,
 } from "./term";
 
@@ -43,65 +42,49 @@ describe("createTerminalFrameGate", () => {
   it("holds the initial repaint until the caller has applied the acknowledged grid", () => {
     const seen: number[] = [];
     const gate = createTerminalFrameGate((bytes) => seen.push(...bytes));
-    gate.push(Uint8Array.of(1, 2));
+    gate.push({ type: "bytes", bytes: Uint8Array.of(1, 2) });
     expect(seen).toEqual([]);
     gate.open();
-    gate.push(Uint8Array.of(3));
+    gate.push({ type: "bytes", bytes: Uint8Array.of(3) });
     expect(seen).toEqual([1, 2, 3]);
   });
 
   it("drops queued and future frames after close", () => {
     const seen: number[] = [];
     const gate = createTerminalFrameGate((bytes) => seen.push(...bytes));
-    gate.push(Uint8Array.of(1));
+    gate.push({ type: "bytes", bytes: Uint8Array.of(1) });
     gate.close();
     gate.open();
-    gate.push(Uint8Array.of(2));
+    gate.push({ type: "bytes", bytes: Uint8Array.of(2) });
     expect(seen).toEqual([]);
+  });
+
+  it("preserves grid and byte ordering while the initial checkpoint is gated", () => {
+    const seen: string[] = [];
+    const gate = createTerminalFrameGate(
+      (bytes) => seen.push(`bytes:${bytes[0]}`),
+      ({ cols, rows }) => seen.push(`grid:${cols}x${rows}`),
+    );
+    gate.push({ type: "bytes", bytes: Uint8Array.of(1) });
+    gate.push({ type: "grid", cols: 120, rows: 40 });
+    gate.push({ type: "bytes", bytes: Uint8Array.of(2) });
+    gate.open();
+    expect(seen).toEqual(["bytes:1", "grid:120x40", "bytes:2"]);
   });
 });
 
-describe("watchTerminalGrid", () => {
-  it("applies a matching pane grid change without a local resize event", async () => {
-    let listener: ((event: {
-      jsonrpc: "2.0";
-      method: `event.${string}`;
-      params: unknown;
-    }) => void) | undefined;
-    const apply = vi.fn();
-    const stop = await watchTerminalGrid(
-      { laneId: 7, window: "lane-7-2" },
-      apply,
-      async (next) => {
-        listener = next;
-        return () => undefined;
-      },
-    );
-
-    listener?.({
-      jsonrpc: "2.0",
-      method: "event.agent.grid",
-      params: { lane_id: 7, window: "lane-7-2", cols: 132, rows: 38 },
+describe("decodeTerminalChannelFrame", () => {
+  it("decodes tagged output and grid frames", () => {
+    expect(decodeTerminalChannelFrame(Uint8Array.of(0, 27, 91, 72).buffer)).toEqual({
+      type: "bytes",
+      bytes: Uint8Array.of(27, 91, 72),
     });
-    expect(apply).toHaveBeenCalledWith({ cols: 132, rows: 38 });
-
-    listener?.({
-      jsonrpc: "2.0",
-      method: "event.agent.grid",
-      params: { lane_id: 7, window: "lane-7", cols: 80, rows: 24 },
+    expect(decodeTerminalChannelFrame(Uint8Array.of(1, 0, 120, 0, 40).buffer)).toEqual({
+      type: "grid",
+      cols: 120,
+      rows: 40,
     });
-    expect(apply).toHaveBeenCalledTimes(1);
-    stop();
-  });
-
-  it("requests an authoritative repaint after applying a grid change", async () => {
-    mockIPC((command, args) => {
-      expect(command).toBe("term_resync");
-      expect(args).toEqual({ window: "lane-7-2" });
-      return null;
-    });
-
-    await resyncTerminal({ laneId: 7, window: "lane-7-2" });
+    expect(decodeTerminalChannelFrame(Uint8Array.of(1, 0).buffer)).toBeNull();
   });
 });
 

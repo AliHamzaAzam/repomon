@@ -258,8 +258,8 @@ mod host_backend {
     use repomon_host::registry::{self, RegistryEntry};
 
     use super::super::backend::{
-        AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, ScrollEvent, SessionBackend,
-        SpawnSpec, WindowActivity,
+        AttachCommand, ByteStream, ByteStreamEvent, CaptureOpts, Cursor, OwnerState, ScrollEvent,
+        SessionBackend, SpawnSpec, WindowActivity,
     };
     use super::super::tmux::TmuxRuntime;
     use super::{
@@ -931,7 +931,7 @@ mod host_backend {
             // already hold the first stream frames behind it — hand both to the pump.
             roundtrip(&mut file, &mut dec, Op::SubscribeBytes)?;
 
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let stop = Arc::new(AtomicBool::new(false));
             let id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
             let mut map = self.streams.lock().expect("streams lock");
@@ -970,7 +970,7 @@ mod host_backend {
     fn pump(
         mut file: File,
         mut dec: FrameDecoder,
-        tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        tx: tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>,
         stop: &AtomicBool,
     ) {
         let mut buf = [0u8; 64 * 1024];
@@ -989,7 +989,7 @@ mod host_backend {
                         else {
                             continue;
                         };
-                        if tx.send(bytes).is_err() {
+                        if tx.send(ByteStreamEvent::Bytes(bytes)).is_err() {
                             return; // consumer gone
                         }
                     }

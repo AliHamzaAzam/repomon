@@ -124,14 +124,20 @@ pub struct AttachCommand {
     pub args: Vec<String>,
 }
 
-/// A live raw-PTY byte stream for one window, as handed out by
-/// [`SessionBackend::open_byte_stream`]. The backend owns the plumbing (tmux: `mkfifo` +
-/// `pipe-pane`, with a reader thread pumping the fifo); the consumer just drains `rx`. The
-/// channel closes when the stream ends — the pipe was turned off via
-/// [`SessionBackend::close_byte_stream`] or the window died.
+/// One ordered event from a live terminal stream. Grid changes and bytes share the same channel
+/// so a renderer can resize before it interprets output produced at the new dimensions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ByteStreamEvent {
+    Bytes(Vec<u8>),
+    Grid { cols: u16, rows: u16 },
+}
+
+/// A live raw-PTY stream for one window, as handed out by
+/// [`SessionBackend::open_byte_stream`]. The backend owns the plumbing; the consumer just drains
+/// `rx`. The channel closes when the stream ends or the window dies.
 pub struct ByteStream {
-    /// Chunks of raw PTY output, bounded to a backend-chosen chunk size per message.
-    pub rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Ordered raw-output and grid-change events.
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<ByteStreamEvent>,
 }
 
 /// A durable, out-of-process agent-session runtime: spawn/capture/input/resize/kill windows
@@ -255,10 +261,9 @@ pub trait SessionBackend: Send + Sync {
     /// The command a client runs in a real terminal to attach to `target`.
     fn attach_command(&self, target: &str) -> AttachCommand;
 
-    /// Start streaming the window's raw PTY bytes. The backend owns the transport (tmux:
-    /// fifo + `pipe-pane` + reader thread); the returned [`ByteStream`]'s channel closes when
-    /// the stream ends. At most one stream per window (tmux allows a single `pipe-pane`) —
-    /// callers refcount watchers and share it.
+    /// Start streaming the window's raw PTY bytes and authoritative grid changes in order.
+    /// The returned [`ByteStream`]'s channel closes when the stream ends. Callers refcount
+    /// watchers and share one stream per window.
     fn open_byte_stream(&self, window: &str) -> Result<ByteStream>;
 
     /// Stop streaming the window's bytes (EOFs the reader). Benign when the window — or the
