@@ -158,7 +158,7 @@ pub struct Repo {
     /// Manual-order position assigned by a full reorder (`repo.reorder`). `None` keeps the repo
     /// in the legacy name order; listings sort positioned repos first, then the rest by name.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub position: Option<i64>,
     /// Optional display-name override shown instead of the folder name. `None` (or empty) means
     /// clients fall back to `name`.

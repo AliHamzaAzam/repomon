@@ -13,6 +13,8 @@ export interface FleetSnapshot {
   /// in the TUI shows up here without a restart. Null when the call failed; the store keeps the
   /// last good value in that case.
   sortReposByActivity: boolean | null;
+  /// Resolved repo sort mode ("default" | "activity" | "manual"). Null when config.get failed.
+  sortMode: string | null;
 }
 
 export interface FleetSource {
@@ -36,6 +38,7 @@ export const daemonFleetSource: FleetSource = {
       usage,
       terminals,
       sortReposByActivity: config ? Boolean(config.sort_repos_by_activity) : null,
+      sortMode: config && typeof config.sort_mode === "string" ? config.sort_mode : null,
     };
   },
   refreshUsage: async () => {
@@ -45,6 +48,10 @@ export const daemonFleetSource: FleetSource = {
 };
 
 export type LaneTone = "attention" | "fault" | "signal" | "muted";
+
+function isRepoSortMode(value: string): value is RepoSortMode {
+  return value === "default" || value === "activity" || value === "manual";
+}
 
 export interface LaneIndicator {
   label: string;
@@ -121,6 +128,20 @@ export function pickFocusedUsage(
   if (!agent) return reports[0];
   const key = accountKeyOf(agent);
   return reports.find((report) => report.key === key) ?? null;
+}
+
+/// The sidebar repo sort modes, mirroring the daemon's `SortMode`.
+export type RepoSortMode = "default" | "activity" | "manual";
+
+/// Order repo groups for the sidebar according to `mode`.
+///
+/// - `"activity"`: most recent lane activity first (see `sortReposByActivity`).
+/// - `"manual"`: the daemon's order is taken as-is — `repo.list` already sorts by the persisted
+///   manual positions, so re-sorting here would fight the user's drag-and-drop.
+/// - `"default"`: the daemon's order untouched.
+export function orderRepos(repos: Repo[], lanes: Lane[], mode: string): Repo[] {
+  if (mode === "activity") return sortReposByActivity(repos, lanes, true);
+  return repos;
 }
 
 /// Order repo groups by their most recent lane activity, newest first, when the setting is on.
@@ -225,13 +246,13 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   let unsubscribe: (() => void) | undefined;
   let refreshQueued = false;
 
-  // Mirrors the daemon's `sort_repos_by_activity` setting, refreshed with every poll so a change
-  // made in the TUI lands here too.
-  const [sortByActivity, setSortByActivity] = createSignal(false);
+  // Mirrors the daemon's repo sort mode, refreshed with every poll so a change made in the TUI
+  // lands here too. Falls back to the legacy boolean for daemons that predate `sort_mode`.
+  const [sortMode, setSortMode] = createSignal<RepoSortMode>("default");
   // The daemon keeps returning hidden repos (flagged) so we can offer a way back; everything that
   // renders the fleet works from `visibleRepos` / `visibleLanes` / `unhiddenLanes` instead.
   const visibleRepos = createMemo(() =>
-    sortReposByActivity(repos().filter((repo) => !repo.hidden), lanes(), sortByActivity()),
+    orderRepos(repos().filter((repo) => !repo.hidden), lanes(), sortMode()),
   );
   const hiddenRepos = createMemo(() => repos().filter((repo) => repo.hidden));
   // Everything a hidden repo owns goes with it, including its share of the urgent/running counts:
@@ -268,7 +289,11 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setLaneStore(reconcile(withSessionKeys(snapshot.lanes), { key: "id" }));
       setUsage(snapshot.usage);
       setTerminals(snapshot.terminals);
-      if (snapshot.sortReposByActivity !== null) setSortByActivity(snapshot.sortReposByActivity);
+      if (snapshot.sortMode !== null && isRepoSortMode(snapshot.sortMode)) {
+        setSortMode(snapshot.sortMode);
+      } else if (snapshot.sortReposByActivity !== null) {
+        setSortMode(snapshot.sortReposByActivity ? "activity" : "default");
+      }
       setSynced(true);
       setError(null);
       const current = selectedLaneId();
@@ -354,6 +379,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     loading,
     synced,
     error,
+    sortMode,
     dismissError: () => setError(null),
     visibleLanes,
     counts,

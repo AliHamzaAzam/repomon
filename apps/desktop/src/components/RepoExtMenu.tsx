@@ -10,6 +10,7 @@ interface RepoExtMenuProps {
   y: number;
   onOpenExtensions: () => void;
   onOpenNotes: () => void;
+  onRename: () => void;
   onClose: () => void;
 }
 
@@ -71,6 +72,14 @@ export default function RepoExtMenu(props: RepoExtMenuProps) {
           role="menuitem"
         >
           <span>Repo notes…</span>
+        </button>
+        <button
+          type="button"
+          class="focus-ring flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-foreground transition-colors hover:bg-raised"
+          onClick={() => { props.onRename(); props.onClose(); }}
+          role="menuitem"
+        >
+          <span>Rename…</span>
         </button>
         <div class="my-1 border-t border-line/70" />
         <Show when={error()}>{(message) => <p class="px-2.5 py-1 text-xs text-fault">{message()}</p>}</Show>

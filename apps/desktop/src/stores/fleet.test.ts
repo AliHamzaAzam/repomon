@@ -6,6 +6,7 @@ import {
   createFleetStore,
   laneIndicator,
   matchesLane,
+  orderRepos,
   pickFocusedUsage,
   sortReposByActivity,
   withSessionKeys,
@@ -15,7 +16,7 @@ import {
 function lane(overrides: Partial<Lane> = {}): Lane {
   return {
     id: 7,
-    repo: { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false },
+    repo: { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null },
     worktree: { id: 3, repo_id: 2, path: "/code/repomon-wt/desktop", branch: "feat/desktop", head: "abc", is_main: false, name: "desktop" },
     state: { worktree_id: 3, head: "abc", branch: "feat/desktop", upstream: null, ahead: 2, behind: 0, dirty: { staged: 0, unstaged: 1, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
     agent_sessions: [],
@@ -57,14 +58,14 @@ function agent(overrides: Partial<AgentSession> = {}): AgentSession {
 }
 
 function repo(id: number, name: string, hidden = false): Repo {
-  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden };
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden, position: null, label: null };
 }
 
 /// A store fed one fixed snapshot, started and refreshed once. `subscribe` never fires, and the
 /// 2s heartbeat is stopped before the test asserts, so nothing races the assertions.
 async function startedStore(repos: Repo[], lanes: Lane[], sortReposByActivity: boolean | null = false) {
   const source: FleetSource = {
-    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [], sortReposByActivity }),
+    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [], sortReposByActivity, sortMode: sortReposByActivity === true ? "activity" : "default" }),
     refreshUsage: () => Promise.resolve(),
     subscribe: () => Promise.resolve(() => undefined),
   };
@@ -132,6 +133,31 @@ describe("sortReposByActivity", () => {
     const input = [alpha, beta];
     sortReposByActivity(input, [at(20, beta, "2026-07-27T00:00:00Z")], true);
     expect(input).toEqual([alpha, beta]);
+  });
+});
+
+describe("orderRepos", () => {
+  const alpha = repo(1, "alpha");
+  const beta = repo(2, "beta");
+  const at = (id: number, target: Repo, when: string) => lane({ id, repo: target, last_activity_at: when });
+
+  it("keeps the daemon order in default mode", () => {
+    expect(orderRepos([beta, alpha], [], "default")).toEqual([beta, alpha]);
+  });
+
+  it("sorts by activity in activity mode", () => {
+    const lanes = [at(10, alpha, "2026-07-20T00:00:00Z"), at(20, beta, "2026-07-27T00:00:00Z")];
+    expect(orderRepos([alpha, beta], lanes, "activity").map((r) => r.id)).toEqual([2, 1]);
+  });
+
+  it("takes the daemon's persisted manual order as-is in manual mode", () => {
+    // repo.list already sorts by position; re-sorting here would fight the user's drags.
+    const lanes = [at(10, alpha, "2026-07-27T00:00:00Z"), at(20, beta, "2026-07-20T00:00:00Z")];
+    expect(orderRepos([beta, alpha], lanes, "manual")).toEqual([beta, alpha]);
+  });
+
+  it("treats an unknown mode like default rather than throwing", () => {
+    expect(orderRepos([beta, alpha], [], "something-new")).toEqual([beta, alpha]);
   });
 });
 

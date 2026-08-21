@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { AgentSession, Lane } from "../bindings";
+import type { AgentSession, Lane, Repo } from "../bindings";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
 import type { WorkspaceStore } from "../stores/workspace";
@@ -11,6 +11,7 @@ import {
 } from "../stores/uiSettings";
 import { primarySession } from "./agentLabel";
 import { formatResetAt } from "./resetTime";
+import Modal from "./Modal";
 import RepoExtMenu from "./RepoExtMenu";
 import {
   AgentIcon,
@@ -376,8 +377,104 @@ function loadHiddenSectionCollapsed(): boolean {
   }
 }
 
+/// The name shown for a repo: the custom label when set, else the folder name.
+export function repoDisplayName(repo: Pick<Repo, "name" | "label">): string {
+  const label = repo.label?.trim();
+  return label || repo.name;
+}
+
+/// Move `dragged` to sit just `after` (or before) `target` in `ids`, returning the new order
+/// (a no-op returns null so callers can skip the RPC). Pure so the reorder math is unit-testable.
+export function reorderAround(
+  ids: number[],
+  dragged: number,
+  target: number,
+  after: boolean,
+): number[] | null {
+  if (dragged === target) return null;
+  const without = ids.filter((id) => id !== dragged);
+  let at = without.indexOf(target);
+  if (at < 0) return null;
+  if (after) at += 1;
+  without.splice(at, 0, dragged);
+  return without;
+}
+
+/// Rename a repo's sidebar display. The folder name on disk never changes — this sets a label
+/// override; clearing the field falls back to it.
+function RepoRenameModal(props: {
+  repo: Repo;
+  onClose: () => void;
+  onSubmit: (label: string) => Promise<void>;
+}) {
+  const [label, setLabel] = createSignal(props.repo.label ?? "");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  async function rename() {
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onSubmit(label());
+      props.onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const footer = (
+    <>
+      <button
+        type="button"
+        class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
+        onClick={props.onClose}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
+        disabled={busy()}
+        onClick={() => void rename()}
+      >
+        {busy() ? "Saving…" : "Save"}
+      </button>
+    </>
+  );
+
+  return (
+    <Modal
+      title={`Rename ${props.repo.name}`}
+      subtitle="Set a display name for the sidebar. The folder on disk keeps its real name."
+      onClose={props.onClose}
+      footer={footer}
+    >
+      <label class="block">
+        <span class="section-label">Display Name</span>
+        <input
+          class="focus-ring mt-1.5 h-9 w-full rounded-lg border border-line bg-surface px-3 text-xs text-foreground outline-none placeholder:text-muted/60"
+          value={label()}
+          placeholder={props.repo.name}
+          onInput={(event) => setLabel(event.currentTarget.value)}
+          autofocus
+        />
+      </label>
+      <Show when={error()}>
+        <p class="mt-3 rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>
+      </Show>
+    </Modal>
+  );
+}
+
 export default function FleetSidebar(props: FleetSidebarProps) {
   const [extMenu, setExtMenu] = createSignal<{ repoId: number; x: number; y: number } | null>(null);
+  const [renameRepoId, setRenameRepoId] = createSignal<number | null>(null);
+  // Manual-mode drag state: which repo is being dragged, and which header is the current
+  // insertion target (drives the drop indicator line).
+  const [dragRepoId, setDragRepoId] = createSignal<number | null>(null);
+  const [dropTargetId, setDropTargetId] = createSignal<number | null>(null);
   const [autoCollapse, setAutoCollapse] = createSignal<boolean>(readAutoCollapseEmptyLanes());
   const [manuallyExpandedLanes, setManuallyExpandedLanes] = createSignal<Set<number>>(new Set());
   const [manuallyCollapsedLanes, setManuallyCollapsedLanes] = createSignal<Set<number>>(loadCollapsedLanes());
@@ -464,6 +561,52 @@ export default function FleetSidebar(props: FleetSidebarProps) {
     }
     props.onSelectAgent?.(lane, session);
   };
+
+  // Manual ordering is only draggable in that mode; activity/default orders are daemon-computed.
+  const manualMode = () => props.fleet.sortMode() === "manual";
+
+  const onRepoDragStart = (repo: Repo, event: DragEvent) => {
+    if (!manualMode()) return;
+    event.dataTransfer?.setData("text/plain", String(repo.id));
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    setDragRepoId(repo.id);
+  };
+
+  const onRepoDragOver = (repo: Repo, event: DragEvent) => {
+    if (dragRepoId() === null || repo.id === dragRepoId()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    setDropTargetId(repo.id);
+  };
+
+  const onRepoDrop = (repo: Repo, event: DragEvent) => {
+    event.preventDefault();
+    const dragged = dragRepoId();
+    setDragRepoId(null);
+    setDropTargetId(null);
+    if (dragged === null || dragged === repo.id) return;
+    // Drop position follows the pointer relative to the target header's midpoint, so dragging
+    // downward past a repo moves the dragged one below it rather than being swallowed by
+    // insert-before.
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const after = rect.height > 0 && event.clientY > rect.top + rect.height / 2;
+    const next = reorderAround(
+      props.fleet.visibleRepos().map((r) => r.id),
+      dragged,
+      repo.id,
+      after,
+    );
+    if (next) void props.actions.reorderRepos(next);
+  };
+
+  const endRepoDrag = () => {
+    setDragRepoId(null);
+    setDropTargetId(null);
+  };
+
+  const renameTargetRepo = createMemo(
+    () => props.fleet.repos().find((repo) => repo.id === renameRepoId()) ?? null,
+  );
 
   return (
     <>
@@ -578,9 +721,17 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               );
               return (
                 <Show when={laneList().length > 0 || !props.fleet.query()}>
-                  <section class="mb-2.5" aria-label={repo.name}>
+                  <section class="mb-2.5" aria-label={repoDisplayName(repo)}>
                     <div
-                      class="group/repo-header flex items-center justify-between rounded px-2 py-1 text-muted transition-colors hover:bg-raised/40"
+                      class={`group/repo-header flex items-center justify-between rounded px-2 py-1 text-muted transition-colors hover:bg-raised/40 ${
+                        manualMode() ? "cursor-grab active:cursor-grabbing" : ""
+                      } ${dropTargetId() === repo.id && dragRepoId() !== null ? "border-t border-signal" : ""}`}
+                      draggable={manualMode()}
+                      onDragStart={(event) => onRepoDragStart(repo, event)}
+                      onDragOver={(event) => onRepoDragOver(repo, event)}
+                      onDrop={(event) => onRepoDrop(repo, event)}
+                      onDragEnd={endRepoDrag}
+                      onDragLeave={() => setDropTargetId((current) => (current === repo.id ? null : current))}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         setExtMenu({ repoId: repo.id, x: event.clientX, y: event.clientY });
@@ -588,9 +739,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                     >
                       <span
                         class="truncate font-mono text-[11px] font-semibold uppercase tracking-wider text-muted hover:text-foreground transition-colors cursor-default"
-                        title={`Repository: ${repo.name} (${repo.path})`}
+                        title={
+                          repo.label
+                            ? `${repoDisplayName(repo)} — repository: ${repo.name} (${repo.path})`
+                            : `Repository: ${repo.name} (${repo.path})`
+                        }
                       >
-                        {repo.name}
+                        {repoDisplayName(repo)}
                       </span>
                       <span class="flex items-center gap-1 shrink-0">
                         <div class="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/repo-header:opacity-100 focus-within:opacity-100">
@@ -598,8 +753,8 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             type="button"
                             class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-signal"
                             onClick={() => props.actions.newLane(repo.id)}
-                            title={`New lane in ${repo.name}`}
-                            aria-label={`New lane in ${repo.name}`}
+                            title={`New lane in ${repoDisplayName(repo)}`}
+                            aria-label={`New lane in ${repoDisplayName(repo)}`}
                           >
                             <IconPlus size={12} />
                           </button>
@@ -607,8 +762,8 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             type="button"
                             class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
                             onClick={() => void props.actions.setRepoHidden(repo, true)}
-                            title={`Hide ${repo.name} (stays registered)`}
-                            aria-label={`Hide ${repo.name}`}
+                            title={`Hide ${repoDisplayName(repo)} (stays registered)`}
+                            aria-label={`Hide ${repoDisplayName(repo)}`}
                           >
                             <IconHide size={12} />
                           </button>
@@ -616,8 +771,8 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             type="button"
                             class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-fault"
                             onClick={() => props.actions.removeRepo(repo)}
-                            title={`Remove ${repo.name}`}
-                            aria-label={`Remove ${repo.name}`}
+                            title={`Remove ${repoDisplayName(repo)}`}
+                            aria-label={`Remove ${repoDisplayName(repo)}`}
                           >
                             <IconClose size={12} />
                           </button>
@@ -733,7 +888,20 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               const repo = props.fleet.repos().find((r) => r.id === menu.repoId);
               if (repo) props.actions.openRepoNotes(repo);
             }}
+            onRename={() => setRenameRepoId(menu.repoId)}
             onClose={() => setExtMenu(null)}
+          />
+        )}
+      </Show>
+
+      <Show when={renameTargetRepo()}>
+        {(repo) => (
+          <RepoRenameModal
+            repo={repo()}
+            onClose={() => setRenameRepoId(null)}
+            onSubmit={async (label) => {
+              await props.actions.renameRepo(repo(), label);
+            }}
           />
         )}
       </Show>

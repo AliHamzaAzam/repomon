@@ -24,8 +24,7 @@ afterEach(() => {
 
 const repo: Repo = {
   id: 2, path: "/code/r", name: "r", added_at: "2026-07-27T00:00:00Z",
-  worktree_root_template: null, hidden: false,
-};
+  worktree_root_template: null, hidden: false, position: null, label: null };
 
 function open(content = "", exists = true) {
   responses.get = { repo_id: 2, name: "r", exists, content, path: "/notes/r.md" };

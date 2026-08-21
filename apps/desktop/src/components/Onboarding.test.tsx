@@ -178,8 +178,7 @@ describe("Onboarding component", () => {
       path: "/Users/dev/repomon",
       added_at: "2026-08-01T00:00:00Z",
       worktree_root_template: null,
-      hidden: false,
-    };
+      hidden: false, position: null, label: null };
     const actions = createMockActions([mockRepo]);
     const onComplete = vi.fn();
     const onSkip = vi.fn();

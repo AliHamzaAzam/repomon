@@ -4,14 +4,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import FleetSidebar from "./FleetSidebar";
+import FleetSidebar, { reorderAround, repoDisplayName } from "./FleetSidebar";
+
+vi.mock("../ipc/rpc", () => ({
+  daemonCall: vi.fn().mockResolvedValue({ plugins: [] }),
+  subscribeDaemon: vi.fn().mockResolvedValue(() => undefined),
+}));
 
 afterEach(() => {
   cleanup();
 });
 
 function repo(id: number, name: string, hidden = false): Repo {
-  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden };
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden, position: null, label: null };
 }
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {
@@ -58,8 +63,10 @@ function lane(id: number, target: Repo, sessions: AgentSession[] = []): Lane {
   };
 }
 
-function stubs(repos: Repo[], lanes: Lane[]) {
+function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
   const setRepoHidden = vi.fn().mockResolvedValue(undefined);
+  const renameRepo = vi.fn().mockResolvedValue(undefined);
+  const reorderRepos = vi.fn().mockResolvedValue(undefined);
   const visible = repos.filter((r) => !r.hidden);
   const fleet = {
     repos: () => repos,
@@ -78,11 +85,20 @@ function stubs(repos: Repo[], lanes: Lane[]) {
     loading: () => false,
     counts: () => ({ urgent: 0, running: 0 }),
     focusedUsage: () => null,
+    sortMode: () => sortMode,
     refresh: vi.fn().mockResolvedValue(undefined),
     refreshUsage: vi.fn().mockResolvedValue(undefined),
   } as unknown as FleetStore;
-  const actions = { setRepoHidden, removeRepo: vi.fn(), newLane: vi.fn(), addRepo: vi.fn() } as unknown as ActionsStore;
-  return { fleet, actions, setRepoHidden };
+  const actions = {
+    setRepoHidden,
+    renameRepo,
+    reorderRepos,
+    removeRepo: vi.fn(),
+    newLane: vi.fn(),
+    addRepo: vi.fn(),
+    openRepoNotes: vi.fn(),
+  } as unknown as ActionsStore;
+  return { fleet, actions, setRepoHidden, renameRepo, reorderRepos };
 }
 
 describe("fleet sidebar hiding", () => {
@@ -328,5 +344,102 @@ describe("fleet sidebar hiding", () => {
     await Promise.resolve();
 
     expect(button).not.toBeDisabled();
+  });
+});
+
+describe("repo display labels", () => {
+  it("falls back to the folder name when no label is set", () => {
+    expect(repoDisplayName({ name: "repomon", label: null })).toBe("repomon");
+    // A whitespace-only label is treated as unset rather than blanking the row.
+    expect(repoDisplayName({ name: "repomon", label: "   " })).toBe("repomon");
+  });
+
+  it("shows the custom label instead of the folder name", () => {
+    const alpha = { ...repo(1, "alpha"), label: "Client Portal" };
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText("Client Portal")).toBeInTheDocument();
+    expect(screen.queryByText("alpha")).not.toBeInTheDocument();
+    // The real identity stays reachable via the tooltip.
+    expect(screen.getByTitle(/repository: alpha/i)).toBeInTheDocument();
+  });
+});
+
+describe("repo rename from the context menu", () => {
+  it("opens the rename modal and calls repo.rename with the entered label", async () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions, renameRepo } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    fireEvent.contextMenu(screen.getByText("alpha"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rename…" }));
+
+    const input = await screen.findByPlaceholderText("alpha");
+    fireEvent.input(input, { target: { value: "Client Portal" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await vi.waitFor(() => {
+      expect(renameRepo).toHaveBeenCalledWith(alpha, "Client Portal");
+    });
+  });
+
+  it("passes an empty label through so clearing falls back to the folder name", async () => {
+    const alpha = { ...repo(1, "alpha"), label: "Client Portal" };
+    const { fleet, actions, renameRepo } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    fireEvent.contextMenu(screen.getByText("Client Portal"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rename…" }));
+
+    const input = await screen.findByPlaceholderText("alpha");
+    fireEvent.input(input, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await vi.waitFor(() => {
+      expect(renameRepo).toHaveBeenCalledWith(alpha, "");
+    });
+  });
+});
+
+describe("manual repo reordering", () => {
+  it("reorderAround moves a repo before or after its drop target", () => {
+    expect(reorderAround([1, 2, 3], 3, 1, false)).toEqual([3, 1, 2]);
+    expect(reorderAround([1, 2, 3], 1, 3, true)).toEqual([2, 3, 1]);
+    // Dropping onto itself is a no-op.
+    expect(reorderAround([1, 2, 3], 2, 2, false)).toBeNull();
+    // A target that is not in the list leaves the order untouched.
+    expect(reorderAround([1, 2, 3], 1, 99, true)).toBeNull();
+  });
+
+  it("drops a dragged header on another repo and persists the new order", () => {
+    const alpha = repo(1, "alpha");
+    const beta = repo(2, "beta");
+    const { fleet, actions, reorderRepos } = stubs([alpha, beta], [lane(10, alpha), lane(20, beta)], "manual");
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    const alphaHeader = screen.getByText("alpha").parentElement as HTMLElement;
+    const betaHeader = screen.getByText("beta").parentElement as HTMLElement;
+    // jsdom rects are zero-height, so the pointer counts as the upper half: insert before.
+    fireEvent.dragStart(betaHeader);
+    fireEvent.dragOver(alphaHeader);
+    fireEvent.drop(alphaHeader);
+
+    expect(reorderRepos).toHaveBeenCalledWith([2, 1]);
+  });
+
+  it("does not reorder outside manual mode", () => {
+    const alpha = repo(1, "alpha");
+    const beta = repo(2, "beta");
+    const { fleet, actions, reorderRepos } = stubs([alpha, beta], [lane(10, alpha), lane(20, beta)], "activity");
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    const alphaHeader = screen.getByText("alpha").parentElement as HTMLElement;
+    const betaHeader = screen.getByText("beta").parentElement as HTMLElement;
+    fireEvent.dragStart(alphaHeader);
+    fireEvent.dragOver(betaHeader);
+    fireEvent.drop(betaHeader);
+
+    expect(reorderRepos).not.toHaveBeenCalled();
   });
 });

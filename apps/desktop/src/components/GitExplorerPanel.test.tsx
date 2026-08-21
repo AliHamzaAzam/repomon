@@ -57,7 +57,7 @@ afterEach(() => {
 });
 
 function repo(): Repo {
-  return { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false };
+  return { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
 }
 
 function lane(overrides: Partial<Lane> = {}): Lane {
