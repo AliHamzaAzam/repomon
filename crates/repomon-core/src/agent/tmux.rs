@@ -766,19 +766,34 @@ impl TmuxRuntime {
     }
 
     /// Return the process at the root of a pane's process tree.
+    ///
+    /// `display-message -t session:=name` does NOT error when `name` doesn't exist the way
+    /// `kill-window` does — it silently falls back to reporting the session's *current* window
+    /// instead, `=` prefix notwithstanding. Reproduced directly: querying a nonexistent exact
+    /// target returns the real current window's own pid, not an absence. Every probe round's
+    /// defensive pre-clear (`kill_named` on a `usage-probe-<label>` window that doesn't exist
+    /// yet) hit exactly this: it would silently resolve to whatever real lane window happened to
+    /// be "current" and hand its pid to `terminate_pane_processes`, which then `SIGTERM`ed that
+    /// live agent's entire process tree — a different real window died on each probe cycle,
+    /// whichever one was current at that moment. So the window name is requested alongside the
+    /// pid and checked against what was actually asked for; a mismatch means "not found",
+    /// exactly like the other exact-match operations here already assume.
     fn pane_pid(&self, window: &str) -> Option<u32> {
-        self.run_allow_absent(&[
-            "display-message",
-            "-p",
-            "-t",
-            &self.exact_target(window),
-            "-F",
-            "#{pane_pid}",
-        ])
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+        let out = self
+            .run_allow_absent(&[
+                "display-message",
+                "-p",
+                "-t",
+                &self.exact_target(window),
+                "-F",
+                "#{window_name} #{pane_pid}",
+            ])
+            .ok()?;
+        let (name, pid) = out.trim().split_once(' ')?;
+        if name != window {
+            return None;
+        }
+        pid.parse().ok()
     }
 
     /// Collect a process and all descendants using the platform's process table.
