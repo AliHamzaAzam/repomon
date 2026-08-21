@@ -7,7 +7,7 @@
 //! `spawn_blocking`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
@@ -732,6 +732,63 @@ impl TmuxRuntime {
         Ok(())
     }
 
+    /// Return the process at the root of a pane's process tree.
+    fn pane_pid(&self, window: &str) -> Option<u32> {
+        self.run_allow_absent(&[
+            "display-message",
+            "-p",
+            "-t",
+            &self.exact_target(window),
+            "-F",
+            "#{pane_pid}",
+        ])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+    }
+
+    /// Collect a process and all descendants using the platform's process table.
+    #[cfg(unix)]
+    fn process_tree(root: u32) -> Vec<u32> {
+        fn children_of(pid: u32, out: &mut Vec<u32>) {
+            let pid_arg = pid.to_string();
+            let Ok(output) = Command::new("pgrep").args(["-P", &pid_arg]).output() else {
+                return;
+            };
+            for child in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+            {
+                out.push(child);
+                children_of(child, out);
+            }
+        }
+
+        let mut pids = vec![root];
+        children_of(root, &mut pids);
+        pids
+    }
+
+    /// Signal the pane process tree before killing the tmux window. `kill-window` sends the
+    /// pane shell a hangup, but CLI children can ignore that signal or survive after being
+    /// reparented to PID 1 (notably `agy`). Querying the tree while the pane still exists keeps
+    /// teardown deterministic and prevents those children becoming untracked orphans.
+    fn terminate_pane_processes(&self, window: &str) {
+        #[cfg(unix)]
+        if let Some(root) = self.pane_pid(window) {
+            // Children first: the pane shell should not disappear before its descendants have
+            // received the explicit termination signal.
+            for pid in Self::process_tree(root).into_iter().rev() {
+                let pid_arg = pid.to_string();
+                let _ = Command::new("kill")
+                    .args(["-TERM", &pid_arg])
+                    .stderr(Stdio::null())
+                    .output();
+            }
+        }
+    }
+
     /// Whether `window`'s app is on the *alternate screen* — i.e. a full-screen TUI (Claude, vim, …)
     /// that owns its own scrollback. `false` for a plain shell (whose scrollback lives in tmux).
     pub fn alternate_on_named(&self, window: &str) -> bool {
@@ -974,10 +1031,14 @@ impl TmuxRuntime {
     }
 
     /// Terminate a named window (an agent slot or a terminal). Exact-match target, so killing
-    /// `lane-1` can't take out `lane-1-2`.
+    /// `lane-1` can't take out `lane-1-2`. Signal the pane process tree first so a CLI child
+    /// cannot survive the window and become an orphan reparented to PID 1.
     pub fn kill_named(&self, name: &str) -> Result<()> {
+        self.terminate_pane_processes(name);
         tracing::debug!(target: "repomon::tmuxwrite", window = %name, op = "kill-window", "tmux write");
-        self.run(&["kill-window", "-t", &self.exact_target(name)])?;
+        // Signalling the pane root can make the shell exit before tmux processes this command;
+        // that is already a successful teardown, so treat a vanished window as benign here.
+        self.run_allow_absent(&["kill-window", "-t", &self.exact_target(name)])?;
         Ok(())
     }
 
@@ -1527,6 +1588,49 @@ mod tests {
         assert_eq!(TmuxRuntime::parse_term_window("term-x-1"), None);
         assert_eq!(TmuxRuntime::parse_term_window("term-7-x"), None);
         assert_eq!(TmuxRuntime::parse_term_window("orchestrator"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_named_terminates_pane_process_tree() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-killtree-{}", std::process::id()));
+        let cwd = std::env::temp_dir();
+        rt.spawn_named("orchestrator", &cwd, "sh -c 'sleep 30'")
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let root = rt.pane_pid("orchestrator").expect("pane root pid");
+        let tree = TmuxRuntime::process_tree(root);
+        assert!(
+            !tree.is_empty(),
+            "test command should have a pane process: {tree:?}"
+        );
+
+        rt.kill_named("orchestrator").unwrap();
+        for _ in 0..20 {
+            if tree.iter().all(|pid| {
+                Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|status| !status.success())
+                    .unwrap_or(true)
+            }) {
+                let _ = Command::new(tmux_program())
+                    .args(["-L", rt.session(), "kill-server"])
+                    .output();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = Command::new(tmux_program())
+            .args(["-L", rt.session(), "kill-server"])
+            .output();
+        panic!("pane process tree survived kill_named: {tree:?}");
     }
 
     #[test]
