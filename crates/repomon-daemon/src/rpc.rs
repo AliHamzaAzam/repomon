@@ -4838,7 +4838,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         let was_managed = session
                             .session_id
                             .as_deref()
-                            .map_or(false, |sid| known_managed.contains(sid));
+                            .is_some_and(|sid| known_managed.contains(sid));
                         let is_ext = if was_managed {
                             false
                         } else {
@@ -5522,13 +5522,7 @@ fn pair_transcripts_to_windows(
         //    (`session.is_some()`) is left for a fresh claimant, never re-stamped from a guess.
         if let Some(sid) = &summaries[si].session_id {
             let needle = message_fingerprint(summaries[si].last_message.as_deref());
-            let nominate = if is_fresh(&summaries[si]) {
-                true
-            } else if has_never_bound_window && needle.is_some() {
-                true
-            } else {
-                false
-            };
+            let nominate = is_fresh(&summaries[si]) || (has_never_bound_window && needle.is_some());
             if nominate {
                 new_bindings.push(BindingCandidate {
                     sid: sid.clone(),

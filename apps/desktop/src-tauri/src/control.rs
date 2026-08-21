@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ async fn send_shutdown(client: &DaemonClient) {
 /// mid-shutdown* with dozens of those (one every 50ms) is exactly the kind of extra connection
 /// churn that can widen the shutdown-notify race in `repomon-daemon`'s accept loop instead of
 /// helping it along.
-async fn wait_until_unreachable(socket: &PathBuf, timeout: Duration) {
+async fn wait_until_unreachable(socket: &Path, timeout: Duration) {
     let endpoint = Endpoint::from_path(socket);
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
@@ -86,7 +86,7 @@ pub async fn daemon_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(
         send_shutdown(&client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     } else if let Some(client) = state.client.get() {
-        send_shutdown(&client).await;
+        send_shutdown(client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 
@@ -134,7 +134,7 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
         send_shutdown(&client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     } else if let Some(client) = state.client.get() {
-        send_shutdown(&client).await;
+        send_shutdown(client).await;
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 

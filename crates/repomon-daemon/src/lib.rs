@@ -178,6 +178,14 @@ pub type GateCacheEntry = (
     Option<repomon_core::agent::gate::GateVerdict>,
 );
 
+/// One `prompt_cache` entry, keyed by window: when it was sniffed, the dialog found (if any),
+/// and the pending-prompt summary found (if any).
+pub type PromptCacheEntry = (
+    Instant,
+    Option<repomon_core::agent::prompt::PendingDialog>,
+    Option<String>,
+);
+
 /// Everything a request handler needs. Cheap to share via `Arc`.
 pub struct Ctx {
     pub store: Store,
@@ -225,16 +233,7 @@ pub struct Ctx {
     /// session is the bulk of the overlay's subprocess cost. Short TTL: a dialog appearing is seen
     /// within it; until then the session reads as it last did. Keyed by window name. Any input sent
     /// to a window drops its entry, so an answered dialog can't ride out the TTL as a ghost.
-    pub prompt_cache: Mutex<
-        HashMap<
-            String,
-            (
-                Instant,
-                Option<repomon_core::agent::prompt::PendingDialog>,
-                Option<String>,
-            ),
-        >,
-    >,
+    pub prompt_cache: Mutex<HashMap<String, PromptCacheEntry>>,
     /// Per window: the last sniffed pane-content hash and when it last CHANGED — the stall
     /// detector's clock. Never TTL-pruned (its point is remembering how long a pane has sat
     /// still); entries drop only when their window vanishes.
