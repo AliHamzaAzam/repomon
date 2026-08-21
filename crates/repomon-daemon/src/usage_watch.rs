@@ -88,7 +88,10 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
     let mut last_round: Option<Instant> = None;
 
     loop {
-        tick.tick().await;
+        let forced = tokio::select! {
+            _ = tick.tick() => false,
+            _ = ctx.usage_refresh.notified() => true,
+        };
 
         if !ctx.config.read().await.usage_probe {
             ctx.usage.lock().await.clear();
@@ -100,7 +103,7 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
         if !tui_active {
             continue;
         }
-        if last_round.is_some_and(|t| t.elapsed() < REFRESH) {
+        if !usage_round_due(last_round, forced) {
             continue;
         }
 
@@ -197,6 +200,12 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
         ctx.usage.lock().await.retain(|k, _| live.contains(k));
         last_round = Some(Instant::now());
     }
+}
+
+/// A manual refresh bypasses only the slow freshness cadence. The watcher still applies its
+/// normal opt-in, local-TUI, active-kind, and probe-timeout rules around this decision.
+fn usage_round_due(last_round: Option<Instant>, forced: bool) -> bool {
+    forced || last_round.is_none_or(|t| t.elapsed() >= REFRESH)
 }
 
 /// A usage-bearing account to probe: its stable key (matches the focused agent's attribution), a
@@ -643,6 +652,13 @@ mod tests {
             probe_state("Antigravity CLI\n Models & Quota", &agy),
             ProbeState::Ready
         );
+    }
+
+    #[test]
+    fn forced_refresh_bypasses_a_recent_probe_round() {
+        let recent = Some(Instant::now());
+        assert!(!usage_round_due(recent, false));
+        assert!(usage_round_due(recent, true));
     }
 
     /// Full end-to-end probe against a real `claude` on the default account, in an isolated tmux

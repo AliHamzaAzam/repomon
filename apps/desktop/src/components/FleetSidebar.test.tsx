@@ -79,6 +79,7 @@ function stubs(repos: Repo[], lanes: Lane[]) {
     counts: () => ({ urgent: 0, running: 0 }),
     focusedUsage: () => null,
     refresh: vi.fn().mockResolvedValue(undefined),
+    refreshUsage: vi.fn().mockResolvedValue(undefined),
   } as unknown as FleetStore;
   const actions = { setRepoHidden, removeRepo: vi.fn(), newLane: vi.fn(), addRepo: vi.fn() } as unknown as ActionsStore;
   return { fleet, actions, setRepoHidden };
@@ -318,7 +319,7 @@ describe("fleet sidebar hiding", () => {
     const button = screen.getByLabelText("Refresh rate limit data");
     fireEvent.click(button);
 
-    expect(fleet.refresh).toHaveBeenCalledTimes(1);
+    expect(fleet.refreshUsage).toHaveBeenCalledTimes(1);
     expect(button).toBeDisabled();
     expect(button.querySelector("svg")).toHaveClass("animate-spin");
 

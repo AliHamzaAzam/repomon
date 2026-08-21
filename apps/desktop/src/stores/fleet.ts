@@ -17,6 +17,7 @@ export interface FleetSnapshot {
 
 export interface FleetSource {
   load(): Promise<FleetSnapshot>;
+  refreshUsage(): Promise<void>;
   subscribe(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
 }
 
@@ -36,6 +37,9 @@ export const daemonFleetSource: FleetSource = {
       terminals,
       sortReposByActivity: config ? Boolean(config.sort_repos_by_activity) : null,
     };
+  },
+  refreshUsage: async () => {
+    await daemonCall("usage.refresh");
   },
   subscribe: subscribeDaemon,
 };
@@ -281,6 +285,12 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     }
   }
 
+  async function refreshUsage() {
+    if (!active) return;
+    await source.refreshUsage();
+    await refresh();
+  }
+
   function queueRefresh() {
     if (refreshQueued) return;
     refreshQueued = true;
@@ -348,6 +358,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     visibleLanes,
     counts,
     refresh,
+    refreshUsage,
     start,
     stop,
     moveSelection,

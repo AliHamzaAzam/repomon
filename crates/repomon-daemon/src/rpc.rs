@@ -3992,6 +3992,12 @@ pub async fn dispatch(
             out.sort_by(|a, b| a.key.cmp(&b.key));
             to_value(out)
         }
+        "usage.refresh" => {
+            // The watcher owns probe IO and its active-kind/local-TUI gates. Wake it now so the
+            // next pass bypasses only the five-minute freshness cooldown.
+            ctx.usage_refresh.notify_one();
+            Ok(Value::Null)
+        }
 
         // Set/clear a user label for a session (keyed by transcript session_id; persisted).
         "session.rename" => {
@@ -9786,6 +9792,19 @@ mod tests {
 
         // 4. In-memory snapshot is refreshed and contains the lane
         assert!(ctx.supervision.read().await.lane(42).is_some());
+    }
+
+    #[tokio::test]
+    async fn usage_refresh_rpc_wakes_the_probe_watcher() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let ctx = Ctx::new(store, repomon_core::Config::default(), None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+        let wake = ctx.usage_refresh.notified();
+
+        dispatch(&ctx, &sess, "usage.refresh", None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100), wake)
+            .await
+            .expect("usage.refresh should wake the watcher");
     }
 
     #[tokio::test]

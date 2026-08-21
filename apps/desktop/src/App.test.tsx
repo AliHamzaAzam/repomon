@@ -76,6 +76,7 @@ describe("Repomon desktop shell", () => {
   it("surfaces fleet loading errors instead of failing silently", async () => {
     const fleetSource: FleetSource = {
       load: async () => { throw new Error("fleet sync failed"); },
+      refreshUsage: async () => undefined,
       subscribe: async () => () => undefined,
     };
     render(() => <App connectionSource={sourceFor({
@@ -141,6 +142,7 @@ describe("Repomon desktop shell", () => {
         terminals: [],
         sortReposByActivity: null,
       }),
+      refreshUsage: async () => undefined,
       subscribe: async () => () => undefined,
     };
 
@@ -181,6 +183,7 @@ describe("Repomon desktop shell", () => {
         terminals: [],
         sortReposByActivity: null,
       }),
+      refreshUsage: async () => undefined,
       subscribe: async () => () => undefined,
     };
 

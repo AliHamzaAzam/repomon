@@ -259,6 +259,7 @@ interface RpcMap {
   "config.set": { params: Partial<ConfigView>; result: ConfigView };
   "system.doctor": { params: undefined; result: SystemDoctorResult };
   "usage.get": { params: undefined; result: AccountUsage[] };
+  "usage.refresh": { params: undefined; result: null };
   "orchestrator.status": { params: undefined; result: OrchestratorStatus };
   "orchestrator.transcript": { params: { limit?: number }; result: TranscriptItem[] };
   "orchestrator.start": { params: { agent?: string; model?: string }; result: OrchestratorStatus };

@@ -256,6 +256,9 @@ pub struct Ctx {
     /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
     /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a TUI is attached.
     pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,
+    /// Wakes the usage watcher for a user-requested refresh, bypassing the normal five-minute
+    /// cadence while preserving its active-kind and local-TUI gates.
+    pub usage_refresh: Notify,
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
     /// The filesystem watcher (set once the background task brings it up). Held here so `repo.add`
@@ -428,6 +431,7 @@ impl Ctx {
             bytes_watches: Arc::new(Mutex::new(HashMap::new())),
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
+            usage_refresh: Notify::new(),
             auto_continue_off: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
             local_watcher_seen: Mutex::new(None),

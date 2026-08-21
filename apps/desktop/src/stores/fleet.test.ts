@@ -65,6 +65,7 @@ function repo(id: number, name: string, hidden = false): Repo {
 async function startedStore(repos: Repo[], lanes: Lane[], sortReposByActivity: boolean | null = false) {
   const source: FleetSource = {
     load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [], sortReposByActivity }),
+    refreshUsage: () => Promise.resolve(),
     subscribe: () => Promise.resolve(() => undefined),
   };
   return createRoot((dispose) => {

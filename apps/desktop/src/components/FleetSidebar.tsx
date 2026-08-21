@@ -391,7 +391,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
     if (usageRefreshing()) return;
     setUsageRefreshing(true);
     try {
-      await props.fleet.refresh();
+      await props.fleet.refreshUsage();
     } finally {
       setUsageRefreshing(false);
     }
