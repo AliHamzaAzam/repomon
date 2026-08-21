@@ -112,23 +112,38 @@ async function mountedWorkspace(sessions: AgentSession[], terminals: Array<{ lan
 }
 
 describe("terminal workspace tab strip ordering and rename", () => {
-  it("drops a dragged agent pill on another and persists the new session order", async () => {
+  it("drags a pill past its neighbor's midpoint to reorder, and commits on release", async () => {
     const { actions, dispose } = await mountedWorkspace([
       session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),
       session({ id: 2, agent: "claude-code", tmux_window: "lane-10-2", session_id: "s2" }),
     ]);
 
-    const dragged = await screen.findByText("codex 1");
-    const target = screen.getAllByText("claude-code 2")[0];
-    // jsdom rects are zero-height, so the pointer counts as the upper half: insert before.
-    // Dragging the SECOND pill onto the FIRST proves a real reorder happened.
-    fireEvent.dragStart(target.parentElement!);
-    fireEvent.dragOver(dragged.parentElement!);
-    fireEvent.drop(dragged.parentElement!);
-
-    await waitFor(() => {
-      expect(actions.setAgentTabOrder).toHaveBeenCalledWith(10, ["s2", "s1"]);
+    // The reorderable element is the pill DIV wrapping the activate button.
+    const codexPill = (await screen.findByText("codex 1")).parentElement!.parentElement!;
+    const claudePill =
+      screen.getAllByText("claude-code 2")[0].parentElement!.parentElement!;
+    // Synthetic horizontal geometry: codex [0,100), claude-code [100,200). Dragging the second
+    // pill left past the first's midpoint proves a real reorder.
+    Object.defineProperty(codexPill, "getBoundingClientRect", {
+      value: () => new DOMRect(0, 0, 100, 28),
+      configurable: true,
     });
+    Object.defineProperty(claudePill, "getBoundingClientRect", {
+      value: () => new DOMRect(100, 0, 100, 28),
+      configurable: true,
+    });
+
+    fireEvent.pointerDown(claudePill, { button: 0, clientX: 150, clientY: 14, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 140, clientY: 14, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 40, clientY: 14, pointerId: 1 });
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    expect(actions.setAgentTabOrder).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(window, { clientX: 40, clientY: 14, pointerId: 1 });
+    expect(actions.setAgentTabOrder).toHaveBeenCalledTimes(1);
+    expect(actions.setAgentTabOrder).toHaveBeenCalledWith(10, ["s2", "s1"]);
     dispose();
   });
 
@@ -152,12 +167,17 @@ describe("terminal workspace tab strip ordering and rename", () => {
 
     const shellLabel = await screen.findByText("shell abc");
     const shellTab = shellLabel.parentElement!.parentElement!;
-    expect(shellTab.getAttribute("draggable")).toBe("false");
+    // Shells get no data-reorder-id, so the pointer primitive never arms on them.
+    expect(shellTab.hasAttribute("data-reorder-id")).toBe(false);
+    expect(shellTab.getAttribute("draggable")).toBe(null);
 
     const dragged = screen.getAllByText("codex 1")[0].parentElement!;
-    fireEvent.dragStart(dragged);
-    fireEvent.dragOver(shellTab);
-    fireEvent.drop(shellTab);
+    fireEvent.pointerDown(dragged, { button: 0, clientX: 5, clientY: 5, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 400, clientY: 5, pointerId: 1 });
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    fireEvent.pointerUp(window, { clientX: 400, clientY: 5, pointerId: 1 });
     fireEvent.contextMenu(shellTab);
 
     expect(actions.setAgentTabOrder).not.toHaveBeenCalled();
@@ -199,10 +219,12 @@ describe("terminal workspace tab strip ordering and rename", () => {
     });
 
     const dragged = await screen.findByText("claude-code 2");
-    const target = screen.getAllByText("codex 1")[0];
-    fireEvent.dragStart(dragged.parentElement!);
-    fireEvent.dragOver(target.parentElement!);
-    fireEvent.drop(target.parentElement!);
+    fireEvent.pointerDown(dragged.parentElement!, { button: 0, clientX: 5, clientY: 5, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 400, clientY: 5, pointerId: 1 });
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    fireEvent.pointerUp(window, { clientX: 400, clientY: 5, pointerId: 1 });
 
     expect(actions.setAgentTabOrder).not.toHaveBeenCalled();
     dispose();
