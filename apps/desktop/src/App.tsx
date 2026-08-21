@@ -393,23 +393,6 @@ function App(props: AppProps) {
         </div>
 
         <div class="flex items-center">
-          <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
-          <button
-            type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
-              extensionsOpen()
-                ? "text-signal font-semibold"
-                : "text-muted hover:text-foreground"
-            }`}
-            onClick={() => setExtensionsOpen(!extensionsOpen())}
-            aria-pressed={extensionsOpen()}
-            title="Extensions (⌘4)"
-          >
-            <IconExtensions size={13} />
-            <span>Extensions</span>
-          </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -438,6 +421,23 @@ function App(props: AppProps) {
           >
             <IconLayers size={13} />
             <span>Editor</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              extensionsOpen()
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => setExtensionsOpen(!extensionsOpen())}
+            aria-pressed={extensionsOpen()}
+            title="Extensions (⌘4)"
+          >
+            <IconExtensions size={13} />
+            <span>Extensions</span>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
