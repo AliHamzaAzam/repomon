@@ -209,6 +209,22 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
+    /// `summary_for` reads its DB path from the process environment, and cargo runs a
+    /// crate's tests on parallel threads: without this lock, one test's `set_var`/`remove_var`
+    /// races another's read and the suite flakes. Every test that touches the variable holds
+    /// the guard for its whole body.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_db<T>(db: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: single-threaded within the lock; nothing else reads the variable here.
+        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", db) };
+        let out = f();
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        out
+    }
+
     fn fixture(path: &Path, cwd: &Path) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
@@ -245,9 +261,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("opencode.db");
         fixture(&db, temp.path());
-        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", &db) };
-        let summary = summary_for(temp.path()).unwrap();
-        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        let summary = with_db(&db, || summary_for(temp.path()).unwrap());
         assert_eq!(summary.kind, AgentKind::OpenCode);
         assert_eq!(summary.status, AgentStatus::Waiting);
         assert!(summary.ended_turn);
@@ -273,9 +287,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", &db) };
-        let summary = summary_for(temp.path()).unwrap();
-        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        let summary = with_db(&db, || summary_for(temp.path()).unwrap());
         let msg = summary.last_message.unwrap();
         assert_eq!(msg.chars().count(), 200);
         assert!(msg.ends_with("..."));
@@ -300,9 +312,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", &db) };
-        let summary = summary_for(temp.path()).unwrap();
-        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        let summary = with_db(&db, || summary_for(temp.path()).unwrap());
         assert_eq!(summary.last_message.as_deref(), Some("Working on it now."));
     }
 
@@ -314,8 +324,6 @@ mod tests {
             .unwrap()
             .execute("CREATE TABLE session(id TEXT)", [])
             .unwrap();
-        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", &db) };
-        assert!(summary_for(temp.path()).is_none());
-        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        with_db(&db, || assert!(summary_for(temp.path()).is_none()));
     }
 }
