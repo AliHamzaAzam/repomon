@@ -3616,8 +3616,9 @@ pub async fn dispatch(
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            // Clamp to a sane floor so a momentary tiny layout can't shrink the agent to nothing.
-            let (cols, rows) = (p.cols.max(20), p.rows.max(4));
+            // Clamp to a usable floor so a momentary tiny layout can't shrink the agent to
+            // nothing (an opencode TUI observed dying after being squeezed into ~100×18).
+            let (cols, rows) = repomon_core::agent::tmux::clamp_pane_size(p.cols, p.rows);
             tokio::task::spawn_blocking(move || tmux.resize_named(&window, cols, rows))
                 .await
                 .map_err(internal)?
@@ -3650,7 +3651,7 @@ pub async fn dispatch(
                     "rows": dims.map(|d| d.1),
                 }));
             }
-            let (cols, rows) = (p.cols.max(20), p.rows.max(4));
+            let (cols, rows) = repomon_core::agent::tmux::clamp_pane_size(p.cols, p.rows);
             let tmux = ctx.backend.clone();
             let w = window.clone();
             tokio::task::spawn_blocking(move || tmux.resize_named(&w, cols, rows))
