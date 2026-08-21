@@ -54,6 +54,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0017_session_generated_labels.sql"),
     ),
     (18, include_str!("../../migrations/0018_supervision.sql")),
+    (
+        19,
+        include_str!("../../migrations/0019_repo_position_label.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -169,6 +173,8 @@ impl Store {
                 added_at: now,
                 worktree_root_template: template,
                 hidden: false,
+                position: None,
+                label: None,
             })
         })
         .await
@@ -176,9 +182,8 @@ impl Store {
 
     pub async fn list_repos(&self) -> Result<Vec<Repo>> {
         self.call(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos ORDER BY name",
-            )?;
+            let sql = format!("SELECT {REPO_COLUMNS} FROM repos {REPO_ORDER}");
+            let mut stmt = c.prepare(&sql)?;
             let rows = stmt.query_map([], repo_from_row)?;
             collect(rows)
         })
@@ -187,27 +192,21 @@ impl Store {
 
     pub async fn get_repo(&self, id: RepoId) -> Result<Repo> {
         self.call(move |c| {
-            c.query_row(
-                "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos WHERE id = ?1",
-                params![id],
-                repo_from_row,
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("repo {id}")),
-                other => other.into(),
-            })
+            let sql = format!("SELECT {REPO_COLUMNS} FROM repos WHERE id = ?1");
+            c.query_row(&sql, params![id], repo_from_row)
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("repo {id}")),
+                    other => other.into(),
+                })
         })
         .await
     }
 
     pub async fn find_repo_by_path(&self, path: PathBuf) -> Result<Option<Repo>> {
         self.call(move |c| {
+            let sql = format!("SELECT {REPO_COLUMNS} FROM repos WHERE path = ?1");
             let r = c
-                .query_row(
-                    "SELECT id, path, name, added_at, worktree_root_template, hidden FROM repos WHERE path = ?1",
-                    params![path.to_string_lossy()],
-                    repo_from_row,
-                )
+                .query_row(&sql, params![path.to_string_lossy()], repo_from_row)
                 .map(Some);
             match r {
                 Ok(v) => Ok(v),
@@ -237,6 +236,44 @@ impl Store {
     pub async fn remove_repo(&self, id: RepoId) -> Result<()> {
         self.call(move |c| {
             let n = c.execute("DELETE FROM repos WHERE id = ?1", params![id])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("repo {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Persist a full manual ordering: `ordered_ids` are assigned dense positions 0..n-1 in one
+    /// transaction, so a partially-applied reorder is never observable. Repos omitted from the
+    /// list keep their old position (they may simply be hidden); pass every visible id to order
+    /// the whole set.
+    pub async fn set_repo_order(&self, ordered_ids: Vec<RepoId>) -> Result<()> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            for (index, id) in ordered_ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE repos SET position = ?2 WHERE id = ?1",
+                    params![id, index as i64],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Set a repo's display label. `None`, empty, or whitespace-only clears the override,
+    /// falling back to the folder name.
+    pub async fn set_repo_label(&self, id: RepoId, label: Option<String>) -> Result<()> {
+        self.call(move |c| {
+            let label = label
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty());
+            let n = c.execute(
+                "UPDATE repos SET label = ?2 WHERE id = ?1",
+                params![id, label],
+            )?;
             if n == 0 {
                 return Err(Error::NotFound(format!("repo {id}")));
             }
@@ -1965,8 +2002,18 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
         added_at: dt_col(r, 3)?,
         worktree_root_template: r.get(4)?,
         hidden: r.get(5)?,
+        position: r.get(6)?,
+        label: r.get(7)?,
     })
 }
+
+/// The repo column list shared by every repo SELECT, matching `repo_from_row`'s indices.
+const REPO_COLUMNS: &str =
+    "id, path, name, added_at, worktree_root_template, hidden, position, label";
+
+/// Manual order first (ascending), then unpositioned repos by name — so a fresh database keeps
+/// the legacy ordering until the user drags something.
+const REPO_ORDER: &str = "ORDER BY (position IS NULL), position, name";
 
 fn worktree_from_row(r: &Row) -> rusqlite::Result<Worktree> {
     Ok(Worktree {
@@ -2680,6 +2727,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repo_order_and_label_round_trip() {
+        let s = store().await;
+        let a = s
+            .add_repo(PathBuf::from("/code/a"), "a".into(), None)
+            .await
+            .unwrap();
+        let b = s
+            .add_repo(PathBuf::from("/code/b"), "b".into(), None)
+            .await
+            .unwrap();
+        let c = s
+            .add_repo(PathBuf::from("/code/c"), "c".into(), None)
+            .await
+            .unwrap();
+
+        // Unpositioned repos keep the legacy name order.
+        assert_eq!(
+            s.list_repos()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![a.id, b.id, c.id]
+        );
+
+        // A full reorder assigns dense positions and listings follow them.
+        s.set_repo_order(vec![c.id, a.id, b.id]).await.unwrap();
+        let listed = s.list_repos().await.unwrap();
+        assert_eq!(
+            listed
+                .into_iter()
+                .map(|r| (r.id, r.position))
+                .collect::<Vec<_>>(),
+            vec![(c.id, Some(0)), (a.id, Some(1)), (b.id, Some(2))]
+        );
+
+        // Repos omitted from the reorder keep their previous position.
+        s.set_repo_order(vec![b.id]).await.unwrap();
+        assert_eq!(s.get_repo(b.id).await.unwrap().position, Some(0));
+        assert_eq!(s.get_repo(a.id).await.unwrap().position, Some(1));
+
+        // Labels persist, and clearing (None or empty) falls back to the folder name.
+        s.set_repo_label(b.id, Some("Client Portal".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_repo(b.id).await.unwrap().label.as_deref(),
+            Some("Client Portal")
+        );
+        s.set_repo_label(b.id, Some("   ".into())).await.unwrap();
+        assert!(s.get_repo(b.id).await.unwrap().label.is_none());
+        s.set_repo_label(b.id, None).await.unwrap();
+        assert!(s.get_repo(b.id).await.unwrap().label.is_none());
+
+        assert!(matches!(
+            s.set_repo_label(9999, Some("x".into())).await,
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn lane_id_is_stable_and_pinnable() {
         let s = store().await;
         let r = s
@@ -3129,18 +3238,10 @@ mod tests {
     }
 
     #[test]
-    fn migration_18_applies_fresh_and_from_17() {
-        // Fresh DB reaches version 18
-        let mut c = Connection::open_in_memory().unwrap();
-        init(&mut c).unwrap();
-        let version: i64 = c
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 18);
-
+    fn migration_18_applies_from_17() {
         // Staged DB from version 17
         let mut c17 = Connection::open_in_memory().unwrap();
-        for (target, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+        for (target, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 2) {
             let tx = c17.transaction().unwrap();
             tx.execute_batch(sql).unwrap();
             tx.pragma_update(None, "user_version", target).unwrap();
@@ -3151,12 +3252,8 @@ mod tests {
             .unwrap();
         assert_eq!(v17, 17);
 
-        // Run migrations -> reaches 18 and tables exist
+        // Run migrations -> reaches at least 18 and the tables exist
         run_migrations(&mut c17).unwrap();
-        let v18: i64 = c17
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap();
-        assert_eq!(v18, 18);
 
         let lp_exists: i64 = c17
             .query_row(
@@ -3175,6 +3272,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sl_exists, 1);
+    }
+
+    #[test]
+    fn migration_19_applies_fresh_and_from_18() {
+        // Fresh DB reaches version 19
+        let mut c = Connection::open_in_memory().unwrap();
+        init(&mut c).unwrap();
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 19);
+
+        // Staged DB from version 18
+        let mut c18 = Connection::open_in_memory().unwrap();
+        for (target, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+            let tx = c18.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", target).unwrap();
+            tx.commit().unwrap();
+        }
+        let v18: i64 = c18
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v18, 18);
+
+        // Run migrations -> reaches 19 and the new columns exist
+        run_migrations(&mut c18).unwrap();
+        let v19: i64 = c18
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v19, 19);
+
+        let position_exists: i64 = c18
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('repos') WHERE name='position'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(position_exists, 1);
+
+        let label_exists: i64 = c18
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('repos') WHERE name='label'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(label_exists, 1);
     }
 
     #[tokio::test]

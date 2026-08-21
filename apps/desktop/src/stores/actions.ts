@@ -74,6 +74,30 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     }
   }
 
+  /// Set a repo's display label (shown instead of the folder name). An empty label clears the
+  /// override.
+  async function renameRepo(repo: Repo, label: string) {
+    setError(null);
+    try {
+      await daemonCall("repo.rename", { repo_id: repo.id, label });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  /// Persist a manual sidebar ordering. The caller computes the full visible order; the daemon
+  /// assigns dense positions so it survives restarts and reaches the TUI too.
+  async function reorderRepos(orderedIds: number[]) {
+    setError(null);
+    try {
+      await daemonCall("repo.reorder", { ordered_ids: orderedIds });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   /// Deleting a playbook throws away procedural memory that took real work to earn, so it asks
   /// first. Approving does not: reading the content and clicking Approve is itself the review.
   function confirmPlaybookDelete(name: string, onConfirm: () => Promise<void>) {
@@ -235,6 +259,8 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     addRepo,
     removeRepo,
     setRepoHidden,
+    renameRepo,
+    reorderRepos,
     confirmPlaybookDelete,
     notesRepo,
     openRepoNotes,

@@ -8,6 +8,7 @@ import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
 import {
+  stableVisibleTargets,
   warmTargetWindows,
   type PaneTarget,
 } from "./terminalTargets";
@@ -105,15 +106,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     if (!active) return [];
     const eff = effectiveLayout();
     if (eff === "focused") return [active];
-    if (eff === "split") {
-      const peer = laneTargets().find((target) => target.window !== active.window)
-        ?? all.find((target) => target.window !== active.window);
-      return peer ? [active, peer] : [active];
-    }
-    return [
-      ...laneTargets(),
-      ...all.filter((target) => target.laneId !== props.fleet.selectedLaneId()),
-    ].slice(0, 6);
+    // Split/grid use a selection-independent order: clicking an agent moves focus, not the grid.
+    return stableVisibleTargets(all, active.window, eff);
   });
 
   createEffect(() => {

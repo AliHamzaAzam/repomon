@@ -142,7 +142,12 @@ pub struct Config {
     /// working in floats to the top. Off by default (groups keep the daemon's order). Only the
     /// groups move: lane order inside a group is untouched, since sorting *lanes* by activity made
     /// them bubble around on every agent output.
+    ///
+    /// Superseded by [`Config::sort_mode`]; kept in sync by `config.set` so older clients (the
+    /// TUI) that only know the boolean keep seeing the right behavior.
     pub sort_repos_by_activity: bool,
+    /// How sidebar repo groups are ordered. `None` falls back to the legacy boolean above.
+    pub sort_mode: Option<SortMode>,
     /// Which agent powers the repomind orchestrator session — a built-in Claude variant (e.g.
     /// `claude-work`), a custom agent name, or `codex` (the one non-Claude CLI with the MCP
     /// client repomind needs; it runs with pane-only monitoring — no transcript chat view or
@@ -211,6 +216,7 @@ impl Default for Config {
             usage_probe: false,
             expand_agents: false,
             sort_repos_by_activity: false,
+            sort_mode: None,
             orchestrator_agent: None,
             orchestrator_model: None,
             embedded_pty: true,
@@ -259,6 +265,29 @@ pub struct RemoteConfig {
     pub bind: Option<String>,
     /// The bearer token clients must present at the WebSocket handshake.
     pub token: Option<String>,
+}
+
+/// How sidebar repo groups are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMode {
+    /// The daemon's default order (manual positions where set, then name).
+    Default,
+    /// Most recent lane activity first (the legacy `sort_repos_by_activity` behavior).
+    Activity,
+    /// Pure manual order: exactly the positions persisted by `repo.reorder`, no auto-sorting.
+    Manual,
+}
+
+/// Resolve the effective sort mode from the explicit setting and the legacy boolean. Pure so the
+/// precedence rules are unit-testable: an explicit `sort_mode` always wins; otherwise the legacy
+/// boolean maps `true` to `Activity` and `false` to `Default`.
+pub fn resolve_sort_mode(mode: Option<SortMode>, legacy_sort_by_activity: bool) -> SortMode {
+    match mode {
+        Some(m) => m,
+        None if legacy_sort_by_activity => SortMode::Activity,
+        None => SortMode::Default,
+    }
 }
 
 impl Config {
@@ -340,6 +369,12 @@ impl Config {
             .get(repo_name)
             .and_then(|r| r.worktree_template.as_deref())
             .unwrap_or(&self.worktree_template)
+    }
+
+    /// The effective sidebar repo sort mode, honoring the legacy boolean when `sort_mode` is
+    /// unset (config files written before the setting existed).
+    pub fn sort_mode(&self) -> SortMode {
+        resolve_sort_mode(self.sort_mode, self.sort_repos_by_activity)
     }
 }
 
@@ -486,6 +521,62 @@ mod tests {
         );
         assert_eq!(c.worktree_template_for("pos-saas"), "~/wt/{branch}");
         assert_eq!(c.worktree_template_for("other"), DEFAULT_WORKTREE_TEMPLATE);
+    }
+
+    #[test]
+    fn sort_mode_resolution_precedence() {
+        // No explicit mode: the legacy boolean decides.
+        assert_eq!(resolve_sort_mode(None, false), SortMode::Default);
+        assert_eq!(resolve_sort_mode(None, true), SortMode::Activity);
+        // An explicit mode always wins, even when it contradicts the legacy boolean.
+        assert_eq!(
+            resolve_sort_mode(Some(SortMode::Manual), true),
+            SortMode::Manual
+        );
+        assert_eq!(
+            resolve_sort_mode(Some(SortMode::Default), true),
+            SortMode::Default
+        );
+        assert_eq!(
+            resolve_sort_mode(Some(SortMode::Activity), false),
+            SortMode::Activity
+        );
+    }
+
+    #[test]
+    fn sort_mode_defaults_and_serializes_lowercase() {
+        let c = Config::default();
+        assert_eq!(c.sort_mode(), SortMode::Default);
+
+        let c: Config = toml::from_str("sort_repos_by_activity = true\n").unwrap();
+        assert_eq!(c.sort_mode(), SortMode::Activity);
+
+        let c: Config = toml::from_str("sort_mode = \"manual\"\n").unwrap();
+        assert_eq!(c.sort_mode(), SortMode::Manual);
+    }
+
+    #[test]
+    fn sort_mode_round_trips_through_toml() {
+        let dir =
+            std::env::temp_dir().join(format!("repomon-sortmode-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+
+        let c = Config {
+            sort_mode: Some(SortMode::Manual),
+            ..Default::default()
+        };
+        c.save_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.sort_mode(), SortMode::Manual);
+
+        // A pre-sort-mode config file still resolves through the legacy boolean.
+        std::fs::write(&path, "sort_repos_by_activity = true\n").unwrap();
+        let legacy = Config::load_from(&path).unwrap();
+        assert_eq!(legacy.sort_mode(), SortMode::Activity);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

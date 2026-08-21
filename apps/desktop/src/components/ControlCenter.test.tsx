@@ -154,8 +154,7 @@ describe("ControlCenter component UI", () => {
     path: "/path/to/my-project",
     added_at: "2026-07-20T00:00:00Z",
     worktree_root_template: null,
-    hidden: false,
-  };
+    hidden: false, position: null, label: null };
   const mockLane: Lane = {
     id: 10,
     repo: mockRepo,

@@ -16,6 +16,27 @@ export function dedupe(targets: PaneTarget[]): PaneTarget[] {
   });
 }
 
+/// Pick the panes to show in a multi-pane layout (split = 2, grid = 6), in a stable order.
+///
+/// The order is always the incoming (fleet) order — never "selected lane first". Selection has
+/// to move focus and highlight only: deriving the arrangement from the selection made every grid
+/// cell jump around each time the user clicked an agent, which made split/grid view unusable.
+/// The one concession: when the newly selected pane is not visible at all (beyond the cap), it
+/// swaps into the last slot so focusing an agent never silently shows you panes that exclude it.
+export function stableVisibleTargets(
+  all: PaneTarget[],
+  activeWindow: string | null,
+  layout: "split" | "grid",
+): PaneTarget[] {
+  const cap = layout === "split" ? 2 : 6;
+  const stable = all.slice(0, cap);
+  const active = all.find((target) => target.window === activeWindow);
+  if (active && !stable.some((target) => target.window === active.window)) {
+    stable[cap - 1] = active;
+  }
+  return stable;
+}
+
 /// Keep visible windows hot, retain recently viewed windows, then proactively warm unvisited
 /// live windows up to `capacity`. Visible windows are ordered first so CSS can place them in the
 /// active layout while the remaining panes stay mounted off-layout with their xterm state and

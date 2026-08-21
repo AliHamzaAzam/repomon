@@ -49,6 +49,19 @@ impl Registry {
         self.store.set_repo_hidden(id, hidden).await
     }
 
+    /// Set a repo's display label (shown instead of the folder name). `None` clears the override.
+    pub async fn set_label(&self, id: RepoId, label: Option<String>) -> Result<Repo> {
+        self.store.set_repo_label(id, label).await?;
+        self.store.get_repo(id).await
+    }
+
+    /// Persist a manual ordering. `ordered_ids` are assigned positions in list order; repos not
+    /// listed keep their previous position.
+    pub async fn reorder(&self, ordered_ids: Vec<RepoId>) -> Result<Vec<Repo>> {
+        self.store.set_repo_order(ordered_ids).await?;
+        self.store.list_repos().await
+    }
+
     pub async fn list(&self) -> Result<Vec<Repo>> {
         self.store.list_repos().await
     }

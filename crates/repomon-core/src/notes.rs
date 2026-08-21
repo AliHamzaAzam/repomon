@@ -141,6 +141,8 @@ mod tests {
             added_at: Utc::now(),
             worktree_root_template: None,
             hidden: false,
+            position: None,
+            label: None,
         }
     }
 

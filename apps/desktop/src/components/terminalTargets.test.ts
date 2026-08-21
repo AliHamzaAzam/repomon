@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   dedupe,
+  stableVisibleTargets,
   stabilizeTargets,
   warmTargetWindows,
   type PaneTarget,
@@ -84,6 +85,47 @@ describe("warmTargetWindows", () => {
     expect(warmTargetWindows(["gone", "a"], [target("b")], [target("a"), target("b")])).toEqual([
       "b",
       "a",
+    ]);
+  });
+});
+
+describe("stableVisibleTargets", () => {
+  const panes = ["a", "b", "c", "d"].map((window) => target(window));
+
+  it("keeps the fleet order in grid mode regardless of which pane is active", () => {
+    expect(stableVisibleTargets(panes, "c", "grid").map((t) => t.window)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("does not reorder when the selection moves between visible panes", () => {
+    const before = stableVisibleTargets(panes, "a", "grid");
+    const after = stableVisibleTargets(panes, "d", "grid");
+    expect(after.map((t) => t.window)).toEqual(before.map((t) => t.window));
+  });
+
+  it("caps the grid at six panes and swaps an unseen selection into the last slot", () => {
+    const many = ["a", "b", "c", "d", "e", "f", "g"].map((window) => target(window));
+    const visible = stableVisibleTargets(many, "g", "grid");
+    // "g" was beyond the cap, so it takes the last slot instead of being invisible.
+    expect(visible.map((t) => t.window)).toEqual(["a", "b", "c", "d", "e", "g"]);
+  });
+
+  it("caps split view at two panes with the same stability rule", () => {
+    expect(stableVisibleTargets(panes, "b", "split").map((t) => t.window)).toEqual(["a", "b"]);
+    const swapped = stableVisibleTargets(panes, "d", "split");
+    expect(swapped.map((t) => t.window)).toEqual(["a", "d"]);
+  });
+
+  it("returns panes without the active one when no window matches", () => {
+    expect(stableVisibleTargets(panes, null, "grid").map((t) => t.window)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
     ]);
   });
 });

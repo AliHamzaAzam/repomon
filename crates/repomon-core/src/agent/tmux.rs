@@ -58,6 +58,24 @@ pub struct WindowMeta {
 /// exposed to the same sanitization.)
 const PROBE_FIELD_SEP: &str = "%#%";
 
+/// The roomy grid every agent pane gets at spawn (and a brand-new session via `-x/-y`). Agents
+/// render their TUIs for wide terminals; a fresh pane must never inherit whatever small size the
+/// session happens to be in.
+pub const DEFAULT_PANE_COLS: u16 = 220;
+pub const DEFAULT_PANE_ROWS: u16 = 50;
+
+/// The smallest usable mediated-view grid. Below this an agent's TUI is unreadable and some
+/// (observed with opencode) misbehave outright, so `agent.resize` / `agent.fit` clamps to here
+/// rather than letting a momentary tiny client layout shrink a real agent to nothing.
+pub const MIN_PANE_COLS: u16 = 80;
+pub const MIN_PANE_ROWS: u16 = 24;
+
+/// Clamp a requested pane grid to the sane floor ([`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`]). Pure
+/// so the floor is unit-testable without a tmux server.
+pub fn clamp_pane_size(cols: u16, rows: u16) -> (u16, u16) {
+    (cols.max(MIN_PANE_COLS), rows.max(MIN_PANE_ROWS))
+}
+
 /// Where a resolved tmux binary originates and what path was resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTmux {
@@ -631,13 +649,15 @@ impl TmuxRuntime {
             ])?;
         } else {
             // A roomy detached size so the agent renders wide (vs the 80×24 default).
+            let cols = DEFAULT_PANE_COLS.to_string();
+            let rows = DEFAULT_PANE_ROWS.to_string();
             self.run(&[
                 "new-session",
                 "-d",
                 "-x",
-                "220",
+                &cols,
                 "-y",
-                "50",
+                &rows,
                 "-s",
                 &self.session,
                 "-n",
@@ -648,6 +668,13 @@ impl TmuxRuntime {
             ])?;
         }
         self.configure();
+        // Give the fresh window the roomy default grid explicitly. A `new-window` inherits the
+        // session's *current* size, which can be tiny (a mediated viewer shrank an earlier pane,
+        // or no client ever attached and the 80x24 floor applied) — an agent whose first paint
+        // lands in that box renders broken and some TUIs exit on the subsequent reflow storm.
+        // The desktop refits to the operator's viewport right after focusing; until then this is
+        // the same grid a brand-new session gets from `-x/-y` above.
+        let _ = self.resize_named(&window, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS);
         Ok(window)
     }
 
@@ -1305,6 +1332,17 @@ mod tests {
     fn quotes_for_shell() {
         assert_eq!(shell_quote("hello"), "'hello'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn pane_size_floor_clamps_tiny_grids_and_keeps_healthy_ones() {
+        // A mediated viewer reporting a momentary tiny layout must not shrink a real agent;
+        // each dimension is floored independently (103x18 keeps its width, gains rows).
+        assert_eq!(clamp_pane_size(20, 4), (MIN_PANE_COLS, MIN_PANE_ROWS));
+        assert_eq!(clamp_pane_size(103, 18), (103, MIN_PANE_ROWS));
+        // Healthy requests pass through unchanged.
+        assert_eq!(clamp_pane_size(211, 60), (211, 60));
+        assert_eq!(clamp_pane_size(120, 40), (120, 40));
     }
 
     #[test]

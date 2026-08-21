@@ -178,8 +178,7 @@ describe("Onboarding component", () => {
       path: "/Users/dev/repomon",
       added_at: "2026-08-01T00:00:00Z",
       worktree_root_template: null,
-      hidden: false,
-    };
+      hidden: false, position: null, label: null };
     const actions = createMockActions([mockRepo]);
     const onComplete = vi.fn();
     const onSkip = vi.fn();
@@ -199,7 +198,7 @@ describe("Onboarding component", () => {
     expect(screen.getByText("Add Your First Repository")).toBeInTheDocument();
     expect(screen.getByText("repomon")).toBeInTheDocument();
     expect(screen.getByText("/Users/dev/repomon")).toBeInTheDocument();
-    expect(screen.getByText("✓ 1 repo added")).toBeInTheDocument();
+    expect(screen.getByText("1 repo added")).toBeInTheDocument();
   });
 
   it("does NOT dismiss on Escape key", () => {

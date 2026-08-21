@@ -275,7 +275,7 @@ describe("System Health tab", () => {
     expect(screen.getByText("/usr/bin/git")).toBeInTheDocument();
     expect(screen.getByText("git version 2.44.0")).toBeInTheDocument();
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
-    expect(screen.getByText("✓ Detected")).toBeInTheDocument();
+    expect(screen.getByText("Detected")).toBeInTheDocument();
     expect(screen.getByText("Cursor Agent")).toBeInTheDocument();
     expect(screen.getByText("Not Found")).toBeInTheDocument();
   });

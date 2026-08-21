@@ -176,7 +176,10 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                   <span class="section-label">Core Runtime Dependencies</span>
                   <span class="text-[11px] font-mono text-muted">
                     {tmuxInfo().available && gitInfo().available ? (
-                      <span class="text-emerald-500 font-medium">✓ Ready for sessions</span>
+                      <span class="inline-flex items-center gap-1 text-emerald-500 font-medium">
+                        <IconCheck size={11} strokeWidth={2.5} />
+                        Ready for sessions
+                      </span>
                     ) : (
                       <span class="text-amber-500 font-medium">Attention needed</span>
                     )}
@@ -384,7 +387,12 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                                   : "bg-surface text-muted border border-line"
                               }`}
                             >
-                              {agent.detected ? "✓ Detected" : "Not Found"}
+                              <span class="inline-flex items-center gap-1">
+                                <Show when={agent.detected}>
+                                  <IconCheck size={11} strokeWidth={2.5} />
+                                </Show>
+                                {agent.detected ? "Detected" : "Not Found"}
+                              </span>
                             </span>
                           </div>
 

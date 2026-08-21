@@ -140,7 +140,7 @@ describe("Repomon desktop shell", () => {
         lanes: [],
         usage: [],
         terminals: [],
-        sortReposByActivity: null,
+        sortReposByActivity: null, sortMode: null,
       }),
       refreshUsage: async () => undefined,
       subscribe: async () => () => undefined,
@@ -177,11 +177,11 @@ describe("Repomon desktop shell", () => {
     localStorage.removeItem("repomon:onboarding-completed");
     const fleetSource: FleetSource = {
       load: async () => ({
-        repos: [{ id: 1, name: "repo-1", path: "/path/to/1", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false }],
+        repos: [{ id: 1, name: "repo-1", path: "/path/to/1", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null }],
         lanes: [],
         usage: [],
         terminals: [],
-        sortReposByActivity: null,
+        sortReposByActivity: null, sortMode: null,
       }),
       refreshUsage: async () => undefined,
       subscribe: async () => () => undefined,

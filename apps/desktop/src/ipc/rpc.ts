@@ -93,6 +93,8 @@ export interface ConfigView {
   usage_probe: boolean;
   expand_agents: boolean;
   sort_repos_by_activity: boolean;
+  /** "default" | "activity" | "manual" — resolved daemon-side from the setting + legacy boolean. */
+  sort_mode?: string;
   embedded_pty: boolean;
   orchestrator_agent?: string | null;
   orchestrator_model?: string | null;
@@ -134,6 +136,8 @@ interface RpcMap {
   "repo.add": { params: { path: string }; result: Repo };
   "repo.remove": { params: { repo_id: number }; result: null };
   "repo.set_hidden": { params: { repo_id: number; hidden: boolean }; result: null };
+  "repo.rename": { params: { repo_id: number; label: string }; result: Repo };
+  "repo.reorder": { params: { ordered_ids: number[] }; result: Repo[] };
   "approval.record": {
     params: { repo: string; command: string; verdict: string };
     result: { pattern: string | null; approvals: number; rule_exists: boolean; propose: boolean };

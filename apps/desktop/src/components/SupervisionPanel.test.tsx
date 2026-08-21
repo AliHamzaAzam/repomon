@@ -81,7 +81,7 @@ function defaultEffective(overrides?: Partial<SupervisionPolicy>): SupervisionPo
 function sampleLane(id = 7): Lane {
   return {
     id,
-    repo: { id: 1, name: "repo-1", path: "/code/repo-1", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false },
+    repo: { id: 1, name: "repo-1", path: "/code/repo-1", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null },
     worktree: { id: 1, repo_id: 1, path: "/code/repo-1-wt/feat", branch: "feat/supervision", head: "abc1234", is_main: false, name: "feat" },
     state: {
       worktree_id: 1,

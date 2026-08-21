@@ -1401,11 +1401,21 @@ export default function SettingsModal(props: SettingsModalProps) {
                 {/* 4. Layout & Visual Preferences */}
                 <section class="space-y-3 border-t border-line/70 pt-5">
                   <p class="section-label">Sidebar & Layout</p>
-                  <Switch
-                    label="Sort projects by activity"
-                    checked={Boolean(settings().sort_repos_by_activity)}
-                    onChange={(value) => patch({ sort_repos_by_activity: value })}
+                  <Select
+                    label="Order projects"
+                    value={settings().sort_mode ?? (settings().sort_repos_by_activity ? "activity" : "default")}
+                    options={[
+                      { value: "default", label: "Default" },
+                      { value: "activity", label: "Recent activity" },
+                      { value: "manual", label: "Manual" },
+                    ]}
+                    onChange={(value) => patch({ sort_mode: value })}
                   />
+                  <Show when={settings().sort_mode === "manual"}>
+                    <p class="text-xs text-muted">
+                      Drag project headers in the sidebar to arrange them. Right-click a project to rename it.
+                    </p>
+                  </Show>
                 </section>
               </div>
             </Show>

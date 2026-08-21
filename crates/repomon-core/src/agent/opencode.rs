@@ -154,6 +154,11 @@ fn summarize(
     } else {
         AgentStatus::Running
     };
+    // The latest assistant text is what the daemon's transcript↔window pairing fingerprints
+    // against the pane capture. Without it an OpenCode session can never prove which window it
+    // drives, so once it stops being fresh it silently drops out of the overlay instead of
+    // staying classified.
+    let last_message = latest_text(conn, &session_id).map(|t| truncate(&t, 200));
     Some(TranscriptSummary {
         kind: AgentKind::OpenCode,
         manifest_path: path.to_path_buf(),
@@ -162,11 +167,42 @@ fn summarize(
         tool_call_count,
         status,
         title,
-        last_message: error.then(|| "OpenCode session ended with an error".to_string()),
+        last_message: error
+            .then(|| "OpenCode session ended with an error".to_string())
+            .or(last_message),
         config_dir: None,
         session_id: Some(session_id),
         ended_turn,
     })
+}
+
+/// The newest assistant message text for a session (its parts carry the actual prose), or None.
+fn latest_text(conn: &Connection, session_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT p.data FROM part p JOIN message m ON p.message_id = m.id \
+         WHERE p.session_id = ?1 AND json_extract(m.data, '$.role') = 'assistant' \
+         AND json_extract(p.data, '$.type') = 'text' \
+         ORDER BY p.time_created DESC LIMIT 1",
+        params![session_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|value| {
+        value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(n.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
 }
 
 #[cfg(test)]
@@ -178,7 +214,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session(id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER);\n\
              CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);\n\
-             CREATE TABLE part(id TEXT, session_id TEXT, data TEXT);",
+             CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
         )
         .unwrap();
         let now = Utc::now().timestamp_millis();
@@ -193,8 +229,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO part VALUES('part-1', 'ses-1', ?1)",
-            params![r#"{"type":"tool","state":{"status":"completed"}}"#],
+            "INSERT INTO part VALUES('part-0', 'msg-1', 'ses-1', ?1, ?2)",
+            params![now - 10, r#"{"type":"text","text":"Working on it now."}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES('part-1', 'msg-1', 'ses-1', ?1, ?2)",
+            params![now, r#"{"type":"tool","state":{"status":"completed"}}"#],
         )
         .unwrap();
     }
@@ -210,7 +251,59 @@ mod tests {
         assert_eq!(summary.kind, AgentKind::OpenCode);
         assert_eq!(summary.status, AgentStatus::Waiting);
         assert!(summary.ended_turn);
+        // The latest assistant text is surfaced so the daemon can fingerprint the transcript
+        // against its pane capture (and notifications can show why).
+        assert_eq!(summary.last_message.as_deref(), Some("Working on it now."));
         assert_eq!(summary.tool_call_count, 1);
+    }
+
+    #[test]
+    fn last_message_is_truncated() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("opencode.db");
+        fixture(&db, temp.path());
+        let long = "x".repeat(400);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES('part-long', 'msg-1', 'ses-1', ?1, ?2)",
+            params![
+                Utc::now().timestamp_millis() - 5,
+                format!(r#"{{"type":"text","text":"{long}"}}"#)
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", &db) };
+        let summary = summary_for(temp.path()).unwrap();
+        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        let msg = summary.last_message.unwrap();
+        assert_eq!(msg.chars().count(), 200);
+        assert!(msg.ends_with("..."));
+    }
+
+    #[test]
+    fn user_messages_never_become_the_last_assistant_word() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("opencode.db");
+        fixture(&db, temp.path());
+        // A later user message must not override the assistant text.
+        let conn = Connection::open(&db).unwrap();
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO message VALUES('msg-2', 'ses-1', ?1, ?2)",
+            params![now + 5, r#"{"role":"user"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES('part-user', 'msg-2', 'ses-1', ?1, ?2)",
+            params![now + 5, r#"{"type":"text","text":"please ignore this"}"#],
+        )
+        .unwrap();
+        drop(conn);
+        unsafe { std::env::set_var("REPOMON_OPENCODE_DB", &db) };
+        let summary = summary_for(temp.path()).unwrap();
+        unsafe { std::env::remove_var("REPOMON_OPENCODE_DB") };
+        assert_eq!(summary.last_message.as_deref(), Some("Working on it now."));
     }
 
     #[test]
