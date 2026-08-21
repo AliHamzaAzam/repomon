@@ -16,6 +16,7 @@ import {
   terminalPointerCell,
   translateKeyboardKey,
   watchTerminal,
+  watchTerminalGrid,
   wheelLines,
   type TerminalRenderer,
   type TerminalTarget,
@@ -104,6 +105,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let wheelFrame: number | undefined;
   let visibilityFrame: number | undefined;
   let stopWatch: (() => Promise<void>) | undefined;
+  let stopGridWatch: (() => void) | undefined;
   let syncSize: (() => Promise<void>) | undefined;
   let rendererEpoch = 0;
   let disposed = false;
@@ -513,6 +515,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
       window.addEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
 
       try {
+        const stopGrid = await watchTerminalGrid(target, ({ cols, rows }) => {
+          applyGrid(cols, rows);
+        });
+        if (disposed) {
+          stopGrid();
+          return;
+        }
+        stopGridWatch = stopGrid;
         const watch = await watchTerminal(
           target,
           (bytes) => {
@@ -586,6 +596,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
     input = undefined;
     void stopWatch?.();
     stopWatch = undefined;
+    stopGridWatch?.();
+    stopGridWatch = undefined;
     webgl?.dispose();
     webgl = undefined;
     fit = undefined;

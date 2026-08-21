@@ -1,6 +1,12 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import { DaemonRpcError, daemonCall, isRpcFailure } from "./rpc";
+import {
+  DaemonRpcError,
+  daemonCall,
+  isRpcFailure,
+  subscribeDaemon,
+  type DaemonEvent,
+} from "./rpc";
 
 export type TerminalRenderer = "auto" | "webgl" | "dom";
 
@@ -14,6 +20,37 @@ export interface TermWatchAck {
   rows: number | null;
   generation: number | null;
   sequence: number | null;
+}
+
+export interface TerminalGrid {
+  cols: number;
+  rows: number;
+}
+
+type DaemonSubscriber = (
+  onEvent: (event: DaemonEvent) => void,
+) => Promise<() => void>;
+
+/// Follow authoritative grid changes made by another viewer of this shared pane. Raw PTY bytes
+/// are meaningful only at the pane width that produced them; applying the new grid immediately
+/// keeps xterm's cursor-relative redraws aligned without waiting for this window to be resized.
+export function watchTerminalGrid(
+  target: TerminalTarget,
+  onGrid: (grid: TerminalGrid) => void,
+  subscribe: DaemonSubscriber = subscribeDaemon,
+): Promise<() => void> {
+  return subscribe((event) => {
+    if (event.method !== "event.agent.grid") return;
+    const params = event.params as Partial<{
+      lane_id: number;
+      window: string;
+      cols: number;
+      rows: number;
+    }>;
+    if (params.lane_id !== target.laneId || params.window !== target.window) return;
+    if (!params.cols || !params.rows) return;
+    onGrid({ cols: params.cols, rows: params.rows });
+  });
 }
 
 export interface TranslatedKey {

@@ -22,6 +22,8 @@ pub mod topic {
     pub const AGENT_OUTPUT: &str = "event.agent.output";
     /// Raw PTY bytes (base64) from the byte-watched pane — the embedded renderer's feed.
     pub const AGENT_BYTES: &str = "event.agent.bytes";
+    /// The authoritative cell grid after a mediated viewer resized a shared agent pane.
+    pub const AGENT_GRID: &str = "event.agent.grid";
     pub const AGENT_STATUS: &str = "event.agent.status";
     /// A custom agent was added/removed, or the default changed (config mutated).
     pub const AGENT_CHANGED: &str = "event.agent.changed";
@@ -45,8 +47,9 @@ pub const SUPERVISION_CHANGED: &str = topic::SUPERVISION_CHANGED;
 /// connections that actually asked for them. All state read here lives behind `std::sync::Mutex`es,
 /// so the check adds no `await` on the event-forward hot path.
 ///
-/// - `event.agent.bytes` (A4): forwards only when its `window` param is in `watched`; a bytes event
-///   with no `window` goes to nobody.
+/// - `event.agent.bytes` / `event.agent.grid` (A4): forward only when their `window` param is in
+///   `watched`; an event with no `window` goes to nobody. Grid notifications follow the byte watch
+///   because only an embedded renderer can become stale when another viewer reflows the pane.
 /// - `event.agent.output` (A5): forwards when its `lane_id` is in the connection's viewport
 ///   `output_lanes` OR its `window` is in `output_windows` — i.e. lane-membership or the terminal
 ///   window the client put in its viewport. This is what the client literally requested via
@@ -65,7 +68,7 @@ pub fn deliver_to(
     let method = value.get("method").and_then(Value::as_str);
     let params = value.get("params");
     match method {
-        Some(topic::AGENT_BYTES) => {
+        Some(topic::AGENT_BYTES) | Some(topic::AGENT_GRID) => {
             match params.and_then(|p| p.get("window")).and_then(Value::as_str) {
                 Some(window) => watched.contains(window),
                 None => false,
@@ -133,6 +136,18 @@ mod tests {
         let ev = json!({ "method": topic::AGENT_BYTES, "params": { "data": "x" } });
         let (_, ol, ow) = nothing();
         assert!(!deliver_to(&ev, &windows(&["lane-1"]), &ol, &ow));
+    }
+
+    #[test]
+    fn grid_changes_forward_only_to_watchers_of_that_window() {
+        let ev = json!({
+            "method": topic::AGENT_GRID,
+            "params": { "lane_id": 1, "window": "lane-1", "cols": 120, "rows": 40 }
+        });
+        let (_, ol, ow) = nothing();
+        assert!(deliver_to(&ev, &windows(&["lane-1"]), &ol, &ow));
+        assert!(!deliver_to(&ev, &windows(&["lane-2"]), &ol, &ow));
+        assert!(!deliver_to(&ev, &windows(&[]), &ol, &ow));
     }
 
     #[test]

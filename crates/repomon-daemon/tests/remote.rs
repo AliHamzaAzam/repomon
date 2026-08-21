@@ -10,7 +10,7 @@ use repomon_core::agent::backend::SpawnSpec;
 use repomon_core::{Config, Store, TmuxRuntime};
 use repomon_daemon::bytes_stream::WatchEntry;
 use repomon_daemon::conn::{ConnKind, ConnSession};
-use repomon_daemon::{Ctx, remote, rpc};
+use repomon_daemon::{Ctx, pubsub, remote, rpc};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
@@ -960,6 +960,7 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     };
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
+    let mut events = ctx.events.subscribe();
 
     // A real, uncontested window for the apply case.
     let cwd = std::env::temp_dir();
@@ -1005,6 +1006,13 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         json!(false),
         "A must not resize a window B freshly owns and drove"
     );
+    assert!(
+        matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a denied fit must not announce a grid change"
+    );
 
     // A fits the uncontested real window → applied.
     let applied = rpc::dispatch(
@@ -1019,6 +1027,33 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         applied["applied"],
         json!(true),
         "A resizes a window nobody else owns"
+    );
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("grid-change event timeout")
+        .expect("grid-change event");
+    assert_eq!(event["method"], json!(pubsub::topic::AGENT_GRID));
+    assert_eq!(
+        event["params"],
+        json!({ "lane_id": 2, "window": "lane-2", "cols": 100, "rows": 30 })
+    );
+
+    rpc::dispatch(
+        &ctx,
+        &a,
+        "agent.resize",
+        Some(json!({ "lane_id": 2, "window": "lane-2", "cols": 101, "rows": 31 })),
+    )
+    .await
+    .unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("resize grid-change event timeout")
+        .expect("resize grid-change event");
+    assert_eq!(event["method"], json!(pubsub::topic::AGENT_GRID));
+    assert_eq!(
+        event["params"],
+        json!({ "lane_id": 2, "window": "lane-2", "cols": 101, "rows": 31 })
     );
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())

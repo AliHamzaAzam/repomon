@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DaemonRpcError } from "./rpc";
 import {
@@ -8,6 +8,7 @@ import {
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
+  watchTerminalGrid,
   wheelLines,
 } from "./term";
 
@@ -51,6 +52,40 @@ describe("createTerminalFrameGate", () => {
     gate.open();
     gate.push(Uint8Array.of(2));
     expect(seen).toEqual([]);
+  });
+});
+
+describe("watchTerminalGrid", () => {
+  it("applies a matching pane grid change without a local resize event", async () => {
+    let listener: ((event: {
+      jsonrpc: "2.0";
+      method: `event.${string}`;
+      params: unknown;
+    }) => void) | undefined;
+    const apply = vi.fn();
+    const stop = await watchTerminalGrid(
+      { laneId: 7, window: "lane-7-2" },
+      apply,
+      async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+    );
+
+    listener?.({
+      jsonrpc: "2.0",
+      method: "event.agent.grid",
+      params: { lane_id: 7, window: "lane-7-2", cols: 132, rows: 38 },
+    });
+    expect(apply).toHaveBeenCalledWith({ cols: 132, rows: 38 });
+
+    listener?.({
+      jsonrpc: "2.0",
+      method: "event.agent.grid",
+      params: { lane_id: 7, window: "lane-7", cols: 80, rows: 24 },
+    });
+    expect(apply).toHaveBeenCalledTimes(1);
+    stop();
   });
 });
 

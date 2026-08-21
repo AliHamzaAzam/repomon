@@ -1353,6 +1353,42 @@ fn message_event(message: &repomon_core::model::FleetMessage) -> Value {
     })
 }
 
+/// Resize a shared agent pane and notify every byte-watching renderer when its authoritative grid
+/// actually changed. The caller still receives its normal RPC response; this additive event closes
+/// the gap for other viewers, whose xterm instances would otherwise keep parsing repaint bytes at
+/// the old width until their own container happened to resize.
+async fn resize_agent_grid(
+    ctx: &Ctx,
+    lane_id: repomon_core::model::LaneId,
+    window: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<(), RpcError> {
+    let backend = ctx.backend.clone();
+    let resize_window = window.to_string();
+    let before = tokio::task::spawn_blocking(move || {
+        let before = backend.size_named(&resize_window);
+        backend.resize_named(&resize_window, cols, rows)?;
+        Ok::<_, repomon_core::Error>(before)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+
+    if before != Some((cols, rows)) {
+        ctx.broadcast(
+            crate::pubsub::topic::AGENT_GRID,
+            json!({
+                "lane_id": lane_id,
+                "window": window,
+                "cols": cols,
+                "rows": rows,
+            }),
+        );
+    }
+    Ok(())
+}
+
 /// Dispatch a single request to its handler.
 pub async fn dispatch(
     ctx: &Ctx,
@@ -3555,16 +3591,12 @@ pub async fn dispatch(
         }
         "agent.resize" => {
             let p: AgentResize = parse(params)?;
-            let tmux = ctx.backend.clone();
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             // Clamp to a sane floor so a momentary tiny layout can't shrink the agent to nothing.
             let (cols, rows) = (p.cols.max(20), p.rows.max(4));
-            tokio::task::spawn_blocking(move || tmux.resize_named(&window, cols, rows))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
+            resize_agent_grid(ctx, p.lane_id, &window, cols, rows).await?;
             Ok(Value::Null)
         }
         "agent.fit" => {
@@ -3594,12 +3626,7 @@ pub async fn dispatch(
                 }));
             }
             let (cols, rows) = (p.cols.max(20), p.rows.max(4));
-            let tmux = ctx.backend.clone();
-            let w = window.clone();
-            tokio::task::spawn_blocking(move || tmux.resize_named(&w, cols, rows))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
+            resize_agent_grid(ctx, p.lane_id, &window, cols, rows).await?;
             // The applied fit is this connection's most recent agent-driving act — stamp it so a
             // later remote peer's fit yields to us (last-interaction-wins). Denied fits don't stamp.
             *sess.last_interaction.lock().await = Some(now);
