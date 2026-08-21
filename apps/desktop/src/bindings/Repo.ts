@@ -14,7 +14,7 @@ hidden: boolean,
  * Manual-order position assigned by a full reorder (`repo.reorder`). `None` keeps the repo
  * in the legacy name order; listings sort positioned repos first, then the rest by name.
  */
-position: bigint | null, 
+position: number, 
 /**
  * Optional display-name override shown instead of the folder name. `None` (or empty) means
  * clients fall back to `name`.
