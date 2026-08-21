@@ -15,6 +15,8 @@ export interface FleetSnapshot {
   sortReposByActivity: boolean | null;
   /// Resolved repo sort mode ("default" | "activity" | "manual"). Null when config.get failed.
   sortMode: string | null;
+  /// Resolved per-lane agent tab sort mode ("activity" | "manual"). Null when config.get failed.
+  tabSortMode: string | null;
 }
 
 export interface FleetSource {
@@ -39,6 +41,8 @@ export const daemonFleetSource: FleetSource = {
       terminals,
       sortReposByActivity: config ? Boolean(config.sort_repos_by_activity) : null,
       sortMode: config && typeof config.sort_mode === "string" ? config.sort_mode : null,
+      tabSortMode:
+        config && typeof config.tab_sort_mode === "string" ? config.tab_sort_mode : null,
     };
   },
   refreshUsage: async () => {
@@ -249,6 +253,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   // Mirrors the daemon's repo sort mode, refreshed with every poll so a change made in the TUI
   // lands here too. Falls back to the legacy boolean for daemons that predate `sort_mode`.
   const [sortMode, setSortMode] = createSignal<RepoSortMode>("default");
+  // Mirrors the daemon's per-lane agent tab sort mode ("activity" | "manual").
+  const [tabSortMode, setTabSortMode] = createSignal<"activity" | "manual">("activity");
   // The daemon keeps returning hidden repos (flagged) so we can offer a way back; everything that
   // renders the fleet works from `visibleRepos` / `visibleLanes` / `unhiddenLanes` instead.
   const visibleRepos = createMemo(() =>
@@ -293,6 +299,9 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
         setSortMode(snapshot.sortMode);
       } else if (snapshot.sortReposByActivity !== null) {
         setSortMode(snapshot.sortReposByActivity ? "activity" : "default");
+      }
+      if (snapshot.tabSortMode === "manual" || snapshot.tabSortMode === "activity") {
+        setTabSortMode(snapshot.tabSortMode);
       }
       setSynced(true);
       setError(null);
@@ -380,6 +389,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     synced,
     error,
     sortMode,
+    tabSortMode,
     dismissError: () => setError(null),
     visibleLanes,
     counts,

@@ -98,6 +98,18 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     }
   }
 
+  /// Persist a lane's manual agent-tab ordering (transcript session ids, in tab order). Only
+  /// meaningful while the tab sort mode is "manual"; the daemon re-applies it on every overlay.
+  async function setAgentTabOrder(laneId: number, orderedSessionIds: string[]) {
+    setError(null);
+    try {
+      await daemonCall("agent.set_tab_order", { lane_id: laneId, ordered_ids: orderedSessionIds });
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   /// Deleting a playbook throws away procedural memory that took real work to earn, so it asks
   /// first. Approving does not: reading the content and clicking Approve is itself the review.
   function confirmPlaybookDelete(name: string, onConfirm: () => Promise<void>) {
@@ -261,6 +273,7 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     setRepoHidden,
     renameRepo,
     reorderRepos,
+    setAgentTabOrder,
     confirmPlaybookDelete,
     notesRepo,
     openRepoNotes,

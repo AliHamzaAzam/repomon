@@ -173,6 +173,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "expand_agents": cfg.expand_agents,
         "sort_repos_by_activity": cfg.sort_repos_by_activity,
         "sort_mode": cfg.sort_mode(),
+        "tab_sort_mode": cfg.tab_sort_mode(),
         "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
@@ -932,6 +933,8 @@ struct ConfigSet {
     #[serde(default)]
     sort_mode: Option<String>,
     #[serde(default)]
+    tab_sort_mode: Option<String>,
+    #[serde(default)]
     embedded_pty: Option<bool>,
     #[serde(default)]
     orchestrator_agent: Option<String>,
@@ -1019,6 +1022,12 @@ struct SessionRename {
     /// The new label; `None`/absent or empty clears it.
     #[serde(default)]
     label: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentSetTabOrder {
+    lane_id: repomon_core::model::LaneId,
+    /// The lane's sessions in the desired tab order (transcript session ids).
+    ordered_ids: Vec<String>,
 }
 #[derive(Deserialize)]
 struct AgentTranscript {
@@ -2942,6 +2951,16 @@ pub async fn dispatch(
                         other => return Err(internal(format!("unknown sort_mode {other:?}"))),
                     }
                 }
+                if let Some(mode) = p.tab_sort_mode {
+                    match mode.as_str() {
+                        "activity" | "manual" => {
+                            let parsed: repomon_core::config::TabSortMode =
+                                serde_json::from_value(json!(mode)).map_err(internal)?;
+                            cfg.tab_sort_mode = Some(parsed);
+                        }
+                        other => return Err(internal(format!("unknown tab_sort_mode {other:?}"))),
+                    }
+                }
                 if let Some(b) = p.embedded_pty {
                     cfg.embedded_pty = b;
                 }
@@ -4106,6 +4125,19 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
+        // Persist a lane's manual agent-tab ordering (used when `tab_sort_mode` is `manual`).
+        // The overlay re-applies the stored order to `lane.agent_sessions` on every rebuild, so
+        // every client sees the same arrangement.
+        "agent.set_tab_order" => {
+            let p: AgentSetTabOrder = parse(params)?;
+            ctx.store
+                .set_agent_session_order(p.lane_id, p.ordered_ids)
+                .await
+                .map_err(internal)?;
+            ctx.invalidate_overlay().await;
+            Ok(Value::Null)
+        }
+
         // ---- repomind orchestrator (a single daemon-owned `claude` session) ----
         "orchestrator.status" => {
             // A window killed externally would otherwise still read as running; reconcile first.
@@ -4752,6 +4784,17 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let metas = ctx.store.list_lane_meta().await.unwrap_or_default();
     // User-set session labels (keyed by transcript session_id), overlaid below.
     let labels = ctx.store.list_session_labels().await.unwrap_or_default();
+    // Manual per-lane agent-tab order, only fetched when that mode is active (one query saved
+    // on every overlay tick otherwise).
+    let manual_tab_orders =
+        if ctx.config.read().await.tab_sort_mode() == repomon_core::config::TabSortMode::Manual {
+            ctx.store
+                .list_agent_session_orders()
+                .await
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
     // Auto-generated session labels from the local LLM subsystem.
     let generated_labels = ctx
         .store
@@ -5032,6 +5075,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     generated_label: None,
                 });
             }
+        }
+
+        // Manual tab mode: reorder the lane's sessions by the persisted arrangement before the
+        // wire format is produced, so every client (TUI, desktop, MCP digest) agrees.
+        if let Some(order) = manual_tab_orders.get(&lane.id) {
+            apply_session_order(&mut lane.agent_sessions, order);
         }
 
         // Overlay usage-limit pauses onto the managed sessions, one per paused slot window.
@@ -5438,6 +5487,27 @@ fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
     }
     // Byte slicing is safe: the normalized form is pure ASCII.
     Some(n[n.len().saturating_sub(FINGERPRINT_LEN)..].to_string())
+}
+
+/// Reorder `sessions` in place to match a persisted manual tab order (transcript session ids).
+///
+/// Sessions named in `order` come first, in that order; sessions the order doesn't mention (a
+/// freshly spawned agent, placeholders with no transcript id yet) keep their relative wire
+/// order and append — like browser tabs, new tabs open at the end. A stable sort keeps this
+/// deterministic even when the same session appears twice in `order` (the first entry wins).
+fn apply_session_order(sessions: &mut [repomon_core::model::AgentSession], order: &[String]) {
+    let position: std::collections::HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, sid)| (sid.as_str(), i))
+        .collect();
+    sessions.sort_by_key(|session| {
+        session
+            .session_id
+            .as_deref()
+            .and_then(|sid| position.get(sid).copied())
+            .unwrap_or(usize::MAX)
+    });
 }
 
 /// Which stamps the pane evidence supports: each candidate with a fingerprint is stamped on
@@ -8546,6 +8616,74 @@ mod tests {
         let kept =
             select_kept_summaries(vec![tsum("b", t(3)), tsum("a", t(1))], &bound, 1, t(1000));
         assert_eq!(kept.len(), 2);
+    }
+
+    fn tsession(sid: &str) -> repomon_core::model::AgentSession {
+        let mut s = repomon_core::model::AgentSession {
+            id: 0,
+            agent: AgentKind::ClaudeCode,
+            repo_id: 1,
+            worktree_id: Some(1),
+            started_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+            ended_at: None,
+            manifest_path: std::path::PathBuf::new(),
+            tool_call_count: 0,
+            title: None,
+            status: AgentStatus::Idle,
+            external: false,
+            session_id: Some(sid.to_string()),
+            resume_at: None,
+            inferred: false,
+            tmux_window: None,
+            last_message: None,
+            pending_prompt: None,
+            pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            subagent_running: None,
+            ended_turn: true,
+            gate: None,
+            config_dir: None,
+            custom_label: None,
+            generated_label: None,
+        };
+        s.id = 0;
+        s
+    }
+
+    #[test]
+    fn apply_session_order_reorders_known_and_appends_unknown() {
+        let mut sessions = vec![tsession("a"), tsession("b"), tsession("c")];
+        apply_session_order(&mut sessions, &["c".to_string(), "a".to_string()]);
+        let sids: Vec<_> = sessions
+            .iter()
+            .map(|s| s.session_id.clone().unwrap())
+            .collect();
+        assert_eq!(sids, ["c", "a", "b"]);
+
+        // Sessions with no transcript id at all (placeholders) also append in wire order.
+        let mut mixed = vec![
+            tsession("a"),
+            {
+                let mut p = tsession("x");
+                p.session_id = None;
+                p
+            },
+            tsession("b"),
+        ];
+        apply_session_order(&mut mixed, &["b".to_string(), "a".to_string()]);
+        let sids: Vec<_> = mixed.iter().map(|s| s.session_id.clone()).collect();
+        assert_eq!(sids, [Some("b".into()), Some("a".into()), None]);
+
+        // An empty order is a no-op.
+        let mut untouched = vec![tsession("a"), tsession("b")];
+        apply_session_order(&mut untouched, &[]);
+        let sids: Vec<_> = untouched
+            .iter()
+            .map(|s| s.session_id.clone().unwrap())
+            .collect();
+        assert_eq!(sids, ["a", "b"]);
     }
 
     #[test]

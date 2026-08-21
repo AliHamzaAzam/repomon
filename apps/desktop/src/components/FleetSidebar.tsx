@@ -10,8 +10,10 @@ import {
   notifyLayoutChanged,
 } from "../stores/uiSettings";
 import { primarySession } from "./agentLabel";
+import { agentSessionTitle } from "./LaneAgentRosterPopover";
 import { formatResetAt } from "./resetTime";
 import Modal from "./Modal";
+import { reorderAround } from "./ordering";
 import RepoExtMenu from "./RepoExtMenu";
 import {
   AgentIcon,
@@ -82,6 +84,9 @@ function LaneRow(props: {
   collapsed?: boolean;
   toggleCollapse?: () => void;
   onSelectAgent?: (lane: Lane, session: AgentSession) => void;
+  tabsReorderable?: boolean;
+  onReorderTabs?: (laneId: number, orderedSessionIds: string[]) => void;
+  onRenameAgent?: (session: AgentSession) => void;
 }) {
   let rowRef: HTMLButtonElement | undefined;
   const [isHovered, setIsHovered] = createSignal(false);
@@ -311,6 +316,9 @@ function LaneRow(props: {
             onSelectAgent={handleSelectAgent}
             onMouseEnter={onPopoverMouseEnter}
             onMouseLeave={onPopoverMouseLeave}
+            reorderable={props.tabsReorderable}
+            onReorderTabs={(ids) => props.onReorderTabs?.(props.lane.id, ids)}
+            onRenameAgent={props.onRenameAgent}
           />
         </>
       }
@@ -381,23 +389,6 @@ function loadHiddenSectionCollapsed(): boolean {
 export function repoDisplayName(repo: Pick<Repo, "name" | "label">): string {
   const label = repo.label?.trim();
   return label || repo.name;
-}
-
-/// Move `dragged` to sit just `after` (or before) `target` in `ids`, returning the new order
-/// (a no-op returns null so callers can skip the RPC). Pure so the reorder math is unit-testable.
-export function reorderAround(
-  ids: number[],
-  dragged: number,
-  target: number,
-  after: boolean,
-): number[] | null {
-  if (dragged === target) return null;
-  const without = ids.filter((id) => id !== dragged);
-  let at = without.indexOf(target);
-  if (at < 0) return null;
-  if (after) at += 1;
-  without.splice(at, 0, dragged);
-  return without;
 }
 
 /// Rename a repo's sidebar display. The folder name on disk never changes — this sets a label
@@ -564,6 +555,19 @@ export default function FleetSidebar(props: FleetSidebarProps) {
 
   // Manual ordering is only draggable in that mode; activity/default orders are daemon-computed.
   const manualMode = () => props.fleet.sortMode() === "manual";
+  const tabsReorderable = () => props.fleet.tabSortMode() === "manual";
+
+  const handleReorderTabs = (laneId: number, orderedSessionIds: string[]) => {
+    void props.actions.setAgentTabOrder(laneId, orderedSessionIds);
+  };
+
+  const handleRenameAgent = (session: AgentSession) => {
+    if (!session.session_id) return;
+    props.actions.rename({
+      sessionId: session.session_id,
+      current: agentSessionTitle(session),
+    });
+  };
 
   const onRepoDragStart = (repo: Repo, event: DragEvent) => {
     if (!manualMode()) return;
@@ -795,6 +799,9 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             collapsed={isLaneCollapsed(lane)}
                             toggleCollapse={() => toggleLaneCollapsed(lane.id)}
                             onSelectAgent={handleSelectAgent}
+                            tabsReorderable={tabsReorderable()}
+                            onReorderTabs={handleReorderTabs}
+                            onRenameAgent={handleRenameAgent}
                           />
                         )}
                       </For>

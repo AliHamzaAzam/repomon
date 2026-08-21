@@ -58,6 +58,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         19,
         include_str!("../../migrations/0019_repo_position_label.sql"),
     ),
+    (
+        20,
+        include_str!("../../migrations/0020_agent_session_order.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -580,6 +584,52 @@ impl Store {
             for row in rows {
                 let (k, v) = row?;
                 out.insert(k, v);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    // ---- agent tab order -------------------------------------------------------
+
+    /// Persist a lane's manual agent-tab ordering: `ordered_session_ids` are assigned dense
+    /// positions in one transaction (the lane's previous order is replaced wholesale, so stale
+    /// entries for exited sessions never linger).
+    pub async fn set_agent_session_order(
+        &self,
+        lane_id: LaneId,
+        ordered_session_ids: Vec<String>,
+    ) -> Result<()> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            tx.execute("DELETE FROM agent_session_order WHERE lane_id = ?1", params![lane_id])?;
+            for (index, sid) in ordered_session_ids.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO agent_session_order(lane_id, session_id, position) VALUES(?1, ?2, ?3)",
+                    params![lane_id, sid, index as i64],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Every lane's manual tab order, as `lane_id -> [session_id in tab order]`.
+    pub async fn list_agent_session_orders(
+        &self,
+    ) -> Result<std::collections::HashMap<LaneId, Vec<String>>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT lane_id, session_id FROM agent_session_order ORDER BY lane_id, position",
+            )?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, LaneId>(0)?, r.get::<_, String>(1)?)))?;
+            let mut out: std::collections::HashMap<LaneId, Vec<String>> =
+                std::collections::HashMap::new();
+            for row in rows {
+                let (lane_id, sid) = row?;
+                out.entry(lane_id).or_default().push(sid);
             }
             Ok(out)
         })
@@ -2727,6 +2777,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_session_order_round_trip_and_replace() {
+        let s = store().await;
+
+        // Empty until written.
+        assert!(s.list_agent_session_orders().await.unwrap().is_empty());
+
+        s.set_agent_session_order(7, vec!["c".into(), "a".into(), "b".into()])
+            .await
+            .unwrap();
+        let orders = s.list_agent_session_orders().await.unwrap();
+        assert_eq!(
+            orders.get(&7).unwrap(),
+            &vec!["c".to_string(), "a".to_string(), "b".to_string()]
+        );
+
+        // A second lane's order is independent.
+        s.set_agent_session_order(9, vec!["z".into()])
+            .await
+            .unwrap();
+
+        // Rewriting a lane replaces its rows wholesale (no stale entries pile up).
+        s.set_agent_session_order(7, vec!["b".into(), "c".into()])
+            .await
+            .unwrap();
+        let orders = s.list_agent_session_orders().await.unwrap();
+        assert_eq!(
+            orders.get(&7).unwrap(),
+            &vec!["b".to_string(), "c".to_string()]
+        );
+        assert_eq!(orders.get(&9).unwrap(), &vec!["z".to_string()]);
+    }
+
+    #[tokio::test]
     async fn repo_order_and_label_round_trip() {
         let s = store().await;
         let a = s
@@ -3241,7 +3324,7 @@ mod tests {
     fn migration_18_applies_from_17() {
         // Staged DB from version 17
         let mut c17 = Connection::open_in_memory().unwrap();
-        for (target, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 2) {
+        for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 17) {
             let tx = c17.transaction().unwrap();
             tx.execute_batch(sql).unwrap();
             tx.pragma_update(None, "user_version", target).unwrap();
@@ -3276,17 +3359,19 @@ mod tests {
 
     #[test]
     fn migration_19_applies_fresh_and_from_18() {
-        // Fresh DB reaches version 19
+        // Fresh DB reaches the newest version
         let mut c = Connection::open_in_memory().unwrap();
         init(&mut c).unwrap();
+        let newest = MIGRATIONS.iter().map(|(v, _)| *v).max().unwrap();
         let version: i64 = c
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 19);
+        assert_eq!(version, newest);
+        assert!(newest >= 19);
 
         // Staged DB from version 18
         let mut c18 = Connection::open_in_memory().unwrap();
-        for (target, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+        for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 18) {
             let tx = c18.transaction().unwrap();
             tx.execute_batch(sql).unwrap();
             tx.pragma_update(None, "user_version", target).unwrap();
@@ -3302,7 +3387,7 @@ mod tests {
         let v19: i64 = c18
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v19, 19);
+        assert_eq!(v19, newest);
 
         let position_exists: i64 = c18
             .query_row(

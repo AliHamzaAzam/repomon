@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import FleetSidebar, { reorderAround, repoDisplayName } from "./FleetSidebar";
+import FleetSidebar, { repoDisplayName } from "./FleetSidebar";
+import { reorderAround } from "./ordering";
 
 vi.mock("../ipc/rpc", () => ({
   daemonCall: vi.fn().mockResolvedValue({ plugins: [] }),
