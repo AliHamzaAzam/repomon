@@ -118,7 +118,7 @@ describe("Select custom dropdown", () => {
     expect(trigger).toHaveTextContent("auto");
   });
 
-  it("applies right alignment class when align='right' is specified", async () => {
+  it("portals the menu above ancestor stacking contexts and right-aligns it to the trigger", async () => {
     render(() => (
       <Select
         size="sm"
@@ -134,9 +134,22 @@ describe("Select custom dropdown", () => {
     ));
 
     const trigger = screen.getByRole("combobox", { name: "Layout mode" });
+    trigger.getBoundingClientRect = () => ({
+      x: 700,
+      y: 20,
+      top: 20,
+      left: 700,
+      right: 800,
+      bottom: 44,
+      width: 100,
+      height: 24,
+      toJSON: () => undefined,
+    });
     fireEvent.click(trigger);
     const listbox = await screen.findByRole("listbox");
-    expect(listbox).toHaveClass("right-0");
+    expect(trigger.parentElement).not.toContainElement(listbox);
+    expect(listbox).toHaveClass("fixed", "z-[100]");
+    expect(listbox).toHaveStyle({ top: "48px", right: `${window.innerWidth - 800}px` });
   });
 
   it("renders frameless variant without standard border/surface box", () => {

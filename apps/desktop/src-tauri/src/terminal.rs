@@ -58,7 +58,12 @@ pub struct ByteChunk {
 pub enum RouteFrame {
     Chunk(ByteChunk),
     Lagged,
+    /// Force an authoritative capture repaint after the frontend has applied a new pane grid.
+    Resync,
 }
+
+type RouteMap =
+    std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<Arc<RouteFrame>>>>;
 
 /// Match and decode one `event.agent.bytes` notification into `(window, chunk)`. Base64 is
 /// decoded exactly once, in the demux — panes receive ready bytes instead of each scanning
@@ -345,6 +350,7 @@ pub async fn term_watch(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending = Vec::with_capacity(FLUSH_BYTES);
         let mut resync = initial_resync;
+        let mut force_resync = false;
         let mut last_resync = std::time::Instant::now();
         let mut cancelled = None;
 
@@ -357,7 +363,14 @@ pub async fn term_watch(
                 frame = route_rx.recv() => match frame {
                     Ok(frame) => match frame.as_ref() {
                         RouteFrame::Lagged => resync = true,
+                        RouteFrame::Resync => {
+                            pending.clear();
+                            force_resync = true;
+                        }
                         RouteFrame::Chunk(chunk) => {
+                            if force_resync {
+                                continue;
+                            }
                             // Events queued before a repaint are already visible in it. A later
                             // generation or sequence gap means terminal-relative state is unsafe,
                             // so stop applying bytes until an authoritative repaint replaces it.
@@ -398,8 +411,8 @@ pub async fn term_watch(
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = ticker.tick() => {
-                    if resync {
-                        if last_resync.elapsed() < RESYNC_RETRY {
+                    if force_resync || resync {
+                        if !force_resync && last_resync.elapsed() < RESYNC_RETRY {
                             continue;
                         }
                         last_resync = std::time::Instant::now();
@@ -411,6 +424,7 @@ pub async fn term_watch(
                         };
                         stream_cursor = repaint.cursor;
                         resync = false;
+                        force_resync = false;
                     } else if !flush(&on_bytes, &mut pending) {
                         break;
                     }
@@ -434,6 +448,19 @@ pub async fn term_watch(
     Ok(ack)
 }
 
+fn enqueue_resync(routes: &RouteMap, window: &str) -> bool {
+    let tx = routes.lock().unwrap().get(window).cloned();
+    tx.is_some_and(|tx| tx.send(Arc::new(RouteFrame::Resync)).is_ok())
+}
+
+#[tauri::command]
+pub async fn term_resync(state: State<'_, AppState>, window: String) -> Result<(), RpcFailure> {
+    // A grid event can race a pane unmount. A vanished route needs no repaint; otherwise queue a
+    // forced checkpoint that cannot be canceled by the next contiguous byte chunk.
+    let _ = enqueue_resync(state.terminal_routes.as_ref(), &window);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn term_unwatch(state: State<'_, AppState>, window: String) -> Result<(), RpcFailure> {
     let cancel = state.terminal_watches.lock().unwrap().remove(&window);
@@ -448,12 +475,19 @@ pub async fn term_unwatch(state: State<'_, AppState>, window: String) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use repomon_core::protocol::Notification;
     use serde_json::json;
+    use tokio::sync::broadcast;
 
-    use super::{MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, resync_frame};
+    use super::{
+        MAX_PENDING, RouteFrame, StreamCursor, append_pending, dimensions, enqueue_resync,
+        event_chunk, resync_frame,
+    };
 
     #[test]
     fn resync_frame_positions_rows_explicitly() {
@@ -469,6 +503,27 @@ mod tests {
         let frame = String::from_utf8(resync_frame("shell\nprompt", false, None)).unwrap();
         assert!(frame.starts_with("\x1b[?1049l\x1b[?25l\x1b[?7h\x1b[H\x1b[2J"));
         assert!(frame.contains("\x1b[1;1H\x1b[2Kshell\x1b[2;1H\x1b[2Kprompt"));
+    }
+
+    #[tokio::test]
+    async fn resync_request_reaches_only_the_matching_terminal_route() {
+        let (lane_one, mut lane_one_rx) = broadcast::channel(4);
+        let (lane_two, mut lane_two_rx) = broadcast::channel(4);
+        let routes = Arc::new(Mutex::new(HashMap::from([
+            ("lane-1".to_string(), lane_one),
+            ("lane-2".to_string(), lane_two),
+        ])));
+
+        assert!(enqueue_resync(routes.as_ref(), "lane-1"));
+        assert!(matches!(
+            lane_one_rx.recv().await.unwrap().as_ref(),
+            RouteFrame::Resync
+        ));
+        assert!(matches!(
+            lane_two_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(!enqueue_resync(routes.as_ref(), "lane-missing"));
     }
 
     #[test]

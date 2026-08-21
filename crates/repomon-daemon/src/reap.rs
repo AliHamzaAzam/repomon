@@ -365,8 +365,10 @@ mod tests {
     fn unrelated_windows_confirm_independently() {
         // Two windows orphaned on the same sweep confirm on their own schedules; one going clean
         // doesn't disturb the other's count.
-        let (state, to_kill) =
-            confirm_orphans(HashMap::new(), &["lane-1".to_string(), "lane-2".to_string()]);
+        let (state, to_kill) = confirm_orphans(
+            HashMap::new(),
+            &["lane-1".to_string(), "lane-2".to_string()],
+        );
         assert!(to_kill.is_empty());
 
         let (state, to_kill) = confirm_orphans(state, &["lane-2".to_string()]);

@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
   createTerminalFrameGate,
+  resyncTerminal,
   isTerminalReleaseChord,
   takeWheelBatch,
   terminalPointerCell,
@@ -11,6 +13,10 @@ import {
   watchTerminalGrid,
   wheelLines,
 } from "./term";
+
+afterEach(() => {
+  clearMocks();
+});
 
 function key(value: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return new KeyboardEvent("keydown", { key: value, ...modifiers });
@@ -86,6 +92,16 @@ describe("watchTerminalGrid", () => {
     });
     expect(apply).toHaveBeenCalledTimes(1);
     stop();
+  });
+
+  it("requests an authoritative repaint after applying a grid change", async () => {
+    mockIPC((command, args) => {
+      expect(command).toBe("term_resync");
+      expect(args).toEqual({ window: "lane-7-2" });
+      return null;
+    });
+
+    await resyncTerminal({ laneId: 7, window: "lane-7-2" });
   });
 });
 

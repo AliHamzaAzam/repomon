@@ -912,6 +912,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 refs: [a.id, b.id].into_iter().collect(),
                 generation: 0,
                 sequence: Arc::new(AtomicU64::new(0)),
+                grid: None,
             },
         );
         // A window only A watches.
@@ -922,6 +923,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 refs: [a.id].into_iter().collect(),
                 generation: 1,
                 sequence: Arc::new(AtomicU64::new(0)),
+                grid: None,
             },
         );
     }
@@ -965,7 +967,10 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     // A real, uncontested window for the apply case.
     let cwd = std::env::temp_dir();
     ctx.backend
-        .spawn_named("lane-2", &SpawnSpec::new("sleep 30", &cwd))
+        .spawn_named(
+            "lane-2",
+            &SpawnSpec::new("sh -c 'while :; do printf x; sleep 0.05; done'", &cwd),
+        )
         .expect("spawn uncontested window");
 
     let a = ctx
@@ -1054,6 +1059,34 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     assert_eq!(
         event["params"],
         json!({ "lane_id": 2, "window": "lane-2", "cols": 101, "rows": 31 })
+    );
+
+    // A raw tmux attach/direct resize bypasses both mediated RPCs. Once output flows at that new
+    // grid, the shared byte watch must discover it and announce it to every renderer.
+    rpc::dispatch(
+        &ctx,
+        &a,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 2, "window": "lane-2", "on": true })),
+    )
+    .await
+    .unwrap();
+    ctx.backend.resize_named("lane-2", 111, 32).unwrap();
+    let external_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("event bus remains open");
+            if event["method"] == json!(pubsub::topic::AGENT_GRID)
+                && event["params"]["cols"] == json!(111)
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("external grid-change event timeout");
+    assert_eq!(
+        external_event["params"],
+        json!({ "lane_id": 2, "window": "lane-2", "cols": 111, "rows": 32 })
     );
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())

@@ -1387,7 +1387,10 @@ async fn resize_agent_grid(
     .map_err(internal)?
     .map_err(internal)?;
 
-    if before != Some((cols, rows)) {
+    let changed = crate::bytes_stream::note_grid(&ctx.bytes_watches, window, None, (cols, rows))
+        .await
+        .unwrap_or(before != Some((cols, rows)));
+    if changed {
         ctx.broadcast(
             crate::pubsub::topic::AGENT_GRID,
             json!({
