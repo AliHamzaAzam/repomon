@@ -3,7 +3,7 @@ import { Portal } from "solid-js/web";
 
 import type { AgentSession, Lane } from "../bindings";
 import { slotOf } from "./agentLabel";
-import { reorderAround } from "./ordering";
+import { createPointerReorder } from "./pointerReorder";
 import { AgentIcon, IconGitBranch } from "./icons";
 
 export interface AgentStatusDetails {
@@ -128,11 +128,9 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
   // persisted arrangement (which by then matches). Keyed per lane so switching hover targets
   // never carries an old lane's order over.
   const [localOrder, setLocalOrder] = createSignal<string[] | null>(null);
-  const [dragSessionId, setDragSessionId] = createSignal<string | null>(null);
   createEffect(() => {
     void props.lane.id;
     setLocalOrder(null);
-    setDragSessionId(null);
   });
 
   const orderedSessions = createMemo(() => {
@@ -149,36 +147,18 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
     return [...sessions].sort((a, b) => rank(a) - rank(b));
   });
 
-  const onTabDragStart = (session: AgentSession, event: DragEvent) => {
-    if (!props.reorderable || session.session_id === null) return;
-    event.dataTransfer?.setData("text/plain", session.session_id);
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-    setDragSessionId(session.session_id);
-  };
-
-  const onTabDragOver = (session: AgentSession, event: DragEvent) => {
-    if (!props.reorderable || dragSessionId() === null || session.session_id === null) return;
-    if (session.session_id === dragSessionId()) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  };
-
-  const onTabDrop = (session: AgentSession, event: DragEvent) => {
-    if (!props.reorderable) return;
-    event.preventDefault();
-    const dragged = dragSessionId();
-    setDragSessionId(null);
-    if (dragged === null || session.session_id === null || dragged === session.session_id) return;
-    const ids = orderedSessions()
-      .map((s) => s.session_id)
-      .filter((sid): sid is string => sid !== null);
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const after = rect.height > 0 && event.clientY > rect.top + rect.height / 2;
-    const next = reorderAround(ids, dragged, session.session_id, after);
-    if (!next) return;
-    setLocalOrder(next as string[]);
-    props.onReorderTabs?.(next as string[]);
-  };
+  // Chrome-style pointer dragging (see pointerReorder.ts). Only rows with a durable transcript
+  // id participate; placeholders can't be ordered meaningfully.
+  const rowDrag = createPointerReorder<string>({
+    axis: "y",
+    ids: () =>
+      orderedSessions()
+        .map((session) => session.session_id)
+        .filter((sid): sid is string => sid !== null),
+    reorder: setLocalOrder,
+    commit: (order) => props.onReorderTabs?.(order),
+    enabled: () => Boolean(props.reorderable),
+  });
   const position = () => {
     const rect = props.anchorRect;
     if (!rect) return { top: 0, left: 0 };
@@ -231,12 +211,14 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
           <div class="my-2.5 h-px bg-line/60" />
 
           {/* Roster List */}
-          <div class="space-y-1.5">
+          <div class="space-y-1.5" data-reorder-container>
             <For each={orderedSessions()}>
               {(agent) => {
                 const status = () => getSessionStatusDetails(agent);
                 const title = () => agentSessionTitle(agent);
                 const kind = () => agentKindDisplayName(agent.agent);
+                const draggableRow = () =>
+                  Boolean(props.reorderable && agent.session_id !== null);
 
                 return (
                   <button
@@ -244,11 +226,8 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                     class={`group/roster-row flex w-full items-start gap-2.5 rounded-lg border border-line/40 bg-raised/40 p-2 text-left transition-all duration-150 hover:bg-raised hover:border-line hover:shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-signal active:scale-[0.99] cursor-pointer ${
                       props.reorderable ? "cursor-grab active:cursor-grabbing" : ""
                     }`}
-                    draggable={props.reorderable && agent.session_id !== null}
-                    onDragStart={(e) => onTabDragStart(agent, e)}
-                    onDragOver={(e) => onTabDragOver(agent, e)}
-                    onDrop={(e) => onTabDrop(agent, e)}
-                    onDragEnd={() => setDragSessionId(null)}
+                    {...(draggableRow() ? rowDrag.itemHandlers(agent.session_id!) : {})}
+                    style={{ "touch-action": draggableRow() ? "none" : undefined }}
                     onContextMenu={(e) => {
                       if (!props.onRenameAgent || agent.session_id === null) return;
                       e.preventDefault();

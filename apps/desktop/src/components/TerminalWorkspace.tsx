@@ -8,7 +8,7 @@ import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
 import { agentSessionTitle } from "./LaneAgentRosterPopover";
-import { reorderAround } from "./ordering";
+import { createPointerReorder } from "./pointerReorder";
 import {
   stableVisibleTargets,
   warmTargetWindows,
@@ -78,13 +78,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   // daemon's next poll returns the persisted arrangement.
   const tabsReorderable = () => props.fleet.tabSortMode() === "manual";
   const [localTabOrder, setLocalTabOrder] = createSignal<string[] | null>(null);
-  const [dragTabSessionId, setDragTabSessionId] = createSignal<string | null>(null);
-  createEffect(() => {
-    void props.fleet.selectedLaneId();
-    setLocalTabOrder(null);
-    setDragTabSessionId(null);
-  });
-
   /// The lane's targets in display order: the persisted manual arrangement while it's set,
   /// otherwise the wire order. Only agent pills carry transcript ids; shells keep their place.
   const stripTargets = createMemo(() => {
@@ -99,45 +92,26 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     return [...all].sort((a, b) => rank(a) - rank(b));
   });
 
+  // Chrome-style pointer dragging for the strip's agent pills (see pointerReorder.ts). Shells
+  // and placeholder pills (no transcript id) never participate.
+  const tabDrag = createPointerReorder<string>({
+    axis: "x",
+    ids: () =>
+      stripTargets()
+        .map((target) => target.sessionId)
+        .filter((sid): sid is string => sid !== null),
+    reorder: setLocalTabOrder,
+    commit: (order) => {
+      const laneId = props.fleet.selectedLaneId();
+      if (laneId !== null) void props.actions.setAgentTabOrder(laneId, order);
+    },
+    enabled: () => tabsReorderable(),
+  });
+
   const sessionForTarget = (target: PaneTarget) =>
     props.fleet
       .selectedLane()
       ?.agent_sessions.find((session) => session.tmux_window === target.window) ?? null;
-
-  const onTabDragStart = (target: PaneTarget, event: DragEvent) => {
-    if (!tabsReorderable() || target.shell || target.sessionId === null) return;
-    event.dataTransfer?.setData("text/plain", target.sessionId);
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-    setDragTabSessionId(target.sessionId);
-  };
-
-  const onTabDragOver = (target: PaneTarget, event: DragEvent) => {
-    if (!tabsReorderable() || target.shell || target.sessionId === null) return;
-    if (dragTabSessionId() === null || target.sessionId === dragTabSessionId()) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  };
-
-  const onTabDrop = (target: PaneTarget, event: DragEvent) => {
-    if (!tabsReorderable()) return;
-    event.preventDefault();
-    const dragged = dragTabSessionId();
-    setDragTabSessionId(null);
-    const laneId = props.fleet.selectedLaneId();
-    if (dragged === null || laneId === null) return;
-    if (target.shell || target.sessionId === null || dragged === target.sessionId) return;
-    const ids = stripTargets()
-      .map((item) => item.sessionId)
-      .filter((sid): sid is string => sid !== null);
-    // Horizontal strip — unlike the roster popover's vertical list, "after" is decided by the
-    // cursor's x position against the pill's horizontal midpoint, not y/height.
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const after = rect.width > 0 && event.clientX > rect.left + rect.width / 2;
-    const next = reorderAround(ids, dragged, target.sessionId, after);
-    if (!next) return;
-    setLocalTabOrder(next as string[]);
-    void props.actions.setAgentTabOrder(laneId, next as string[]);
-  };
 
   const onTabContextMenu = (target: PaneTarget, event: MouseEvent) => {
     if (target.shell) return;
@@ -307,9 +281,13 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             onScroll={updateScrollIndicators}
             role="group"
             aria-label="Lane terminals and actions"
+            data-reorder-container
           >
             <For each={stripTargets()}>
-              {(target) => (
+              {(target) => {
+                const draggablePill = () =>
+                  tabsReorderable() && !target.shell && target.sessionId !== null && !isTargetClosing(target);
+                return (
                 <div
                   class={`group/tab relative flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all duration-200 ${
                     isTargetClosing(target)
@@ -318,13 +296,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                         ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
                         : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
                   } ${tabsReorderable() && !target.shell && target.sessionId !== null ? "cursor-grab active:cursor-grabbing" : ""}`}
-                  draggable={
-                    tabsReorderable() && !target.shell && target.sessionId !== null && !isTargetClosing(target)
-                  }
-                  onDragStart={(e) => onTabDragStart(target, e)}
-                  onDragOver={(e) => onTabDragOver(target, e)}
-                  onDrop={(e) => onTabDrop(target, e)}
-                  onDragEnd={() => setDragTabSessionId(null)}
+                  {...(draggablePill() ? tabDrag.itemHandlers(target.sessionId!) : {})}
+                  style={{ "touch-action": draggablePill() ? "none" : undefined }}
                   onContextMenu={(e) => onTabContextMenu(target, e)}
                 >
                   <button
@@ -372,7 +345,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     </button>
                   </Show>
                 </div>
-              )}
+                );
+              }}
             </For>
             <div class="ml-2 flex shrink-0 items-center gap-2 border-l border-line/60 pl-2">
               <Show when={props.fleet.selectedLane()?.agent_sessions.find((s) => s.external)}>

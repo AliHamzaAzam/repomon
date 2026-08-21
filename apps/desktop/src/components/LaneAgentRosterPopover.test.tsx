@@ -215,7 +215,21 @@ describe("manual agent tab ordering and rename", () => {
     ]);
   }
 
-  it("drops a dragged row on another and persists the new session order", () => {
+  /// Give the roster rows synthetic vertical geometry so the pointer primitive's midpoint math
+  /// has real coordinates to work with (jsdom rects are all zero): Architect [0,50),
+  /// Claude Code #2 [50,100).
+  function stubRowRects() {
+    const rects = new Map<HTMLElement, () => DOMRect>();
+    const architect = screen.getByRole("button", { name: /switch to architect terminal/i });
+    const second = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
+    rects.set(architect, () => new DOMRect(0, 0, 300, 50));
+    rects.set(second, () => new DOMRect(0, 50, 300, 50));
+    for (const [el, rect] of rects) {
+      Object.defineProperty(el, "getBoundingClientRect", { value: rect, configurable: true });
+    }
+  }
+
+  it("drags a row past its neighbor's midpoint to reorder, and commits on release", async () => {
     const onReorderTabs = vi.fn();
     render(() => (
       <LaneAgentRosterPopover
@@ -226,18 +240,28 @@ describe("manual agent tab ordering and rename", () => {
         onReorderTabs={onReorderTabs}
       />
     ));
+    stubRowRects();
 
     const dragged = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
-    const target = screen.getByRole("button", { name: /switch to architect terminal/i });
-    // jsdom rects are zero-height, so the pointer counts as the upper half: insert before.
-    fireEvent.dragStart(dragged);
-    fireEvent.dragOver(target);
-    fireEvent.drop(target);
+    // Grab the second row at y=75 (its rect is [50,100)) and drag above the first row's
+    // midpoint (y=25). Threshold first, then the crossing. The primitive throttles its work to
+    // animation frames, so flush two before asserting.
+    fireEvent.pointerDown(dragged, { clientX: 10, clientY: 75, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 70, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 20, pointerId: 1 });
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
 
+    // The row live-swapped ahead of release (Chrome-style), but nothing persists yet.
+    expect(onReorderTabs).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(window, { clientX: 10, clientY: 20, pointerId: 1 });
+    expect(onReorderTabs).toHaveBeenCalledTimes(1);
     expect(onReorderTabs).toHaveBeenCalledWith(["s2", "s1"]);
   });
 
-  it("does not reorder while the tab sort mode is activity (reorderable off)", () => {
+  it("does not reorder while the tab sort mode is activity (reorderable off)", async () => {
     const onReorderTabs = vi.fn();
     render(() => (
       <LaneAgentRosterPopover
@@ -249,11 +273,10 @@ describe("manual agent tab ordering and rename", () => {
       />
     ));
 
-    const dragged = screen.getByRole("button", { name: /switch to architect terminal/i });
-    const target = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
-    fireEvent.dragStart(dragged);
-    fireEvent.dragOver(target);
-    fireEvent.drop(target);
+    const dragged = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
+    fireEvent.pointerDown(dragged, { clientX: 10, clientY: 5, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 500, pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 10, clientY: 500, pointerId: 1 });
 
     expect(onReorderTabs).not.toHaveBeenCalled();
   });
