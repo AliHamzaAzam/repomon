@@ -172,6 +172,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "usage_probe": cfg.usage_probe,
         "expand_agents": cfg.expand_agents,
         "sort_repos_by_activity": cfg.sort_repos_by_activity,
+        "sort_mode": cfg.sort_mode(),
         "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
@@ -192,6 +193,15 @@ struct RepoRemove {
 struct RepoSetHidden {
     repo_id: RepoId,
     hidden: bool,
+}
+#[derive(Deserialize)]
+struct RepoRename {
+    repo_id: RepoId,
+    label: String,
+}
+#[derive(Deserialize)]
+struct RepoReorder {
+    ordered_ids: Vec<RepoId>,
 }
 #[derive(Deserialize)]
 struct RepoNotesGet {
@@ -920,6 +930,8 @@ struct ConfigSet {
     #[serde(default)]
     sort_repos_by_activity: Option<bool>,
     #[serde(default)]
+    sort_mode: Option<String>,
+    #[serde(default)]
     embedded_pty: Option<bool>,
     #[serde(default)]
     orchestrator_agent: Option<String>,
@@ -1419,6 +1431,37 @@ pub async fn dispatch(
                 json!({ "repo_id": p.repo_id, "hidden": p.hidden }),
             );
             Ok(Value::Null)
+        }
+        // A display-name override: the repo keeps its folder name on disk, but clients show
+        // `label` instead. An empty string clears the override.
+        "repo.rename" => {
+            let p: RepoRename = parse(params)?;
+            let label = (!p.label.trim().is_empty()).then(|| p.label.trim().to_string());
+            let repo = ctx
+                .registry
+                .set_label(p.repo_id, label)
+                .await
+                .map_err(internal)?;
+            ctx.broadcast(
+                crate::pubsub::topic::REPO_CHANGED,
+                json!({ "repo_id": p.repo_id, "label": repo.label }),
+            );
+            to_value(repo)
+        }
+        // Persist a manual ordering (used when `sort_mode` is `manual`). The full visible list is
+        // sent so positions stay dense; repos omitted keep their previous position.
+        "repo.reorder" => {
+            let p: RepoReorder = parse(params)?;
+            let repos = ctx
+                .registry
+                .reorder(p.ordered_ids)
+                .await
+                .map_err(internal)?;
+            ctx.broadcast(
+                crate::pubsub::topic::REPO_CHANGED,
+                json!({ "reordered": true }),
+            );
+            to_value(repos)
         }
         "repo.remove" => {
             let p: RepoRemove = parse(params)?;
@@ -2845,6 +2888,20 @@ pub async fn dispatch(
                 }
                 if let Some(b) = p.sort_repos_by_activity {
                     cfg.sort_repos_by_activity = b;
+                }
+                // An explicit sort mode supersedes the legacy boolean; keep the boolean in sync
+                // so TUI builds that only know the toggle still see the right behavior.
+                if let Some(mode) = p.sort_mode {
+                    match mode.as_str() {
+                        "default" | "activity" | "manual" => {
+                            let parsed: repomon_core::config::SortMode =
+                                serde_json::from_value(json!(mode)).map_err(internal)?;
+                            cfg.sort_mode = Some(parsed);
+                            cfg.sort_repos_by_activity =
+                                parsed == repomon_core::config::SortMode::Activity;
+                        }
+                        other => return Err(internal(format!("unknown sort_mode {other:?}"))),
+                    }
                 }
                 if let Some(b) = p.embedded_pty {
                     cfg.embedded_pty = b;
@@ -7425,6 +7482,8 @@ mod tests {
             added_at: now,
             worktree_root_template: None,
             hidden: false,
+            position: None,
+            label: None,
         };
         let worktree = repomon_core::model::Worktree {
             id,
@@ -7501,6 +7560,8 @@ mod tests {
             added_at: now,
             worktree_root_template: None,
             hidden: false,
+            position: None,
+            label: None,
         };
         let worktree = repomon_core::model::Worktree {
             id,

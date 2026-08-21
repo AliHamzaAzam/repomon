@@ -155,6 +155,14 @@ pub struct Repo {
     /// way back; each client decides what to do with them.
     #[serde(default)]
     pub hidden: bool,
+    /// Manual-order position assigned by a full reorder (`repo.reorder`). `None` keeps the repo
+    /// in the legacy name order; listings sort positioned repos first, then the rest by name.
+    #[serde(default)]
+    pub position: Option<i64>,
+    /// Optional display-name override shown instead of the folder name. `None` (or empty) means
+    /// clients fall back to `name`.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// A paired remote-access device: one named, individually-revocable bearer token minted at

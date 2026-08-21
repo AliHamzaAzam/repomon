@@ -875,6 +875,8 @@ mod legacy_auto_approve_tests {
                 added_at: Utc::now(),
                 worktree_root_template: None,
                 hidden: false,
+                position: None,
+                label: None,
             },
             worktree: Worktree {
                 id: 1,

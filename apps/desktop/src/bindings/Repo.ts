@@ -9,4 +9,14 @@ export type Repo = { id: number, path: string, name: string, added_at: string, w
  * hidden repos (carrying this flag) rather than filtering them out, so a client can offer a
  * way back; each client decides what to do with them.
  */
-hidden: boolean, };
+hidden: boolean, 
+/**
+ * Manual-order position assigned by a full reorder (`repo.reorder`). `None` keeps the repo
+ * in the legacy name order; listings sort positioned repos first, then the rest by name.
+ */
+position: bigint | null, 
+/**
+ * Optional display-name override shown instead of the folder name. `None` (or empty) means
+ * clients fall back to `name`.
+ */
+label: string | null, };
