@@ -7,6 +7,8 @@ import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
+import { agentSessionTitle } from "./LaneAgentRosterPopover";
+import { reorderAround } from "./ordering";
 import {
   stableVisibleTargets,
   warmTargetWindows,
@@ -70,6 +72,78 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const setActiveWindow = props.workspace.setActiveWindow;
   const targets = () => props.workspace.targets();
   const laneTargets = () => props.workspace.laneTargets();
+
+  // Manual tab mode (settings): agent pills drag-to-reorder, right-click renames. Shells are
+  // plain terminals and stay out of both. The optimistic order holds the strip steady until the
+  // daemon's next poll returns the persisted arrangement.
+  const tabsReorderable = () => props.fleet.tabSortMode() === "manual";
+  const [localTabOrder, setLocalTabOrder] = createSignal<string[] | null>(null);
+  const [dragTabSessionId, setDragTabSessionId] = createSignal<string | null>(null);
+  createEffect(() => {
+    void props.fleet.selectedLaneId();
+    setLocalTabOrder(null);
+    setDragTabSessionId(null);
+  });
+
+  /// The lane's targets in display order: the persisted manual arrangement while it's set,
+  /// otherwise the wire order. Only agent pills carry transcript ids; shells keep their place.
+  const stripTargets = createMemo(() => {
+    const all = laneTargets();
+    const order = localTabOrder();
+    if (!order || order.length === 0) return all;
+    const position = new Map(order.map((sid, index) => [sid, index]));
+    const rank = (target: PaneTarget) =>
+      target.sessionId !== null
+        ? (position.get(target.sessionId) ?? Number.MAX_SAFE_INTEGER)
+        : Number.MAX_SAFE_INTEGER;
+    return [...all].sort((a, b) => rank(a) - rank(b));
+  });
+
+  const sessionForTarget = (target: PaneTarget) =>
+    props.fleet
+      .selectedLane()
+      ?.agent_sessions.find((session) => session.tmux_window === target.window) ?? null;
+
+  const onTabDragStart = (target: PaneTarget, event: DragEvent) => {
+    if (!tabsReorderable() || target.shell || target.sessionId === null) return;
+    event.dataTransfer?.setData("text/plain", target.sessionId);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    setDragTabSessionId(target.sessionId);
+  };
+
+  const onTabDragOver = (target: PaneTarget, event: DragEvent) => {
+    if (!tabsReorderable() || target.shell || target.sessionId === null) return;
+    if (dragTabSessionId() === null || target.sessionId === dragTabSessionId()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  };
+
+  const onTabDrop = (target: PaneTarget, event: DragEvent) => {
+    if (!tabsReorderable()) return;
+    event.preventDefault();
+    const dragged = dragTabSessionId();
+    setDragTabSessionId(null);
+    const laneId = props.fleet.selectedLaneId();
+    if (dragged === null || laneId === null) return;
+    if (target.shell || target.sessionId === null || dragged === target.sessionId) return;
+    const ids = stripTargets()
+      .map((item) => item.sessionId)
+      .filter((sid): sid is string => sid !== null);
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const after = rect.height > 0 && event.clientY > rect.top + rect.height / 2;
+    const next = reorderAround(ids, dragged, target.sessionId, after);
+    if (!next) return;
+    setLocalTabOrder(next as string[]);
+    void props.actions.setAgentTabOrder(laneId, next as string[]);
+  };
+
+  const onTabContextMenu = (target: PaneTarget, event: MouseEvent) => {
+    if (target.shell) return;
+    const session = sessionForTarget(target);
+    if (!session?.session_id) return;
+    event.preventDefault();
+    props.actions.rename({ sessionId: session.session_id, current: agentSessionTitle(session) });
+  };
 
   const labelByWindow = createMemo(() => {
     const map = new Map<string, string>();
@@ -232,7 +306,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             role="group"
             aria-label="Lane terminals and actions"
           >
-            <For each={laneTargets()}>
+            <For each={stripTargets()}>
               {(target) => (
                 <div
                   class={`group/tab relative flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all duration-200 ${
@@ -241,7 +315,15 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                       : activeWindow() === target.window
                         ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
                         : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
-                  }`}
+                  } ${tabsReorderable() && !target.shell && target.sessionId !== null ? "cursor-grab active:cursor-grabbing" : ""}`}
+                  draggable={
+                    tabsReorderable() && !target.shell && target.sessionId !== null && !isTargetClosing(target)
+                  }
+                  onDragStart={(e) => onTabDragStart(target, e)}
+                  onDragOver={(e) => onTabDragOver(target, e)}
+                  onDrop={(e) => onTabDrop(target, e)}
+                  onDragEnd={() => setDragTabSessionId(null)}
+                  onContextMenu={(e) => onTabContextMenu(target, e)}
                 >
                   <button
                     type="button"
