@@ -53,6 +53,10 @@ export function watchTerminalGrid(
   });
 }
 
+export async function resyncTerminal(target: TerminalTarget): Promise<void> {
+  await invoke("term_resync", { window: target.window });
+}
+
 export interface TranslatedKey {
   key: string;
   literal: boolean;

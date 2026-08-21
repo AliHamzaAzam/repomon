@@ -29,7 +29,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use base64::Engine;
 use repomon_core::SessionBackend;
@@ -51,6 +52,8 @@ pub struct WatchEntry {
     pub generation: u64,
     /// Last raw PTY chunk accepted from this generation.
     pub sequence: Arc<AtomicU64>,
+    /// Last pane grid observed by either a mediated resize or the byte-watch grid probe.
+    pub grid: Option<(u16, u16)>,
 }
 
 /// The registry of live byte watches, keyed by window. `Arc<Mutex<…>>` so the forwarder task can
@@ -94,6 +97,28 @@ fn eof_entry_is_current(map: &HashMap<String, WatchEntry>, window: &str, generat
     map.get(window).is_some_and(|e| e.generation == generation)
 }
 
+/// Record an authoritative grid for a live byte watch. `generation` guards the asynchronous
+/// external-resize probe from updating a replacement stream; mediated RPCs pass `None` because
+/// they address the current named window directly. `None` means there is no matching live watch,
+/// while `Some(false)` suppresses a duplicate notification for an unchanged grid.
+pub async fn note_grid(
+    watches: &Watches,
+    window: &str,
+    generation: Option<u64>,
+    grid: (u16, u16),
+) -> Option<bool> {
+    let mut map = watches.lock().await;
+    let entry = map.get_mut(window)?;
+    if generation.is_some_and(|generation| generation != entry.generation) {
+        return None;
+    }
+    if entry.grid == Some(grid) {
+        return Some(false);
+    }
+    entry.grid = Some(grid);
+    Some(true)
+}
+
 /// Start (or join) a byte watch on `window` for `conn_id`.
 ///
 /// - Entry exists → the stream is already flowing; `conn_id` just joins the readership.
@@ -118,13 +143,18 @@ pub async fn watch(
 
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     let sequence = Arc::new(AtomicU64::new(0));
-    let stream = {
+    let (stream, initial_grid) = {
         let backend = backend.clone();
         let window = window.clone();
-        tokio::task::spawn_blocking(move || backend.open_byte_stream(&window))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()))?
+        tokio::task::spawn_blocking(move || {
+            let grid = backend.size_named(&window);
+            backend
+                .open_byte_stream(&window)
+                .map(|stream| (stream, grid))
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| e.to_string()))?
     };
 
     map.insert(
@@ -134,6 +164,7 @@ pub async fn watch(
             refs: HashSet::from([conn_id]),
             generation,
             sequence: sequence.clone(),
+            grid: initial_grid,
         },
     );
 
@@ -141,31 +172,84 @@ pub async fn watch(
     // (stream turned off or window died) it drops its own entry, but only while the entry is
     // still this stream's (generation match) — a later watch of the same window supersedes it.
     {
-        let window = window.clone();
-        let watches = watches.clone();
+        let forward_window = window.clone();
+        let forward_watches = watches.clone();
+        let forward_events = events.clone();
         let stream_sequence = sequence.clone();
+        let output_since_probe = Arc::new(AtomicBool::new(false));
+        let probe_dirty = output_since_probe.clone();
         tokio::spawn(async move {
             let mut rx = stream.rx;
             while let Some(chunk) = rx.recv().await {
+                output_since_probe.store(true, Ordering::Release);
                 let sequence = stream_sequence.fetch_add(1, Ordering::AcqRel) + 1;
                 let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
                 let note = Notification::new(
                     pubsub::topic::AGENT_BYTES,
                     serde_json::json!({
                         "lane_id": lane,
-                        "window": window,
+                        "window": forward_window,
                         "generation": generation,
                         "sequence": sequence,
                         "data": data,
                     }),
                 );
                 if let Ok(value) = serde_json::to_value(&note) {
-                    let _ = events.send(value); // Err = no subscribers; fine
+                    let _ = forward_events.send(value); // Err = no subscribers; fine
                 }
             }
-            let mut map = watches.lock().await;
-            if eof_entry_is_current(&map, &window, generation) {
-                map.remove(&window);
+            let mut map = forward_watches.lock().await;
+            if eof_entry_is_current(&map, &forward_window, generation) {
+                map.remove(&forward_window);
+            }
+        });
+
+        // A raw tmux attach or direct tmux resize changes the pane without going through
+        // `agent.fit` / `agent.resize`. Probe only while output is flowing — a quiet pane cannot
+        // corrupt a renderer — and emit the same grid event before an authoritative repaint heals
+        // any chunks that arrived during the short detection window.
+        let probe_backend = backend.clone();
+        let probe_events = events.clone();
+        let probe_watches = watches.clone();
+        let probe_window = window.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(250));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if !probe_dirty.swap(false, Ordering::AcqRel) {
+                    let map = probe_watches.lock().await;
+                    if !eof_entry_is_current(&map, &probe_window, generation) {
+                        break;
+                    }
+                    continue;
+                }
+                let backend = probe_backend.clone();
+                let window = probe_window.clone();
+                let Some(grid) = tokio::task::spawn_blocking(move || backend.size_named(&window))
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    continue;
+                };
+                if note_grid(&probe_watches, &probe_window, Some(generation), grid).await
+                    != Some(true)
+                {
+                    continue;
+                }
+                let note = Notification::new(
+                    pubsub::topic::AGENT_GRID,
+                    serde_json::json!({
+                        "lane_id": lane,
+                        "window": probe_window,
+                        "cols": grid.0,
+                        "rows": grid.1,
+                    }),
+                );
+                if let Ok(value) = serde_json::to_value(&note) {
+                    let _ = probe_events.send(value);
+                }
             }
         });
     }
@@ -247,6 +331,7 @@ mod tests {
             refs: refs.iter().copied().collect(),
             generation,
             sequence: Arc::new(AtomicU64::new(0)),
+            grid: Some((80, 24)),
         }
     }
 
@@ -309,6 +394,30 @@ mod tests {
         assert!(!eof_entry_is_current(&map, "lane-1", 2));
         // A window with no entry at all.
         assert!(!eof_entry_is_current(&map, "lane-9", 3));
+    }
+
+    #[tokio::test]
+    async fn grid_tracking_deduplicates_and_rejects_stale_streams() {
+        let watches = Arc::new(Mutex::new(HashMap::from([(
+            "lane-1".to_string(),
+            entry(&[1], 3),
+        )])));
+        assert_eq!(
+            note_grid(&watches, "lane-1", Some(3), (80, 24)).await,
+            Some(false)
+        );
+        assert_eq!(
+            note_grid(&watches, "lane-1", Some(2), (100, 30)).await,
+            None
+        );
+        assert_eq!(
+            note_grid(&watches, "lane-1", Some(3), (100, 30)).await,
+            Some(true)
+        );
+        assert_eq!(
+            note_grid(&watches, "lane-1", None, (100, 30)).await,
+            Some(false)
+        );
     }
 
     #[test]

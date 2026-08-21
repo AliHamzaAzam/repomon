@@ -59,6 +59,7 @@ pub fn run() {
             ipc::daemon_call,
             ipc::daemon_subscribe,
             terminal::term_watch,
+            terminal::term_resync,
             terminal::term_unwatch,
             update::mark_daemon_update,
             update::clear_daemon_update

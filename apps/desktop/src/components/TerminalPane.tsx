@@ -12,6 +12,7 @@ import {
   createInputCoalescer,
   isTerminalReleaseChord,
   recordTrace,
+  resyncTerminal,
   takeWheelBatch,
   terminalPointerCell,
   translateKeyboardKey,
@@ -517,6 +518,12 @@ export default function TerminalPane(props: TerminalPaneProps) {
       try {
         const stopGrid = await watchTerminalGrid(target, ({ cols, rows }) => {
           applyGrid(cols, rows);
+          // A pane can emit repaint bytes before its grid notification reaches this WebView.
+          // Resize first, then ask the host watcher for a sequenced capture that clears any
+          // cursor-relative output already interpreted at the old width.
+          void resyncTerminal(target).catch((error: unknown) => {
+            if (!disposed) setTransportError(errorMessage(error));
+          });
         });
         if (disposed) {
           stopGrid();
