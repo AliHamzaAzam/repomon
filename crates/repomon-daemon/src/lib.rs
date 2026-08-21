@@ -297,6 +297,14 @@ pub struct Ctx {
     /// the reaper. See `reap::confirm_orphans` for why and `reap::ORPHAN_CONFIRM` for the
     /// threshold.
     pub orphan_confirm: Mutex<HashMap<String, u32>>,
+    /// Consecutive-sweep count of "the store lists live lanes but the tmux server has zero
+    /// windows at all" — the whole-session-loss case `reap::reap_orphan_windows` used to return
+    /// from silently (see the disappearing-sessions bug: the backing `tmux -L <session>` server
+    /// itself dies — killed out from under the daemon, not reaped by it — and every agent in it
+    /// dies too, with nothing surfaced to the user). Same "don't trust a single bad snapshot"
+    /// debounce as `orphan_confirm`, so a transient tmux hiccup can't fire a false alarm; see
+    /// `reap::SESSION_LOSS_CONFIRM`.
+    pub session_loss_confirm: Mutex<u32>,
     /// Last successful per-worktree transcript scan, keyed by worktree path. Reused for one overlay
     /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
     /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
@@ -447,6 +455,7 @@ impl Ctx {
             last_good_windows: Mutex::new(Vec::new()),
             window_empty_misses: Mutex::new(0),
             orphan_confirm: Mutex::new(HashMap::new()),
+            session_loss_confirm: Mutex::new(0),
             last_good_sessions: Mutex::new(HashMap::new()),
             last_overlay_sessions: Mutex::new(HashMap::new()),
             orchestrator: Mutex::new(None),
