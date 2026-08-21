@@ -389,12 +389,18 @@ impl TmuxRuntime {
         // tmux: "can't find window/session/pane: …", "no server running on …",
         // "error connecting to …" — the target simply isn't there. `set-option` phrases the
         // same absence as "no such window/session: …" (tmux ≥ 3.x), unlike the capture/list
-        // commands.
+        // commands. With `exit-empty off` (see `configure`), killing a pane's process directly
+        // (`terminate_pane_processes`) can make tmux tear the session down on its own — the last
+        // window's shell exiting is itself a destroy — before our own explicit `kill-window` for
+        // that same window runs; with no session left to fall back to as "current", tmux reports
+        // that race as "no current target" rather than "no such session". Same benign
+        // already-torn-down race either way.
         let absent = stderr.contains("can't find ")
             || stderr.contains("no server running")
             || stderr.contains("error connecting")
             || stderr.contains("no such window")
-            || stderr.contains("no such session");
+            || stderr.contains("no such session")
+            || stderr.contains("no current target");
         if absent {
             Ok(String::new())
         } else {
@@ -921,6 +927,16 @@ impl TmuxRuntime {
     /// drag-select), system-clipboard passthrough, and drag-select copies to the clipboard.
     /// Server-global, so calling it once per session creation is enough (idempotent).
     pub fn configure(&self) {
+        // tmux's default `exit-empty on` kills the whole server the instant its last window
+        // closes — and repomon routinely has zero *real* agent windows open for a moment (every
+        // usage-probe round kills its own placeholder window when done; a fleet with no lanes
+        // spawned has none at all). Without this, that transient emptiness takes the entire
+        // server down — every other window/session sharing it included — rather than just
+        // leaving an idle, ready-for-the-next-spawn server sitting there. Reproduced live: three
+        // successive usage-probe rounds each briefly left the probe as the sole window, and the
+        // third's own cleanup kill took the whole session (and every lane window that happened
+        // to already be gone at that instant) down with it.
+        let _ = self.run(&["set", "-g", "exit-empty", "off"]);
         let _ = self.run(&["set", "-g", "mouse", "on"]);
         let _ = self.run(&["set", "-g", "set-clipboard", "on"]);
         // History deep enough to scroll back through a long plan.
