@@ -741,6 +741,28 @@ export function IconBolt(props: IconProps): JSX.Element {
   );
 }
 
+export function IconLightbulb(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M9 18h6" />
+      <path d="M10 22h4" />
+      <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z" />
+    </svg>
+  );
+}
+
 export function IconCompass(props: IconProps): JSX.Element {
   const s = () => props.size ?? 14;
   return (

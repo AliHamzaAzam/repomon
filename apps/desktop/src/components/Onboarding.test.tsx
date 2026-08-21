@@ -198,7 +198,7 @@ describe("Onboarding component", () => {
     expect(screen.getByText("Add Your First Repository")).toBeInTheDocument();
     expect(screen.getByText("repomon")).toBeInTheDocument();
     expect(screen.getByText("/Users/dev/repomon")).toBeInTheDocument();
-    expect(screen.getByText("✓ 1 repo added")).toBeInTheDocument();
+    expect(screen.getByText("1 repo added")).toBeInTheDocument();
   });
 
   it("does NOT dismiss on Escape key", () => {

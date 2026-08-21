@@ -10,6 +10,7 @@ import {
   IconCommand,
   IconGitBranch,
   IconLayers,
+  IconLightbulb,
   IconPlus,
   IconTerminal,
 } from "./icons";
@@ -260,8 +261,13 @@ export default function Onboarding(props: OnboardingProps) {
             </div>
 
             <div class="rounded-lg border border-line/60 bg-surface/40 p-2.5 text-[11px] text-muted flex items-center justify-between gap-3">
-              <span>
-                💡 Repomon runs with built-in bundled tmux. At least one agent CLI is recommended to launch tasks, but you can continue now and install CLIs anytime later.
+              <span class="flex items-start gap-1.5">
+                <span class="mt-0.5 shrink-0 text-attention">
+                  <IconLightbulb size={12} />
+                </span>
+                <span>
+                  Repomon runs with built-in bundled tmux. At least one agent CLI is recommended to launch tasks, but you can continue now and install CLIs anytime later.
+                </span>
               </span>
             </div>
 
@@ -327,8 +333,9 @@ export default function Onboarding(props: OnboardingProps) {
                 <div class="rounded-xl border border-line bg-surface p-4 space-y-3">
                   <div class="flex items-center justify-between">
                     <span class="section-label">Tracked Repositories</span>
-                    <span class="text-[11px] font-mono text-emerald-500 font-medium">
-                      ✓ {repos().length} repo{repos().length !== 1 ? "s" : ""} added
+                    <span class="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-500 font-medium">
+                      <IconCheck size={11} strokeWidth={2.5} />
+                      {repos().length} repo{repos().length !== 1 ? "s" : ""} added
                     </span>
                   </div>
 
