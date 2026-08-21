@@ -38,13 +38,24 @@ struct Win {
 /// long task doesn't get an active agent reaped — the user's "don't reap a running agent" rule.
 const RUNNING_GRACE: Duration = Duration::from_secs(300);
 
-/// Names of stale `lane-<id>` agent windows to reap: the id maps to no current lane, or the
-/// worktree for that id no longer lives at the window's pane cwd. Both mean the window is a
-/// leftover from a re-registered / renumbered worktree (e.g. the tmux server outliving a store
-/// reset) — a managed `claude` is spawned with `-c <worktree>` and never chdirs, so a cwd
-/// mismatch is proof the window belongs to a defunct generation. An **active** window is never
-/// reaped, even when orphaned, so a still-running agent is left alone. Non-lane windows
-/// (terminals, the usage probe) are ignored.
+/// Names of stale `lane-<id>` agent windows *this sweep* considers orphaned: the id maps to no
+/// current lane, or the worktree for that id no longer lives at the window's pane cwd. Both mean
+/// the window is a leftover from a re-registered / renumbered worktree (e.g. the tmux server
+/// outliving a store reset) — a managed `claude` is spawned with `-c <worktree>` and never
+/// chdirs, so a cwd mismatch is proof the window belongs to a defunct generation. An **active**
+/// window is never reaped, even when orphaned, so a still-running agent is left alone. Non-lane
+/// windows (terminals, the usage probe) are ignored.
+///
+/// This is a single-snapshot judgment, not a kill decision: a transient bad read — `ctx.lanes
+/// .list()` racing a store write, or `Path::canonicalize()` faulting/mismatching under disk or fd
+/// pressure — can flag a real, live window as orphaned for one sweep. That used to be low-stakes,
+/// because the old `kill_named` only ran tmux `kill-window`, which a stubborn or reparented CLI
+/// child could simply outlive. Since d46a340 ("fix(core): terminate pane descendants on window
+/// stop"), `kill_named` walks the pane's full process tree and `SIGTERM`s every descendant
+/// directly, so a false positive here now genuinely and unrecoverably kills a live agent session.
+/// The caller (`reap_orphan_windows`) is responsible for requiring a window to appear in this
+/// list across [`ORPHAN_CONFIRM`] consecutive sweeps — see `confirm_orphans` — before it's ever
+/// passed to `kill_and_forget`. Kept pure (no `Ctx`) so it stays independently unit-testable.
 fn orphan_lane_windows(windows: &[Win], lane_paths: &HashMap<LaneId, PathBuf>) -> Vec<String> {
     windows
         .iter()
@@ -64,6 +75,43 @@ fn orphan_lane_windows(windows: &[Win], lane_paths: &HashMap<LaneId, PathBuf>) -
 
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Consecutive sweeps a window must be classified orphaned (by [`orphan_lane_windows`]) before
+/// [`reap_orphan_windows`] actually kills it. Mirrors `rpc::resolve_windows`'s
+/// `EMPTY_WINDOWS_CONFIRM`: one bad snapshot must not be trusted as ground truth. See the doc
+/// comment on `orphan_lane_windows` for why that matters much more since d46a340.
+const ORPHAN_CONFIRM: u32 = 2;
+
+/// Advance the reaper's cross-sweep confirmation state given this sweep's orphan set, returning
+/// the updated state to persist (in [`Ctx::orphan_confirm`]) and the window names that have now
+/// reached [`ORPHAN_CONFIRM`] and should be killed this sweep.
+///
+/// Any window not in `orphans` this sweep — its lane reappeared in `lane_paths` with a matching
+/// cwd, or it became active — has its counter cleared immediately, not merely left to expire.
+/// That's the key correctness property (mirroring `resolve_windows`'s reset-on-good-read
+/// semantics): a window orphaned once, seen fine on the very next sweep, then orphaned again must
+/// restart confirmation from zero, so two *non-consecutive* orphan sightings can never combine
+/// into a kill.
+fn confirm_orphans(
+    mut state: HashMap<String, u32>,
+    orphans: &[String],
+) -> (HashMap<String, u32>, Vec<String>) {
+    state.retain(|name, _| orphans.iter().any(|o| o == name));
+
+    let mut to_kill = Vec::new();
+    for name in orphans {
+        let count = state.entry(name.clone()).or_insert(0);
+        *count += 1;
+        if *count >= ORPHAN_CONFIRM {
+            to_kill.push(name.clone());
+        }
+    }
+    // A window about to be killed won't reappear next sweep to have its counter cleared by the
+    // `retain` above; drop it now so a future window that reuses the same name starts at zero.
+    state.retain(|name, _| !to_kill.iter().any(|k| k == name));
+
+    (state, to_kill)
 }
 
 /// Kill a single managed tmux window and synchronously reconcile the daemon-side caches that
@@ -102,8 +150,10 @@ pub(crate) async fn kill_and_forget(ctx: &Ctx, window: &str) {
     ctx.invalidate_overlay().await;
 }
 
-/// Find and kill orphaned `lane-<id>` windows once, then drop the overlay cache so the phantom
-/// sessions they were propping up disappear on the next `lane.list`.
+/// Find this sweep's orphaned `lane-<id>` windows, fold them into the cross-sweep confirmation
+/// state in [`Ctx::orphan_confirm`], and kill only the ones that have now been seen as orphaned
+/// on [`ORPHAN_CONFIRM`] consecutive sweeps — then drop the overlay cache so the phantom sessions
+/// they were propping up disappear on the next `lane.list`.
 pub async fn reap_orphan_windows(ctx: &Ctx) {
     let Ok(lanes) = ctx.lanes.list().await else {
         return;
@@ -149,12 +199,23 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         .unwrap_or(false);
 
     let orphans = orphan_lane_windows(&windows, &lane_paths);
-    if orphans.is_empty() {
+
+    // Advance the reaper's cross-sweep confirmation state every sweep — including when `orphans`
+    // is empty right now, which is exactly what clears a stale count immediately for a window
+    // that no longer looks orphaned, rather than leaving it to expire on its own. See
+    // `confirm_orphans` for why a window must be seen as orphaned on two consecutive sweeps
+    // before it's ever handed to `kill_and_forget`.
+    let mut confirm = ctx.orphan_confirm.lock().await;
+    let (new_state, to_kill) = confirm_orphans(std::mem::take(&mut *confirm), &orphans);
+    *confirm = new_state;
+    drop(confirm);
+
+    if to_kill.is_empty() {
         return;
     }
     if !owns {
         tracing::warn!(
-            ?orphans,
+            ?to_kill,
             owner = %me,
             session = %ctx.backend.label(),
             "another repomond owns this tmux server; skipping reap (would kill its windows)"
@@ -162,9 +223,9 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         return;
     }
 
-    tracing::info!(?orphans, "reaping orphaned agent windows");
+    tracing::info!(?to_kill, "reaping orphaned agent windows");
 
-    for w in &orphans {
+    for w in &to_kill {
         kill_and_forget(ctx, w).await;
     }
 }
@@ -259,5 +320,58 @@ mod tests {
             idle("lane-13", "/Users/x/Developer/Aven/flick"),
         ];
         assert_eq!(orphan_lane_windows(&windows, &lane_paths), vec!["lane-13"]);
+    }
+
+    #[test]
+    fn orphaned_once_is_not_killed_yet() {
+        // A single sweep's orphan reading must not be trusted outright — see `confirm_orphans`.
+        let (state, to_kill) = confirm_orphans(HashMap::new(), &["lane-81".to_string()]);
+        assert!(to_kill.is_empty());
+        assert_eq!(state.get("lane-81"), Some(&1));
+    }
+
+    #[test]
+    fn orphaned_on_two_consecutive_sweeps_is_killed() {
+        let (state, to_kill) = confirm_orphans(HashMap::new(), &["lane-81".to_string()]);
+        assert!(to_kill.is_empty());
+        let (state, to_kill) = confirm_orphans(state, &["lane-81".to_string()]);
+        assert_eq!(to_kill, vec!["lane-81".to_string()]);
+        // Killed windows drop out of the tracked state so a reused name starts at zero.
+        assert!(!state.contains_key("lane-81"));
+    }
+
+    #[test]
+    fn a_clean_sweep_between_two_orphan_sightings_resets_confirmation() {
+        // Orphaned once, then NOT orphaned on the next sweep (lane reappeared with a matching
+        // cwd, or the window went active), then orphaned again: this must restart confirmation
+        // from zero rather than treat the two non-consecutive sightings as back-to-back — the
+        // same reset-on-good-read property `resolve_windows` has for `EMPTY_WINDOWS_CONFIRM`.
+        let (state, to_kill) = confirm_orphans(HashMap::new(), &["lane-81".to_string()]);
+        assert!(to_kill.is_empty());
+        assert_eq!(state.get("lane-81"), Some(&1));
+
+        // Looked fine this sweep -> counter cleared immediately, not merely left to expire.
+        let (state, to_kill) = confirm_orphans(state, &[]);
+        assert!(to_kill.is_empty());
+        assert!(!state.contains_key("lane-81"));
+
+        // Orphaned again: this is sighting #1 of a fresh streak, so still not killed.
+        let (state, to_kill) = confirm_orphans(state, &["lane-81".to_string()]);
+        assert!(to_kill.is_empty());
+        assert_eq!(state.get("lane-81"), Some(&1));
+    }
+
+    #[test]
+    fn unrelated_windows_confirm_independently() {
+        // Two windows orphaned on the same sweep confirm on their own schedules; one going clean
+        // doesn't disturb the other's count.
+        let (state, to_kill) =
+            confirm_orphans(HashMap::new(), &["lane-1".to_string(), "lane-2".to_string()]);
+        assert!(to_kill.is_empty());
+
+        let (state, to_kill) = confirm_orphans(state, &["lane-2".to_string()]);
+        assert_eq!(to_kill, vec!["lane-2".to_string()]);
+        assert!(!state.contains_key("lane-1")); // lane-1 looked fine -> cleared
+        assert!(!state.contains_key("lane-2")); // lane-2 was killed -> cleared
     }
 }

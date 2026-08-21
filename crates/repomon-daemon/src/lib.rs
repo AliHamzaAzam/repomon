@@ -291,6 +291,12 @@ pub struct Ctx {
     /// bounce, not every agent exiting at once — `resolve_windows` reuses last-good until this
     /// reaches the confirm threshold, so a server restart doesn't mass-fire Idle.
     pub window_empty_misses: Mutex<u8>,
+    /// Consecutive-sweep orphan counts for `reap::reap_orphan_windows`, keyed by window name. A
+    /// window must be classified orphaned on back-to-back sweeps before it's actually killed —
+    /// same "don't trust a single bad snapshot" idea as `window_empty_misses` above, applied to
+    /// the reaper. See `reap::confirm_orphans` for why and `reap::ORPHAN_CONFIRM` for the
+    /// threshold.
+    pub orphan_confirm: Mutex<HashMap<String, u32>>,
     /// Last successful per-worktree transcript scan, keyed by worktree path. Reused for one overlay
     /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
     /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
@@ -440,6 +446,7 @@ impl Ctx {
             known_managed_sessions: Mutex::new(HashSet::new()),
             last_good_windows: Mutex::new(Vec::new()),
             window_empty_misses: Mutex::new(0),
+            orphan_confirm: Mutex::new(HashMap::new()),
             last_good_sessions: Mutex::new(HashMap::new()),
             last_overlay_sessions: Mutex::new(HashMap::new()),
             orchestrator: Mutex::new(None),
