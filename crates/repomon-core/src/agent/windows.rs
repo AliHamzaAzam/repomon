@@ -970,6 +970,8 @@ mod host_backend {
     fn pump(
         mut file: File,
         mut dec: FrameDecoder,
+        // TODO(windows-grid-parity): emit ordered Grid events when ConPTY's external size changes.
+        // The old daemon-side poll covered this; tmux control-mode replaced it only on Unix.
         tx: tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>,
         stop: &AtomicBool,
     ) {

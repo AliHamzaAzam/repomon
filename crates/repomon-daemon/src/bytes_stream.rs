@@ -3,7 +3,8 @@
 //! The mediated view is a poll → capture → re-parse pipeline; the embedded renderer instead
 //! wants the pane's actual byte stream. The backend provides it via
 //! [`SessionBackend::open_byte_stream`] (on tmux: one ignore-size control client); ordered output
-//! chunks and grid changes are broadcast as `event.agent.bytes` / `event.agent.grid`.
+//! chunks and grid changes are broadcast as `event.agent.bytes` / `event.agent.grid`. If the
+//! target window disappears, `event.agent.stream_closed` tells each renderer to release its watch.
 //!
 //! ONE STREAM PER WINDOW, SHARED. A window has exactly one backend observer no matter how many
 //! clients watch it. The event bus already broadcasts every chunk to every subscriber; who actually
@@ -15,8 +16,8 @@
 //! old single global slot let any new watch kill the previous one, which is exactly what broke
 //! concurrency.
 //!
-//! GENERATION / EOF race: lifecycle is EOF-driven — closing the stream (or the window dying)
-//! ends the backend's byte channel, whose closure the forwarder task sees, and it then removes
+//! GENERATION / EOF race: closing the stream (or the backend detecting that its target window
+//! died) ends the backend's byte channel, whose closure the forwarder task sees, and it then removes
 //! its own map entry. Each fresh stream (a first watcher creating a new entry) gets a
 //! globally-unique `generation`, and the forwarder drops its entry ONLY if the entry's
 //! generation still matches the one it was started with; without that, a rapid unwatch→rewatch
@@ -222,9 +223,30 @@ pub async fn watch(
                     let _ = forward_events.send(value); // Err = no subscribers; fine
                 }
             }
-            let mut map = forward_watches.lock().await;
-            if eof_entry_is_current(&map, &forward_window, generation) {
-                map.remove(&forward_window);
+            let closed_current = {
+                let mut map = forward_watches.lock().await;
+                if eof_entry_is_current(&map, &forward_window, generation) {
+                    map.remove(&forward_window);
+                    true
+                } else {
+                    false
+                }
+            };
+            // Explicit unwatch removes the entry before closing the backend, so only an
+            // unexpected backend EOF (normally target-window death) reaches clients. The
+            // generation prevents a delayed close from stopping a replacement watch.
+            if closed_current {
+                let note = Notification::new(
+                    pubsub::topic::AGENT_STREAM_CLOSED,
+                    serde_json::json!({
+                        "lane_id": lane,
+                        "window": forward_window,
+                        "generation": generation,
+                    }),
+                );
+                if let Ok(value) = serde_json::to_value(&note) {
+                    let _ = forward_events.send(value);
+                }
             }
         });
     }

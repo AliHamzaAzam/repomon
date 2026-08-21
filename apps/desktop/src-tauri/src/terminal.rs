@@ -61,12 +61,24 @@ pub struct GridChange {
     rows: u16,
 }
 
-/// One routed item on a window's byte channel: a decoded chunk, or notice that the upstream
-/// daemon subscription lagged (every receiver must resync — chunks were dropped).
+#[derive(Debug, PartialEq, Eq)]
+pub struct StreamClosed {
+    generation: u64,
+}
+
+impl StreamClosed {
+    fn matches(&self, cursor: StreamCursor) -> bool {
+        self.generation == cursor.generation
+    }
+}
+
+/// One routed item on a window's terminal channel: ordered bytes/grid, target closure, or notice
+/// that the upstream daemon subscription lagged (every receiver must resync — chunks were dropped).
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteFrame {
     Chunk(ByteChunk),
     Grid(GridChange),
+    Closed(StreamClosed),
     Lagged,
 }
 
@@ -117,6 +129,15 @@ fn event_grid(event: &Notification) -> Option<(String, GridChange)> {
     ))
 }
 
+fn event_stream_closed(event: &Notification) -> Option<(String, StreamClosed)> {
+    if event.method != "event.agent.stream_closed" {
+        return None;
+    }
+    let window = event.params.get("window").and_then(Value::as_str)?;
+    let generation = event.params.get("generation").and_then(Value::as_u64)?;
+    Some((window.to_string(), StreamClosed { generation }))
+}
+
 /// Start the one demux task that owns the app's daemon event subscription: byte chunks are
 /// decoded once and routed to exactly their window's channel; every other event is
 /// re-broadcast on `ui_events` for `daemon_subscribe`. Before this, every mounted pane held
@@ -152,6 +173,12 @@ pub(crate) async fn ensure_demux(state: &State<'_, AppState>) -> Result<(), RpcF
                                     let _ = tx.send(Arc::new(RouteFrame::Grid(grid)));
                                 }
                                 // Non-terminal consumers still receive the additive grid event.
+                                let _ = ui_events.send(event);
+                            } else if let Some((window, closed)) = event_stream_closed(&event) {
+                                let tx = routes.lock().unwrap().get(&window).cloned();
+                                if let Some(tx) = tx {
+                                    let _ = tx.send(Arc::new(RouteFrame::Closed(closed)));
+                                }
                                 let _ = ui_events.send(event);
                             } else {
                                 let _ = ui_events.send(event);
@@ -353,13 +380,19 @@ pub async fn term_watch(
             .or_insert_with(|| broadcast::channel(512).0)
             .subscribe()
     };
-    let value = client
+    let value = match client
         .call(
             "agent.watch_bytes",
             Some(json!({ "lane_id": lane_id, "window": window, "on": true })),
         )
         .await
-        .map_err(map_call_error)?;
+    {
+        Ok(value) => value,
+        Err(error) => {
+            state.terminal_routes.lock().unwrap().remove(&window);
+            return Err(map_call_error(error));
+        }
+    };
     let ack = dimensions(&value);
     if ack.generation.is_none() || ack.sequence.is_none() {
         let _ = client
@@ -368,6 +401,7 @@ pub async fn term_watch(
                 Some(json!({ "lane_id": lane_id, "window": window, "on": false })),
             )
             .await;
+        state.terminal_routes.lock().unwrap().remove(&window);
         return Err(RpcFailure {
             code: -32012,
             message: "The running daemon is too old for reliable terminal rendering. Restart the Repomon daemon, then reopen this agent.".into(),
@@ -385,6 +419,7 @@ pub async fn term_watch(
                 Some(json!({ "lane_id": lane_id, "window": window, "on": false })),
             )
             .await;
+        state.terminal_routes.lock().unwrap().remove(&window);
         return Err(RpcFailure {
             code: -32000,
             message: "could not establish an authoritative terminal repaint".into(),
@@ -420,6 +455,11 @@ pub async fn term_watch(
                 frame = route_rx.recv() => match frame {
                     Ok(frame) => match frame.as_ref() {
                         RouteFrame::Lagged => resync = true,
+                        RouteFrame::Closed(closed) => {
+                            if closed.matches(stream_cursor) {
+                                break;
+                            }
+                        }
                         RouteFrame::Grid(grid) => {
                             let contiguous = grid.cursor.generation == stream_cursor.generation
                                 && grid.cursor.sequence == stream_cursor.sequence + 1;
@@ -534,7 +574,7 @@ mod tests {
 
     use super::{
         MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, event_grid,
-        resync_frame,
+        event_stream_closed, resync_frame,
     };
 
     #[test]
@@ -614,6 +654,29 @@ mod tests {
             json!({ "window": "lane-7", "cols": 120, "rows": 40 }),
         );
         assert!(event_grid(&unsequenced).is_none());
+    }
+
+    #[test]
+    fn stream_close_names_the_window_and_generation() {
+        let closed = Notification::new(
+            "event.agent.stream_closed",
+            json!({ "window": "lane-7", "generation": 3 }),
+        );
+        let (window, closed) = event_stream_closed(&closed).unwrap();
+        assert_eq!(window, "lane-7");
+        assert_eq!(closed.generation, 3);
+        assert!(closed.matches(StreamCursor {
+            generation: 3,
+            sequence: 99,
+        }));
+        assert!(!closed.matches(StreamCursor {
+            generation: 4,
+            sequence: 0,
+        }));
+
+        let missing_generation =
+            Notification::new("event.agent.stream_closed", json!({ "window": "lane-7" }));
+        assert!(event_stream_closed(&missing_generation).is_none());
     }
 
     #[test]

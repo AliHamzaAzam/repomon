@@ -3369,7 +3369,8 @@ pub async fn dispatch(
                     .await
                     .map_err(internal)?
                     .map_err(internal)?;
-                    // Let pipe-pane deliver output tmux had already applied when capture-pane ran.
+                    // Let the backend stream deliver output tmux had already applied when the
+                    // capture ran.
                     tokio::time::sleep(std::time::Duration::from_millis(8)).await;
                     let after = crate::bytes_stream::cursor(&ctx.bytes_watches, &window).await;
                     state = Some(next);
@@ -3457,7 +3458,7 @@ pub async fn dispatch(
         "agent.watch_bytes" => {
             // The embedded renderer's feed: stream one pane's raw PTY bytes as
             // `event.agent.bytes`. Refcounted per window and per connection: a window has one
-            // shared pipe (tmux allows only one pipe-pane per pane), this session joins/leaves its
+            // shared backend stream, this session joins/leaves its
             // readership, and delivery is filtered per connection at the forwarding loops. A new
             // `on` NEVER stops another session's watch; `on:false` releases only THIS session's.
             let p: AgentWatchBytes = parse(params)?;

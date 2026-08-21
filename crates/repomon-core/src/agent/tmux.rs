@@ -1174,7 +1174,10 @@ fn decode_control_output(value: &[u8]) -> Option<Vec<u8>> {
         if !digits.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
             return None;
         }
-        decoded.push((digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + digits[2] - b'0');
+        let value = u16::from(digits[0] - b'0') * 64
+            + u16::from(digits[1] - b'0') * 8
+            + u16::from(digits[2] - b'0');
+        decoded.push(u8::try_from(value).ok()?);
         index += 4;
     }
     Some(decoded)
@@ -1186,22 +1189,40 @@ fn control_layout_grid(layout: &str) -> Option<(u16, u16)> {
     Some((cols.parse().ok()?, rows.parse().ok()?))
 }
 
-fn parse_control_event(line: &[u8], window_id: &str, pane_id: &str) -> Option<ByteStreamEvent> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ControlEvent {
+    Stream(ByteStreamEvent),
+    Closed,
+}
+
+fn parse_control_event(line: &[u8], window_id: &str, pane_id: &str) -> Option<ControlEvent> {
     if let Some(rest) = line.strip_prefix(b"%output ") {
         let split = rest.iter().position(|byte| *byte == b' ')?;
         if &rest[..split] != pane_id.as_bytes() {
             return None;
         }
-        return decode_control_output(&rest[split + 1..]).map(ByteStreamEvent::Bytes);
+        return decode_control_output(&rest[split + 1..])
+            .map(ByteStreamEvent::Bytes)
+            .map(ControlEvent::Stream);
     }
     let text = std::str::from_utf8(line).ok()?;
+    if ["%unlinked-window-close ", "%window-close "]
+        .iter()
+        .any(|prefix| {
+            text.strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next())
+                == Some(window_id)
+        })
+    {
+        return Some(ControlEvent::Closed);
+    }
     let rest = text.strip_prefix("%layout-change ")?;
     let mut fields = rest.split_whitespace();
     if fields.next()? != window_id {
         return None;
     }
     let (cols, rows) = control_layout_grid(fields.next()?)?;
-    Some(ByteStreamEvent::Grid { cols, rows })
+    Some(ControlEvent::Stream(ByteStreamEvent::Grid { cols, rows }))
 }
 
 impl SessionBackend for TmuxRuntime {
@@ -1422,10 +1443,13 @@ impl SessionBackend for TmuxRuntime {
                 while matches!(line.last(), Some(b'\n' | b'\r')) {
                     line.pop();
                 }
-                if let Some(event) = parse_control_event(&line, &window_id, &pane_id)
-                    && tx.send(event).is_err()
-                {
-                    break;
+                match parse_control_event(&line, &window_id, &pane_id) {
+                    Some(ControlEvent::Stream(event)) => match tx.send(event) {
+                        Ok(()) => {}
+                        Err(_) => break,
+                    },
+                    Some(ControlEvent::Closed) => break,
+                    _ => {}
                 }
             }
             let _ = child.kill();
@@ -1473,25 +1497,37 @@ mod tests {
             b"ready\r\n\x1b[32m \xe2\x98\x83 \\"
         );
         assert!(decode_control_output(br"bad\12").is_none());
+        assert!(decode_control_output(br"bad\400").is_none());
     }
 
     #[test]
     fn control_events_filter_identity_and_preserve_layout_order() {
         assert_eq!(
             parse_control_event(br"%layout-change @7 a87d,100x30,0,0,4 *", "@7", "%4"),
-            Some(ByteStreamEvent::Grid {
+            Some(ControlEvent::Stream(ByteStreamEvent::Grid {
                 cols: 100,
                 rows: 30
-            })
+            }))
         );
         assert_eq!(
             parse_control_event(br"%output %4 \033[2;1Hready", "@7", "%4"),
-            Some(ByteStreamEvent::Bytes(b"\x1b[2;1Hready".to_vec()))
+            Some(ControlEvent::Stream(ByteStreamEvent::Bytes(
+                b"\x1b[2;1Hready".to_vec()
+            )))
         );
         assert!(parse_control_event(br"%output %9 nope", "@7", "%4").is_none());
         assert!(
             parse_control_event(br"%layout-change @8 a87d,100x30,0,0,4 *", "@7", "%4").is_none()
         );
+        assert_eq!(
+            parse_control_event(br"%unlinked-window-close @7", "@7", "%4"),
+            Some(ControlEvent::Closed)
+        );
+        assert_eq!(
+            parse_control_event(br"%window-close @7", "@7", "%4"),
+            Some(ControlEvent::Closed)
+        );
+        assert!(parse_control_event(br"%unlinked-window-close @8", "@7", "%4").is_none());
     }
 
     #[test]
@@ -1992,6 +2028,52 @@ mod tests {
             clients.trim().is_empty(),
             "control client leaked: {clients:?}"
         );
+        backend.kill_named("lane-1").unwrap();
+        let _ = Command::new(tmux_program())
+            .args(["-L", backend.session(), "kill-server"])
+            .output();
+    }
+
+    #[test]
+    fn control_stream_closes_when_its_window_dies_but_session_survives() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let backend = TmuxRuntime::new(format!("repomon-control-close-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        backend.spawn(1, dir.path(), "sh").unwrap();
+        backend.spawn(2, dir.path(), "sh").unwrap();
+
+        let mut stream = backend.open_byte_stream("lane-2").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        backend.kill_named("lane-2").unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let closed = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while stream.rx.recv().await.is_some() {}
+            })
+            .await
+            .is_ok()
+        });
+        assert!(closed, "target window death did not close its byte stream");
+        assert!(
+            backend
+                .list_windows()
+                .unwrap()
+                .iter()
+                .any(|w| w == "lane-1"),
+            "the sibling window should keep the tmux session alive"
+        );
+        let clients = backend
+            .run_allow_absent(&["list-clients", "-F", "#{client_control_mode}"])
+            .unwrap();
+        assert!(
+            clients.trim().is_empty(),
+            "target window death leaked a control client: {clients:?}"
+        );
+
         backend.kill_named("lane-1").unwrap();
         let _ = Command::new(tmux_program())
             .args(["-L", backend.session(), "kill-server"])

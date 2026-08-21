@@ -1240,3 +1240,96 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         .args(["-L", &session, "kill-server"])
         .output();
 }
+
+/// A tmux control client is session-scoped, so killing its target while another window survives
+/// must explicitly terminate the stream. The daemon then drops its watch entry and tells the
+/// watching connection which generation ended; otherwise the core reader, daemon forwarder, and
+/// desktop route task all wait forever.
+#[tokio::test]
+async fn watched_window_death_closes_stream_while_sibling_survives() {
+    if !TmuxRuntime::available() {
+        eprintln!("tmux not available; skipping watch close test");
+        return;
+    }
+    let session = format!("repomon-bytes-close-it-{}", std::process::id());
+    let config = Config {
+        tmux_session: session.clone(),
+        ..Default::default()
+    };
+    let store = Store::open_in_memory().unwrap();
+    let ctx = Ctx::new(store, config, None);
+    let cwd = std::env::temp_dir();
+    for window in ["lane-1", "lane-2"] {
+        ctx.backend
+            .spawn_named(window, &SpawnSpec::new("sleep 30", &cwd))
+            .expect("spawn window");
+    }
+
+    let sess = ctx.open_session(ConnKind::Local).await;
+    let mut events = ctx.events.subscribe();
+    let ack = rpc::dispatch(
+        &ctx,
+        &sess,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 1, "window": "lane-1", "on": true })),
+    )
+    .await
+    .expect("start byte watch");
+    let generation = ack["generation"].as_u64().expect("stream generation");
+
+    ctx.backend
+        .kill_named("lane-1")
+        .expect("kill watched window");
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = events.recv().await.expect("event bus remains open");
+            if event["method"] == json!(pubsub::topic::AGENT_STREAM_CLOSED) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("stream-close event within 3s");
+    assert_eq!(closed["params"]["window"], json!("lane-1"));
+    assert_eq!(closed["params"]["generation"], json!(generation));
+    assert!(!ctx.bytes_watches.lock().await.contains_key("lane-1"));
+    assert!(
+        ctx.backend
+            .list_windows()
+            .unwrap()
+            .iter()
+            .any(|window| window == "lane-2"),
+        "sibling window should keep the tmux session alive"
+    );
+
+    let clients = std::process::Command::new(repomon_core::agent::tmux_program())
+        .args([
+            "-L",
+            &session,
+            "list-clients",
+            "-F",
+            "#{client_control_mode}",
+        ])
+        .output()
+        .expect("list tmux clients");
+    assert!(
+        clients.stdout.is_empty(),
+        "target death leaked a control client: {:?}",
+        String::from_utf8_lossy(&clients.stdout)
+    );
+
+    // The client consumes the close event, then releases its per-connection watch bookkeeping.
+    rpc::dispatch(
+        &ctx,
+        &sess,
+        "agent.watch_bytes",
+        Some(json!({ "lane_id": 1, "window": "lane-1", "on": false })),
+    )
+    .await
+    .expect("release closed watch");
+    assert!(!sess.watched_bytes.lock().unwrap().contains("lane-1"));
+
+    let _ = std::process::Command::new(repomon_core::agent::tmux_program())
+        .args(["-L", &session, "kill-server"])
+        .output();
+}

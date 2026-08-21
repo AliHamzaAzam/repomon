@@ -142,8 +142,8 @@ async fn run() {
     // Stream visible agents' output to subscribed TUIs.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
-    // Sweep stale pipe-panes from a previous daemon: a watch left on with no reader would make
-    // tmux buffer that pane's output in memory without bound.
+    // Sweep legacy pipe-panes from daemon versions before control-mode streaming: a pipe left on
+    // with no reader would make tmux buffer that pane's output in memory without bound.
     tokio::spawn(repomon_daemon::bytes_stream::sweep(ctx.backend.clone()));
 
     // Stream the repomind orchestrator's pane to a watching command-center view (self-gates on a
