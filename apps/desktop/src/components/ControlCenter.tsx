@@ -390,7 +390,6 @@ export default function ControlCenter(props: ControlCenterProps) {
       >
         <IconCommand size={13} />
         <span>Control</span>
-        <kbd class="ml-0.5 rounded border border-line/60 bg-surface/60 px-1 py-0.2 text-[9px] font-mono text-muted/80">⌘K</kbd>
       </button>
 
       {/* Command Palette Modal */}
