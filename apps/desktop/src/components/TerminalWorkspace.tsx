@@ -129,8 +129,10 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     const ids = stripTargets()
       .map((item) => item.sessionId)
       .filter((sid): sid is string => sid !== null);
+    // Horizontal strip — unlike the roster popover's vertical list, "after" is decided by the
+    // cursor's x position against the pill's horizontal midpoint, not y/height.
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const after = rect.height > 0 && event.clientY > rect.top + rect.height / 2;
+    const after = rect.width > 0 && event.clientX > rect.left + rect.width / 2;
     const next = reorderAround(ids, dragged, target.sessionId, after);
     if (!next) return;
     setLocalTabOrder(next as string[]);
