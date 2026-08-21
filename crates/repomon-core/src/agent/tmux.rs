@@ -804,6 +804,15 @@ impl TmuxRuntime {
         tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-text", text = %text.chars().take(60).collect::<String>(), "tmux write");
         let target = self.exact_target(window);
         self.run(&["send-keys", "-t", &target, "-l", text])?;
+        // A literal `-l` send arrives at the target program as an unbracketed burst of
+        // characters, indistinguishable at the terminal level from a paste. Several agent
+        // TUIs (Codex's composer in particular) treat a burst like that as "still pasting"
+        // and, as a safety measure against an accidental Enter buried inside pasted text,
+        // suppress auto-submit on any Enter that arrives too close behind it — so the
+        // Enter below can land in the input box without ever submitting, leaving the human
+        // to press it again by hand. A short quiet gap here lets that paste-burst detector
+        // settle before Enter arrives, so it reads as a deliberate keystroke.
+        std::thread::sleep(std::time::Duration::from_millis(80));
         self.run(&["send-keys", "-t", &target, "Enter"])?;
         Ok(())
     }
