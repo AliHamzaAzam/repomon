@@ -65,7 +65,7 @@ function repo(id: number, name: string, hidden = false): Repo {
 /// 2s heartbeat is stopped before the test asserts, so nothing races the assertions.
 async function startedStore(repos: Repo[], lanes: Lane[], sortReposByActivity: boolean | null = false) {
   const source: FleetSource = {
-    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [], sortReposByActivity, sortMode: sortReposByActivity === true ? "activity" : "default" }),
+    load: () => Promise.resolve({ repos, lanes, usage: [], terminals: [], sortReposByActivity, sortMode: sortReposByActivity === true ? "activity" : "default", tabSortMode: null }),
     refreshUsage: () => Promise.resolve(),
     subscribe: () => Promise.resolve(() => undefined),
   };

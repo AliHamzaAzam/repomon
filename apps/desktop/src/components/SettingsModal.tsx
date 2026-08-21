@@ -1416,6 +1416,20 @@ export default function SettingsModal(props: SettingsModalProps) {
                       Drag project headers in the sidebar to arrange them. Right-click a project to rename it.
                     </p>
                   </Show>
+                  <Select
+                    label="Order agent tabs in a lane"
+                    value={settings().tab_sort_mode ?? "activity"}
+                    options={[
+                      { value: "activity", label: "Recent activity" },
+                      { value: "manual", label: "Manual" },
+                    ]}
+                    onChange={(value) => patch({ tab_sort_mode: value })}
+                  />
+                  <Show when={settings().tab_sort_mode === "manual"}>
+                    <p class="text-xs text-muted">
+                      Hover a lane with several agents and drag the roster rows into your own order. Right-click a tab to rename it.
+                    </p>
+                  </Show>
                 </section>
               </div>
             </Show>

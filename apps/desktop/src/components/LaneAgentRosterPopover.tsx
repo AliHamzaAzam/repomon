@@ -1,8 +1,9 @@
-import { For, Show } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
 
 import type { AgentSession, Lane } from "../bindings";
 import { slotOf } from "./agentLabel";
+import { reorderAround } from "./ordering";
 import { AgentIcon, IconGitBranch } from "./icons";
 
 export interface AgentStatusDetails {
@@ -114,9 +115,70 @@ export interface LaneAgentRosterPopoverProps {
   onSelectAgent?: (lane: Lane, session: AgentSession) => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
+  /// Manual tab ordering is enabled (settings "manual"): rows become drag-to-reorder, like
+  /// browser tabs. Drops call `onReorderTabs` with the full session-id order to persist.
+  reorderable?: boolean;
+  onReorderTabs?: (orderedSessionIds: string[]) => void;
+  /// Right-click a tab to rename its agent (durable custom label).
+  onRenameAgent?: (session: AgentSession) => void;
 }
 
 export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
+  // Optimistic tab order applied right after a drop, until the daemon's next poll confirms the
+  // persisted arrangement (which by then matches). Keyed per lane so switching hover targets
+  // never carries an old lane's order over.
+  const [localOrder, setLocalOrder] = createSignal<string[] | null>(null);
+  const [dragSessionId, setDragSessionId] = createSignal<string | null>(null);
+  createEffect(() => {
+    void props.lane.id;
+    setLocalOrder(null);
+    setDragSessionId(null);
+  });
+
+  const orderedSessions = createMemo(() => {
+    const sessions = props.lane.agent_sessions ?? [];
+    const order = localOrder();
+    if (!order || order.length === 0) return sessions;
+    const position = new Map(order.map((sid, index) => [sid, index]));
+    // Sessions the order doesn't mention (placeholders with no transcript id, a just-spawned
+    // agent) keep their wire order at the end — like browser tabs, new tabs open last.
+    const rank = (session: AgentSession) =>
+      session.session_id !== null
+        ? (position.get(session.session_id) ?? Number.MAX_SAFE_INTEGER)
+        : Number.MAX_SAFE_INTEGER;
+    return [...sessions].sort((a, b) => rank(a) - rank(b));
+  });
+
+  const onTabDragStart = (session: AgentSession, event: DragEvent) => {
+    if (!props.reorderable || session.session_id === null) return;
+    event.dataTransfer?.setData("text/plain", session.session_id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    setDragSessionId(session.session_id);
+  };
+
+  const onTabDragOver = (session: AgentSession, event: DragEvent) => {
+    if (!props.reorderable || dragSessionId() === null || session.session_id === null) return;
+    if (session.session_id === dragSessionId()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  };
+
+  const onTabDrop = (session: AgentSession, event: DragEvent) => {
+    if (!props.reorderable) return;
+    event.preventDefault();
+    const dragged = dragSessionId();
+    setDragSessionId(null);
+    if (dragged === null || session.session_id === null || dragged === session.session_id) return;
+    const ids = orderedSessions()
+      .map((s) => s.session_id)
+      .filter((sid): sid is string => sid !== null);
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const after = rect.height > 0 && event.clientY > rect.top + rect.height / 2;
+    const next = reorderAround(ids, dragged, session.session_id, after);
+    if (!next) return;
+    setLocalOrder(next as string[]);
+    props.onReorderTabs?.(next as string[]);
+  };
   const position = () => {
     const rect = props.anchorRect;
     if (!rect) return { top: 0, left: 0 };
@@ -170,7 +232,7 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
 
           {/* Roster List */}
           <div class="space-y-1.5">
-            <For each={props.lane.agent_sessions}>
+            <For each={orderedSessions()}>
               {(agent) => {
                 const status = () => getSessionStatusDetails(agent);
                 const title = () => agentSessionTitle(agent);
@@ -179,7 +241,19 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                 return (
                   <button
                     type="button"
-                    class="group/roster-row flex w-full items-start gap-2.5 rounded-lg border border-line/40 bg-raised/40 p-2 text-left transition-all duration-150 hover:bg-raised hover:border-line hover:shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-signal active:scale-[0.99] cursor-pointer"
+                    class={`group/roster-row flex w-full items-start gap-2.5 rounded-lg border border-line/40 bg-raised/40 p-2 text-left transition-all duration-150 hover:bg-raised hover:border-line hover:shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-signal active:scale-[0.99] cursor-pointer ${
+                      props.reorderable ? "cursor-grab active:cursor-grabbing" : ""
+                    }`}
+                    draggable={props.reorderable && agent.session_id !== null}
+                    onDragStart={(e) => onTabDragStart(agent, e)}
+                    onDragOver={(e) => onTabDragOver(agent, e)}
+                    onDrop={(e) => onTabDrop(agent, e)}
+                    onDragEnd={() => setDragSessionId(null)}
+                    onContextMenu={(e) => {
+                      if (!props.onRenameAgent || agent.session_id === null) return;
+                      e.preventDefault();
+                      props.onRenameAgent(agent);
+                    }}
                     onClick={(e) => {
                       e.stopPropagation();
                       props.onSelectAgent?.(props.lane, agent);
@@ -252,7 +326,9 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
 
           {/* Subtle footer */}
           <div class="mt-2 text-[10px] text-muted/60 font-mono text-center">
-            Click an agent to open terminal
+            <Show when={props.reorderable} fallback="Click an agent to open terminal">
+              Drag to arrange · right-click to rename · click to open
+            </Show>
           </div>
         </div>
       </Portal>

@@ -204,3 +204,73 @@ describe("LaneAgentRosterPopover", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 });
+
+describe("manual agent tab ordering and rename", () => {
+  const mockRect = { top: 100, right: 250, bottom: 140, left: 10, width: 240, height: 40, x: 10, y: 100, toJSON: () => ({}) } as DOMRect;
+
+  function twoSessionLane() {
+    return createLane([
+      session({ id: 1, session_id: "s1", custom_label: "Architect" }),
+      session({ id: 2, session_id: "s2", tmux_window: "lane-1-2" }),
+    ]);
+  }
+
+  it("drops a dragged row on another and persists the new session order", () => {
+    const onReorderTabs = vi.fn();
+    render(() => (
+      <LaneAgentRosterPopover
+        lane={twoSessionLane()}
+        anchorRect={mockRect}
+        visible={true}
+        reorderable={true}
+        onReorderTabs={onReorderTabs}
+      />
+    ));
+
+    const dragged = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
+    const target = screen.getByRole("button", { name: /switch to architect terminal/i });
+    // jsdom rects are zero-height, so the pointer counts as the upper half: insert before.
+    fireEvent.dragStart(dragged);
+    fireEvent.dragOver(target);
+    fireEvent.drop(target);
+
+    expect(onReorderTabs).toHaveBeenCalledWith(["s2", "s1"]);
+  });
+
+  it("does not reorder while the tab sort mode is activity (reorderable off)", () => {
+    const onReorderTabs = vi.fn();
+    render(() => (
+      <LaneAgentRosterPopover
+        lane={twoSessionLane()}
+        anchorRect={mockRect}
+        visible={true}
+        reorderable={false}
+        onReorderTabs={onReorderTabs}
+      />
+    ));
+
+    const dragged = screen.getByRole("button", { name: /switch to architect terminal/i });
+    const target = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
+    fireEvent.dragStart(dragged);
+    fireEvent.dragOver(target);
+    fireEvent.drop(target);
+
+    expect(onReorderTabs).not.toHaveBeenCalled();
+  });
+
+  it("right-clicks a tab to rename it via the durable custom label flow", () => {
+    const onRenameAgent = vi.fn();
+    render(() => (
+      <LaneAgentRosterPopover
+        lane={twoSessionLane()}
+        anchorRect={mockRect}
+        visible={true}
+        onRenameAgent={onRenameAgent}
+      />
+    ));
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /switch to architect terminal/i }));
+    expect(onRenameAgent).toHaveBeenCalledTimes(1);
+    expect(onRenameAgent.mock.calls[0][0].session_id).toBe("s1");
+  });
+});
