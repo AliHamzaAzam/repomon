@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createSignal, createUniqueId, onCleanup, onMount, type JSX } from "solid-js";
+import { Portal } from "solid-js/web";
 import { IconCheck, IconChevronDown } from "../icons";
 
 export interface SelectOption {
@@ -27,6 +28,7 @@ export default function Select(props: SelectProps) {
   let containerRef!: HTMLDivElement;
   let buttonRef!: HTMLButtonElement;
   let listboxRef!: HTMLUListElement;
+  const [menuStyle, setMenuStyle] = createSignal<JSX.CSSProperties>({});
   const labelId = createUniqueId();
   const listboxId = createUniqueId();
 
@@ -48,17 +50,33 @@ export default function Select(props: SelectProps) {
   }
 
   const onPointerDownOutside = (event: PointerEvent) => {
-    if (containerRef && !containerRef.contains(event.target as Node)) {
+    const target = event.target as Node;
+    if (containerRef && !containerRef.contains(target) && !listboxRef?.contains(target)) {
       close(false);
     }
   };
 
+  const positionMenu = () => {
+    if (!open() || !buttonRef) return;
+    const rect = buttonRef.getBoundingClientRect();
+    setMenuStyle({
+      top: `${rect.bottom + 4}px`,
+      left: props.align === "right" ? undefined : `${rect.left}px`,
+      right: props.align === "right" ? `${window.innerWidth - rect.right}px` : undefined,
+      "min-width": `${Math.max(128, rect.width)}px`,
+    });
+  };
+
   onMount(() => {
     window.addEventListener("pointerdown", onPointerDownOutside);
+    window.addEventListener("resize", positionMenu);
+    window.addEventListener("scroll", positionMenu, true);
   });
 
   onCleanup(() => {
     window.removeEventListener("pointerdown", onPointerDownOutside);
+    window.removeEventListener("resize", positionMenu);
+    window.removeEventListener("scroll", positionMenu, true);
   });
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -99,6 +117,7 @@ export default function Select(props: SelectProps) {
     if (open()) {
       const idx = props.options.findIndex((opt) => opt.value === props.value);
       setHighlightedIndex(idx >= 0 ? idx : 0);
+      positionMenu();
     }
   });
 
@@ -150,53 +169,54 @@ export default function Select(props: SelectProps) {
       </button>
 
       <Show when={open()}>
-        <ul
-          ref={listboxRef}
-          id={listboxId}
-          role="listbox"
-          aria-labelledby={props.label ? labelId : undefined}
-          aria-label={props.label ? undefined : (props.ariaLabel ?? "Options")}
-          tabIndex={-1}
-          class={`absolute z-50 mt-1 max-h-60 min-w-[8rem] overflow-y-auto rounded-xl border border-line bg-surface p-1 shadow-[0_12px_36px_var(--shadow)] outline-none backdrop-blur-md ${
-            props.align === "right" ? "right-0" : "left-0"
-          }`}
-        >
-          <For each={props.options}>
-            {(option, index) => {
-              const isSelected = () => option.value === props.value;
-              const isHighlighted = () => highlightedIndex() === index();
-              return (
-                <li
-                  role="option"
-                  aria-selected={isSelected()}
-                  class={`flex cursor-pointer select-none items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 transition-colors ${
-                    size() === "sm" ? "font-mono text-[10px] uppercase tracking-wider" : "text-xs font-medium"
-                  } ${
-                    isHighlighted()
-                      ? "bg-raised text-foreground shadow-xs"
-                      : isSelected()
-                        ? "text-signal font-semibold"
-                        : "text-muted hover:bg-raised/60 hover:text-foreground"
-                  }`}
-                  onPointerMove={() => setHighlightedIndex(index())}
-                  onClick={() => choose(option)}
-                >
-                  <span class="flex min-w-0 items-center gap-2 truncate">
-                    <Show when={option.icon}>
-                      <span class="shrink-0">{option.icon}</span>
-                    </Show>
-                    <span class="truncate">{option.label}</span>
-                  </span>
-                  <Show when={isSelected()}>
-                    <span class="shrink-0 text-signal">
-                      <IconCheck size={13} strokeWidth={2.5} />
+        <Portal>
+          <ul
+            ref={listboxRef}
+            id={listboxId}
+            role="listbox"
+            aria-labelledby={props.label ? labelId : undefined}
+            aria-label={props.label ? undefined : (props.ariaLabel ?? "Options")}
+            tabIndex={-1}
+            style={menuStyle()}
+            class="fixed z-[100] max-h-60 min-w-[8rem] overflow-y-auto rounded-xl border border-line bg-surface p-1 shadow-[0_12px_36px_var(--shadow)] outline-none backdrop-blur-md"
+          >
+            <For each={props.options}>
+              {(option, index) => {
+                const isSelected = () => option.value === props.value;
+                const isHighlighted = () => highlightedIndex() === index();
+                return (
+                  <li
+                    role="option"
+                    aria-selected={isSelected()}
+                    class={`flex cursor-pointer select-none items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 transition-colors ${
+                      size() === "sm" ? "font-mono text-[10px] uppercase tracking-wider" : "text-xs font-medium"
+                    } ${
+                      isHighlighted()
+                        ? "bg-raised text-foreground shadow-xs"
+                        : isSelected()
+                          ? "text-signal font-semibold"
+                          : "text-muted hover:bg-raised/60 hover:text-foreground"
+                    }`}
+                    onPointerMove={() => setHighlightedIndex(index())}
+                    onClick={() => choose(option)}
+                  >
+                    <span class="flex min-w-0 items-center gap-2 truncate">
+                      <Show when={option.icon}>
+                        <span class="shrink-0">{option.icon}</span>
+                      </Show>
+                      <span class="truncate">{option.label}</span>
                     </span>
-                  </Show>
-                </li>
-              );
-            }}
-          </For>
-        </ul>
+                    <Show when={isSelected()}>
+                      <span class="shrink-0 text-signal">
+                        <IconCheck size={13} strokeWidth={2.5} />
+                      </span>
+                    </Show>
+                  </li>
+                );
+              }}
+            </For>
+          </ul>
+        </Portal>
       </Show>
     </div>
   );
