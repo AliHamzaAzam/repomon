@@ -255,15 +255,21 @@ pub async fn reap_orphan_windows(ctx: &Ctx) {
         })
         .collect();
 
-    // Nothing to own or reap on a server with no managed windows — UNLESS the store still lists
-    // live lanes, in which case a zero-window server isn't "nothing running", it's every one of
-    // those lanes' agents having vanished at once. That's never a normal reap outcome (a real
-    // orphan sweep kills windows one at a time and always leaves the rest); it means the tmux
-    // server backing them died outright — see the doc comment on `Ctx::session_loss_confirm`.
+    // Nothing to own or reap on a server with no managed windows — UNLESS this daemon run has
+    // already seen managed windows before, in which case a zero-window server with live lanes
+    // still in the store isn't "nothing running", it's every one of those lanes' agents having
+    // vanished at once. That's never a normal reap outcome (a real orphan sweep kills windows one
+    // at a time and always leaves the rest); it means the tmux server backing them died outright
+    // — see the doc comment on `Ctx::session_loss_confirm`. A daemon that just started and hasn't
+    // spawned anything yet also has zero windows; `saw_managed_windows` is what tells the two
+    // apart, since a fresh boot is the healthy case, not a loss.
     if windows.is_empty() {
-        note_possible_session_loss(ctx, lane_paths.len()).await;
+        if *ctx.saw_managed_windows.lock().await {
+            note_possible_session_loss(ctx, lane_paths.len()).await;
+        }
         return;
     }
+    *ctx.saw_managed_windows.lock().await = true;
     *ctx.session_loss_confirm.lock().await = 0;
 
     // Single-owner guard: claim/verify ownership of this tmux server every sweep — PROACTIVELY, so

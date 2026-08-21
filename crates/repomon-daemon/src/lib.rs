@@ -305,6 +305,11 @@ pub struct Ctx {
     /// debounce as `orphan_confirm`, so a transient tmux hiccup can't fire a false alarm; see
     /// `reap::SESSION_LOSS_CONFIRM`.
     pub session_loss_confirm: Mutex<u32>,
+    /// Set once `reap::reap_orphan_windows` has observed at least one managed window this daemon
+    /// run. Guards `session_loss_confirm`: a cold boot has zero tmux windows until something
+    /// spawns one, which is the ordinary, healthy startup state, not a loss — the counter must
+    /// only start once there was something to lose.
+    pub saw_managed_windows: Mutex<bool>,
     /// Last successful per-worktree transcript scan, keyed by worktree path. Reused for one overlay
     /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
     /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
@@ -456,6 +461,7 @@ impl Ctx {
             window_empty_misses: Mutex::new(0),
             orphan_confirm: Mutex::new(HashMap::new()),
             session_loss_confirm: Mutex::new(0),
+            saw_managed_windows: Mutex::new(false),
             last_good_sessions: Mutex::new(HashMap::new()),
             last_overlay_sessions: Mutex::new(HashMap::new()),
             orchestrator: Mutex::new(None),
