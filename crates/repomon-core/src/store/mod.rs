@@ -864,6 +864,28 @@ impl Store {
         .await
     }
 
+    /// Whether `lane_id` has mail genuinely still waiting to be picked up: `delivered_at IS
+    /// NULL`, the same "queued" test [`queued_messages`] and the mail delivery worker use.
+    ///
+    /// Deliberately NOT `read_state`: a recipient that answers a message conversationally,
+    /// without ever calling `message.mark_read`, leaves it `Unread` in the database forever —
+    /// checking read state here would read as "still outstanding" indefinitely and nudge/stall
+    /// a lane that has no actual undelivered mail. `delivered_at` is authoritative: the daemon
+    /// itself sets it, either when the recipient pulls `message.inbox` or when a full-body
+    /// injection lands, so it can't go stale the way a human-driven read flag can.
+    pub async fn lane_has_queued_mail(&self, lane_id: LaneId) -> Result<bool> {
+        self.call(move |c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE recipient_lane_id = ?1 AND delivered_at IS NULL",
+                params![lane_id],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     pub async fn mark_message_delivered(&self, id: String) -> Result<FleetMessage> {
         self.call(move |c| {
             let changed = c.execute(

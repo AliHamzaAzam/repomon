@@ -660,17 +660,14 @@ fn stall_eligible(session: &AgentSession) -> bool {
         || (session.status == AgentStatus::Running && session.ended_turn)
 }
 
-/// Cheapest available check for "does this lane have unread mail addressed to it" — `list_messages`
-/// is the store's only query surface for this, so ask for at most one unread row scoped to the lane.
-async fn lane_has_unread_mail(ctx: &Ctx, lane_id: LaneId) -> bool {
-    match ctx
-        .store
-        .list_messages(None, Some(lane_id), true, 1, None, false)
-        .await
-    {
-        Ok(page) => !page.messages.is_empty(),
+/// Whether the lane has mail genuinely still waiting to be picked up (delegates to
+/// [`Store::lane_has_queued_mail`], which explains why `delivered_at`, not `read_state`, is the
+/// right column to check here).
+async fn lane_has_queued_mail(ctx: &Ctx, lane_id: LaneId) -> bool {
+    match ctx.store.lane_has_queued_mail(lane_id).await {
+        Ok(has_mail) => has_mail,
         Err(error) => {
-            tracing::warn!("stall phase failed to check unread mail for lane {lane_id}: {error:?}");
+            tracing::warn!("stall phase failed to check queued mail for lane {lane_id}: {error:?}");
             false
         }
     }
@@ -699,8 +696,8 @@ fn stall_escalate_payload(lane: &Lane, idle_mins: i64) -> serde_json::Value {
 }
 
 /// Supervised stall handling: per eligible session in a supervised lane, when it has been idle
-/// past the policy's `stall_mins` with outstanding assigned work (unread mail or
-/// `policy.expect_work`) AND its pane has independently sat quiet that long, send one nudge; if
+/// past the policy's `stall_mins` with outstanding assigned work (mail still queued for the lane,
+/// or `policy.expect_work`) AND its pane has independently sat quiet that long, send one nudge; if
 /// nudges keep failing to unstick it, raise attention once and hold until the agent shows
 /// activity again. Runs after the mail phase in the same tick.
 async fn stall_phase(
@@ -714,7 +711,7 @@ async fn stall_phase(
         let Some(policy) = snapshot.lane(lane.id) else {
             continue;
         };
-        let lane_unread = lane_has_unread_mail(ctx, lane.id).await;
+        let lane_has_queued_mail = lane_has_queued_mail(ctx, lane.id).await;
         for session in &lane.agent_sessions {
             if !stall_eligible(session) {
                 continue;
@@ -722,7 +719,7 @@ async fn stall_phase(
             let Some(window) = session.tmux_window.clone() else {
                 continue;
             };
-            let outstanding = lane_unread || policy.expect_work;
+            let outstanding = lane_has_queued_mail || policy.expect_work;
 
             // Activity reset: drop a stale episode's bookkeeping once the agent has moved
             // (activity past the last nudge) or there's no longer any outstanding work, so a
