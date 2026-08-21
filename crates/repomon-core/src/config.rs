@@ -148,6 +148,10 @@ pub struct Config {
     pub sort_repos_by_activity: bool,
     /// How sidebar repo groups are ordered. `None` falls back to the legacy boolean above.
     pub sort_mode: Option<SortMode>,
+    /// How the per-lane agent tabs (the roster shown when a lane runs several agents) are
+    /// ordered. Independent of [`Config::sort_mode`]: one governs project groups, the other the
+    /// agents inside a single lane. `None` means Activity, the historical wire order.
+    pub tab_sort_mode: Option<TabSortMode>,
     /// Which agent powers the repomind orchestrator session — a built-in Claude variant (e.g.
     /// `claude-work`), a custom agent name, or `codex` (the one non-Claude CLI with the MCP
     /// client repomind needs; it runs with pane-only monitoring — no transcript chat view or
@@ -217,6 +221,7 @@ impl Default for Config {
             expand_agents: false,
             sort_repos_by_activity: false,
             sort_mode: None,
+            tab_sort_mode: None,
             orchestrator_agent: None,
             orchestrator_model: None,
             embedded_pty: true,
@@ -277,6 +282,24 @@ pub enum SortMode {
     Activity,
     /// Pure manual order: exactly the positions persisted by `repo.reorder`, no auto-sorting.
     Manual,
+}
+
+/// How the per-lane agent tabs are ordered. Deliberately not [`SortMode`]: repo groups have a
+/// meaningful "default" (daemon order), agent tabs do not — their historical order *is* activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabSortMode {
+    /// Most recent agent activity first (the historical behavior).
+    Activity,
+    /// The persisted per-lane tab order (`agent.set_tab_order`), no auto-sorting; newly seen
+    /// agents append.
+    Manual,
+}
+
+/// Resolve the effective tab sort mode from the optional setting. Pure for unit testing: an
+/// explicit mode wins; otherwise tabs stay in the historical activity order.
+pub fn resolve_tab_sort_mode(mode: Option<TabSortMode>) -> TabSortMode {
+    mode.unwrap_or(TabSortMode::Activity)
 }
 
 /// Resolve the effective sort mode from the explicit setting and the legacy boolean. Pure so the
@@ -375,6 +398,11 @@ impl Config {
     /// unset (config files written before the setting existed).
     pub fn sort_mode(&self) -> SortMode {
         resolve_sort_mode(self.sort_mode, self.sort_repos_by_activity)
+    }
+
+    /// The effective per-lane agent tab sort mode.
+    pub fn tab_sort_mode(&self) -> TabSortMode {
+        resolve_tab_sort_mode(self.tab_sort_mode)
     }
 }
 
@@ -541,6 +569,25 @@ mod tests {
             resolve_sort_mode(Some(SortMode::Activity), false),
             SortMode::Activity
         );
+    }
+
+    #[test]
+    fn tab_sort_mode_resolution_and_round_trip() {
+        // Unset keeps the historical activity order.
+        assert_eq!(resolve_tab_sort_mode(None), TabSortMode::Activity);
+        assert_eq!(Config::default().tab_sort_mode(), TabSortMode::Activity);
+
+        let dir = std::env::temp_dir().join(format!("repomon-tabsort-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        let c = Config {
+            tab_sort_mode: Some(TabSortMode::Manual),
+            ..Default::default()
+        };
+        c.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.tab_sort_mode(), TabSortMode::Manual);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
