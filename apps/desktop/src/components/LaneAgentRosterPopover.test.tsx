@@ -246,7 +246,7 @@ describe("manual agent tab ordering and rename", () => {
     // Grab the second row at y=75 (its rect is [50,100)) and drag above the first row's
     // midpoint (y=25). Threshold first, then the crossing. The primitive throttles its work to
     // animation frames, so flush two before asserting.
-    fireEvent.pointerDown(dragged, { clientX: 10, clientY: 75, pointerId: 1 });
+    fireEvent.pointerDown(dragged, { button: 0, clientX: 10, clientY: 75, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 10, clientY: 70, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 10, clientY: 20, pointerId: 1 });
     await new Promise((resolve) =>
@@ -274,7 +274,7 @@ describe("manual agent tab ordering and rename", () => {
     ));
 
     const dragged = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
-    fireEvent.pointerDown(dragged, { clientX: 10, clientY: 5, pointerId: 1 });
+    fireEvent.pointerDown(dragged, { button: 0, clientX: 10, clientY: 5, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 10, clientY: 500, pointerId: 1 });
     fireEvent.pointerUp(window, { clientX: 10, clientY: 500, pointerId: 1 });
 

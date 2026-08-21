@@ -116,6 +116,11 @@ export function createPointerReorder<T extends string | number>(
   }
 
   function begin(event: PointerEvent, id: T) {
+    // Only the primary button drags: pointerdown fires for every mouse button, and a
+    // right-click that drifts past the threshold would otherwise arm a real drag and race the
+    // context menu's rename flow. Real pointer events always carry `button`; treat `undefined`
+    // (synthetic/test environments) as primary.
+    if (event.button !== 0 && event.button !== undefined) return;
     if (drag || !options.enabled(id)) return;
     const target = event.currentTarget as HTMLElement | null;
     if (!target) return;
@@ -185,42 +190,39 @@ export function createPointerReorder<T extends string | number>(
     });
   }
 
-  /// Swap with an adjacent sibling as soon as the cursor crosses its midpoint, then FLIP the
-  /// others out of the way. Adjacent-only keeps the motion calm and predictable.
+  /// Move the dragged item to the slot under the cursor, then FLIP the others out of the way.
+  ///
+  /// The target slot is resolved directly from the cursor position against every sibling's
+  /// midpoint — not by stepping one adjacent swap at a time — so a single fast pointermove that
+  /// flicks across several items lands in the right slot in one tick. (Adjacent-only evaluation
+  /// desynced the committed array from the visual position when a jump crossed more than one
+  /// midpoint between two paint frames.)
   function maybeSwap() {
     if (!drag || !drag.active) return;
     const container = drag.el.closest("[data-reorder-container]") as HTMLElement | null;
     if (!container) return;
     const ids = options.ids();
     const index = ids.indexOf(drag.id);
-    if (index < 0) return;
+    if (index < 0 || ids.length < 2) return;
     const cursor = coord({
       clientX: drag.lastX ?? 0,
       clientY: drag.lastY ?? 0,
     });
 
-    let targetIndex = index;
-    if (index > 0) {
-      const prevEl = container.querySelector<HTMLElement>(
-        `[data-reorder-id="${CSS.escape(String(ids[index - 1]))}"]`,
+    let passed = 0;
+    for (let i = 0; i < ids.length; i++) {
+      if (i === index) continue;
+      const el = container.querySelector<HTMLElement>(
+        `[data-reorder-id="${CSS.escape(String(ids[i]))}"]`,
       );
-      if (prevEl) {
-        const rect = prevEl.getBoundingClientRect();
-        const midpoint = options.axis === "x" ? rect.left + rect.width / 2 : rect.top + rect.height / 2;
-        if (cursor < midpoint) targetIndex = index - 1;
-      }
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      const midpoint =
+        options.axis === "x" ? rect.left + rect.width / 2 : rect.top + rect.height / 2;
+      if (cursor > midpoint) passed += 1;
     }
-    if (targetIndex === index && index < ids.length - 1) {
-      const nextEl = container.querySelector<HTMLElement>(
-        `[data-reorder-id="${CSS.escape(String(ids[index + 1]))}"]`,
-      );
-      if (nextEl) {
-        const rect = nextEl.getBoundingClientRect();
-        const midpoint = options.axis === "x" ? rect.left + rect.width / 2 : rect.top + rect.height / 2;
-        if (cursor > midpoint) targetIndex = index + 1;
-      }
-    }
-    if (targetIndex === index) return;
+    // The cursor sits in the `passed`-th gap (skipping the dragged element's own slot).
+    const targetIndex = Math.min(passed, ids.length - 1);
 
     const next = reorderAround(ids, drag.id, ids[targetIndex], targetIndex > index);
     if (!next) return;
@@ -288,5 +290,9 @@ export function createPointerReorder<T extends string | number>(
     },
     /// True while a drag is in flight (exposed for tests and aria states).
     isDragging: () => drag !== null,
+    /// Tear down an in-flight drag without committing — call from `onCleanup` so a surface that
+    /// unmounts mid-drag (lane switch, popover close) never leaves window listeners or a
+    /// captured pointer behind, and never commits against gone state.
+    abort,
   };
 }

@@ -133,7 +133,7 @@ describe("terminal workspace tab strip ordering and rename", () => {
       configurable: true,
     });
 
-    fireEvent.pointerDown(claudePill, { clientX: 150, clientY: 14, pointerId: 1 });
+    fireEvent.pointerDown(claudePill, { button: 0, clientX: 150, clientY: 14, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 140, clientY: 14, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 40, clientY: 14, pointerId: 1 });
     await new Promise((resolve) =>
@@ -172,7 +172,7 @@ describe("terminal workspace tab strip ordering and rename", () => {
     expect(shellTab.getAttribute("draggable")).toBe(null);
 
     const dragged = screen.getAllByText("codex 1")[0].parentElement!;
-    fireEvent.pointerDown(dragged, { clientX: 5, clientY: 5, pointerId: 1 });
+    fireEvent.pointerDown(dragged, { button: 0, clientX: 5, clientY: 5, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 400, clientY: 5, pointerId: 1 });
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve)),
@@ -219,7 +219,7 @@ describe("terminal workspace tab strip ordering and rename", () => {
     });
 
     const dragged = await screen.findByText("claude-code 2");
-    fireEvent.pointerDown(dragged.parentElement!, { clientX: 5, clientY: 5, pointerId: 1 });
+    fireEvent.pointerDown(dragged.parentElement!, { button: 0, clientX: 5, clientY: 5, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 400, clientY: 5, pointerId: 1 });
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve)),

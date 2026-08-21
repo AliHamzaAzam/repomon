@@ -112,4 +112,72 @@ describe("createPointerReorder", () => {
     h.cancel();
     expect(h.commit).not.toHaveBeenCalled();
   });
+
+  it("ignores non-primary-button pointerdown entirely (right-click must not drag)", async () => {
+    const h = harness(["a", "b", "c"]);
+    // A right-click that drifts past the threshold before release must never arm a drag —
+    // contextmenu owns that gesture.
+    h.pill("a").dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX: 50, clientY: 10, button: 2 }),
+    );
+    h.move(400, 10);
+    await flushFrames();
+    h.up(400, 10);
+
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.renderedOrder()).toEqual(["a", "b", "c"]);
+  });
+
+  it("resolves the target slot from one large jump across several midpoints", async () => {
+    const h = harness(["a", "b", "c", "d"]);
+    // Grab "a" (slot [0,100), midpoint of its own irrelevant) and flick it all the way past
+    // b's midpoint (150) AND c's midpoint (250) in a single native pointermove. The committed
+    // order must match the visual position — not land one adjacent swap short.
+    h.pill("a").dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX: 50, clientY: 10 }),
+    );
+    h.move(60, 10); // arm
+    await flushFrames();
+    h.move(260, 10); // single jump past two midpoints
+    await flushFrames();
+
+    expect(h.renderedOrder()).toEqual(["b", "c", "a", "d"]);
+
+    h.up(260, 10);
+    expect(h.commit).toHaveBeenCalledWith(["b", "c", "a", "d"]);
+  });
+
+  it("abort() tears down an in-flight drag without committing", async () => {
+    let api: ReturnType<typeof createPointerReorder<string>> | null = null;
+    const container = document.createElement("div");
+    container.setAttribute("data-reorder-container", "");
+    document.body.appendChild(container);
+    const order = ["a", "b"];
+    const commit = vi.fn();
+    const drag = createPointerReorder<string>({
+      axis: "x",
+      ids: () => [...order],
+      reorder: () => {},
+      commit,
+      enabled: () => true,
+    });
+    api = drag;
+    const el = document.createElement("div");
+    el.dataset.reorderId = "a";
+    el.getBoundingClientRect = () => new DOMRect(0, 0, 100, 30);
+    const handlers = drag.itemHandlers("a");
+    el.addEventListener("pointerdown", (e) => handlers.onPointerDown(e as PointerEvent));
+    container.appendChild(el);
+
+    el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 50, clientY: 10 }));
+    container.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 90, clientY: 10 }));
+    await flushFrames();
+    expect(api!.isDragging()).toBe(true);
+
+    // Simulates the surface unmounting mid-drag.
+    api!.abort();
+    expect(api!.isDragging()).toBe(false);
+    container.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 90, clientY: 10 }));
+    expect(commit).not.toHaveBeenCalled();
+  });
 });

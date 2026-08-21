@@ -107,6 +107,14 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     },
     enabled: () => tabsReorderable(),
   });
+  // Switching lanes must drop any optimistic order (the fresh wire order is authoritative) and
+  // tear down an in-flight drag against the old lane.
+  createEffect(() => {
+    void props.fleet.selectedLaneId();
+    tabDrag.abort();
+    setLocalTabOrder(null);
+  });
+  onCleanup(() => tabDrag.abort());
 
   const sessionForTarget = (target: PaneTarget) =>
     props.fleet

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { Portal } from "solid-js/web";
 
 import type { AgentSession, Lane } from "../bindings";
@@ -159,6 +159,8 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
     commit: (order) => props.onReorderTabs?.(order),
     enabled: () => Boolean(props.reorderable),
   });
+  // A popover that closes mid-drag must not leave window listeners or a captured pointer behind.
+  onCleanup(() => rowDrag.abort());
   const position = () => {
     const rect = props.anchorRect;
     if (!rect) return { top: 0, left: 0 };
