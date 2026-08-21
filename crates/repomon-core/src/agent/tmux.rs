@@ -6,22 +6,31 @@
 //! there with full scrollback. All methods are synchronous; the daemon calls them from
 //! `spawn_blocking`.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
 use crate::model::LaneId;
 
 use super::backend::{
-    AttachCommand, ByteStream, CaptureOpts, Cursor, OwnerState, ScrollEvent, SessionBackend,
-    SpawnSpec, WindowActivity,
+    AttachCommand, ByteStream, ByteStreamEvent, CaptureOpts, Cursor, OwnerState, ScrollEvent,
+    SessionBackend, SpawnSpec, WindowActivity,
 };
 
 /// A handle to a managed tmux session. Cheap to clone.
 #[derive(Clone, Debug)]
 pub struct TmuxRuntime {
     session: String,
+    streams: Arc<Mutex<std::collections::HashMap<String, ActiveControlStream>>>,
+}
+
+#[derive(Debug)]
+struct ActiveControlStream {
+    tag: u64,
+    input: ChildStdin,
 }
 
 /// One window as the overlay probes it ([`TmuxRuntime::list_windows_meta`]).
@@ -207,6 +216,7 @@ impl TmuxRuntime {
     pub fn new(session: impl Into<String>) -> Self {
         Self {
             session: session.into(),
+            streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1147,15 +1157,73 @@ fn render_spawn_command(spec: &SpawnSpec) -> String {
     cmd
 }
 
-/// Largest chunk a byte stream delivers per channel message — keeps single `event.agent.bytes`
-/// events bounded while a busy pane floods.
-const BYTE_STREAM_CHUNK: usize = 16 * 1024;
-
-/// Monotonic tag baked into every byte-stream fifo NAME, so two pipe instances of the same
-/// window never share a path — a superseded reader's EOF unlink can then only ever remove its
-/// own fifo, never a successor's (see `repomon-daemon`'s `bytes_stream` module doc for the
-/// rapid unwatch→rewatch race this kills).
+/// Monotonic identity for control clients, guarding an old reader's EOF cleanup from removing a
+/// replacement stream for the same window.
 static NEXT_STREAM_TAG: AtomicU64 = AtomicU64::new(0);
+
+fn decode_control_output(value: &[u8]) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] != b'\\' {
+            decoded.push(value[index]);
+            index += 1;
+            continue;
+        }
+        let digits = value.get(index + 1..index + 4)?;
+        if !digits.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
+            return None;
+        }
+        let value = u16::from(digits[0] - b'0') * 64
+            + u16::from(digits[1] - b'0') * 8
+            + u16::from(digits[2] - b'0');
+        decoded.push(u8::try_from(value).ok()?);
+        index += 4;
+    }
+    Some(decoded)
+}
+
+fn control_layout_grid(layout: &str) -> Option<(u16, u16)> {
+    let dimensions = layout.split(',').nth(1)?;
+    let (cols, rows) = dimensions.split_once('x')?;
+    Some((cols.parse().ok()?, rows.parse().ok()?))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ControlEvent {
+    Stream(ByteStreamEvent),
+    Closed,
+}
+
+fn parse_control_event(line: &[u8], window_id: &str, pane_id: &str) -> Option<ControlEvent> {
+    if let Some(rest) = line.strip_prefix(b"%output ") {
+        let split = rest.iter().position(|byte| *byte == b' ')?;
+        if &rest[..split] != pane_id.as_bytes() {
+            return None;
+        }
+        return decode_control_output(&rest[split + 1..])
+            .map(ByteStreamEvent::Bytes)
+            .map(ControlEvent::Stream);
+    }
+    let text = std::str::from_utf8(line).ok()?;
+    if ["%unlinked-window-close ", "%window-close "]
+        .iter()
+        .any(|prefix| {
+            text.strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next())
+                == Some(window_id)
+        })
+    {
+        return Some(ControlEvent::Closed);
+    }
+    let rest = text.strip_prefix("%layout-change ")?;
+    let mut fields = rest.split_whitespace();
+    if fields.next()? != window_id {
+        return None;
+    }
+    let (cols, rows) = control_layout_grid(fields.next()?)?;
+    Some(ControlEvent::Stream(ByteStreamEvent::Grid { cols, rows }))
+}
 
 impl SessionBackend for TmuxRuntime {
     fn available(&self) -> bool {
@@ -1294,63 +1362,120 @@ impl SessionBackend for TmuxRuntime {
         }
     }
 
-    /// The fifo + `pipe-pane` rendezvous, absorbed from the daemon's old `bytes_stream::watch`:
-    /// create a uniquely-named fifo, start the reader thread FIRST (its `open()` is the
-    /// rendezvous with `cat`'s write-side open — tmux buffers pane output behind a stalled
-    /// pipe), then point `pipe-pane` at it. On EOF (pipe turned off or window died) the reader
-    /// removes its fifo — inherently safe: the tag-unique name means it can only ever be its
-    /// own, never a successor's — and drops the sender, closing the stream.
+    /// An ignore-size tmux control client receives `%layout-change` and `%output` on
+    /// one stdout stream. That ordering is the crucial contract: a renderer sees the new grid
+    /// before any cursor-relative redraw produced for it. `ignore-size` ensures this observer
+    /// never participates in tmux's pane-size arbitration.
     fn open_byte_stream(&self, window: &str) -> Result<ByteStream> {
         let tag = NEXT_STREAM_TAG.fetch_add(1, Ordering::Relaxed);
-        let fifo = std::env::temp_dir().join(format!(
-            "repomon-bytes-{}-{window}-{tag}.fifo",
-            self.session
-        ));
-        // The pre-mkfifo unlink guards the one same-path case left — a leftover fifo from a
-        // previous daemon run (the tag counter restarts at 0).
-        let _ = std::fs::remove_file(&fifo);
-        let ok = Command::new("mkfifo")
-            .arg(&fifo)
-            .output()
-            .map_err(Error::Io)?
-            .status
-            .success();
-        if !ok {
-            return Err(Error::Agent(format!("mkfifo {} failed", fifo.display())));
+        let target = self.exact_target(window);
+        let ids = self.run(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "-F",
+            "#{window_id} #{pane_id}",
+        ])?;
+        let mut ids = ids.split_whitespace();
+        let window_id = ids
+            .next()
+            .ok_or_else(|| Error::Agent(format!("window id unavailable for {window}")))?
+            .to_string();
+        let pane_id = ids
+            .next()
+            .ok_or_else(|| Error::Agent(format!("pane id unavailable for {window}")))?
+            .to_string();
+
+        // Clear a legacy pipe-pane left by an older daemon before switching this pane to control
+        // mode. Benign when no pipe exists.
+        let _ = self.pipe_pane_off_named(window);
+        let mut command = Command::new(tmux_program());
+        command
+            .args([
+                "-L",
+                self.session.as_str(),
+                "-C",
+                "attach-session",
+                "-f",
+                "ignore-size",
+                "-t",
+                target.as_str(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some((key, value)) = locale_env() {
+            command.env(key, value);
         }
+        let mut child = command.spawn().map_err(Error::Io)?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Agent("tmux control stdin unavailable".into()))?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Agent("tmux control stdout unavailable".into()))?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        {
-            let fifo = fifo.clone();
-            std::thread::spawn(move || {
-                use std::io::Read;
-                let Ok(mut f) = std::fs::File::open(&fifo) else {
-                    return;
+
+        let mut streams = self.streams.lock().expect("control streams lock");
+        if let Some(mut old) = streams.remove(window) {
+            let _ = old.input.write_all(b"detach-client\n");
+            let _ = old.input.flush();
+        }
+        streams.insert(window.to_string(), ActiveControlStream { tag, input });
+        drop(streams);
+
+        let streams = self.streams.clone();
+        let stream_window = window.to_string();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(output);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let Ok(read) = reader.read_until(b'\n', &mut line) else {
+                    break;
                 };
-                let mut buf = vec![0u8; BYTE_STREAM_CHUNK];
-                loop {
-                    match f.read(&mut buf) {
-                        Ok(0) | Err(_) => break, // EOF: pipe turned off or window died
-                        Ok(n) => {
-                            if tx.send(buf[..n].to_vec()).is_err() {
-                                break; // consumer gone — stop pumping
-                            }
-                        }
-                    }
+                if read == 0 {
+                    break;
                 }
-                let _ = std::fs::remove_file(&fifo);
-            });
-        }
-        if let Err(e) = self.pipe_pane_named(window, &fifo) {
-            // The pipe never started: remove the fifo so it can't linger. (The reader, still
-            // blocked on open(), is a pre-existing leak parity — no `cat` ever opens the write
-            // side, same as before this moved out of the daemon.)
-            let _ = std::fs::remove_file(&fifo);
-            return Err(e);
-        }
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                match parse_control_event(&line, &window_id, &pane_id) {
+                    Some(ControlEvent::Stream(event)) => match tx.send(event) {
+                        Ok(()) => {}
+                        Err(_) => break,
+                    },
+                    Some(ControlEvent::Closed) => break,
+                    _ => {}
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let mut streams = streams.lock().expect("control streams lock");
+            if streams
+                .get(&stream_window)
+                .is_some_and(|stream| stream.tag == tag)
+            {
+                streams.remove(&stream_window);
+            }
+        });
         Ok(ByteStream { rx })
     }
 
     fn close_byte_stream(&self, window: &str) -> Result<()> {
+        if let Some(mut stream) = self
+            .streams
+            .lock()
+            .expect("control streams lock")
+            .remove(window)
+        {
+            let _ = stream.input.write_all(b"detach-client\n");
+            let _ = stream.input.flush();
+        }
+        // Also clean up a pipe from a daemon version that predates control-mode streaming.
         self.pipe_pane_off_named(window)
     }
 }
@@ -1363,6 +1488,46 @@ mod tests {
     fn quotes_for_shell() {
         assert_eq!(shell_quote("hello"), "'hello'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn control_output_decodes_octal_without_touching_utf8() {
+        assert_eq!(
+            decode_control_output(b"ready\\015\\012\\033[32m \xe2\x98\x83 \\134").unwrap(),
+            b"ready\r\n\x1b[32m \xe2\x98\x83 \\"
+        );
+        assert!(decode_control_output(br"bad\12").is_none());
+        assert!(decode_control_output(br"bad\400").is_none());
+    }
+
+    #[test]
+    fn control_events_filter_identity_and_preserve_layout_order() {
+        assert_eq!(
+            parse_control_event(br"%layout-change @7 a87d,100x30,0,0,4 *", "@7", "%4"),
+            Some(ControlEvent::Stream(ByteStreamEvent::Grid {
+                cols: 100,
+                rows: 30
+            }))
+        );
+        assert_eq!(
+            parse_control_event(br"%output %4 \033[2;1Hready", "@7", "%4"),
+            Some(ControlEvent::Stream(ByteStreamEvent::Bytes(
+                b"\x1b[2;1Hready".to_vec()
+            )))
+        );
+        assert!(parse_control_event(br"%output %9 nope", "@7", "%4").is_none());
+        assert!(
+            parse_control_event(br"%layout-change @8 a87d,100x30,0,0,4 *", "@7", "%4").is_none()
+        );
+        assert_eq!(
+            parse_control_event(br"%unlinked-window-close @7", "@7", "%4"),
+            Some(ControlEvent::Closed)
+        );
+        assert_eq!(
+            parse_control_event(br"%window-close @7", "@7", "%4"),
+            Some(ControlEvent::Closed)
+        );
+        assert!(parse_control_event(br"%unlinked-window-close @8", "@7", "%4").is_none());
     }
 
     #[test]
@@ -1802,6 +1967,116 @@ mod tests {
         rt.kill_named("lane-1").unwrap();
         let _ = Command::new("tmux")
             .args(["-L", rt.session(), "kill-server"])
+            .output();
+    }
+
+    #[test]
+    fn control_stream_orders_grid_before_new_size_output_and_ignores_client_size() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let backend = TmuxRuntime::new(format!("repomon-controltest-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        backend.spawn(1, dir.path(), "sh").unwrap();
+        backend.resize_named("lane-1", 100, 30).unwrap();
+        let before = backend.size_named("lane-1");
+
+        let mut stream = backend.open_byte_stream("lane-1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(backend.size_named("lane-1"), before);
+
+        backend.resize_named("lane-1", 120, 40).unwrap();
+        backend
+            .send_text_named("lane-1", "printf CONTROL_AFTER_RESIZE")
+            .unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut saw_grid = false;
+        let ordered = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(event) = stream.rx.recv().await {
+                    match event {
+                        ByteStreamEvent::Grid { cols, rows } => {
+                            if (cols, rows) == (120, 40) {
+                                saw_grid = true;
+                            }
+                        }
+                        ByteStreamEvent::Bytes(bytes)
+                            if bytes
+                                .windows(b"CONTROL_AFTER_RESIZE".len())
+                                .any(|window| window == b"CONTROL_AFTER_RESIZE") =>
+                        {
+                            return saw_grid;
+                        }
+                        ByteStreamEvent::Bytes(_) => {}
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        });
+        assert!(ordered, "new-grid output arrived before its layout change");
+
+        backend.close_byte_stream("lane-1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let clients = backend
+            .run_allow_absent(&["list-clients", "-F", "#{client_control_mode}"])
+            .unwrap();
+        assert!(
+            clients.trim().is_empty(),
+            "control client leaked: {clients:?}"
+        );
+        backend.kill_named("lane-1").unwrap();
+        let _ = Command::new(tmux_program())
+            .args(["-L", backend.session(), "kill-server"])
+            .output();
+    }
+
+    #[test]
+    fn control_stream_closes_when_its_window_dies_but_session_survives() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let backend = TmuxRuntime::new(format!("repomon-control-close-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        backend.spawn(1, dir.path(), "sh").unwrap();
+        backend.spawn(2, dir.path(), "sh").unwrap();
+
+        let mut stream = backend.open_byte_stream("lane-2").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        backend.kill_named("lane-2").unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let closed = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while stream.rx.recv().await.is_some() {}
+            })
+            .await
+            .is_ok()
+        });
+        assert!(closed, "target window death did not close its byte stream");
+        assert!(
+            backend
+                .list_windows()
+                .unwrap()
+                .iter()
+                .any(|w| w == "lane-1"),
+            "the sibling window should keep the tmux session alive"
+        );
+        let clients = backend
+            .run_allow_absent(&["list-clients", "-F", "#{client_control_mode}"])
+            .unwrap();
+        assert!(
+            clients.trim().is_empty(),
+            "target window death leaked a control client: {clients:?}"
+        );
+
+        backend.kill_named("lane-1").unwrap();
+        let _ = Command::new(tmux_program())
+            .args(["-L", backend.session(), "kill-server"])
             .output();
     }
 

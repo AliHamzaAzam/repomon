@@ -1,12 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import {
-  DaemonRpcError,
-  daemonCall,
-  isRpcFailure,
-  subscribeDaemon,
-  type DaemonEvent,
-} from "./rpc";
+import { DaemonRpcError, daemonCall, isRpcFailure } from "./rpc";
 
 export type TerminalRenderer = "auto" | "webgl" | "dom";
 
@@ -25,36 +19,6 @@ export interface TermWatchAck {
 export interface TerminalGrid {
   cols: number;
   rows: number;
-}
-
-type DaemonSubscriber = (
-  onEvent: (event: DaemonEvent) => void,
-) => Promise<() => void>;
-
-/// Follow authoritative grid changes made by another viewer of this shared pane. Raw PTY bytes
-/// are meaningful only at the pane width that produced them; applying the new grid immediately
-/// keeps xterm's cursor-relative redraws aligned without waiting for this window to be resized.
-export function watchTerminalGrid(
-  target: TerminalTarget,
-  onGrid: (grid: TerminalGrid) => void,
-  subscribe: DaemonSubscriber = subscribeDaemon,
-): Promise<() => void> {
-  return subscribe((event) => {
-    if (event.method !== "event.agent.grid") return;
-    const params = event.params as Partial<{
-      lane_id: number;
-      window: string;
-      cols: number;
-      rows: number;
-    }>;
-    if (params.lane_id !== target.laneId || params.window !== target.window) return;
-    if (!params.cols || !params.rows) return;
-    onGrid({ cols: params.cols, rows: params.rows });
-  });
-}
-
-export async function resyncTerminal(target: TerminalTarget): Promise<void> {
-  await invoke("term_resync", { window: target.window });
 }
 
 export interface TranslatedKey {
@@ -193,21 +157,43 @@ export function recordTrace(type: string, windowName: string | undefined, bytes:
   }
 }
 
-export function createTerminalFrameGate(onBytes: (bytes: Uint8Array) => void) {
+export type TerminalChannelFrame =
+  | { type: "bytes"; bytes: Uint8Array }
+  | { type: "grid"; cols: number; rows: number };
+
+export function decodeTerminalChannelFrame(buffer: ArrayBuffer): TerminalChannelFrame | null {
+  const frame = new Uint8Array(buffer);
+  if (frame[0] === 0) return { type: "bytes", bytes: frame.slice(1) };
+  if (frame[0] === 1 && frame.length === 5) {
+    const view = new DataView(buffer);
+    return { type: "grid", cols: view.getUint16(1), rows: view.getUint16(3) };
+  }
+  return null;
+}
+
+export function createTerminalFrameGate(
+  onBytes: (bytes: Uint8Array) => void,
+  onGrid: (grid: TerminalGrid) => void = () => undefined,
+) {
   let active = true;
   let streaming = false;
-  let queued: Uint8Array[] = [];
+  let queued: TerminalChannelFrame[] = [];
+
+  const dispatch = (frame: TerminalChannelFrame) => {
+    if (frame.type === "bytes") onBytes(frame.bytes);
+    else onGrid(frame);
+  };
 
   return {
-    push(bytes: Uint8Array) {
+    push(frame: TerminalChannelFrame) {
       if (!active) return;
-      if (streaming) onBytes(bytes);
-      else queued.push(bytes);
+      if (streaming) dispatch(frame);
+      else queued.push(frame);
     },
     open() {
       if (!active) return;
       streaming = true;
-      for (const bytes of queued) onBytes(bytes);
+      for (const frame of queued) dispatch(frame);
       queued = [];
     },
     close() {
@@ -221,13 +207,19 @@ export async function watchTerminal(
   target: TerminalTarget,
   onBytes: (bytes: Uint8Array) => void,
   onReady?: (ack: TermWatchAck) => void,
+  onGrid?: (grid: TerminalGrid) => void,
 ): Promise<{ ack: TermWatchAck; stop: () => Promise<void> }> {
   const channel = new Channel<ArrayBuffer>();
-  const gate = createTerminalFrameGate(onBytes);
+  const gate = createTerminalFrameGate(onBytes, onGrid);
   channel.onmessage = (buffer) => {
-    const bytes = new Uint8Array(buffer);
-    recordTrace("CHANNEL_ONMESSAGE", target.window, bytes);
-    gate.push(bytes);
+    const frame = decodeTerminalChannelFrame(buffer);
+    if (!frame) return;
+    if (frame.type === "bytes") {
+      recordTrace("CHANNEL_ONMESSAGE", target.window, frame.bytes);
+    } else {
+      recordTrace("CHANNEL_GRID", target.window, `${frame.cols}x${frame.rows}`);
+    }
+    gate.push(frame);
   };
   let ack: TermWatchAck;
   try {

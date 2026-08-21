@@ -244,10 +244,9 @@ pub struct Ctx {
     /// Per worktree: the dxkit loop ledger's mtime and the verdict parsed from its tail, so
     /// the overlay re-reads only when the gate actually ran again. Keyed by worktree path.
     pub gate_cache: Mutex<HashMap<PathBuf, GateCacheEntry>>,
-    /// Live PTY byte watches, keyed by window — the embedded renderer's feed. tmux allows one
-    /// `pipe-pane` per pane, so each window has exactly one shared pipe; the entry refcounts the
-    /// connections watching it (see [`bytes_stream`]). `Arc<Mutex<…>>` so an EOF reader thread can
-    /// clean up its own entry.
+    /// Live PTY byte watches, keyed by window — the embedded renderer's feed. Each window has one
+    /// shared backend stream; the entry refcounts its watching connections (see [`bytes_stream`]).
+    /// `Arc<Mutex<…>>` lets the forwarder clean up when the backend detects target closure.
     pub bytes_watches: bytes_stream::Watches,
     /// Agent windows currently paused on a usage limit, with their reset time — written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.

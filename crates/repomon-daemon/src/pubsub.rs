@@ -24,6 +24,8 @@ pub mod topic {
     pub const AGENT_BYTES: &str = "event.agent.bytes";
     /// The authoritative cell grid after a shared agent pane changes size.
     pub const AGENT_GRID: &str = "event.agent.grid";
+    /// A watched pane's backend stream ended because its target window disappeared.
+    pub const AGENT_STREAM_CLOSED: &str = "event.agent.stream_closed";
     pub const AGENT_STATUS: &str = "event.agent.status";
     /// A custom agent was added/removed, or the default changed (config mutated).
     pub const AGENT_CHANGED: &str = "event.agent.changed";
@@ -42,14 +44,14 @@ pub const SUPERVISION_CHANGED: &str = topic::SUPERVISION_CHANGED;
 
 /// Whether a connection with the given per-connection filter state should receive `value`.
 ///
-/// Two topics are per-connection; every other topic forwards unchanged. The event bus broadcasts
-/// each event to every subscriber, so the forwarding loops narrow the two streaming topics to the
+/// Three topics are per-connection; every other topic forwards unchanged. The event bus broadcasts
+/// each event to every subscriber, so the forwarding loops narrow these terminal-stream topics to the
 /// connections that actually asked for them. All state read here lives behind `std::sync::Mutex`es,
 /// so the check adds no `await` on the event-forward hot path.
 ///
-/// - `event.agent.bytes` / `event.agent.grid` (A4): forward only when their `window` param is in
-///   `watched`; an event with no `window` goes to nobody. Grid notifications follow the byte watch
-///   because only an embedded renderer can become stale when another viewer reflows the pane.
+/// - `event.agent.bytes` / `event.agent.grid` / `event.agent.stream_closed` (A4): forward only when
+///   their `window` param is in `watched`; an event with no `window` goes to nobody. Grid and close
+///   notifications follow the byte watch because only an embedded renderer owns that stream.
 /// - `event.agent.output` (A5): forwards when its `lane_id` is in the connection's viewport
 ///   `output_lanes` OR its `window` is in `output_windows` — i.e. lane-membership or the terminal
 ///   window the client put in its viewport. This is what the client literally requested via
@@ -68,7 +70,7 @@ pub fn deliver_to(
     let method = value.get("method").and_then(Value::as_str);
     let params = value.get("params");
     match method {
-        Some(topic::AGENT_BYTES) | Some(topic::AGENT_GRID) => {
+        Some(topic::AGENT_BYTES) | Some(topic::AGENT_GRID) | Some(topic::AGENT_STREAM_CLOSED) => {
             match params.and_then(|p| p.get("window")).and_then(Value::as_str) {
                 Some(window) => watched.contains(window),
                 None => false,
@@ -143,6 +145,18 @@ mod tests {
         let ev = json!({
             "method": topic::AGENT_GRID,
             "params": { "lane_id": 1, "window": "lane-1", "cols": 120, "rows": 40 }
+        });
+        let (_, ol, ow) = nothing();
+        assert!(deliver_to(&ev, &windows(&["lane-1"]), &ol, &ow));
+        assert!(!deliver_to(&ev, &windows(&["lane-2"]), &ol, &ow));
+        assert!(!deliver_to(&ev, &windows(&[]), &ol, &ow));
+    }
+
+    #[test]
+    fn stream_close_forwards_only_to_watchers_of_that_window() {
+        let ev = json!({
+            "method": topic::AGENT_STREAM_CLOSED,
+            "params": { "lane_id": 1, "window": "lane-1", "generation": 7 }
         });
         let (_, ol, ow) = nothing();
         assert!(deliver_to(&ev, &windows(&["lane-1"]), &ol, &ow));

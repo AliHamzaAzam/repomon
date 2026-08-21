@@ -1255,7 +1255,14 @@ fn resolved_lane(lane: &Lane, slot: usize) -> Result<ResolvedAgentAddress, RpcEr
                 .and_then(TmuxRuntime::slot_of_window)
                 == Some(slot)
         })
-        .or_else(|| lane.agent_sessions.get(slot - 1))
+        // Windowless external sessions have no durable tmux suffix, so their displayed list
+        // position is the only available slot. Never apply this fallback to a managed session:
+        // after lane-N-k dies, activity ordering must not silently retarget /k to lane-N-j.
+        .or_else(|| {
+            lane.agent_sessions
+                .get(slot - 1)
+                .filter(|session| session.external && session.tmux_window.is_none())
+        })
         .ok_or_else(|| {
             RpcError::invalid_params(format!("lane-{} has no agent slot {slot}", lane.id))
         })?;
@@ -1396,10 +1403,7 @@ async fn resize_agent_grid(
     .map_err(internal)?
     .map_err(internal)?;
 
-    let changed = crate::bytes_stream::note_grid(&ctx.bytes_watches, window, None, (cols, rows))
-        .await
-        .unwrap_or(before != Some((cols, rows)));
-    if changed {
+    if before != Some((cols, rows)) {
         ctx.broadcast(
             crate::pubsub::topic::AGENT_GRID,
             json!({
@@ -3365,7 +3369,8 @@ pub async fn dispatch(
                     .await
                     .map_err(internal)?
                     .map_err(internal)?;
-                    // Let pipe-pane deliver output tmux had already applied when capture-pane ran.
+                    // Let the backend stream deliver output tmux had already applied when the
+                    // capture ran.
                     tokio::time::sleep(std::time::Duration::from_millis(8)).await;
                     let after = crate::bytes_stream::cursor(&ctx.bytes_watches, &window).await;
                     state = Some(next);
@@ -3453,7 +3458,7 @@ pub async fn dispatch(
         "agent.watch_bytes" => {
             // The embedded renderer's feed: stream one pane's raw PTY bytes as
             // `event.agent.bytes`. Refcounted per window and per connection: a window has one
-            // shared pipe (tmux allows only one pipe-pane per pane), this session joins/leaves its
+            // shared backend stream, this session joins/leaves its
             // readership, and delivery is filtered per connection at the forwarding loops. A new
             // `on` NEVER stops another session's watch; `on:false` releases only THIS session's.
             let p: AgentWatchBytes = parse(params)?;
@@ -7771,6 +7776,27 @@ mod tests {
         let first = resolve_agent_message_address(&[lane], "lane-7/1").unwrap();
         assert_eq!(first.window.as_deref(), Some("lane-7"));
         assert_eq!(first.session_id.as_deref(), Some("session-7-0"));
+    }
+
+    #[test]
+    fn missing_managed_message_slot_never_retargets_by_list_position() {
+        let mut lane = mail_lane(7, &[Some("first"), Some("gone"), Some("current")]);
+        lane.agent_sessions.remove(1);
+
+        let error = resolve_agent_message_address(&[lane], "lane-7/2").unwrap_err();
+        assert!(error.message.contains("has no agent slot 2"));
+    }
+
+    #[test]
+    fn windowless_external_message_slot_uses_its_list_position() {
+        let mut lane = mail_lane(7, &[Some("managed"), Some("external")]);
+        lane.agent_sessions[1].external = true;
+        lane.agent_sessions[1].tmux_window = None;
+
+        let external = resolve_agent_message_address(&[lane], "lane-7/2").unwrap();
+        assert_eq!(external.slot, Some(2));
+        assert_eq!(external.window, None);
+        assert_eq!(external.session_id.as_deref(), Some("session-7-1"));
     }
 
     #[test]

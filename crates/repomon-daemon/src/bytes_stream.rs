@@ -2,13 +2,12 @@
 //!
 //! The mediated view is a poll → capture → re-parse pipeline; the embedded renderer instead
 //! wants the pane's actual byte stream. The backend provides it via
-//! [`SessionBackend::open_byte_stream`] (on tmux: `pipe-pane` into a daemon-owned fifo); each
-//! chunk is broadcast as `event.agent.bytes` (base64 — PTY bytes are not valid UTF-8 at chunk
-//! boundaries).
+//! [`SessionBackend::open_byte_stream`] (on tmux: one ignore-size control client); ordered output
+//! chunks and grid changes are broadcast as `event.agent.bytes` / `event.agent.grid`. If the
+//! target window disappears, `event.agent.stream_closed` tells each renderer to release its watch.
 //!
-//! ONE PIPE PER WINDOW, SHARED. The backend allows only one byte stream per window (tmux allows
-//! one `pipe-pane` per pane), so a window can have exactly one stream no matter how many clients
-//! watch it. The event bus already broadcasts every chunk to every subscriber; who actually
+//! ONE STREAM PER WINDOW, SHARED. A window has exactly one backend observer no matter how many
+//! clients watch it. The event bus already broadcasts every chunk to every subscriber; who actually
 //! *receives* a window's bytes is decided per connection at the forwarding loops (a connection
 //! forwards `event.agent.bytes` only for windows in its `watched_bytes` set). This module
 //! therefore refcounts watchers per window: the first watcher starts the stream, later watchers
@@ -17,25 +16,23 @@
 //! old single global slot let any new watch kill the previous one, which is exactly what broke
 //! concurrency.
 //!
-//! GENERATION / EOF race: lifecycle is EOF-driven — closing the stream (or the window dying)
-//! ends the backend's byte channel, whose closure the forwarder task sees, and it then removes
+//! GENERATION / EOF race: closing the stream (or the backend detecting that its target window
+//! died) ends the backend's byte channel, whose closure the forwarder task sees, and it then removes
 //! its own map entry. Each fresh stream (a first watcher creating a new entry) gets a
 //! globally-unique `generation`, and the forwarder drops its entry ONLY if the entry's
 //! generation still matches the one it was started with; without that, a rapid unwatch→rewatch
 //! of the same window could have the dying forwarder delete the freshly-started entry, leaving
 //! `watched_bytes` pointing at a live window whose entry is gone — it would accept refs and
-//! stream nothing. (The matching fifo-path race is handled inside the tmux backend, which bakes
-//! its own unique tag into every fifo name.)
+//! stream nothing. The tmux backend applies the same generation guard to control-client cleanup.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
-use repomon_core::SessionBackend;
 use repomon_core::model::LaneId;
 use repomon_core::protocol::Notification;
+use repomon_core::{ByteStreamEvent, SessionBackend};
 use tokio::sync::Mutex;
 
 use crate::pubsub::{self, EventTx};
@@ -168,7 +165,9 @@ pub async fn watch(
         },
     );
 
-    // The forwarder: drain the backend's chunks onto the event bus. When the channel closes
+    // The forwarder: drain the backend's ordered terminal events onto the event bus. Grid and
+    // byte notifications receive positions in the same sequence, so clients can resize before
+    // interpreting output produced for the new dimensions. When the channel closes
     // (stream turned off or window died) it drops its own entry, but only while the entry is
     // still this stream's (generation match) — a later watch of the same window supersedes it.
     {
@@ -176,79 +175,77 @@ pub async fn watch(
         let forward_watches = watches.clone();
         let forward_events = events.clone();
         let stream_sequence = sequence.clone();
-        let output_since_probe = Arc::new(AtomicBool::new(false));
-        let probe_dirty = output_since_probe.clone();
         tokio::spawn(async move {
             let mut rx = stream.rx;
-            while let Some(chunk) = rx.recv().await {
-                output_since_probe.store(true, Ordering::Release);
-                let sequence = stream_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-                let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
-                let note = Notification::new(
-                    pubsub::topic::AGENT_BYTES,
-                    serde_json::json!({
-                        "lane_id": lane,
-                        "window": forward_window,
-                        "generation": generation,
-                        "sequence": sequence,
-                        "data": data,
-                    }),
-                );
+            while let Some(event) = rx.recv().await {
+                let note = match event {
+                    ByteStreamEvent::Bytes(chunk) => {
+                        let sequence = stream_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                        let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
+                        Notification::new(
+                            pubsub::topic::AGENT_BYTES,
+                            serde_json::json!({
+                                "lane_id": lane,
+                                "window": forward_window,
+                                "generation": generation,
+                                "sequence": sequence,
+                                "data": data,
+                            }),
+                        )
+                    }
+                    ByteStreamEvent::Grid { cols, rows } => {
+                        if note_grid(
+                            &forward_watches,
+                            &forward_window,
+                            Some(generation),
+                            (cols, rows),
+                        )
+                        .await
+                            != Some(true)
+                        {
+                            continue;
+                        }
+                        let sequence = stream_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                        Notification::new(
+                            pubsub::topic::AGENT_GRID,
+                            serde_json::json!({
+                                "lane_id": lane,
+                                "window": forward_window,
+                                "generation": generation,
+                                "sequence": sequence,
+                                "cols": cols,
+                                "rows": rows,
+                            }),
+                        )
+                    }
+                };
                 if let Ok(value) = serde_json::to_value(&note) {
                     let _ = forward_events.send(value); // Err = no subscribers; fine
                 }
             }
-            let mut map = forward_watches.lock().await;
-            if eof_entry_is_current(&map, &forward_window, generation) {
-                map.remove(&forward_window);
-            }
-        });
-
-        // A raw tmux attach or direct tmux resize changes the pane without going through
-        // `agent.fit` / `agent.resize`. Probe only while output is flowing — a quiet pane cannot
-        // corrupt a renderer — and emit the same grid event before an authoritative repaint heals
-        // any chunks that arrived during the short detection window.
-        let probe_backend = backend.clone();
-        let probe_events = events.clone();
-        let probe_watches = watches.clone();
-        let probe_window = window.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(250));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                ticker.tick().await;
-                if !probe_dirty.swap(false, Ordering::AcqRel) {
-                    let map = probe_watches.lock().await;
-                    if !eof_entry_is_current(&map, &probe_window, generation) {
-                        break;
-                    }
-                    continue;
+            let closed_current = {
+                let mut map = forward_watches.lock().await;
+                if eof_entry_is_current(&map, &forward_window, generation) {
+                    map.remove(&forward_window);
+                    true
+                } else {
+                    false
                 }
-                let backend = probe_backend.clone();
-                let window = probe_window.clone();
-                let Some(grid) = tokio::task::spawn_blocking(move || backend.size_named(&window))
-                    .await
-                    .ok()
-                    .flatten()
-                else {
-                    continue;
-                };
-                if note_grid(&probe_watches, &probe_window, Some(generation), grid).await
-                    != Some(true)
-                {
-                    continue;
-                }
+            };
+            // Explicit unwatch removes the entry before closing the backend, so only an
+            // unexpected backend EOF (normally target-window death) reaches clients. The
+            // generation prevents a delayed close from stopping a replacement watch.
+            if closed_current {
                 let note = Notification::new(
-                    pubsub::topic::AGENT_GRID,
+                    pubsub::topic::AGENT_STREAM_CLOSED,
                     serde_json::json!({
                         "lane_id": lane,
-                        "window": probe_window,
-                        "cols": grid.0,
-                        "rows": grid.1,
+                        "window": forward_window,
+                        "generation": generation,
                     }),
                 );
                 if let Ok(value) = serde_json::to_value(&note) {
-                    let _ = probe_events.send(value);
+                    let _ = forward_events.send(value);
                 }
             }
         });
