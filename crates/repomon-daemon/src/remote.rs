@@ -68,7 +68,7 @@ fn remote_method_allowed(method: &str) -> bool {
         | "repo.list" | "lane.list" | "lane.get"
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
         | "agent.capture" | "agent.transcript" | "agent.transcript_page"
-        | "usage.get" | "daemon.status"
+        | "usage.get" | "usage.refresh" | "daemon.status"
         // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
         | "terminal.list_all"
         // event stream + per-client streaming hint
