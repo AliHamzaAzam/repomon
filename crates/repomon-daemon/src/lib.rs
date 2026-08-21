@@ -178,10 +178,13 @@ pub type GateCacheEntry = (
     Option<repomon_core::agent::gate::GateVerdict>,
 );
 
-/// One `prompt_cache` entry, keyed by window: when it was sniffed, the dialog found (if any),
-/// and the pending-prompt summary found (if any).
+/// One `prompt_cache` entry, keyed by window: when it was sniffed, the transcript-derived base
+/// status at that point (when the overlay supplied it), the dialog found (if any), and the
+/// pending-prompt summary found (if any). The status snapshot prevents a pane result captured
+/// for a prior turn state from being reused after the transcript flips Running↔Waiting.
 pub type PromptCacheEntry = (
     Instant,
+    Option<repomon_core::model::AgentStatus>,
     Option<repomon_core::agent::prompt::PendingDialog>,
     Option<String>,
 );

@@ -3422,10 +3422,10 @@ pub async fn dispatch(
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            ctx.prompt_cache
-                .lock()
-                .await
-                .insert(window, (std::time::Instant::now(), dialog.clone(), sub));
+            ctx.prompt_cache.lock().await.insert(
+                window,
+                (std::time::Instant::now(), None, dialog.clone(), sub),
+            );
             Ok(json!({ "dialog": dialog }))
         }
         "agent.answer" => {
@@ -3451,7 +3451,7 @@ pub async fn dispatch(
                 ctx.prompt_cache
                     .lock()
                     .await
-                    .insert(window, (std::time::Instant::now(), None, None));
+                    .insert(window, (std::time::Instant::now(), None, None, None));
                 return Err(RpcError {
                     code: DIALOG_CHANGED,
                     message: "no pending dialog".into(),
@@ -3462,7 +3462,7 @@ pub async fn dispatch(
                 if *expect != dialog.summary() {
                     ctx.prompt_cache.lock().await.insert(
                         window,
-                        (std::time::Instant::now(), Some(dialog.clone()), None),
+                        (std::time::Instant::now(), None, Some(dialog.clone()), None),
                     );
                     return Err(RpcError {
                         code: DIALOG_CHANGED,
@@ -4552,6 +4552,16 @@ const RECENTLY_ACTIVE_SECS: i64 = 60;
 /// coalescing sub-second burst requests into a single recomputation.
 const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// A pane sniff captured for one transcript-derived status must not be reused after the base
+/// status changes. A direct `agent.prompt`/`agent.answer` capture has no base status and remains
+/// usable for all statuses; overlay captures record `Some(status)` and require an exact match.
+fn sniff_cache_status_matches(
+    cached_status: Option<AgentStatus>,
+    current_status: AgentStatus,
+) -> bool {
+    cached_status.is_none_or(|cached| cached == current_status)
+}
+
 /// The full lane list with live agent sessions overlaid — what `lane.list` serves — from a
 /// short-TTL cache so a stream of per-second client polls collapses into ~1 scan per TTL. Stale
 /// concurrent callers may each recompute (bounded, rare); we accept that over single-flight to
@@ -5110,7 +5120,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     SNIFF_TTL
                 };
                 match cache.get(w) {
-                    Some((t, p, sub)) if t.elapsed() < ttl => sniffs.push((p.clone(), sub.clone())),
+                    Some((t, cached_status, p, sub))
+                        if t.elapsed() < ttl
+                            && sniff_cache_status_matches(*cached_status, *status) =>
+                    {
+                        sniffs.push((p.clone(), sub.clone()))
+                    }
                     _ => {
                         sniffs.push((None, None));
                         misses.push(idx);
@@ -5155,7 +5170,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 let window = &candidates[i].2;
                 cache.insert(
                     window.clone(),
-                    (std::time::Instant::now(), p.clone(), sub.clone()),
+                    (
+                        std::time::Instant::now(),
+                        Some(candidates[i].3),
+                        p.clone(),
+                        sub.clone(),
+                    ),
                 );
                 // Stamp the pane's last-change time only when the content actually differs.
                 if let Some(h) = hash {
@@ -5177,7 +5197,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let live: std::collections::HashSet<&str> =
                 windows.iter().map(|w| w.name.as_str()).collect();
             let mut cache = ctx.prompt_cache.lock().await;
-            cache.retain(|w, (t, _, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
+            cache.retain(|w, (t, _, _, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
             let mut seen = ctx.pane_seen.lock().await;
             seen.retain(|w, _| live.contains(w.as_str()));
         }
@@ -9463,6 +9483,18 @@ mod tests {
         assert_eq!(stall_since(RateLimited, false, false, Some(old), now), None);
         // No pane observation yet: can't call it.
         assert_eq!(stall_since(Running, false, false, None, now), None);
+    }
+
+    #[test]
+    fn pane_sniff_cache_cannot_cross_base_status_transitions() {
+        use repomon_core::model::AgentStatus::*;
+
+        assert!(sniff_cache_status_matches(Some(Running), Running));
+        assert!(!sniff_cache_status_matches(Some(Waiting), Running));
+        assert!(!sniff_cache_status_matches(Some(Running), Waiting));
+        // Direct prompt captures are intentionally status-agnostic.
+        assert!(sniff_cache_status_matches(None, Running));
+        assert!(sniff_cache_status_matches(None, Waiting));
     }
 
     #[test]
