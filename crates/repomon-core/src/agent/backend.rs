@@ -161,6 +161,13 @@ pub trait SessionBackend: Send + Sync {
     /// Window names currently live in the session. A vanished server reads as empty.
     fn list_windows(&self) -> Result<Vec<String>>;
 
+    /// Return a stable-enough identity for the live process in `window`, when the backend can
+    /// observe one. It must change when the process is replaced, but remain stable across daemon
+    /// restarts while that process survives.
+    fn window_process_fingerprint(&self, _window: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Window identity metadata used to keep transcript routing stable across refreshes.
     /// Backends without durable window metadata degrade to name-only entries.
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {

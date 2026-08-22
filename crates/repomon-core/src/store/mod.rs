@@ -11,7 +11,7 @@ use std::thread;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::types::Type;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use sha2::{Digest, Sha256};
 
 use crate::agent::supervision::{MailDeliveryMode, SupervisionOverrides};
@@ -61,6 +61,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         20,
         include_str!("../../migrations/0020_agent_session_order.sql"),
+    ),
+    (
+        21,
+        include_str!("../../migrations/0021_mcp_identity_process.sql"),
     ),
 ];
 
@@ -687,22 +691,47 @@ impl Store {
     // ---- fleet messages -----------------------------------------------------
 
     /// Create a restricted MCP identity and return its one-time plaintext token.
-    pub async fn create_mcp_identity(&self, identity: ResolvedAgentAddress) -> Result<String> {
+    ///
+    /// A daemon restart may rediscover the same still-running process and mint a fresh launch
+    /// token for it. In that case the old token must remain valid: the agent already has it in
+    /// its environment and cannot be refreshed. A process fingerprint is therefore required to
+    /// distinguish that harmless re-adoption from a genuinely replaced process. Fingerprints we
+    /// cannot establish are deliberately treated as a replacement for security.
+    pub async fn create_mcp_identity(
+        &self,
+        identity: ResolvedAgentAddress,
+        process_fingerprint: Option<String>,
+    ) -> Result<String> {
         let token = random_hex(32);
         let token_hash = hash_identity_token(&token);
         let stored = identity.clone();
         self.call(move |c| {
             if let Some(window) = &stored.window {
-                c.execute(
-                    "UPDATE mcp_identities SET revoked_at = ?2
-                     WHERE window = ?1 AND revoked_at IS NULL",
-                    params![window, to_iso(&Utc::now())],
-                )?;
+                let previous_fingerprint: Option<String> = c
+                    .query_row(
+                        "SELECT process_fingerprint FROM mcp_identities
+                         WHERE window = ?1 AND revoked_at IS NULL
+                         ORDER BY created_at DESC LIMIT 1",
+                        params![window],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let same_process = process_fingerprint.is_some()
+                    && previous_fingerprint.as_deref() == process_fingerprint.as_deref();
+                if !same_process {
+                    c.execute(
+                        "UPDATE mcp_identities SET revoked_at = ?2
+                         WHERE window = ?1 AND revoked_at IS NULL",
+                        params![window, to_iso(&Utc::now())],
+                    )?;
+                }
             }
             c.execute(
                 "INSERT INTO mcp_identities(
-                    token_hash, address, lane_id, slot, window, session_id, agent_kind, created_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    token_hash, address, lane_id, slot, window, session_id, agent_kind,
+                    process_fingerprint, created_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     token_hash,
                     stored.address.as_str(),
@@ -711,6 +740,7 @@ impl Store {
                     stored.window,
                     stored.session_id,
                     stored.agent_kind,
+                    process_fingerprint,
                     to_iso(&Utc::now()),
                 ],
             )?;
@@ -718,6 +748,23 @@ impl Store {
         })
         .await?;
         Ok(token)
+    }
+
+    /// Record the fingerprint of the process launched with `token` after its window exists.
+    pub async fn set_mcp_identity_process_fingerprint(
+        &self,
+        token: String,
+        process_fingerprint: String,
+    ) -> Result<()> {
+        let token_hash = hash_identity_token(&token);
+        self.call(move |c| {
+            c.execute(
+                "UPDATE mcp_identities SET process_fingerprint = ?2 WHERE token_hash = ?1",
+                params![token_hash, process_fingerprint],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Resolve a plaintext MCP identity token without exposing its stored hash.
@@ -3141,9 +3188,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_identity_stores_only_hash_and_revokes_replaced_window() {
+    async fn mcp_identity_stores_only_hash_and_replaces_only_a_different_process() {
         let s = store().await;
-        let token = s.create_mcp_identity(address("lane-2/1")).await.unwrap();
+        let token = s
+            .create_mcp_identity(address("lane-2/1"), Some("123:boot-a".into()))
+            .await
+            .unwrap();
         assert_eq!(
             s.resolve_mcp_identity(token.clone())
                 .await
@@ -3168,8 +3218,23 @@ mod tests {
         assert_eq!(stored.1, 1);
         assert_eq!(stored.0.len(), 64);
 
-        let second = s.create_mcp_identity(address("lane-2/1")).await.unwrap();
+        let second = s
+            .create_mcp_identity(address("lane-2/1"), Some("123:boot-a".into()))
+            .await
+            .unwrap();
         assert!(s.resolve_mcp_identity(second).await.unwrap().is_some());
+        assert!(
+            s.resolve_mcp_identity(token.clone())
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let third = s
+            .create_mcp_identity(address("lane-2/1"), Some("456:boot-b".into()))
+            .await
+            .unwrap();
+        assert!(s.resolve_mcp_identity(third).await.unwrap().is_some());
         assert!(s.resolve_mcp_identity(token).await.unwrap().is_none());
     }
 

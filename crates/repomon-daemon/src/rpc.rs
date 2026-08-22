@@ -3052,6 +3052,14 @@ pub async fn dispatch(
             })
             .await
             .map_err(internal)??;
+            let existing_process_fingerprint = {
+                let backend = ctx.backend.clone();
+                let window = expected_window.clone();
+                tokio::task::spawn_blocking(move || backend.window_process_fingerprint(&window))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?
+            };
             let identity = ResolvedAgentAddress {
                 address: AgentAddress::new(format!("lane-{}/{}", p.lane_id, slot)),
                 lane_id: Some(p.lane_id),
@@ -3062,9 +3070,10 @@ pub async fn dispatch(
             };
             let identity_token = ctx
                 .store
-                .create_mcp_identity(identity)
+                .create_mcp_identity(identity, existing_process_fingerprint)
                 .await
                 .map_err(internal)?;
+            let token_for_fingerprint = identity_token.clone();
             let socket = {
                 let config = ctx.config.read().await;
                 repomon_core::config::socket_path(&config)
@@ -3135,6 +3144,19 @@ pub async fn dispatch(
                     return Err(internal(error));
                 }
             };
+            if let Ok(Some(fingerprint)) = tokio::task::spawn_blocking({
+                let backend = ctx.backend.clone();
+                let window = window.clone();
+                move || backend.window_process_fingerprint(&window)
+            })
+            .await
+            .map_err(internal)?
+            {
+                ctx.store
+                    .set_mcp_identity_process_fingerprint(token_for_fingerprint, fingerprint)
+                    .await
+                    .map_err(internal)?;
+            }
             let label_key = managed_session_key(&window);
             reset_managed_session_labels(ctx, &label_key).await;
             if let Some(prompt) = naming_prompt {
@@ -3257,6 +3279,14 @@ pub async fn dispatch(
             })
             .await
             .map_err(internal)??;
+            let existing_process_fingerprint = {
+                let backend = ctx.backend.clone();
+                let window = expected_window.clone();
+                tokio::task::spawn_blocking(move || backend.window_process_fingerprint(&window))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?
+            };
             let identity = ResolvedAgentAddress {
                 address: AgentAddress::new(format!("lane-{}/{}", p.lane_id, slot)),
                 lane_id: Some(p.lane_id),
@@ -3267,9 +3297,10 @@ pub async fn dispatch(
             };
             let token = ctx
                 .store
-                .create_mcp_identity(identity)
+                .create_mcp_identity(identity, existing_process_fingerprint)
                 .await
                 .map_err(internal)?;
+            let token_for_fingerprint = token.clone();
             let socket = {
                 let config = ctx.config.read().await;
                 repomon_core::config::socket_path(&config)
@@ -3316,6 +3347,19 @@ pub async fn dispatch(
                     return Err(internal(error));
                 }
             };
+            if let Ok(Some(fingerprint)) = tokio::task::spawn_blocking({
+                let backend = ctx.backend.clone();
+                let window = window.clone();
+                move || backend.window_process_fingerprint(&window)
+            })
+            .await
+            .map_err(internal)?
+            {
+                ctx.store
+                    .set_mcp_identity_process_fingerprint(token_for_fingerprint, fingerprint)
+                    .await
+                    .map_err(internal)?;
+            }
             reset_managed_session_labels(ctx, &managed_session_key(&window)).await;
             // The one moment the daemon KNOWS which transcript runs in this window: stamp
             // the sticky binding deterministically instead of leaving it to first-contact
@@ -10299,7 +10343,7 @@ mod tests {
             session_id: None,
             agent_kind: None,
         };
-        let token = ctx.store.create_mcp_identity(identity).await.unwrap();
+        let token = ctx.store.create_mcp_identity(identity, None).await.unwrap();
 
         // Identity for lane 1 + an explicit conflicting lane_id 2 => error.
         let err = dispatch(
@@ -10378,7 +10422,7 @@ mod tests {
             session_id: None,
             agent_kind: None,
         };
-        let token = ctx.store.create_mcp_identity(identity).await.unwrap();
+        let token = ctx.store.create_mcp_identity(identity, None).await.unwrap();
 
         // With the lane-1 identity, only lane 1's row is visible; the master flag still shows.
         let status_lane1 = dispatch(

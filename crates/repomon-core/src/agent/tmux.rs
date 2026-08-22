@@ -473,6 +473,18 @@ impl TmuxRuntime {
         Ok(out.lines().map(str::to_string).collect())
     }
 
+    /// Fingerprint the pane's root process. The tmux pane PID survives a repomond restart, while
+    /// the start time prevents a recycled PID from looking like the same agent.
+    pub fn window_process_fingerprint(&self, window: &str) -> Result<Option<String>> {
+        let target = self.exact_target(window);
+        let out =
+            self.run_allow_absent(&["display-message", "-p", "-t", &target, "#{pane_pid}"])?;
+        let Some(pid) = out.trim().parse::<u32>().ok() else {
+            return Ok(None);
+        };
+        Ok(process_fingerprint(pid).map(|start| format!("{pid}:{start}")))
+    }
+
     /// Each window's name, current pane working directory, and last pane-activity time (Unix
     /// epoch seconds). Used by the orphan reaper: the cwd spots `lane-<id>` windows whose cwd no
     /// longer matches the worktree that id maps to (a stale window left by a re-registered /
@@ -1225,6 +1237,34 @@ fn parse_control_event(line: &[u8], window_id: &str, pane_id: &str) -> Option<Co
     Some(ControlEvent::Stream(ByteStreamEvent::Grid { cols, rows }))
 }
 
+fn process_fingerprint(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = stat.rsplit_once(") ")?.1;
+        // `/proc/<pid>/stat` field 22 is starttime; after the comm field, field 3 is index 0.
+        return after_comm.split_whitespace().nth(19).map(str::to_string);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 impl SessionBackend for TmuxRuntime {
     fn available(&self) -> bool {
         TmuxRuntime::available()
@@ -1248,6 +1288,10 @@ impl SessionBackend for TmuxRuntime {
 
     fn list_windows(&self) -> Result<Vec<String>> {
         TmuxRuntime::list_windows(self)
+    }
+
+    fn window_process_fingerprint(&self, window: &str) -> Result<Option<String>> {
+        TmuxRuntime::window_process_fingerprint(self, window)
     }
 
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
