@@ -220,7 +220,13 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
           <div class="my-2.5 h-px bg-line/60" />
 
           {/* Roster List */}
-          <div class="space-y-1.5" data-reorder-container>
+          {/* `relative` is load-bearing, not decorative: pointerReorder's drag math measures
+              rows via offsetLeft/offsetTop against this element, which only works if this is
+              their offsetParent. A static container isn't one — the plain (non-flex) rows would
+              silently resolve against the popover's own `fixed` shell instead, offsetting every
+              drag position by the header/divider's height. `relative` with no inset set costs
+              nothing visually; it only establishes the positioning context. */}
+          <div class="relative space-y-1.5" data-reorder-container>
             <For each={orderedSessions()}>
               {(agent) => {
                 const status = () => getSessionStatusDetails(agent);
