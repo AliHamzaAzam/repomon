@@ -43,6 +43,8 @@ interface ActiveDrag<T> {
   active: boolean;
   /** Set when a real drag happened, so the trailing click can be swallowed. */
   suppressClick: boolean;
+  /** Inline transition value to restore after the drag. */
+  originalTransition: string;
   // Order at activation; release only commits when this actually changed.
   initialOrder: T[];
   cleanup: () => void;
@@ -149,6 +151,7 @@ export function createPointerReorder<T extends string | number>(
       lastY: event.clientY,
       active: false,
       suppressClick: false,
+      originalTransition: target.style.transition,
       initialOrder: options.ids(),
       cleanup: () => {},
     };
@@ -190,6 +193,11 @@ export function createPointerReorder<T extends string | number>(
       }
       drag.el.style.zIndex = "50";
       drag.el.style.cursor = "grabbing";
+      // Reorder writes the dragged transform every animation frame. The tab/roster row classes
+      // use `transition-all` for hover/close polish; leaving that transition enabled here makes
+      // the element chase stale transform targets (e.g. ~1px after two frames of a 240px move).
+      // FLIP transitions belong to siblings and are installed separately in `flipSiblings`.
+      drag.el.style.transition = "none";
       drag.el.style.willChange = "transform";
     }
     if (rafPending) return;
@@ -262,6 +270,7 @@ export function createPointerReorder<T extends string | number>(
     drag.el.style.transform = "";
     drag.el.style.zIndex = "";
     drag.el.style.cursor = "";
+    drag.el.style.transition = drag.originalTransition;
     drag.el.style.willChange = "";
   }
 

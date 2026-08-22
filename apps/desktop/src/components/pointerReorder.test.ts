@@ -154,6 +154,22 @@ describe("createPointerReorder", () => {
     expect(h.commit).toHaveBeenCalledWith(["b", "c", "a", "d"]);
   });
 
+  it("disables the dragged item's transition while pointer updates are streaming", async () => {
+    const h = harness(["a", "b"]);
+    h.pill("a").style.transition = "all 200ms ease";
+
+    h.pill("a").dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX: 50, clientY: 10 }),
+    );
+    h.move(60, 10);
+    await flushFrames();
+
+    expect(h.pill("a").style.transition).toBe("none");
+
+    h.up(60, 10);
+    expect(h.pill("a").style.transition).toBe("all 200ms ease");
+  });
+
   it("abort() tears down an in-flight drag without committing", async () => {
     let api: ReturnType<typeof createPointerReorder<string>> | null = null;
     const container = document.createElement("div");
