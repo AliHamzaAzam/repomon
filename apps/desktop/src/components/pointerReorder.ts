@@ -34,6 +34,7 @@ const DRAG_THRESHOLD_PX = 4;
 interface ActiveDrag<T> {
   id: T;
   el: HTMLElement;
+  container: HTMLElement;
   startX: number;
   startY: number;
   /** Last raw cursor position (drives per-frame deltas). */
@@ -58,17 +59,20 @@ export function createPointerReorder<T extends string | number>(
 
   function applyDraggedTransform() {
     if (!drag) return;
-    // Clear first: `getBoundingClientRect` reflects the *rendered* box, which includes whatever
-    // transform is already applied. Measuring against that (instead of the untransformed layout
-    // rect) makes each frame's delta partially cancel the previous frame's — the element lags at
-    // roughly half cursor speed in a jittery stair-step. Clearing forces a fresh layout read
-    // against the true static position (which itself moves after a swap reorders the DOM), so
-    // `dx`/`dy` is always the full offset from there, not from wherever the last transform left it.
-    drag.el.style.transform = "";
-    const rect = drag.el.getBoundingClientRect();
-    const dx = visualX - rect.left;
-    const dy = visualY - rect.top;
-    drag.el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+    // `offsetLeft`/`offsetTop` are pure CSS layout-box values (see `maybeSwap`'s comment) — unlike
+    // `getBoundingClientRect`, they're never contaminated by the transform this very function just
+    // applied last frame, so no compensation math is needed and, critically, no write-then-read of
+    // a layout-dependent method is either. An earlier version cleared `transform` and re-read
+    // `getBoundingClientRect` here to get the same transform-invariant answer, but that write
+    // immediately followed by a layout read forces the browser to flush a synchronous layout on
+    // *every* animation frame for the whole drag — real jank, not just wrong-direction motion.
+    const { container, el } = drag;
+    const containerRect = container.getBoundingClientRect();
+    const staticX = el.offsetLeft - container.scrollLeft + container.clientLeft + containerRect.left;
+    const staticY = el.offsetTop - container.scrollTop + container.clientTop + containerRect.top;
+    const dx = visualX - staticX;
+    const dy = visualY - staticY;
+    el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
   }
 
   function setVisualFromCursor(e: { clientX: number; clientY: number }) {
@@ -132,12 +136,13 @@ export function createPointerReorder<T extends string | number>(
     if (drag || !options.enabled(id)) return;
     const target = event.currentTarget as HTMLElement | null;
     if (!target) return;
-    const container = target.closest("[data-reorder-container]");
+    const container = target.closest<HTMLElement>("[data-reorder-container]");
     if (!container) return;
 
     drag = {
       id,
       el: target,
+      container,
       startX: event.clientX,
       startY: event.clientY,
       lastX: event.clientX,
@@ -207,8 +212,7 @@ export function createPointerReorder<T extends string | number>(
   /// midpoint between two paint frames.)
   function maybeSwap() {
     if (!drag || !drag.active) return;
-    const container = drag.el.closest("[data-reorder-container]") as HTMLElement | null;
-    if (!container) return;
+    const container = drag.container;
     const ids = options.ids();
     const index = ids.indexOf(drag.id);
     if (index < 0 || ids.length < 2) return;
