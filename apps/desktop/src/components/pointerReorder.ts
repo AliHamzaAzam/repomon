@@ -99,15 +99,19 @@ export function createPointerReorder<T extends string | number>(
       el.style.transition = "none";
       el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
       requestAnimationFrame(() => {
-        el.style.transition = "transform 150ms ease";
+        // Exponential ease-out, not the default `ease`: a confident, decelerating arrival reads
+        // as a deliberate slide into place rather than a mechanical linear-ish snap.
+        el.style.transition = "transform 200ms cubic-bezier(0.16, 1, 0.3, 1)";
+        el.style.willChange = "transform";
         el.style.transform = "";
         const clear = () => {
           el.style.transition = "";
+          el.style.willChange = "";
           el.removeEventListener("transitionend", clear);
         };
         el.addEventListener("transitionend", clear);
         // Safety: transitions may not fire in tests/headless; clear anyway.
-        setTimeout(clear, 200);
+        setTimeout(clear, 250);
       });
     }
   }
