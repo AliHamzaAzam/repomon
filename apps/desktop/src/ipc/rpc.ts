@@ -97,12 +97,25 @@ export interface ConfigView {
   sort_mode?: string;
   /** "activity" | "manual" — how the per-lane agent tabs are ordered. */
   tab_sort_mode?: string;
+  /** Whether the companion-app WebSocket bridge is enabled at daemon startup. */
+  remote_enabled?: boolean;
+  /** Configured WebSocket bind address for the companion-app bridge. */
+  remote_bind?: string | null;
+  /** Masked legacy shared token; the raw secret never crosses the RPC boundary. */
+  remote_token_masked?: string | null;
   embedded_pty: boolean;
   orchestrator_agent?: string | null;
   orchestrator_model?: string | null;
   agent_icons?: Record<string, string>;
   supervision: SupervisionConfig;
   [key: string]: unknown;
+}
+
+export interface RemoteDeviceSummary {
+  name: string;
+  role: string;
+  created_at: string;
+  last_seen_at: string | null;
 }
 
 export interface OrchestratorStatus {
@@ -267,6 +280,12 @@ interface RpcMap {
   sessions: { params: { from_iso: string; to_iso: string }; result: WorkSession[] };
   "config.get": { params: undefined; result: ConfigView };
   "config.set": { params: Partial<ConfigView>; result: ConfigView };
+  "remote.pair": {
+    params: { name: string };
+    result: { name: string; token: string; url: string };
+  };
+  "remote.devices": { params: undefined; result: RemoteDeviceSummary[] };
+  "remote.revoke": { params: { name: string }; result: { revoked: boolean } };
   "system.doctor": { params: undefined; result: SystemDoctorResult };
   "usage.get": { params: undefined; result: AccountUsage[] };
   "usage.refresh": { params: undefined; result: null };

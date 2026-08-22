@@ -140,6 +140,13 @@ fn cap_chars(s: &str, max_chars: usize) -> (String, bool) {
 
 /// The editable subset of the config exposed to the Settings view.
 fn config_json(cfg: &repomon_core::config::Config) -> Value {
+    let remote_token_masked = cfg.remote.token.as_ref().map(|token| {
+        if token.len() >= 8 {
+            format!("{}…{}", &token[..4], &token[token.len() - 4..])
+        } else {
+            "(set)".to_string()
+        }
+    });
     json!({
         "accent": cfg.accent,
         "theme": cfg.theme,
@@ -174,6 +181,9 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "sort_repos_by_activity": cfg.sort_repos_by_activity,
         "sort_mode": cfg.sort_mode(),
         "tab_sort_mode": cfg.tab_sort_mode(),
+        "remote_enabled": cfg.remote.enabled,
+        "remote_bind": cfg.remote.bind,
+        "remote_token_masked": remote_token_masked,
         "embedded_pty": cfg.embedded_pty,
         "orchestrator_agent": cfg.orchestrator_agent,
         "orchestrator_model": cfg.orchestrator_model,
@@ -934,6 +944,10 @@ struct ConfigSet {
     sort_mode: Option<String>,
     #[serde(default)]
     tab_sort_mode: Option<String>,
+    #[serde(default)]
+    remote_enabled: Option<bool>,
+    #[serde(default)]
+    remote_bind: Option<String>,
     #[serde(default)]
     embedded_pty: Option<bool>,
     #[serde(default)]
@@ -2970,6 +2984,12 @@ pub async fn dispatch(
                         }
                         other => return Err(internal(format!("unknown tab_sort_mode {other:?}"))),
                     }
+                }
+                if let Some(enabled) = p.remote_enabled {
+                    cfg.remote.enabled = enabled;
+                }
+                if let Some(bind) = p.remote_bind {
+                    cfg.remote.bind = (!bind.is_empty()).then_some(bind);
                 }
                 if let Some(b) = p.embedded_pty {
                     cfg.embedded_pty = b;
@@ -7695,6 +7715,20 @@ pub(crate) fn write_orchestrator_mcp_config_named(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_snapshot_exposes_remote_state_without_the_raw_token() {
+        let mut cfg = repomon_core::config::Config::default();
+        cfg.remote.enabled = true;
+        cfg.remote.bind = Some("100.121.102.39:7878".into());
+        cfg.remote.token = Some("secret-token-1234".into());
+
+        let snapshot = config_json(&cfg);
+        assert_eq!(snapshot["remote_enabled"], true);
+        assert_eq!(snapshot["remote_bind"], "100.121.102.39:7878");
+        assert_eq!(snapshot["remote_token_masked"], "secr…1234");
+        assert!(!snapshot.to_string().contains("secret-token-1234"));
+    }
 
     fn mail_lane(id: i64, labels: &[Option<&str>]) -> Lane {
         let now = chrono::Utc::now();

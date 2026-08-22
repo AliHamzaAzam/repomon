@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   config: null as ConfigView | null,
   doctor: null as SystemDoctorResult | null,
   doctorCalls: 0,
+  remoteDevices: [] as Array<{ name: string; role: string; created_at: string; last_seen_at: string | null }>,
 }));
 
 vi.mock("../ipc/rpc", () => ({
@@ -84,6 +85,11 @@ vi.mock("../ipc/rpc", () => ({
         ],
       });
     }
+    if (method === "remote.devices") return Promise.resolve([...state.remoteDevices]);
+    if (method === "remote.revoke") {
+      state.remoteDevices = state.remoteDevices.filter((device) => device.name !== params.name);
+      return Promise.resolve({ revoked: true });
+    }
     if (method === "config.set" && params) {
       calls.saved.push(params);
       state.config = { ...params };
@@ -135,6 +141,7 @@ afterEach(() => {
   cleanup();
   calls.saved = [];
   state.config = { ...config };
+  state.remoteDevices = [];
 });
 
 describe("Settings auto-save persistence", () => {
@@ -245,6 +252,41 @@ describe("Settings auto-save persistence", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(localStorage.getItem("repomon:auto-collapse-empty-lanes")).toBe("false");
+  });
+
+  it("exposes the remote bridge state and revokes a paired device", async () => {
+    state.config = {
+      ...config,
+      remote_enabled: true,
+      remote_bind: "100.121.102.39:7878",
+      remote_token_masked: "abcd…wxyz",
+    };
+    state.remoteDevices = [{
+      name: "iPhone",
+      role: "full",
+      created_at: "2026-08-20T10:00:00Z",
+      last_seen_at: "2026-08-22T10:00:00Z",
+    }];
+
+    render(() => (
+      <SettingsModal
+        initialTab="remote"
+        onClose={() => undefined}
+      />
+    ));
+
+    await screen.findByText("Remote bridge");
+    expect(screen.getByText("ws://100.121.102.39:7878")).toBeInTheDocument();
+    expect(screen.getByText("abcd…wxyz")).toBeInTheDocument();
+    expect(screen.getByText("iPhone")).toBeInTheDocument();
+
+    const toggle = screen.getByRole("switch", { name: "Enable companion bridge" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(calls.saved[calls.saved.length - 1]?.remote_enabled).toBe(false));
+    expect(screen.getByText("Restart required")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Revoke iPhone" }));
+    await waitFor(() => expect(screen.queryByText("iPhone")).not.toBeInTheDocument());
   });
 });
 

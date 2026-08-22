@@ -8,7 +8,7 @@ import {
   type SoundCue,
   type SoundProfile,
 } from "../audio/sound";
-import { daemonCall, type ConfigView } from "../ipc/rpc";
+import { daemonCall, type ConfigView, type RemoteDeviceSummary } from "../ipc/rpc";
 import { checkForUpdate, type AvailableUpdate, type UpdateProgress } from "../ipc/updater";
 import {
   applyAccent,
@@ -47,7 +47,7 @@ import {
   IconTrash,
 } from "./icons";
 
-export type SettingsTab = "general" | "system" | "agents" | "notifications" | "appearance" | "automation" | "keyboard";
+export type SettingsTab = "general" | "system" | "agents" | "notifications" | "appearance" | "remote" | "automation" | "keyboard";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -66,6 +66,7 @@ const TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "agents", label: "Agents" },
   { id: "notifications", label: "Notifications" },
   { id: "appearance", label: "Appearance" },
+  { id: "remote", label: "Remote" },
   { id: "automation", label: "Automation" },
   { id: "keyboard", label: "Keyboard" },
 ];
@@ -131,6 +132,12 @@ function TextField(props: {
   );
 }
 
+function formatRemoteTimestamp(value: string | null): string {
+  if (!value) return "Never seen";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 export default function SettingsModal(props: SettingsModalProps) {
   const [tab, setTab] = createSignal<SettingsTab>(props.initialTab ?? "general");
 
@@ -145,6 +152,11 @@ export default function SettingsModal(props: SettingsModalProps) {
   const [checking, setChecking] = createSignal(false);
   const [progress, setProgress] = createSignal<UpdateProgress | null>(null);
   const [availableUpdate, setAvailableUpdate] = createSignal<AvailableUpdate | null>(null);
+  const [remoteDevices, setRemoteDevices] = createSignal<RemoteDeviceSummary[]>([]);
+  const [remoteDevicesLoading, setRemoteDevicesLoading] = createSignal(false);
+  const [remoteDeviceBusy, setRemoteDeviceBusy] = createSignal<string | null>(null);
+  const [remoteRestartRequired, setRemoteRestartRequired] = createSignal(false);
+  const [remoteRestartBusy, setRemoteRestartBusy] = createSignal(false);
 
   // Icon customization state
   const [pickerAgent, setPickerAgent] = createSignal<string | null>(null);
@@ -166,6 +178,62 @@ export default function SettingsModal(props: SettingsModalProps) {
     });
     void daemonCall("agent.detect").then(setAgents).catch(() => undefined);
   });
+
+  async function loadRemoteDevices() {
+    setRemoteDevicesLoading(true);
+    try {
+      setRemoteDevices(await daemonCall("remote.devices"));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRemoteDevicesLoading(false);
+    }
+  }
+
+  createEffect(() => {
+    if (tab() === "remote") void loadRemoteDevices();
+  });
+
+  async function executeRevokeRemoteDevice(name: string) {
+    setRemoteDeviceBusy(name);
+    setError(null);
+    try {
+      await daemonCall("remote.revoke", { name });
+      await loadRemoteDevices();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRemoteDeviceBusy(null);
+    }
+  }
+
+  function revokeRemoteDevice(name: string) {
+    if (props.actions) {
+      props.actions.confirm({
+        title: `Revoke ${name}?`,
+        message: `This device will lose access to the companion bridge. You can pair it again later.`,
+        confirmLabel: "Revoke Device",
+        danger: true,
+        onConfirm: () => executeRevokeRemoteDevice(name),
+      });
+    } else {
+      void executeRevokeRemoteDevice(name);
+    }
+  }
+
+  async function restartForRemoteChange() {
+    setRemoteRestartBusy(true);
+    setError(null);
+    try {
+      const { restartDaemon } = await import("../ipc/daemonControl");
+      await restartDaemon();
+      setRemoteRestartRequired(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRemoteRestartBusy(false);
+    }
+  }
 
   async function addCustomAgent(e?: Event) {
     e?.preventDefault();
@@ -288,7 +356,7 @@ export default function SettingsModal(props: SettingsModalProps) {
     if (debounceTimer) clearTimeout(debounceTimer);
   });
 
-  async function persistConfig(nextConfig: ConfigView) {
+  async function persistConfig(nextConfig: ConfigView, remoteChange = false) {
     setSaveStatus("saving");
     setError(null);
     try {
@@ -297,6 +365,7 @@ export default function SettingsModal(props: SettingsModalProps) {
       props.onConfigSaved?.(saved);
       if (saved.accent) applyAccent(saved.accent);
       if (saved.agent_icons) setAgentIconOverrides(saved.agent_icons);
+      if (remoteChange) setRemoteRestartRequired(true);
       setSaveStatus("saved");
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(() => setSaveStatus("idle"), 2000);
@@ -326,6 +395,7 @@ export default function SettingsModal(props: SettingsModalProps) {
     const current = config();
     if (!current) return;
     const merged = { ...current, ...next };
+    const remoteChange = Object.prototype.hasOwnProperty.call(next, "remote_enabled");
     setConfig(merged);
     if (next.accent) applyAccent(next.accent);
     if (next.agent_icons) setAgentIconOverrides(next.agent_icons);
@@ -334,11 +404,11 @@ export default function SettingsModal(props: SettingsModalProps) {
       if (debounceTimer) clearTimeout(debounceTimer);
       setSaveStatus("saving");
       debounceTimer = setTimeout(() => {
-        void persistConfig(merged);
+        void persistConfig(merged, remoteChange);
       }, 400);
     } else {
       if (debounceTimer) clearTimeout(debounceTimer);
-      void persistConfig(merged);
+      void persistConfig(merged, remoteChange);
     }
   }
 
@@ -1467,6 +1537,136 @@ export default function SettingsModal(props: SettingsModalProps) {
                     <p class="text-xs text-muted">
                       Hover a lane with several agents and drag the roster rows into your own order. Right-click a tab to rename it.
                     </p>
+                  </Show>
+                </section>
+              </div>
+            </Show>
+
+            <Show when={tab() === "remote"}>
+              <div class="space-y-6">
+                <section class="space-y-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <p class="section-label">Remote bridge</p>
+                      <p class="mt-0.5 text-xs text-muted">
+                        Connect the Repomon companion app over a private WebSocket address, such as your Tailscale network.
+                      </p>
+                    </div>
+                    <span class={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium ${
+                      settings().remote_enabled
+                        ? "bg-signal/10 text-signal"
+                        : "bg-muted/10 text-muted"
+                    }`}>
+                      {settings().remote_enabled ? "enabled" : "disabled"}
+                    </span>
+                  </div>
+
+                  <Switch
+                    label="Enable companion bridge"
+                    checked={Boolean(settings().remote_enabled)}
+                    onChange={(value) => patch({ remote_enabled: value })}
+                  />
+
+                  <Show when={remoteRestartRequired()}>
+                    <div
+                      class="flex items-center justify-between gap-3 rounded-xl border border-attention/30 bg-attention/8 p-3"
+                      role="status"
+                    >
+                      <div class="min-w-0">
+                        <p class="text-xs font-medium text-attention">Restart required</p>
+                        <p class="mt-0.5 text-[11px] leading-snug text-muted">
+                          The saved toggle will take effect when the daemon restarts. Until then, the previous bridge state remains active.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        class="focus-ring shrink-0 rounded-lg border border-attention/40 bg-attention/10 px-3 py-1.5 text-[11px] font-semibold text-attention transition-colors hover:bg-attention/15 disabled:opacity-50"
+                        disabled={remoteRestartBusy()}
+                        onClick={() => void restartForRemoteChange()}
+                      >
+                        {remoteRestartBusy() ? "Restarting…" : "Restart daemon"}
+                      </button>
+                    </div>
+                  </Show>
+
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <div class="rounded-lg border border-line bg-surface/60 px-3.5 py-2.5">
+                      <span class="section-label">Bind address</span>
+                      <p class="mt-1 break-all font-mono text-xs text-foreground">
+                        {settings().remote_bind ? `ws://${settings().remote_bind}` : "Not configured"}
+                      </p>
+                    </div>
+                    <div class="rounded-lg border border-line bg-surface/60 px-3.5 py-2.5">
+                      <span class="section-label">Legacy token</span>
+                      <p class="mt-1 font-mono text-xs text-foreground">
+                        {settings().remote_token_masked ?? "Not configured"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <p class="text-[11px] leading-snug text-muted">
+                    The token is never shown in full. Pairing creates individually revocable device tokens below; bridge changes intentionally apply after a daemon restart.
+                  </p>
+                </section>
+
+                <section class="space-y-3 border-t border-line/70 pt-5">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="section-label">Paired devices</p>
+                      <p class="mt-0.5 text-xs text-muted">
+                        Review companion devices that can access this bridge and revoke them individually.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="focus-ring inline-flex shrink-0 items-center gap-1 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-50"
+                      aria-label="Refresh paired devices"
+                      disabled={remoteDevicesLoading()}
+                      onClick={() => void loadRemoteDevices()}
+                    >
+                      <IconRefresh size={12} />
+                      Refresh
+                    </button>
+                  </div>
+
+                  <Show when={remoteDevicesLoading()}>
+                    <p class="rounded-lg border border-line bg-surface/50 p-3 text-xs text-muted">Loading paired devices…</p>
+                  </Show>
+                  <Show when={!remoteDevicesLoading() && remoteDevices().length === 0}>
+                    <p class="rounded-lg border border-dashed border-line bg-surface/30 p-3 text-xs text-muted">
+                      No named devices are paired. Use <span class="font-mono text-foreground">repomon remote pair --name &lt;device&gt;</span> to create a pairing QR.
+                    </p>
+                  </Show>
+                  <Show when={!remoteDevicesLoading() && remoteDevices().length > 0}>
+                    <div class="space-y-2">
+                      <For each={remoteDevices()}>
+                        {(device) => (
+                          <div class="flex items-center justify-between gap-3 rounded-xl border border-line/80 bg-surface/50 p-3 transition-colors hover:bg-surface/80">
+                            <div class="min-w-0">
+                              <div class="flex items-center gap-2">
+                                <span class="truncate text-xs font-semibold text-foreground">{device.name}</span>
+                                <span class="rounded bg-surface px-1.5 py-0.5 text-[9.5px] font-mono uppercase tracking-wider text-muted border border-line">
+                                  {device.role}
+                                </span>
+                              </div>
+                              <p class="mt-0.5 text-[11px] text-muted">
+                                Paired {formatRemoteTimestamp(device.created_at)} · Last seen {formatRemoteTimestamp(device.last_seen_at)}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              class="focus-ring inline-flex shrink-0 items-center gap-1 rounded-lg border border-fault/30 bg-fault/5 px-2.5 py-1.5 text-[11px] font-medium text-fault transition-colors hover:border-fault/50 hover:bg-fault/10 disabled:opacity-50"
+                              disabled={remoteDeviceBusy() === device.name}
+                              onClick={() => revokeRemoteDevice(device.name)}
+                              aria-label={`Revoke ${device.name}`}
+                            >
+                              <IconTrash size={12} />
+                              {remoteDeviceBusy() === device.name ? "Revoking…" : "Revoke"}
+                            </button>
+                          </div>
+                        )}
+                      </For>
+                    </div>
                   </Show>
                 </section>
               </div>
