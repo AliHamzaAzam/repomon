@@ -579,14 +579,14 @@ export default function SettingsModal(props: SettingsModalProps) {
   return (
     <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width="min(46rem, 95vw)" onClose={props.onClose} footer={footer()}>
       <div class="sticky -top-4 z-10 -mx-5 -mt-4 mb-5 border-b border-line bg-surface/95 px-5 pt-3 pb-2.5 backdrop-blur">
-        <div class="flex items-center gap-1 rounded-lg border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Settings sections">
+        <div class="flex items-center justify-between rounded-lg border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Settings sections">
           <For each={TABS}>
             {(item) => (
               <button
                 type="button"
                 role="tab"
                 aria-selected={tab() === item.id}
-                class={`focus-ring flex-1 rounded-md py-1 text-center text-xs font-medium transition-colors ${
+                class={`focus-ring rounded-md px-2.5 py-1 text-center text-xs font-medium transition-colors ${
                   tab() === item.id ? "bg-surface text-foreground shadow-xs font-semibold" : "text-muted hover:text-foreground"
                 }`}
                 onClick={() => {
