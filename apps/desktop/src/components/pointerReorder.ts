@@ -61,6 +61,13 @@ export function createPointerReorder<T extends string | number>(
 
   function applyDraggedTransform() {
     if (!drag) return;
+    // Clear first: `getBoundingClientRect` reflects the *rendered* box, which includes whatever
+    // transform is already applied. Measuring against that (instead of the untransformed layout
+    // rect) makes each frame's delta partially cancel the previous frame's — the element lags at
+    // roughly half cursor speed in a jittery stair-step. Clearing forces a fresh layout read
+    // against the true static position (which itself moves after a swap reorders the DOM), so
+    // `dx`/`dy` is always the full offset from there, not from wherever the last transform left it.
+    drag.el.style.transform = "";
     const rect = drag.el.getBoundingClientRect();
     const dx = visualX - rect.left;
     const dy = visualY - rect.top;
