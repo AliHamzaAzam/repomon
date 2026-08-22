@@ -56,9 +56,6 @@ export function createPointerReorder<T extends string | number>(
   let visualX = 0;
   let visualY = 0;
 
-  const coord = (e: { clientX: number; clientY: number }) =>
-    options.axis === "x" ? e.clientX : e.clientY;
-
   function applyDraggedTransform() {
     if (!drag) return;
     // Clear first: `getBoundingClientRect` reflects the *rendered* box, which includes whatever
@@ -211,10 +208,15 @@ export function createPointerReorder<T extends string | number>(
     const ids = options.ids();
     const index = ids.indexOf(drag.id);
     if (index < 0 || ids.length < 2) return;
-    const cursor = coord({
-      clientX: drag.lastX ?? 0,
-      clientY: drag.lastY ?? 0,
-    });
+
+    // Cursor converted into the container's own layout-box coordinate space (see below for why
+    // siblings are measured the same way) — a flex item's `offsetLeft`/`offsetTop` is relative to
+    // its flex container's padding-box origin regardless of the container's own `position`.
+    const containerRect = container.getBoundingClientRect();
+    const cursor =
+      options.axis === "x"
+        ? (drag.lastX ?? 0) - containerRect.left + container.scrollLeft - container.clientLeft
+        : (drag.lastY ?? 0) - containerRect.top + container.scrollTop - container.clientTop;
 
     let passed = 0;
     for (let i = 0; i < ids.length; i++) {
@@ -223,9 +225,15 @@ export function createPointerReorder<T extends string | number>(
         `[data-reorder-id="${CSS.escape(String(ids[i]))}"]`,
       );
       if (!el) continue;
-      const rect = el.getBoundingClientRect();
+      // `offsetLeft`/`offsetWidth` are pure CSS layout-box values — unlike `getBoundingClientRect`,
+      // they ignore any `transform` in flight. A sibling still animating back from the *previous*
+      // swap's FLIP has a live, moving `getBoundingClientRect`; reading that instead flips this
+      // frame's swap decision back and forth as the animation plays, which is what caused the
+      // dragged tab's neighbors to flicker/thrash instead of settling.
       const midpoint =
-        options.axis === "x" ? rect.left + rect.width / 2 : rect.top + rect.height / 2;
+        options.axis === "x"
+          ? el.offsetLeft + el.offsetWidth / 2
+          : el.offsetTop + el.offsetHeight / 2;
       if (cursor > midpoint) passed += 1;
     }
     // The cursor sits in the `passed`-th gap (skipping the dragged element's own slot).

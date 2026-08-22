@@ -28,6 +28,13 @@ function harness(order: string[], enabled: (id: string) => boolean = () => true)
       Object.defineProperty(el, "getBoundingClientRect", {
         value: () => new DOMRect(order.indexOf(id) * 100, 0, 100, 30),
       });
+      // Swap-detection reads the layout box (offsetLeft/offsetWidth), not getBoundingClientRect
+      // — see pointerReorder.ts's maybeSwap doc comment — so it stays correct while a sibling's
+      // getBoundingClientRect is mid-FLIP-transition. Keep these in lockstep with the rect above.
+      Object.defineProperty(el, "offsetLeft", { value: order.indexOf(id) * 100, configurable: true });
+      Object.defineProperty(el, "offsetTop", { value: 0, configurable: true });
+      Object.defineProperty(el, "offsetWidth", { value: 100, configurable: true });
+      Object.defineProperty(el, "offsetHeight", { value: 30, configurable: true });
       // Solid spreads itemHandlers onto the element; simulate that with a native listener.
       const handlers = drag.itemHandlers(id);
       el.addEventListener("pointerdown", (e) =>
