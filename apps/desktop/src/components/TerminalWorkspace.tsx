@@ -7,7 +7,7 @@ import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
-import { agentSessionTargetId } from "./agentIdentity";
+import { agentSessionOrderKey, agentSessionTargetId } from "./agentIdentity";
 import { agentSessionTitle } from "./LaneAgentRosterPopover";
 import { createPointerReorder } from "./pointerReorder";
 import {
@@ -76,7 +76,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
 
   // Manual tab mode (settings): agent pills drag-to-reorder, right-click renames. Shells are
   // plain terminals and stay out of both. The optimistic order holds the strip steady until the
-  // daemon's next poll returns the persisted arrangement.
+  // daemon returns the persisted arrangement or another surface changes it.
   const tabsReorderable = () => props.fleet.tabSortMode() === "manual";
   const [localTabOrder, setLocalTabOrder] = createSignal<string[] | null>(null);
   /// The lane's targets in display order: the persisted manual arrangement while it's set,
@@ -108,12 +108,21 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     },
     enabled: () => tabsReorderable(),
   });
-  // Switching lanes must drop any optimistic order (the fresh wire order is authoritative) and
-  // tear down an in-flight drag against the old lane.
+  // Drop the optimistic order whenever the authoritative lane/order changes. This also catches a
+  // reorder committed by the sidebar roster, keeping the two surfaces synchronized without a lane
+  // switch. The lane id is part of the comparison so a same-shaped order in another lane still
+  // tears down a drag against the old lane.
+  let lastBackendLaneId: number | null | undefined;
+  let lastBackendOrder: string | undefined;
   createEffect(() => {
-    void props.fleet.selectedLaneId();
-    tabDrag.abort();
-    setLocalTabOrder(null);
+    const laneId = props.fleet.selectedLaneId();
+    const backendOrder = agentSessionOrderKey(props.fleet.selectedLane()?.agent_sessions ?? []);
+    if (laneId !== lastBackendLaneId || backendOrder !== lastBackendOrder) {
+      lastBackendLaneId = laneId;
+      lastBackendOrder = backendOrder;
+      tabDrag.abort();
+      setLocalTabOrder(null);
+    }
   });
   onCleanup(() => tabDrag.abort());
 

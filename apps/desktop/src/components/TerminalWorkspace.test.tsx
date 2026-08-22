@@ -79,11 +79,12 @@ function lane(sessions: AgentSession[]): Lane {
 }
 
 async function mountedWorkspace(sessions: AgentSession[], terminals: Array<{ lane_id: number; id: string }> = []) {
+  let currentSessions = sessions;
   const source: FleetSource = {
     load: () =>
       Promise.resolve({
-        repos: [sessions[0] ? lane(sessions).repo : lane([]).repo],
-        lanes: [lane(sessions)],
+        repos: [currentSessions[0] ? lane(currentSessions).repo : lane([]).repo],
+        lanes: [lane(currentSessions)],
         usage: [],
         terminals,
         sortReposByActivity: false,
@@ -107,7 +108,15 @@ async function mountedWorkspace(sessions: AgentSession[], terminals: Array<{ lan
     await waitFor(() => expect(fleet.synced()).toBe(true));
     fleet.setSelectedLaneId(10);
     render(() => <TerminalWorkspace fleet={fleet} actions={actions as never} workspace={workspace} />);
-    return { fleet, workspace, actions, dispose };
+    return {
+      fleet,
+      workspace,
+      actions,
+      dispose,
+      setSessions: (next: AgentSession[]) => {
+        currentSessions = next;
+      },
+    };
   });
 }
 
@@ -248,6 +257,49 @@ describe("terminal workspace tab strip ordering and rename", () => {
     fireEvent.pointerUp(window, { clientX: 400, clientY: 5, pointerId: 1 });
 
     expect(actions.setAgentTabOrder).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("drops a stale optimistic order when the backend order changes externally", async () => {
+    const first = session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" });
+    const second = session({ id: 2, agent: "claude-code", tmux_window: "lane-10-2", session_id: "s2" });
+    const third = session({ id: 3, agent: "opencode", tmux_window: "lane-10-3", session_id: "s3" });
+    const { actions, fleet, setSessions, dispose } = await mountedWorkspace([first, second, third]);
+
+    const firstPill = (await screen.findAllByText("codex 1"))[0].parentElement!.parentElement!;
+    const secondPill = screen.getAllByText("claude-code 2")[0].parentElement!.parentElement!;
+    Object.defineProperty(firstPill, "getBoundingClientRect", {
+      value: () => new DOMRect(0, 0, 100, 28), configurable: true,
+    });
+    Object.defineProperty(secondPill, "getBoundingClientRect", {
+      value: () => new DOMRect(100, 0, 100, 28), configurable: true,
+    });
+    const thirdPill = screen.getAllByText("opencode 3")[0].parentElement!.parentElement!;
+    Object.defineProperty(thirdPill, "getBoundingClientRect", {
+      value: () => new DOMRect(200, 0, 100, 28), configurable: true,
+    });
+
+    fireEvent.pointerDown(secondPill, { button: 0, clientX: 150, clientY: 14, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 140, clientY: 14, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 40, clientY: 14, pointerId: 1 });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    fireEvent.pointerUp(window, { clientX: 40, clientY: 14, pointerId: 1 });
+    expect(actions.setAgentTabOrder).toHaveBeenCalledWith(10, [
+      "win:lane-10-2",
+      "win:lane-10-1",
+      "win:lane-10-3",
+    ]);
+
+    // Simulate a fleet refresh with a different authoritative order from the roster popover.
+    // The changed backend key must invalidate the strip's prior optimistic order.
+    setSessions([third, first, second]);
+    await fleet.refresh();
+    const tabStrip = screen.getByRole("group", { name: "Lane terminals and actions" });
+    expect([...tabStrip.querySelectorAll("[data-reorder-id]")].map((el) => el.getAttribute("data-reorder-id"))).toEqual([
+      "win:lane-10-3",
+      "win:lane-10-1",
+      "win:lane-10-2",
+    ]);
     dispose();
   });
 });

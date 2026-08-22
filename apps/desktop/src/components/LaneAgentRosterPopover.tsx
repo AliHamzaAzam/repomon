@@ -3,7 +3,7 @@ import { Portal } from "solid-js/web";
 
 import type { AgentSession, Lane } from "../bindings";
 import { slotOf } from "./agentLabel";
-import { agentSessionTargetId } from "./agentIdentity";
+import { agentSessionOrderKey, agentSessionTargetId } from "./agentIdentity";
 import { createPointerReorder } from "./pointerReorder";
 import { AgentIcon, IconGitBranch } from "./icons";
 
@@ -125,14 +125,10 @@ export interface LaneAgentRosterPopoverProps {
 }
 
 export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
-  // Optimistic tab order applied right after a drop, until the daemon's next poll confirms the
-  // persisted arrangement (which by then matches). Keyed per lane so switching hover targets
-  // never carries an old lane's order over.
+  // Optimistic tab order applied right after a drop, until the daemon returns the persisted
+  // arrangement or another surface changes it. The authoritative order key is shared with the
+  // top strip so a sidebar reorder invalidates this cache immediately on the next fleet update.
   const [localOrder, setLocalOrder] = createSignal<string[] | null>(null);
-  createEffect(() => {
-    void props.lane.id;
-    setLocalOrder(null);
-  });
 
   const orderedSessions = createMemo(() => {
     const sessions = props.lane.agent_sessions ?? [];
@@ -157,6 +153,18 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
     reorder: setLocalOrder,
     commit: (order) => props.onReorderTabs?.(order),
     enabled: () => Boolean(props.reorderable),
+  });
+  let lastBackendLaneId: number | undefined;
+  let lastBackendOrder: string | undefined;
+  createEffect(() => {
+    const laneId = props.lane.id;
+    const backendOrder = agentSessionOrderKey(props.lane.agent_sessions ?? []);
+    if (laneId !== lastBackendLaneId || backendOrder !== lastBackendOrder) {
+      lastBackendLaneId = laneId;
+      lastBackendOrder = backendOrder;
+      rowDrag.abort();
+      setLocalOrder(null);
+    }
   });
   // A popover that closes mid-drag must not leave window listeners or a captured pointer behind.
   onCleanup(() => rowDrag.abort());

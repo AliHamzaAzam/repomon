@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
@@ -319,5 +320,50 @@ describe("manual agent tab ordering and rename", () => {
     expect(codex.getAttribute("data-reorder-id")).toBe("win:lane-1");
     fireEvent.contextMenu(codex);
     expect(onRenameAgent).toHaveBeenCalledWith(lane.agent_sessions[0]);
+  });
+
+  it("drops a stale optimistic order when the backend order changes externally", async () => {
+    const onReorderTabs = vi.fn();
+    const initialLane = createLane([
+      session({ id: 1, session_id: "s1", tmux_window: "lane-1", custom_label: "Architect" }),
+      session({ id: 2, session_id: "s2", tmux_window: "lane-1-2" }),
+      session({ id: 3, session_id: "s3", tmux_window: "lane-1-3" }),
+    ]);
+    const [currentLane, setCurrentLane] = createSignal(initialLane);
+    render(() => (
+      <LaneAgentRosterPopover
+        lane={currentLane()}
+        anchorRect={mockRect}
+        visible={true}
+        reorderable={true}
+        onReorderTabs={onReorderTabs}
+      />
+    ));
+    stubRowRects();
+
+    const dragged = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
+    fireEvent.pointerDown(dragged, { button: 0, clientX: 10, clientY: 75, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 70, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 20, pointerId: 1 });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    fireEvent.pointerUp(window, { clientX: 10, clientY: 20, pointerId: 1 });
+    expect(onReorderTabs).toHaveBeenCalledWith([
+      "win:lane-1-2",
+      "win:lane-1",
+      "win:lane-1-3",
+    ]);
+
+    // Simulate a next fleet refresh carrying a different authoritative order from another
+    // surface. The changed backend key must invalidate this surface's optimistic order.
+    setCurrentLane(createLane([
+      session({ id: 3, session_id: "s3", tmux_window: "lane-1-3" }),
+      session({ id: 1, session_id: "s1", tmux_window: "lane-1", custom_label: "Architect" }),
+      session({ id: 2, session_id: "s2", tmux_window: "lane-1-2" }),
+    ]));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /switch to /i })[0]).toHaveAccessibleName(
+        "Switch to Claude Code #3 terminal",
+      );
+    });
   });
 });
