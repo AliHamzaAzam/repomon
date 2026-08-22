@@ -7,6 +7,7 @@ import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
 import { agentLabel } from "./agentLabel";
+import { agentSessionTargetId } from "./agentIdentity";
 import { agentSessionTitle } from "./LaneAgentRosterPopover";
 import { createPointerReorder } from "./pointerReorder";
 import {
@@ -86,8 +87,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     if (!order || order.length === 0) return all;
     const position = new Map(order.map((sid, index) => [sid, index]));
     const rank = (target: PaneTarget) =>
-      target.sessionId !== null
-        ? (position.get(target.sessionId) ?? Number.MAX_SAFE_INTEGER)
+      target.targetId !== null
+        ? (position.get(target.targetId) ?? Number.MAX_SAFE_INTEGER)
         : Number.MAX_SAFE_INTEGER;
     return [...all].sort((a, b) => rank(a) - rank(b));
   });
@@ -98,8 +99,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     axis: "x",
     ids: () =>
       stripTargets()
-        .map((target) => target.sessionId)
-        .filter((sid): sid is string => sid !== null),
+        .map((target) => target.targetId)
+        .filter((id): id is string => id !== null),
     reorder: setLocalTabOrder,
     commit: (order) => {
       const laneId = props.fleet.selectedLaneId();
@@ -124,9 +125,15 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const onTabContextMenu = (target: PaneTarget, event: MouseEvent) => {
     if (target.shell) return;
     const session = sessionForTarget(target);
-    if (!session?.session_id) return;
+    if (!session) return;
+    const targetId = agentSessionTargetId(session);
+    if (!targetId) return;
     event.preventDefault();
-    props.actions.rename({ sessionId: session.session_id, current: agentSessionTitle(session) });
+    props.actions.rename({
+      targetId,
+      sessionId: session.session_id,
+      current: agentSessionTitle(session),
+    });
   };
 
   const labelByWindow = createMemo(() => {
@@ -294,7 +301,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             <For each={stripTargets()}>
               {(target) => {
                 const draggablePill = () =>
-                  tabsReorderable() && !target.shell && target.sessionId !== null && !isTargetClosing(target);
+                  tabsReorderable() && !target.shell && target.targetId !== null && !isTargetClosing(target);
                 return (
                 <div
                   class={`group/tab relative flex h-7 shrink-0 items-center rounded-lg border text-xs font-medium transition-all duration-200 ${
@@ -303,8 +310,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                       : activeWindow() === target.window
                         ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
                         : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
-                  } ${tabsReorderable() && !target.shell && target.sessionId !== null ? "cursor-grab active:cursor-grabbing" : ""}`}
-                  {...(draggablePill() ? tabDrag.itemHandlers(target.sessionId!) : {})}
+                  } ${tabsReorderable() && !target.shell && target.targetId !== null ? "cursor-grab active:cursor-grabbing" : ""}`}
+                  {...(draggablePill() ? tabDrag.itemHandlers(target.targetId!) : {})}
                   style={{ "touch-action": draggablePill() ? "none" : undefined }}
                   onContextMenu={(e) => onTabContextMenu(target, e)}
                 >

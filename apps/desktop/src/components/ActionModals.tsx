@@ -57,6 +57,7 @@ export default function ActionModals(props: {
       <Show when={actions.renameTarget()}>
         {(target) => (
           <RenameModal
+            targetId={target().targetId}
             sessionId={target().sessionId}
             current={target().current}
             onClose={actions.closeRename}

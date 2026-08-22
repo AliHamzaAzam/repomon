@@ -250,7 +250,7 @@ interface RpcMap {
     params: { lane_id: number; window?: string; cols: number; rows: number };
     result: { applied: boolean; cols: number | null; rows: number | null };
   };
-  "session.rename": { params: { session_id: string; label?: string }; result: null };
+  "session.rename": { params: { session_id: string; fallback_session_id?: string; label?: string }; result: null };
   "terminal.open": { params: { lane_id: number }; result: { id: string; target: string } };
   "terminal.list": { params: { lane_id: number }; result: string[] };
   "terminal.list_all": { params: undefined; result: Array<{ lane_id: number; id: string }> };

@@ -3,7 +3,10 @@ export interface PaneTarget {
   window: string;
   label: string;
   shell: boolean;
+  /// Durable transcript identity, used only by history/transcript views when available.
   sessionId: string | null;
+  /// UI action identity; managed transcript-less sessions use their tmux window.
+  targetId: string | null;
   agent?: string | null;
 }
 
@@ -80,6 +83,7 @@ export function stabilizeTargets(
     prev.label = target.label;
     prev.shell = target.shell;
     prev.sessionId = target.sessionId;
+    prev.targetId = target.targetId;
     prev.agent = target.agent;
     return prev;
   });

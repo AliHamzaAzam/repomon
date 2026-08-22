@@ -9,7 +9,8 @@ import type { FleetStore } from "./fleet";
 import type { WorkspaceStore } from "./workspace";
 
 export interface RenameTarget {
-  sessionId: string;
+  targetId: string;
+  sessionId?: string | null;
   current: string;
 }
 
@@ -98,7 +99,7 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     }
   }
 
-  /// Persist a lane's manual agent-tab ordering (transcript session ids, in tab order). Only
+  /// Persist a lane's manual agent-tab ordering (managed window ids or external transcript ids).
   /// meaningful while the tab sort mode is "manual"; the daemon re-applies it on every overlay.
   async function setAgentTabOrder(laneId: number, orderedSessionIds: string[]) {
     setError(null);

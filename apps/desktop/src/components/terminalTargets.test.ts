@@ -9,7 +9,7 @@ import {
 } from "./terminalTargets";
 
 function target(window: string, overrides: Partial<PaneTarget> = {}): PaneTarget {
-  return { laneId: 1, window, label: window, shell: false, sessionId: null, ...overrides };
+  return { laneId: 1, window, label: window, shell: false, sessionId: null, targetId: null, ...overrides };
 }
 
 describe("stabilizeTargets", () => {

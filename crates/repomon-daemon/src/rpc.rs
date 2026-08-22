@@ -1017,8 +1017,14 @@ struct RemoteRevoke {
 }
 #[derive(Deserialize)]
 struct SessionRename {
-    /// The transcript session id to label (durable across restarts).
+    /// Opaque primary identity: a transcript id for legacy callers or `win:<window>` for a
+    /// managed session.
     session_id: String,
+    /// Transcript identity retained as an alias for managed sessions. Mirroring the mutation to
+    /// both keys preserves old labels and lets a resumed transcript keep its name after the tmux
+    /// window is gone.
+    #[serde(default)]
+    fallback_session_id: Option<String>,
     /// The new label; `None`/absent or empty clears it.
     #[serde(default)]
     label: Option<String>,
@@ -1026,7 +1032,7 @@ struct SessionRename {
 #[derive(Deserialize)]
 struct AgentSetTabOrder {
     lane_id: repomon_core::model::LaneId,
-    /// The lane's sessions in the desired tab order (transcript session ids).
+    /// The lane's sessions in the desired tab order (managed window ids or transcript ids).
     ordered_ids: Vec<String>,
 }
 #[derive(Deserialize)]
@@ -3037,6 +3043,7 @@ pub async fn dispatch(
                 .as_deref()
                 .filter(|t| !t.is_empty())
                 .map(str::to_string);
+            let naming_prompt = task.clone();
             let _spawn_guard = ctx.spawn_lock.lock().await;
             let backend = ctx.backend.clone();
             let lane_for_allocation = p.lane_id;
@@ -3128,6 +3135,11 @@ pub async fn dispatch(
                     return Err(internal(error));
                 }
             };
+            let label_key = managed_session_key(&window);
+            reset_managed_session_labels(ctx, &label_key).await;
+            if let Some(prompt) = naming_prompt {
+                schedule_local_naming(ctx, label_key, prompt);
+            }
             let _ = ctx
                 .store
                 .set_lane_tmux_window(p.lane_id, Some(window.clone()))
@@ -3304,6 +3316,7 @@ pub async fn dispatch(
                     return Err(internal(error));
                 }
             };
+            reset_managed_session_labels(ctx, &managed_session_key(&window)).await;
             // The one moment the daemon KNOWS which transcript runs in this window: stamp
             // the sticky binding deterministically instead of leaving it to first-contact
             // guessing — `--resume` doesn't touch the resumed .jsonl until the first
@@ -4111,7 +4124,8 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // Set/clear a user label for a session (keyed by transcript session_id; persisted).
+        // Set/clear a user label for an opaque surfaced-session identity. Legacy callers send a
+        // transcript id; current desktop clients send `win:<tmux-window>` for managed sessions.
         "session.rename" => {
             let p: SessionRename = parse(params)?;
             let label = p
@@ -4119,9 +4133,18 @@ pub async fn dispatch(
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty());
             ctx.store
-                .set_session_label(p.session_id, label)
+                .set_session_label(p.session_id.clone(), label.clone())
                 .await
                 .map_err(internal)?;
+            if let Some(fallback) = p
+                .fallback_session_id
+                .filter(|fallback| fallback != &p.session_id)
+            {
+                ctx.store
+                    .set_session_label(fallback, label)
+                    .await
+                    .map_err(internal)?;
+            }
             ctx.invalidate_overlay().await;
             ctx.broadcast(
                 crate::pubsub::topic::AGENT_STATUS,
@@ -4921,61 +4944,18 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
                 let initial_prompt = s.title.clone();
                 let mut session = s.into_session(lane.repo.id, lane.worktree.id);
-                session.custom_label = session
-                    .session_id
-                    .as_ref()
-                    .and_then(|id| labels.get(id).cloned());
-                session.generated_label = session
-                    .session_id
-                    .as_ref()
-                    .and_then(|id| generated_labels.get(id).cloned());
-
-                // Trigger local LLM session naming if no custom or generated label exists yet
-                if let Some(session_id) = session.session_id.clone() {
-                    if session.custom_label.is_none()
-                        && session.generated_label.is_none()
-                        && !labels.contains_key(&session_id)
-                        && !generated_labels.contains_key(&session_id)
-                    {
-                        if let Some(prompt) = initial_prompt {
-                            if !prompt.trim().is_empty() {
-                                let in_flight = ctx.in_flight_naming.clone();
-                                let store = ctx.store.clone();
-                                let sid = session_id.clone();
-                                tokio::spawn(async move {
-                                    let should_run = {
-                                        let mut set = in_flight.lock().await;
-                                        set.insert(sid.clone())
-                                    };
-                                    if should_run {
-                                        match repomon_core::local_llm::generate_session_slug_async(
-                                            prompt,
-                                        )
-                                        .await
-                                        {
-                                            Ok(slug) => {
-                                                let _ = store
-                                                    .set_session_generated_label(sid.clone(), slug)
-                                                    .await;
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "Local LLM naming skipped for {sid}: {e}"
-                                                );
-                                            }
-                                        }
-                                        in_flight.lock().await.remove(&sid);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
 
                 match win {
                     Some(w) => {
                         session.external = false;
                         session.tmux_window = Some(w);
+                        finish_session_labels(
+                            ctx,
+                            &mut session,
+                            &labels,
+                            &generated_labels,
+                            initial_prompt,
+                        );
                         if let Some(sid) = &session.session_id {
                             ctx.known_managed_sessions.lock().await.insert(sid.clone());
                         }
@@ -5008,6 +4988,13 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         };
                         if is_ext {
                             session.external = true;
+                            finish_session_labels(
+                                ctx,
+                                &mut session,
+                                &labels,
+                                &generated_labels,
+                                initial_prompt,
+                            );
                             lane.agent_sessions.push(session);
                         }
                     }
@@ -5021,8 +5008,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             for window in pairing.unpaired {
                 let kind = window_meta_kind(&lane_windows, &window)
                     .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
-                lane.agent_sessions
-                    .push(window_placeholder_session(lane, kind, window));
+                let mut session = window_placeholder_session(lane, kind, window);
+                finish_session_labels(ctx, &mut session, &labels, &generated_labels, None);
+                lane.agent_sessions.push(session);
             }
         } else if managed_n > 0 {
             // No parseable transcript at all: surface every live repomon-spawned window.
@@ -5032,11 +5020,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     .as_deref()
                     .map(AgentKind::from_kind_str)
                     .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
-                lane.agent_sessions.push(window_placeholder_session(
-                    lane,
-                    kind,
-                    window.name.clone(),
-                ));
+                let mut session = window_placeholder_session(lane, kind, window.name.clone());
+                finish_session_labels(ctx, &mut session, &labels, &generated_labels, None);
+                lane.agent_sessions.push(session);
             }
         } else if let Some(changed) = lane.state.last_change_at {
             // No identified agent, but a *non-main* worktree's files changed very recently — infer
@@ -5494,7 +5480,95 @@ fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
     Some(n[n.len().saturating_sub(FINGERPRINT_LEN)..].to_string())
 }
 
-/// Reorder `sessions` in place to match a persisted manual tab order (transcript session ids).
+fn managed_session_key(window: &str) -> String {
+    format!("win:{window}")
+}
+
+/// Candidate persistence identities in precedence order. A managed agent's window identity is
+/// stable across overlay refreshes and daemon restarts even when its backend has no transcript.
+/// The transcript id remains a fallback so labels/orders written by older releases still apply.
+fn session_identity_keys(session: &repomon_core::model::AgentSession) -> Vec<String> {
+    let mut keys = Vec::with_capacity(2);
+    if let Some(window) = &session.tmux_window {
+        keys.push(managed_session_key(window));
+    }
+    if let Some(session_id) = &session.session_id
+        && !keys.iter().any(|key| key == session_id)
+    {
+        keys.push(session_id.clone());
+    }
+    keys
+}
+
+fn finish_session_labels(
+    ctx: &Ctx,
+    session: &mut repomon_core::model::AgentSession,
+    labels: &HashMap<String, String>,
+    generated_labels: &HashMap<String, String>,
+    prompt: Option<String>,
+) {
+    let keys = session_identity_keys(session);
+    session.custom_label = keys.iter().find_map(|key| labels.get(key).cloned());
+    session.generated_label = keys
+        .iter()
+        .find_map(|key| generated_labels.get(key).cloned());
+
+    let Some(key) = keys.first().cloned() else {
+        return;
+    };
+    let Some(prompt) = prompt.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    if session.custom_label.is_none()
+        && session.generated_label.is_none()
+        && keys.iter().all(|candidate| !labels.contains_key(candidate))
+        && keys
+            .iter()
+            .all(|candidate| !generated_labels.contains_key(candidate))
+    {
+        schedule_local_naming(ctx, key, prompt);
+    }
+}
+
+fn schedule_local_naming(ctx: &Ctx, key: String, prompt: String) {
+    let in_flight = ctx.in_flight_naming.clone();
+    let store = ctx.store.clone();
+    tokio::spawn(async move {
+        let should_run = {
+            let mut set = in_flight.lock().await;
+            set.insert(key.clone())
+        };
+        if should_run {
+            match repomon_core::local_llm::generate_session_slug_async(prompt).await {
+                Ok(slug) => {
+                    if let Err(error) = store.set_session_generated_label(key.clone(), slug).await {
+                        tracing::warn!("Local LLM label persistence failed for {key}: {error}");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("Local LLM naming failed for {key}: {error}");
+                }
+            }
+            in_flight.lock().await.remove(&key);
+        }
+    });
+}
+
+async fn reset_managed_session_labels(ctx: &Ctx, key: &str) {
+    if let Err(error) = ctx.store.set_session_label(key.to_string(), None).await {
+        tracing::warn!("failed to clear reused session label {key}: {error}");
+    }
+    if let Err(error) = ctx
+        .store
+        .clear_session_generated_label(key.to_string())
+        .await
+    {
+        tracing::warn!("failed to clear reused generated label {key}: {error}");
+    }
+}
+
+/// Reorder `sessions` in place to match a persisted manual tab order (managed window identities
+/// or external transcript ids).
 ///
 /// Sessions named in `order` come first, in that order; sessions the order doesn't mention (a
 /// freshly spawned agent, placeholders with no transcript id yet) keep their relative wire
@@ -5507,10 +5581,9 @@ fn apply_session_order(sessions: &mut [repomon_core::model::AgentSession], order
         .map(|(i, sid)| (sid.as_str(), i))
         .collect();
     sessions.sort_by_key(|session| {
-        session
-            .session_id
-            .as_deref()
-            .and_then(|sid| position.get(sid).copied())
+        session_identity_keys(session)
+            .iter()
+            .find_map(|key| position.get(key.as_str()).copied())
             .unwrap_or(usize::MAX)
     });
 }
@@ -8701,6 +8774,32 @@ mod tests {
         apply_session_order(&mut mixed, &["b".to_string(), "a".to_string()]);
         let sids: Vec<_> = mixed.iter().map(|s| s.session_id.clone()).collect();
         assert_eq!(sids, [Some("b".into()), Some("a".into()), None]);
+
+        // Managed windows use their own identity even when no transcript exists (Codex and
+        // just-spawned placeholders), so they participate in manual ordering.
+        let mut managed = vec![
+            {
+                let mut p = tsession("a");
+                p.tmux_window = Some("lane-7".into());
+                p
+            },
+            {
+                let mut p = tsession("unused");
+                p.session_id = None;
+                p.tmux_window = Some("lane-7-2".into());
+                p
+            },
+        ];
+        apply_session_order(
+            &mut managed,
+            &["win:lane-7-2".to_string(), "win:lane-7".to_string()],
+        );
+        let windows: Vec<_> = managed
+            .iter()
+            .map(|session| session.tmux_window.as_deref().unwrap())
+            .collect();
+        assert_eq!(windows, ["lane-7-2", "lane-7"]);
+        assert_eq!(session_identity_keys(&managed[0]), ["win:lane-7-2"]);
 
         // An empty order is a no-op.
         let mut untouched = vec![tsession("a"), tsession("b")];

@@ -554,8 +554,9 @@ impl Store {
 
     // ---- session labels ------------------------------------------------------
 
-    /// Set (or clear, when `label` is `None`) a user-defined label for a session, keyed by its
-    /// durable transcript `session_id`. Survives daemon restarts; overlaid onto `AgentSession`.
+    /// Set (or clear, when `label` is `None`) a user-defined label for a surfaced session.
+    /// Transcript-backed external sessions use their session id; managed sessions use a
+    /// namespaced tmux-window identity so transcript-less backends can be labelled too.
     pub async fn set_session_label(&self, session_id: String, label: Option<String>) -> Result<()> {
         self.call(move |c| {
             match label {
@@ -574,7 +575,7 @@ impl Store {
         .await
     }
 
-    /// All session labels, as `session_id -> label`.
+    /// All session labels, as opaque session identity -> label.
     pub async fn list_session_labels(&self) -> Result<std::collections::HashMap<String, String>> {
         self.call(|c| {
             let mut stmt = c.prepare("SELECT session_id, label FROM session_labels")?;
@@ -636,7 +637,7 @@ impl Store {
         .await
     }
 
-    /// Set an auto-generated local LLM label for a session, keyed by its durable transcript `session_id`.
+    /// Set an auto-generated local LLM label for an opaque surfaced-session identity.
     pub async fn set_session_generated_label(
         &self,
         session_id: String,
@@ -653,7 +654,19 @@ impl Store {
         .await
     }
 
-    /// All auto-generated session labels, as `session_id -> label`.
+    /// Clear a generated label before a reused tmux slot is assigned to a new agent.
+    pub async fn clear_session_generated_label(&self, session_id: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "DELETE FROM session_generated_labels WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// All auto-generated session labels, as opaque session identity -> label.
     pub async fn list_session_generated_labels(
         &self,
     ) -> Result<std::collections::HashMap<String, String>> {
@@ -2807,6 +2820,27 @@ mod tests {
             &vec!["b".to_string(), "c".to_string()]
         );
         assert_eq!(orders.get(&9).unwrap(), &vec!["z".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn generated_session_label_can_be_cleared_for_a_reused_window() {
+        let s = store().await;
+        let key = "win:lane-7".to_string();
+        s.set_session_generated_label(key.clone(), "first-agent".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            s.list_session_generated_labels().await.unwrap().get(&key),
+            Some(&"first-agent".to_string())
+        );
+
+        s.clear_session_generated_label(key.clone()).await.unwrap();
+        assert!(
+            !s.list_session_generated_labels()
+                .await
+                .unwrap()
+                .contains_key(&key)
+        );
     }
 
     #[tokio::test]

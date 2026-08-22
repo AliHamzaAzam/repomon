@@ -8,6 +8,7 @@ import {
   stabilizeTargets,
   type PaneTarget,
 } from "../components/terminalTargets";
+import { agentSessionTargetId } from "../components/agentIdentity";
 import type { FleetStore } from "./fleet";
 
 export type WorkspaceLayout = "auto" | "focused" | "split" | "grid";
@@ -57,6 +58,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
       label: agentLabel(agent),
       shell: false,
       sessionId: agent.session_id,
+      targetId: agentSessionTargetId(agent),
       agent: agent.agent,
     }] : []),
     ...terminals()
@@ -67,6 +69,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
         label: `shell ${terminal.id.split("-").slice(-1)[0]}`,
         shell: true,
         sessionId: null,
+        targetId: null,
         agent: null,
       })),
   ]))), undefined, { equals: sameTargets });

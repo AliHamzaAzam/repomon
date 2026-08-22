@@ -86,13 +86,12 @@ gate?: GateVerdict | null,
 config_dir: string | null, 
 /**
  * A user-set short label for this session, overlaid at list time from the persisted
- * `session_labels` store (keyed by `session_id`). When set, clients show it instead of the
- * auto-derived summary. `None` when unset or when the session has no durable id. Not persisted
- * on the session row itself.
+ * `session_labels` store. Managed agents use a window identity; external agents use their
+ * transcript id. When set, clients show it instead of the auto-derived summary.
  */
 custom_label: string | null, 
 /**
  * An auto-generated concise summary slug from the local LLM subsystem (e.g. "fix-auth-tokens"),
- * overlaid at list time from the persisted `session_generated_labels` store.
+ * overlaid at list time using the same managed-window/external-transcript identity.
  */
 generated_label: string | null, };

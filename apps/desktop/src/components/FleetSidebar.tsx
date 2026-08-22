@@ -11,6 +11,7 @@ import {
 } from "../stores/uiSettings";
 import { primarySession } from "./agentLabel";
 import { agentSessionTitle } from "./LaneAgentRosterPopover";
+import { agentSessionTargetId } from "./agentIdentity";
 import { formatResetAt } from "./resetTime";
 import Modal from "./Modal";
 import { reorderAround } from "./ordering";
@@ -562,8 +563,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   };
 
   const handleRenameAgent = (session: AgentSession) => {
-    if (!session.session_id) return;
+    const targetId = agentSessionTargetId(session);
+    if (!targetId) return;
     props.actions.rename({
+      targetId,
       sessionId: session.session_id,
       current: agentSessionTitle(session),
     });

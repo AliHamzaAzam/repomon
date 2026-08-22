@@ -8,7 +8,7 @@ import type { FleetStore } from "./fleet";
 vi.mock("../ipc/rpc", () => ({ daemonCall: vi.fn().mockResolvedValue({ id: "term-1" }) }));
 
 function target(window: string): PaneTarget {
-  return { laneId: 7, window, label: window, shell: false, sessionId: null };
+  return { laneId: 7, window, label: window, shell: false, sessionId: null, targetId: null };
 }
 
 function fleetStub(overrides: Partial<FleetStore> = {}): FleetStore {

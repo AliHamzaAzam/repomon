@@ -143,7 +143,7 @@ describe("terminal workspace tab strip ordering and rename", () => {
 
     fireEvent.pointerUp(window, { clientX: 40, clientY: 14, pointerId: 1 });
     expect(actions.setAgentTabOrder).toHaveBeenCalledTimes(1);
-    expect(actions.setAgentTabOrder).toHaveBeenCalledWith(10, ["s2", "s1"]);
+    expect(actions.setAgentTabOrder).toHaveBeenCalledWith(10, ["win:lane-10-2", "win:lane-10-1"]);
     dispose();
   });
 
@@ -155,7 +155,28 @@ describe("terminal workspace tab strip ordering and rename", () => {
     const pill = await screen.findByText("codex 1");
     fireEvent.contextMenu(pill.parentElement!);
 
-    expect(actions.rename).toHaveBeenCalledWith({ sessionId: "s1", current: "Codex #1" });
+    expect(actions.rename).toHaveBeenCalledWith({
+      targetId: "win:lane-10-1",
+      sessionId: "s1",
+      current: "Codex #1",
+    });
+    dispose();
+  });
+
+  it("renames and arms drag for a managed tab without a transcript id", async () => {
+    const { actions, dispose } = await mountedWorkspace([
+      session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: null }),
+    ]);
+
+    const label = (await screen.findAllByText("codex 1"))[0];
+    const pill = label.parentElement!.parentElement!;
+    expect(pill.getAttribute("data-reorder-id")).toBe("win:lane-10-1");
+    fireEvent.contextMenu(pill);
+    expect(actions.rename).toHaveBeenCalledWith({
+      targetId: "win:lane-10-1",
+      sessionId: null,
+      current: "Codex #1",
+    });
     dispose();
   });
 
@@ -165,7 +186,7 @@ describe("terminal workspace tab strip ordering and rename", () => {
       [{ lane_id: 10, id: "term-abc" }],
     );
 
-    const shellLabel = await screen.findByText("shell abc");
+    const shellLabel = (await screen.findAllByText("shell abc"))[0];
     const shellTab = shellLabel.parentElement!.parentElement!;
     // Shells get no data-reorder-id, so the pointer primitive never arms on them.
     expect(shellTab.hasAttribute("data-reorder-id")).toBe(false);

@@ -210,7 +210,7 @@ describe("manual agent tab ordering and rename", () => {
 
   function twoSessionLane() {
     return createLane([
-      session({ id: 1, session_id: "s1", custom_label: "Architect" }),
+      session({ id: 1, session_id: "s1", tmux_window: "lane-1", custom_label: "Architect" }),
       session({ id: 2, session_id: "s2", tmux_window: "lane-1-2" }),
     ]);
   }
@@ -258,7 +258,7 @@ describe("manual agent tab ordering and rename", () => {
 
     fireEvent.pointerUp(window, { clientX: 10, clientY: 20, pointerId: 1 });
     expect(onReorderTabs).toHaveBeenCalledTimes(1);
-    expect(onReorderTabs).toHaveBeenCalledWith(["s2", "s1"]);
+    expect(onReorderTabs).toHaveBeenCalledWith(["win:lane-1-2", "win:lane-1"]);
   });
 
   it("does not reorder while the tab sort mode is activity (reorderable off)", async () => {
@@ -295,5 +295,29 @@ describe("manual agent tab ordering and rename", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: /switch to architect terminal/i }));
     expect(onRenameAgent).toHaveBeenCalledTimes(1);
     expect(onRenameAgent.mock.calls[0][0].session_id).toBe("s1");
+  });
+
+  it("renames and reorders a managed session without a transcript id", async () => {
+    const onRenameAgent = vi.fn();
+    const onReorderTabs = vi.fn();
+    const lane = createLane([
+      session({ id: 1, session_id: null, tmux_window: "lane-1", custom_label: "Codex" }),
+      session({ id: 2, session_id: "s2", tmux_window: "lane-1-2" }),
+    ]);
+    render(() => (
+      <LaneAgentRosterPopover
+        lane={lane}
+        anchorRect={mockRect}
+        visible={true}
+        reorderable={true}
+        onRenameAgent={onRenameAgent}
+        onReorderTabs={onReorderTabs}
+      />
+    ));
+
+    const codex = screen.getByRole("button", { name: /switch to codex terminal/i });
+    expect(codex.getAttribute("data-reorder-id")).toBe("win:lane-1");
+    fireEvent.contextMenu(codex);
+    expect(onRenameAgent).toHaveBeenCalledWith(lane.agent_sessions[0]);
   });
 });

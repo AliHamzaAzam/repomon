@@ -3,6 +3,7 @@ import { Portal } from "solid-js/web";
 
 import type { AgentSession, Lane } from "../bindings";
 import { slotOf } from "./agentLabel";
+import { agentSessionTargetId } from "./agentIdentity";
 import { createPointerReorder } from "./pointerReorder";
 import { AgentIcon, IconGitBranch } from "./icons";
 
@@ -137,24 +138,22 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
     const sessions = props.lane.agent_sessions ?? [];
     const order = localOrder();
     if (!order || order.length === 0) return sessions;
-    const position = new Map(order.map((sid, index) => [sid, index]));
-    // Sessions the order doesn't mention (placeholders with no transcript id, a just-spawned
-    // agent) keep their wire order at the end — like browser tabs, new tabs open last.
-    const rank = (session: AgentSession) =>
-      session.session_id !== null
-        ? (position.get(session.session_id) ?? Number.MAX_SAFE_INTEGER)
-        : Number.MAX_SAFE_INTEGER;
+    const position = new Map(order.map((id, index) => [id, index]));
+    const rank = (session: AgentSession) => {
+      const id = agentSessionTargetId(session);
+      return id !== null ? (position.get(id) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+    };
     return [...sessions].sort((a, b) => rank(a) - rank(b));
   });
 
-  // Chrome-style pointer dragging (see pointerReorder.ts). Only rows with a durable transcript
-  // id participate; placeholders can't be ordered meaningfully.
+  // Chrome-style pointer dragging (see pointerReorder.ts). Managed transcript-less sessions use
+  // their window identity, so every real agent row participates.
   const rowDrag = createPointerReorder<string>({
     axis: "y",
     ids: () =>
       orderedSessions()
-        .map((session) => session.session_id)
-        .filter((sid): sid is string => sid !== null),
+        .map(agentSessionTargetId)
+        .filter((id): id is string => id !== null),
     reorder: setLocalOrder,
     commit: (order) => props.onReorderTabs?.(order),
     enabled: () => Boolean(props.reorderable),
@@ -220,7 +219,7 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                 const title = () => agentSessionTitle(agent);
                 const kind = () => agentKindDisplayName(agent.agent);
                 const draggableRow = () =>
-                  Boolean(props.reorderable && agent.session_id !== null);
+                  Boolean(props.reorderable && agentSessionTargetId(agent) !== null);
 
                 return (
                   <button
@@ -228,10 +227,10 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                     class={`group/roster-row flex w-full items-start gap-2.5 rounded-lg border border-line/40 bg-raised/40 p-2 text-left transition-all duration-150 hover:bg-raised hover:border-line hover:shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-signal active:scale-[0.99] cursor-pointer ${
                       props.reorderable ? "cursor-grab active:cursor-grabbing" : ""
                     }`}
-                    {...(draggableRow() ? rowDrag.itemHandlers(agent.session_id!) : {})}
+                    {...(draggableRow() ? rowDrag.itemHandlers(agentSessionTargetId(agent)!) : {})}
                     style={{ "touch-action": draggableRow() ? "none" : undefined }}
                     onContextMenu={(e) => {
-                      if (!props.onRenameAgent || agent.session_id === null) return;
+                      if (!props.onRenameAgent || agentSessionTargetId(agent) === null) return;
                       e.preventDefault();
                       props.onRenameAgent(agent);
                     }}

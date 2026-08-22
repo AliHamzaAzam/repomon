@@ -4,7 +4,8 @@ import { daemonCall } from "../ipc/rpc";
 import Modal from "./Modal";
 
 export default function RenameModal(props: {
-  sessionId: string;
+  targetId: string;
+  sessionId?: string | null;
   current: string;
   onClose: () => void;
   onDone: () => Promise<void>;
@@ -17,7 +18,11 @@ export default function RenameModal(props: {
     setBusy(true);
     setError(null);
     try {
-      await daemonCall("session.rename", { session_id: props.sessionId, label: label().trim() || undefined });
+      await daemonCall("session.rename", {
+        session_id: props.targetId,
+        fallback_session_id: props.sessionId ?? undefined,
+        label: label().trim() || undefined,
+      });
       await props.onDone();
       props.onClose();
     } catch (cause) {
