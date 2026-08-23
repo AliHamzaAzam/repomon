@@ -43,8 +43,15 @@ export function replacementDialog(error: unknown): PendingDialog | null | undefi
   return data?.dialog;
 }
 
+const TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 export function formatTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  return TIME_FORMATTER.format(new Date(value));
 }
 
 /** Dialog classes shown in the global supervision defaults grid, in a fixed display order. */

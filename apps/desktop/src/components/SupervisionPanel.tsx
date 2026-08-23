@@ -10,42 +10,24 @@ import type {
   SupervisionOverrides,
   SupervisionPolicy,
 } from "../bindings";
-import Select, { type SelectOption } from "./controls/Select";
+import Select from "./controls/Select";
 import Switch from "./controls/Switch";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import { formatTime } from "./automation";
+import {
+  formatTime,
+  SUPERVISION_ACTION_OPTIONS,
+  SUPERVISION_DIALOG_CLASSES,
+  SUPERVISION_MAIL_MODE_OPTIONS,
+} from "./automation";
 import {
   IconChevronDown,
   IconGitBranch,
   IconRefresh,
   IconShield,
 } from "./icons";
-
-export const DIALOG_CLASSES: Array<{ id: DialogClass; label: string; description: string }> = [
-  { id: "command_exec", label: "Command execution", description: "Terminal bash and shell execution" },
-  { id: "file_write", label: "File modification", description: "Creating, editing, or replacing files" },
-  { id: "deletion", label: "File deletion", description: "Removing files or worktrees" },
-  { id: "network_access", label: "Network access", description: "Outbound network requests and fetches" },
-  { id: "credential_access", label: "Credential access", description: "Reading secrets, auth tokens, and keys" },
-  { id: "push_remote", label: "Push to remote", description: "Git push and remote branch mutations" },
-  { id: "install", label: "Package installation", description: "Installing package dependencies" },
-  { id: "device_access", label: "Device access", description: "Interacting with hardware or external devices" },
-  { id: "unknown", label: "Other dialogs", description: "Unclassified or ambiguous prompts" },
-];
-
-const ACTION_OPTIONS: SelectOption[] = [
-  { value: "auto_approve", label: "Auto-approve" },
-  { value: "auto_deny", label: "Auto-deny" },
-  { value: "hold", label: "Hold for human" },
-];
-
-const MAIL_MODE_OPTIONS: SelectOption[] = [
-  { value: "nudge", label: "Nudge" },
-  { value: "full_body", label: "Full body" },
-];
 
 export interface SupervisionPanelProps {
   fleet?: FleetStore;
@@ -493,7 +475,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
             </div>
 
             <div class="space-y-1.5 rounded-xl border border-line bg-raised/20 p-2.5">
-              <For each={DIALOG_CLASSES}>
+              <For each={SUPERVISION_DIALOG_CLASSES}>
                 {(cls) => {
                   const effectiveAction = () =>
                     effectivePolicy()?.classes?.[cls.id] ?? defaults()?.classes?.[cls.id] ?? "hold";
@@ -526,7 +508,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
                         <Select
                           ariaLabel={`${cls.label} policy`}
                           size="sm"
-                          options={ACTION_OPTIONS}
+                          options={SUPERVISION_ACTION_OPTIONS}
                           value={effectiveAction()}
                           disabled={isMasterOff() || loading()}
                           class={`w-36 ${classActionColor(effectiveAction())}`}
@@ -553,7 +535,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
                 <Select
                   ariaLabel="Mail delivery mode"
                   size="sm"
-                  options={MAIL_MODE_OPTIONS}
+                  options={SUPERVISION_MAIL_MODE_OPTIONS}
                   value={laneOverrides()?.mail_mode ?? effectivePolicy()?.mail_mode ?? defaults()?.mail_mode ?? "nudge"}
                   disabled={isMasterOff() || loading()}
                   onChange={(val) => updateMailMode(val as MailDeliveryMode)}
