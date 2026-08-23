@@ -750,22 +750,16 @@ fn is_deletion_scoped(text: &str, subject: Option<&str>, scope: &DialogScope) ->
         if approval::is_always_escalate(sub) {
             return false;
         }
-        let tokens: Vec<&str> = sub.split_whitespace().collect();
-        let target_paths: Vec<&str> = tokens
-            .into_iter()
+        let mut target_paths = sub
+            .split_whitespace()
             .filter(|t| {
                 !t.starts_with('-') && *t != "rm" && *t != "unlink" && *t != "git" && *t != "clean"
             })
-            .collect();
-        if target_paths.is_empty() {
+            .peekable();
+        if target_paths.peek().is_none() {
             return is_path_in_scope(sub, scope);
         }
-        for tp in target_paths {
-            if !is_path_in_scope(tp, scope) {
-                return false;
-            }
-        }
-        return true;
+        return target_paths.all(|path| is_path_in_scope(path, scope));
     }
     false
 }

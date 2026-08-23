@@ -787,8 +787,9 @@ impl App {
                 // New snapshot: advance the anchor miss counter's clock (see `refresh_gen`).
                 self.refresh_gen = self.refresh_gen.wrapping_add(1);
                 // Forget remembered agent selections for lanes that no longer exist.
+                let live_lane_ids: HashSet<_> = self.lanes.iter().map(|lane| lane.id).collect();
                 self.session_memory
-                    .retain(|id, _| self.lanes.iter().any(|l| l.id == *id));
+                    .retain(|id, _| live_lane_ids.contains(id));
                 // A successful fetch is one real chance for a just-spawned window to have
                 // appeared — the only clock the spawn-focus give-up may tick on.
                 self.age_pending_focus();
@@ -4409,8 +4410,13 @@ impl App {
             .await
         {
             self.term_windows = terms.into_iter().map(|t| (t.lane_id, t.id)).collect();
+            let live_windows: HashSet<_> = self
+                .term_windows
+                .iter()
+                .map(|(_, window)| window.as_str())
+                .collect();
             self.term_output
-                .retain(|w, _| self.term_windows.iter().any(|(_, tw)| tw == w));
+                .retain(|window, _| live_windows.contains(window.as_str()));
         }
     }
 

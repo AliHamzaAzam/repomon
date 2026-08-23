@@ -39,7 +39,6 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             let config = config.clone();
-            let socket_override = socket_override.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) =
                     update::apply_pending_daemon_update(&config, socket_override.clone()).await
