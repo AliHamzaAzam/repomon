@@ -1012,7 +1012,14 @@ impl Store {
     }
 
     /// Whether `lane_id` has mail genuinely still waiting to be picked up: `delivered_at IS
-    /// NULL`, the same "queued" test [`queued_messages`] and the mail delivery worker use.
+    /// NULL`, the same "queued" test [`queued_messages`] and the mail delivery worker use — AND
+    /// `delivery_error IS NULL`, since a message the delivery worker already gave up on
+    /// (`supervision::give_up_mail_group` records one after its retries fail) is not "waiting"
+    /// in any actionable sense: nothing further will ever inject it, so a stall nudge telling the
+    /// agent to go check its mail cannot surface it. Without this second clause a single
+    /// permanently-undeliverable message (e.g. addressed to a window with agent-to-agent
+    /// injection disabled) keeps the whole lane "outstanding" forever, and the stall watchdog
+    /// nudges some other, unrelated idle window in the same lane on a loop.
     ///
     /// Deliberately NOT `read_state`: a recipient that answers a message conversationally,
     /// without ever calling `message.mark_read`, leaves it `Unread` in the database forever —
@@ -1024,7 +1031,7 @@ impl Store {
         self.call(move |c| {
             let n: i64 = c.query_row(
                 "SELECT COUNT(*) FROM messages
-                 WHERE recipient_lane_id = ?1 AND delivered_at IS NULL",
+                 WHERE recipient_lane_id = ?1 AND delivered_at IS NULL AND delivery_error IS NULL",
                 params![lane_id],
                 |r| r.get(0),
             )?;
@@ -3275,6 +3282,36 @@ mod tests {
         let read = s.mark_message_read(message.id).await.unwrap();
         assert_eq!(read.read_state, MessageReadState::Read);
         assert!(read.read_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn lane_has_queued_mail_ignores_a_message_that_already_gave_up() {
+        let s = store().await;
+        assert!(!s.lane_has_queued_mail(2).await.unwrap());
+
+        let message = s
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                address("lane-1/1"),
+                address("lane-2/1"),
+                "will be marked delivery-failed".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        // Freshly queued and never attempted: genuinely outstanding.
+        assert!(s.lane_has_queued_mail(2).await.unwrap());
+
+        // The supervised mail loop gives up after its retries fail and records the error, same
+        // as `supervision::give_up_mail_group` does — the message is still `delivered_at IS
+        // NULL` but nothing will ever inject it, so it must stop counting as outstanding.
+        s.set_message_delivery_error(
+            message.id,
+            "supervised delivery failed after nudge retries".into(),
+        )
+        .await
+        .unwrap();
+        assert!(!s.lane_has_queued_mail(2).await.unwrap());
     }
 
     #[tokio::test]
