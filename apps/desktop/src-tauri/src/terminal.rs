@@ -358,18 +358,64 @@ fn resync_from_capture(
     })
 }
 
+/// Poll `capture` for a stable value until `deadline` elapses, backing off from
+/// `poll_start` up to `poll_max` between attempts. Generic and channel-free so the retry/
+/// deadline/fallback orchestration is unit-testable with a mocked capture function, independent
+/// of any live daemon connection.
+///
+/// Each attempt is individually bounded by whatever time remains in the deadline: a single
+/// hanging `capture()` call (the underlying RPC client's own timeout is far longer than this
+/// function's deadline) cannot by itself blow through `deadline` the way an un-timed `.await`
+/// would.
+async fn poll_capture<F, Fut>(
+    mut capture: F,
+    deadline: Duration,
+    poll_start: Duration,
+    poll_max: Duration,
+) -> Option<Value>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Value>>,
+{
+    let expires_at = tokio::time::Instant::now() + deadline;
+    let mut poll_delay = poll_start;
+    let mut last_unstable: Option<Value> = None;
+    loop {
+        let remaining = expires_at.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return last_unstable;
+        }
+        match tokio::time::timeout(remaining, capture()).await {
+            Ok(Ok(value)) if value.get("stable").and_then(Value::as_bool) == Some(true) => {
+                return Some(value);
+            }
+            Ok(Ok(value)) => last_unstable = Some(value),
+            // A transient RPC error is retried within the same deadline rather than aborting the
+            // whole watch on the first hiccup.
+            Ok(Err(_)) => {}
+            // The remaining budget ran out mid-attempt.
+            Err(_) => return last_unstable,
+        }
+        let remaining = expires_at.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return last_unstable;
+        }
+        tokio::time::sleep(poll_delay.min(remaining)).await;
+        poll_delay = (poll_delay * 2).min(poll_max);
+    }
+}
+
 async fn capture_resync(
     client: &DaemonClient,
     channel: &Channel<InvokeResponseBody>,
     lane_id: i64,
     window: &str,
 ) -> Option<Resync> {
-    let start = tokio::time::Instant::now();
-    let mut poll_delay = RESYNC_POLL_START;
-    let mut last_unstable: Option<Value> = None;
-    loop {
-        let capture = client
-            .call(
+    // Best-effort: an unstable-but-parseable capture beats a dead pane. Its cursor still carries
+    // a valid generation/sequence, so the live stream picks up from it correctly.
+    let value = poll_capture(
+        || {
+            client.call(
                 "agent.capture",
                 Some(json!({
                     "lane_id": lane_id,
@@ -377,26 +423,13 @@ async fn capture_resync(
                     "include_state": true
                 })),
             )
-            .await;
-        match capture {
-            Ok(value) if value.get("stable").and_then(Value::as_bool) == Some(true) => {
-                return resync_from_capture(channel, window, &value);
-            }
-            Ok(value) => last_unstable = Some(value),
-            // A transient RPC error is retried within the same deadline rather than aborting the
-            // whole watch on the first hiccup.
-            Err(_) => {}
-        }
-        if start.elapsed() >= RESYNC_DEADLINE {
-            // Best-effort: an unstable-but-parseable capture beats a dead pane. Its cursor still
-            // carries a valid generation/sequence, so the live stream picks up from it correctly.
-            return last_unstable
-                .as_ref()
-                .and_then(|value| resync_from_capture(channel, window, value));
-        }
-        tokio::time::sleep(poll_delay).await;
-        poll_delay = (poll_delay * 2).min(RESYNC_POLL_MAX);
-    }
+        },
+        RESYNC_DEADLINE,
+        RESYNC_POLL_START,
+        RESYNC_POLL_MAX,
+    )
+    .await?;
+    resync_from_capture(channel, window, &value)
 }
 
 #[tauri::command]
@@ -620,15 +653,121 @@ pub async fn term_unwatch(state: State<'_, AppState>, window: String) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use repomon_core::protocol::Notification;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, event_grid,
-        event_stream_closed, parse_resync, resync_frame,
+        event_stream_closed, parse_resync, poll_capture, resync_frame,
     };
+
+    fn capture_value(stable: bool, sequence: u64) -> Value {
+        json!({
+            "stable": stable,
+            "content": format!("frame-{sequence}"),
+            "alternate": false,
+            "cols": 80,
+            "rows": 24,
+            "cursor": { "col": 0, "row": 0 },
+            "generation": 1,
+            "sequence": sequence,
+        })
+    }
+
+    #[tokio::test]
+    async fn poll_capture_returns_the_first_stable_result_without_retrying() {
+        let mut calls = 0;
+        let value = poll_capture(
+            || {
+                calls += 1;
+                std::future::ready(Ok(capture_value(true, 1)))
+            },
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(value["sequence"], 1);
+    }
+
+    #[tokio::test]
+    async fn poll_capture_retries_transient_errors_and_unstable_frames() {
+        let mut responses = VecDeque::from([
+            Err(anyhow::anyhow!("transient")),
+            Ok(capture_value(false, 2)),
+            Err(anyhow::anyhow!("transient")),
+            Ok(capture_value(true, 5)),
+        ]);
+        let value = poll_capture(
+            || std::future::ready(responses.pop_front().unwrap()),
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        )
+        .await
+        .unwrap();
+        assert!(responses.is_empty());
+        assert_eq!(value["stable"], true);
+        assert_eq!(value["sequence"], 5);
+    }
+
+    #[tokio::test]
+    async fn poll_capture_falls_back_to_the_latest_unstable_frame_at_the_deadline() {
+        // A pane that never settles within the deadline (still `stable: false` on every attempt)
+        // must yield its last-seen capture rather than None, so the watch stays alive with a
+        // slightly torn frame instead of dying outright.
+        let mut sequence = 0u64;
+        let value = poll_capture(
+            || {
+                sequence += 1;
+                std::future::ready(Ok(capture_value(false, sequence)))
+            },
+            Duration::from_millis(15),
+            Duration::from_millis(2),
+            Duration::from_millis(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["stable"], false);
+        assert_eq!(value["sequence"], sequence);
+    }
+
+    #[tokio::test]
+    async fn poll_capture_returns_none_when_every_attempt_errors() {
+        let value = poll_capture(
+            || std::future::ready(Err::<Value, _>(anyhow::anyhow!("down"))),
+            Duration::from_millis(10),
+            Duration::from_millis(2),
+            Duration::from_millis(4),
+        )
+        .await;
+        assert!(value.is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_capture_bounds_a_single_hanging_attempt_to_the_deadline() {
+        // Regression: the original loop awaited each capture call with no per-attempt timeout,
+        // so one hung call (the daemon RPC client's own timeout is far longer than this
+        // function's deadline) could block the whole resync well past `deadline`. A capture that
+        // never resolves must still yield within the deadline.
+        let start = tokio::time::Instant::now();
+        let value = poll_capture(
+            std::future::pending::<anyhow::Result<Value>>,
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+        )
+        .await;
+        assert!(value.is_none());
+        assert!(start.elapsed() < Duration::from_millis(200));
+    }
 
     #[test]
     fn parse_resync_accepts_an_unstable_capture() {

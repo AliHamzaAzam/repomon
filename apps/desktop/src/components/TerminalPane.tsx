@@ -111,6 +111,11 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let syncInFlight = false;
   let pendingSync = false;
   let retryWatch: (() => void) | undefined;
+  // Bumped on every fresh watch-open attempt (mount, auto-retry, manual Retry click). A stale
+  // attempt checks this before touching `stopWatch` or component state, so an auto-retry that was
+  // sleeping through its backoff delay when a manual Retry fired can't win a race and orphan a
+  // second, unstopped watch subscription.
+  let watchRun = 0;
   const [transportError, setTransportError] = createSignal<string | null>(null);
   const [retrying, setRetrying] = createSignal(false);
   const [ready, setReady] = createSignal(false);
@@ -517,37 +522,52 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // A freshly spawned agent's pane can still be settling (boot-screen animation, first
       // daemon capture) when the watch opens; a transient failure here does not mean the pane is
       // actually broken. Retry a couple of times with backoff before surfacing the error banner.
-      const openWatch = async (): Promise<boolean> => {
-        try {
-          const watch = await watchTerminal(
-            target,
-            (bytes) => {
-              writeIncoming(bytes);
-            },
-            (ack) => applyGrid(ack.cols, ack.rows),
-            ({ cols, rows }) => applyGrid(cols, rows),
-          );
-          if (disposed) {
-            if (onAppearanceChanged) {
-              window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
-              onAppearanceChanged = undefined;
-            }
-            await watch.stop();
-            return true;
+      //
+      // Single entry point for every open attempt (initial mount, auto-retry, manual Retry
+      // click), guarded by `watchRun`: a stale attempt — one whose backoff delay was still
+      // sleeping when a newer attempt started — checks its captured `run` before touching
+      // `stopWatch` or component state, so two attempts can never both "win" and leave one
+      // watch subscription orphaned without ever being stopped.
+      const openWatch = async () => {
+        const run = ++watchRun;
+        const previousStop = stopWatch;
+        stopWatch = undefined;
+        if (previousStop) await previousStop().catch(() => undefined);
+        if (disposed || run !== watchRun) return;
+
+        const backoffMs = [0, 300, 900];
+        for (let attempt = 0; attempt < backoffMs.length; attempt += 1) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+            if (disposed || run !== watchRun) return;
           }
-          stopWatch = async () => {
-            if (onAppearanceChanged) {
-              window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
-              onAppearanceChanged = undefined;
+          try {
+            const watch = await watchTerminal(
+              target,
+              (bytes) => {
+                writeIncoming(bytes);
+              },
+              (ack) => applyGrid(ack.cols, ack.rows),
+              ({ cols, rows }) => applyGrid(cols, rows),
+            );
+            if (disposed || run !== watchRun) {
+              await watch.stop();
+              return;
             }
-            await watch.stop();
-          };
-          setTransportError(null);
-          if (props.focused && view() === "live" && !disposed && terminal) terminal.focus();
-          return true;
-        } catch (error) {
-          if (!disposed) setTransportError(errorMessage(error));
-          return false;
+            stopWatch = async () => {
+              if (onAppearanceChanged) {
+                window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+                onAppearanceChanged = undefined;
+              }
+              await watch.stop();
+            };
+            setTransportError(null);
+            if (props.focused && view() === "live" && terminal) terminal.focus();
+            return;
+          } catch (error) {
+            if (disposed || run !== watchRun) return;
+            if (attempt === backoffMs.length - 1) setTransportError(errorMessage(error));
+          }
         }
       };
 
@@ -559,18 +579,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         });
       };
 
-      const openWatchWithRetries = async () => {
-        const backoffMs = [300, 900];
-        if (await openWatch()) return;
-        for (const delay of backoffMs) {
-          if (disposed) return;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          if (disposed) return;
-          if (await openWatch()) return;
-        }
-      };
-
-      await openWatchWithRetries();
+      await openWatch();
     })().catch((error: unknown) => {
       if (!disposed) setTransportError(errorMessage(error));
     });
@@ -578,6 +587,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
   onCleanup(() => {
     disposed = true;
+    watchRun += 1;
+    retryWatch = undefined;
     rendererEpoch += 1;
     if (visibilityFrame !== undefined) {
       cancelAnimationFrame(visibilityFrame);
@@ -753,7 +764,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
         </div>
       </div>
       <Show when={view() === "live" && transportError()}>
-        <div class="absolute inset-x-4 top-10 z-20 flex items-center justify-between gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg">
+        <div
+          role="alert"
+          class="absolute inset-x-4 top-10 z-20 flex items-center justify-between gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg"
+        >
           <span>Terminal transport unavailable: {transportError()}</span>
           <button
             type="button"
