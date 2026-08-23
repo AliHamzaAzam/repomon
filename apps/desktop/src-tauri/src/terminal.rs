@@ -293,13 +293,81 @@ struct Resync {
     cursor: StreamCursor,
 }
 
+/// Total time `capture_resync` will spend waiting for a *stable* capture before falling back to
+/// the best-effort one it already has. A freshly spawned TUI (e.g. codex booting its own screen)
+/// can legitimately stay unstable well past the old ~200ms budget; failing the whole watch over
+/// that is worse than briefly painting a torn frame, since the live byte stream self-heals it
+/// within a frame or two.
+const RESYNC_DEADLINE: Duration = Duration::from_millis(2500);
+/// Backoff between resync poll attempts: starts fast for the common already-stable case, backs
+/// off so a genuinely slow-to-settle pane isn't hammered with capture calls for 2.5s straight.
+const RESYNC_POLL_START: Duration = Duration::from_millis(20);
+const RESYNC_POLL_MAX: Duration = Duration::from_millis(200);
+
+struct ParsedResync {
+    cols: u16,
+    rows: u16,
+    frame_bytes: Vec<u8>,
+    cursor: StreamCursor,
+}
+
+/// Parse one `agent.capture` response into repaint-ready fields, whether or not it reported
+/// `stable`. Pure and channel-free so it is unit-testable without a live Tauri IPC channel.
+fn parse_resync(value: &Value) -> Option<ParsedResync> {
+    let content = value.get("content").and_then(Value::as_str)?;
+    let alternate = value.get("alternate").and_then(Value::as_bool)?;
+    let cols = value.get("cols").and_then(Value::as_u64)? as u16;
+    let rows = value.get("rows").and_then(Value::as_u64)? as u16;
+    let cursor = value.get("cursor").and_then(|cursor| {
+        Some((
+            cursor.get("col")?.as_u64()? as u16,
+            cursor.get("row")?.as_u64()? as u16,
+        ))
+    });
+    let repaint_cursor = StreamCursor {
+        generation: value.get("generation").and_then(Value::as_u64)?,
+        sequence: value.get("sequence").and_then(Value::as_u64)?,
+    };
+    let frame_bytes = resync_frame(content, alternate, cursor);
+    Some(ParsedResync {
+        cols,
+        rows,
+        frame_bytes,
+        cursor: repaint_cursor,
+    })
+}
+
+/// Build a `Resync` from one `agent.capture` response, whether or not it reported `stable`.
+fn resync_from_capture(
+    channel: &Channel<InvokeResponseBody>,
+    window: &str,
+    value: &Value,
+) -> Option<Resync> {
+    let parsed = parse_resync(value)?;
+    log_term_trace(
+        "RESYNC_FRAME",
+        window,
+        Some(parsed.cursor.sequence),
+        &parsed.frame_bytes,
+    );
+    if !send_grid(channel, parsed.cols, parsed.rows) || !send_bytes(channel, parsed.frame_bytes) {
+        return None;
+    }
+    Some(Resync {
+        cursor: parsed.cursor,
+    })
+}
+
 async fn capture_resync(
     client: &DaemonClient,
     channel: &Channel<InvokeResponseBody>,
     lane_id: i64,
     window: &str,
 ) -> Option<Resync> {
-    for _ in 0..10 {
+    let start = tokio::time::Instant::now();
+    let mut poll_delay = RESYNC_POLL_START;
+    let mut last_unstable: Option<Value> = None;
+    loop {
         let capture = client
             .call(
                 "agent.capture",
@@ -310,40 +378,25 @@ async fn capture_resync(
                 })),
             )
             .await;
-        let Ok(value) = capture else { return None };
-        if value.get("stable").and_then(Value::as_bool) != Some(true) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            continue;
+        match capture {
+            Ok(value) if value.get("stable").and_then(Value::as_bool) == Some(true) => {
+                return resync_from_capture(channel, window, &value);
+            }
+            Ok(value) => last_unstable = Some(value),
+            // A transient RPC error is retried within the same deadline rather than aborting the
+            // whole watch on the first hiccup.
+            Err(_) => {}
         }
-        let content = value.get("content").and_then(Value::as_str)?;
-        let alternate = value.get("alternate").and_then(Value::as_bool)?;
-        let cols = value.get("cols").and_then(Value::as_u64)? as u16;
-        let rows = value.get("rows").and_then(Value::as_u64)? as u16;
-        let cursor = value.get("cursor").and_then(|cursor| {
-            Some((
-                cursor.get("col")?.as_u64()? as u16,
-                cursor.get("row")?.as_u64()? as u16,
-            ))
-        });
-        let repaint_cursor = StreamCursor {
-            generation: value.get("generation").and_then(Value::as_u64)?,
-            sequence: value.get("sequence").and_then(Value::as_u64)?,
-        };
-        let frame_bytes = resync_frame(content, alternate, cursor);
-        log_term_trace(
-            "RESYNC_FRAME",
-            window,
-            Some(repaint_cursor.sequence),
-            &frame_bytes,
-        );
-        if !send_grid(channel, cols, rows) || !send_bytes(channel, frame_bytes) {
-            return None;
+        if start.elapsed() >= RESYNC_DEADLINE {
+            // Best-effort: an unstable-but-parseable capture beats a dead pane. Its cursor still
+            // carries a valid generation/sequence, so the live stream picks up from it correctly.
+            return last_unstable
+                .as_ref()
+                .and_then(|value| resync_from_capture(channel, window, value));
         }
-        return Some(Resync {
-            cursor: repaint_cursor,
-        });
+        tokio::time::sleep(poll_delay).await;
+        poll_delay = (poll_delay * 2).min(RESYNC_POLL_MAX);
     }
-    None
 }
 
 #[tauri::command]
@@ -574,8 +627,50 @@ mod tests {
 
     use super::{
         MAX_PENDING, StreamCursor, append_pending, dimensions, event_chunk, event_grid,
-        event_stream_closed, resync_frame,
+        event_stream_closed, parse_resync, resync_frame,
     };
+
+    #[test]
+    fn parse_resync_accepts_an_unstable_capture() {
+        // The best-effort fallback path: a capture that never reported `stable: true` must still
+        // parse into a paintable frame with a valid cursor, since it's the only data a booting
+        // agent's pane has given us before the resync deadline runs out.
+        let value = json!({
+            "stable": false,
+            "content": "booting…",
+            "alternate": false,
+            "cols": 80,
+            "rows": 24,
+            "cursor": { "col": 2, "row": 0 },
+            "generation": 5,
+            "sequence": 12,
+        });
+        let parsed = parse_resync(&value).expect("unstable capture should still parse");
+        assert_eq!(parsed.cols, 80);
+        assert_eq!(parsed.rows, 24);
+        assert_eq!(
+            parsed.cursor,
+            StreamCursor {
+                generation: 5,
+                sequence: 12,
+            }
+        );
+        assert!(!parsed.frame_bytes.is_empty());
+    }
+
+    #[test]
+    fn parse_resync_rejects_a_capture_missing_the_repaint_cursor() {
+        // Without generation/sequence there is nothing for the live byte stream to reconcile
+        // against, so this must stay None rather than emit an unroutable frame.
+        let value = json!({
+            "stable": false,
+            "content": "line",
+            "alternate": false,
+            "cols": 80,
+            "rows": 24,
+        });
+        assert!(parse_resync(&value).is_none());
+    }
 
     #[test]
     fn resync_frame_positions_rows_explicitly() {

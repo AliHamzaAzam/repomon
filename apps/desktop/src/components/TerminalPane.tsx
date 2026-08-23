@@ -110,7 +110,9 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let scrollRequestInFlight = false;
   let syncInFlight = false;
   let pendingSync = false;
+  let retryWatch: (() => void) | undefined;
   const [transportError, setTransportError] = createSignal<string | null>(null);
+  const [retrying, setRetrying] = createSignal(false);
   const [ready, setReady] = createSignal(false);
   const [finding, setFinding] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -512,35 +514,63 @@ export default function TerminalPane(props: TerminalPaneProps) {
       };
       window.addEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
 
-      try {
-        const watch = await watchTerminal(
-          target,
-          (bytes) => {
-            writeIncoming(bytes);
-          },
-          (ack) => applyGrid(ack.cols, ack.rows),
-          ({ cols, rows }) => applyGrid(cols, rows),
-        );
-        if (disposed) {
-          if (onAppearanceChanged) {
-            window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
-            onAppearanceChanged = undefined;
+      // A freshly spawned agent's pane can still be settling (boot-screen animation, first
+      // daemon capture) when the watch opens; a transient failure here does not mean the pane is
+      // actually broken. Retry a couple of times with backoff before surfacing the error banner.
+      const openWatch = async (): Promise<boolean> => {
+        try {
+          const watch = await watchTerminal(
+            target,
+            (bytes) => {
+              writeIncoming(bytes);
+            },
+            (ack) => applyGrid(ack.cols, ack.rows),
+            ({ cols, rows }) => applyGrid(cols, rows),
+          );
+          if (disposed) {
+            if (onAppearanceChanged) {
+              window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+              onAppearanceChanged = undefined;
+            }
+            await watch.stop();
+            return true;
           }
-          await watch.stop();
-          return;
+          stopWatch = async () => {
+            if (onAppearanceChanged) {
+              window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
+              onAppearanceChanged = undefined;
+            }
+            await watch.stop();
+          };
+          setTransportError(null);
+          if (props.focused && view() === "live" && !disposed && terminal) terminal.focus();
+          return true;
+        } catch (error) {
+          if (!disposed) setTransportError(errorMessage(error));
+          return false;
         }
-        stopWatch = async () => {
-          if (onAppearanceChanged) {
-            window.removeEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
-            onAppearanceChanged = undefined;
-          }
-          await watch.stop();
-        };
-        setTransportError(null);
-        if (props.focused && view() === "live" && !disposed && terminal) terminal.focus();
-      } catch (error) {
-        if (!disposed) setTransportError(errorMessage(error));
-      }
+      };
+
+      retryWatch = () => {
+        if (disposed || retrying()) return;
+        setRetrying(true);
+        void openWatch().finally(() => {
+          if (!disposed) setRetrying(false);
+        });
+      };
+
+      const openWatchWithRetries = async () => {
+        const backoffMs = [300, 900];
+        if (await openWatch()) return;
+        for (const delay of backoffMs) {
+          if (disposed) return;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          if (disposed) return;
+          if (await openWatch()) return;
+        }
+      };
+
+      await openWatchWithRetries();
     })().catch((error: unknown) => {
       if (!disposed) setTransportError(errorMessage(error));
     });
@@ -723,8 +753,16 @@ export default function TerminalPane(props: TerminalPaneProps) {
         </div>
       </div>
       <Show when={view() === "live" && transportError()}>
-        <div class="absolute inset-x-4 top-10 z-20 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg">
-          Terminal transport unavailable: {transportError()}
+        <div class="absolute inset-x-4 top-10 z-20 flex items-center justify-between gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg">
+          <span>Terminal transport unavailable: {transportError()}</span>
+          <button
+            type="button"
+            class="focus-ring shrink-0 rounded-md border border-fault/40 px-2 py-1 font-medium text-fault transition-colors hover:bg-fault/10 disabled:opacity-50"
+            disabled={retrying()}
+            onClick={() => retryWatch?.()}
+          >
+            {retrying() ? "Retrying…" : "Retry"}
+          </button>
         </div>
       </Show>
     </section>
