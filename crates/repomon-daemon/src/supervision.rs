@@ -1,6 +1,6 @@
 //! Supervision policy snapshot, watcher loop, and policy-driven dialog answering.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,15 +9,14 @@ use chrono::{DateTime, Utc};
 use repomon_core::agent::approval;
 use repomon_core::agent::prompt::{self, PendingDialog};
 use repomon_core::agent::supervision::{
-    Decision, DialogClass, DialogScope, MailDeliveryMode, PolicyAction, SupervisionPolicy,
-    classify_dialog, evaluate, resolve,
+    Decision, DialogClass, DialogScope, PolicyAction, SupervisionPolicy, classify_dialog, evaluate,
+    resolve,
 };
-use repomon_core::model::{AgentSession, AgentStatus, FleetMessage, Lane, LaneId};
+use repomon_core::model::{AgentSession, AgentStatus, Lane, LaneId};
 use serde_json::json;
 
 use crate::Ctx;
-use crate::inject::{self, AuditSeed, Expectation, Payload, SendOutcome};
-use crate::mail;
+use crate::inject::{self, AuditSeed, Expectation, Payload};
 
 const TICK: Duration = Duration::from_secs(2);
 
@@ -262,14 +261,13 @@ pub async fn supervision_watch(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut held_cache: HashMap<String, String> = HashMap::new();
-    let mut mail_scheds: HashMap<String, MailSched> = HashMap::new();
     let mut stall_scheds: HashMap<String, StallSched> = HashMap::new();
 
     loop {
         tokio::select! {
             _ = ctx.shutdown.notified() => break,
             _ = tick.tick() => {
-                supervision_step(&ctx, &mut held_cache, &mut mail_scheds, &mut stall_scheds).await;
+                supervision_step(&ctx, &mut held_cache, &mut stall_scheds).await;
             }
         }
     }
@@ -278,7 +276,6 @@ pub async fn supervision_watch(ctx: Arc<Ctx>) {
 async fn supervision_step(
     ctx: &Ctx,
     held_cache: &mut HashMap<String, String>,
-    mail_scheds: &mut HashMap<String, MailSched>,
     stall_scheds: &mut HashMap<String, StallSched>,
 ) {
     refresh(ctx).await;
@@ -313,265 +310,10 @@ async fn supervision_step(
         }
     }
 
-    // Mail phase runs AFTER the dialog phase — a dialog on screen blocks injection anyway, and
-    // `injection_eligible` re-checks pane state for each candidate session regardless.
-    mail_phase(ctx, &lanes, &snapshot, mail_scheds, Utc::now()).await;
-
-    // Stall phase runs AFTER the mail phase: a session nudged for mail this tick is exactly
-    // the case the stall watchdog should also consider (outstanding work + idle pane), and
-    // `verified_send`'s own re-verification means there's no harm running both in one tick.
+    // Durable mail has its own push-based worker. The stall phase only handles explicit
+    // `expect_work`; queued mail is delivered to its exact recipient rather than converted into
+    // a lane-wide "check your inbox" nudge.
     stall_phase(ctx, &lanes, &snapshot, stall_scheds, Utc::now()).await;
-}
-
-// ---- supervised wake-on-mail (T9) -----------------------------------------------------------
-
-/// Backoff before the supervised mail loop's single nudge retry.
-const RETRY_BACKOFF: chrono::Duration = chrono::Duration::seconds(30);
-
-/// Loop-local retry state for one queued message's supervised delivery, keyed by message id.
-#[derive(Debug, Clone, Copy)]
-struct MailSched {
-    attempts: u32,
-    next_at: DateTime<Utc>,
-    gave_up: bool,
-}
-
-/// Action decided for one supervised mail group by [`decide_mail`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MailAction {
-    Send,
-    Wait,
-    GiveUp,
-}
-
-/// Pure decision router for the supervised mail retry/backoff/give-up state machine: no sched
-/// yet means a fresh attempt; a `gave_up` latch waits forever; the first attempt backs off for
-/// `RETRY_BACKOFF` before the single retry; a second failed attempt gives up.
-fn decide_mail(sched: Option<&MailSched>, now: DateTime<Utc>) -> MailAction {
-    let Some(sched) = sched else {
-        return MailAction::Send;
-    };
-    if sched.gave_up {
-        return MailAction::Wait;
-    }
-    if sched.attempts == 0 {
-        return MailAction::Send;
-    }
-    if now < sched.next_at {
-        return MailAction::Wait;
-    }
-    if sched.attempts == 1 {
-        return MailAction::Send;
-    }
-    MailAction::GiveUp
-}
-
-/// Record that a delivery attempt for message `id` was made (sent, skipped, or failed — any
-/// `verified_send` outcome consumes the attempt), scheduling the next retry.
-fn bump_sched(scheds: &mut HashMap<String, MailSched>, id: &str, now: DateTime<Utc>) {
-    let entry = scheds.entry(id.to_string()).or_insert(MailSched {
-        attempts: 0,
-        next_at: now,
-        gave_up: false,
-    });
-    entry.attempts += 1;
-    entry.next_at = now + RETRY_BACKOFF;
-}
-
-/// The `event.notification` payload for a supervised-mail give-up, mirroring the field set
-/// `notify_watch.rs` broadcasts.
-fn mail_give_up_payload(lane: &Lane, address: &str) -> serde_json::Value {
-    json!({
-        "kind": "needs_you",
-        "title": format!("{} needs you", lane.repo.name),
-        "body": format!("queued mail could not be delivered to {address}"),
-        "lane_id": lane.id,
-    })
-}
-
-/// Supervised wake-on-mail: for each supervised lane with queued mail addressed to it, nudge (or
-/// fully deliver, per policy) the recipient session, backing off after the first attempt and
-/// giving up — raising attention — after the retry also fails. Delivery for supervised lanes is
-/// owned entirely here; `mail.rs::try_deliver` skips them (see the guard added there for T9).
-async fn mail_phase(
-    ctx: &Ctx,
-    lanes: &[Lane],
-    snapshot: &PolicySnapshot,
-    scheds: &mut HashMap<String, MailSched>,
-    now: DateTime<Utc>,
-) {
-    let queued = match ctx.store.queued_messages(100).await {
-        Ok(messages) => messages,
-        Err(error) => {
-            tracing::warn!("supervised mail phase failed to load queue: {error:?}");
-            return;
-        }
-    };
-
-    // A message that left the queue (delivered, or picked up by the agent's own inbox read)
-    // no longer needs retry bookkeeping.
-    let queued_ids: HashSet<&str> = queued.iter().map(|m| m.id.as_str()).collect();
-    scheds.retain(|id, _| queued_ids.contains(id.as_str()));
-
-    for lane in lanes {
-        let Some(policy) = snapshot.lane(lane.id) else {
-            continue;
-        };
-        let lane_messages: Vec<&FleetMessage> = queued
-            .iter()
-            .filter(|m| m.recipient.lane_id == Some(lane.id))
-            .collect();
-        if lane_messages.is_empty() {
-            continue;
-        }
-
-        // Group by the resolved recipient window (same resolution `mail.rs::try_deliver` uses);
-        // a message that can't be resolved to a live session is left alone.
-        let mut groups: HashMap<String, Vec<&FleetMessage>> = HashMap::new();
-        for message in lane_messages {
-            if let Some(session) = mail::resolve_recipient_session(lane, message) {
-                if let Some(window) = &session.tmux_window {
-                    groups.entry(window.clone()).or_default().push(message);
-                }
-            }
-        }
-
-        for (window, mut msgs) in groups {
-            let Some(session) = lane
-                .agent_sessions
-                .iter()
-                .find(|s| s.tmux_window.as_deref() == Some(window.as_str()))
-            else {
-                continue;
-            };
-            if !mail::injection_eligible(session) {
-                // The agent is busy, not unresponsive — leave scheds untouched; not an attempt.
-                continue;
-            }
-            msgs.sort_by_key(|m| m.created_at);
-            let oldest = msgs[0];
-            match decide_mail(scheds.get(&oldest.id), now) {
-                MailAction::Wait => {}
-                MailAction::Send => {
-                    send_mail_group(ctx, lane.id, &window, session, policy, &msgs, scheds, now)
-                        .await;
-                }
-                MailAction::GiveUp => {
-                    give_up_mail_group(ctx, lane, &msgs, scheds, now).await;
-                }
-            }
-        }
-    }
-}
-
-/// Act on a `MailAction::Send` decision for one recipient session's queued mail group.
-#[allow(clippy::too_many_arguments)]
-async fn send_mail_group(
-    ctx: &Ctx,
-    lane_id: LaneId,
-    window: &str,
-    session: &AgentSession,
-    policy: &SupervisionPolicy,
-    msgs: &[&FleetMessage],
-    scheds: &mut HashMap<String, MailSched>,
-    now: DateTime<Utc>,
-) {
-    match policy.mail_mode {
-        MailDeliveryMode::Nudge => {
-            // ONE nudge covers every currently-queued message for this session: leave every
-            // message queued (the agent pulls its own inbox), just bump the retry sched for
-            // each so this group isn't re-nudged again before the backoff (or ever, past the
-            // retry). Every outcome — sent, skipped, or failed — consumed this attempt.
-            let seed = AuditSeed {
-                lane_id,
-                window: window.to_string(),
-                session_id: session.session_id.clone(),
-                agent_kind: Some(session.agent.as_str().to_string()),
-                trigger: "mail".to_string(),
-                dialog_class: None,
-                repo_scoped: None,
-                decision: "nudge".to_string(),
-                policy_source: None,
-                reason: None,
-                subject: None,
-                pane_excerpt: None,
-            };
-            let _ = inject::verified_send(
-                ctx,
-                Expectation::IdleNoDialog,
-                Payload::Line(policy.nudge_text.clone()),
-                seed,
-            )
-            .await;
-            for message in msgs {
-                bump_sched(scheds, &message.id, now);
-            }
-        }
-        MailDeliveryMode::FullBody => {
-            for message in msgs {
-                let seed = AuditSeed {
-                    lane_id,
-                    window: window.to_string(),
-                    session_id: session.session_id.clone(),
-                    agent_kind: Some(session.agent.as_str().to_string()),
-                    trigger: "mail".to_string(),
-                    dialog_class: None,
-                    repo_scoped: None,
-                    decision: "full_body".to_string(),
-                    policy_source: None,
-                    reason: None,
-                    subject: None,
-                    pane_excerpt: None,
-                };
-                let outcome = inject::verified_send(
-                    ctx,
-                    Expectation::IdleNoDialog,
-                    Payload::Line(mail::injection_line(message)),
-                    seed,
-                )
-                .await;
-                match outcome {
-                    SendOutcome::Sent { .. } => {
-                        let _ = ctx.store.mark_message_delivered(message.id.clone()).await;
-                        scheds.remove(&message.id);
-                    }
-                    SendOutcome::Skipped { .. } | SendOutcome::Failed { .. } => {
-                        bump_sched(scheds, &message.id, now);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Act on a `MailAction::GiveUp` decision: mark every message in the group delivery-failed,
-/// latch the give-up so it is never retried or re-notified, and raise attention once.
-async fn give_up_mail_group(
-    ctx: &Ctx,
-    lane: &Lane,
-    msgs: &[&FleetMessage],
-    scheds: &mut HashMap<String, MailSched>,
-    now: DateTime<Utc>,
-) {
-    for message in msgs {
-        let _ = ctx
-            .store
-            .set_message_delivery_error(
-                message.id.clone(),
-                "supervised delivery failed after nudge retries".to_string(),
-            )
-            .await;
-        let entry = scheds.entry(message.id.clone()).or_insert(MailSched {
-            attempts: 2,
-            next_at: now,
-            gave_up: false,
-        });
-        entry.gave_up = true;
-    }
-    if let Some(first) = msgs.first() {
-        let address = first.recipient.address.as_str();
-        ctx.broadcast("event.notification", mail_give_up_payload(lane, address));
-    }
 }
 
 // ---- supervised stall nudge & escalation (T10) ----------------------------------------------
@@ -660,19 +402,6 @@ fn stall_eligible(session: &AgentSession) -> bool {
         || (session.status == AgentStatus::Running && session.ended_turn)
 }
 
-/// Whether the lane has mail genuinely still waiting to be picked up (delegates to
-/// [`Store::lane_has_queued_mail`], which explains why `delivered_at`, not `read_state`, is the
-/// right column to check here).
-async fn lane_has_queued_mail(ctx: &Ctx, lane_id: LaneId) -> bool {
-    match ctx.store.lane_has_queued_mail(lane_id).await {
-        Ok(has_mail) => has_mail,
-        Err(error) => {
-            tracing::warn!("stall phase failed to check queued mail for lane {lane_id}: {error:?}");
-            false
-        }
-    }
-}
-
 /// Whether `window`'s pane has sat unchanged for at least `stall_mins` — no recorded change at
 /// all means no evidence of a freeze, so (mirroring `rpc.rs::stall_since`'s `None` case) it does
 /// NOT count as quiet.
@@ -696,10 +425,10 @@ fn stall_escalate_payload(lane: &Lane, idle_mins: i64) -> serde_json::Value {
 }
 
 /// Supervised stall handling: per eligible session in a supervised lane, when it has been idle
-/// past the policy's `stall_mins` with outstanding assigned work (mail still queued for the lane,
-/// or `policy.expect_work`) AND its pane has independently sat quiet that long, send one nudge; if
-/// nudges keep failing to unstick it, raise attention once and hold until the agent shows
-/// activity again. Runs after the mail phase in the same tick.
+/// past the policy's `stall_mins` with explicit outstanding assigned work (`policy.expect_work`)
+/// AND its pane has independently sat quiet that long, send one nudge; if nudges keep failing to
+/// unstick it, raise attention once and hold until the agent shows activity again. Durable mail is
+/// intentionally excluded: its push worker targets the exact recipient with the actual body.
 async fn stall_phase(
     ctx: &Ctx,
     lanes: &[Lane],
@@ -711,7 +440,6 @@ async fn stall_phase(
         let Some(policy) = snapshot.lane(lane.id) else {
             continue;
         };
-        let lane_has_queued_mail = lane_has_queued_mail(ctx, lane.id).await;
         for session in &lane.agent_sessions {
             if !stall_eligible(session) {
                 continue;
@@ -719,7 +447,7 @@ async fn stall_phase(
             let Some(window) = session.tmux_window.clone() else {
                 continue;
             };
-            let outstanding = lane_has_queued_mail || policy.expect_work;
+            let outstanding = policy.expect_work;
 
             // Activity reset: drop a stale episode's bookkeeping once the agent has moved
             // (activity past the last nudge) or there's no longer any outstanding work, so a
@@ -1289,6 +1017,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervision_step_refreshes_a_stale_snapshot_before_master_gate() {
+        let backend = Arc::new(ScriptedBackend::new(vec![]));
+        let ctx = make_ctx(backend.clone());
+        ctx.store
+            .set_lane_policy(SupervisionOverrides {
+                lane_id: 1,
+                enabled: true,
+                classes: std::collections::BTreeMap::new(),
+                mail_mode: None,
+                nudge_text: Some("must not send".into()),
+                stall_mins: Some(5),
+                nudge_retries: Some(1),
+                expect_work: true,
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        refresh(&ctx).await;
+        assert!(ctx.supervision.read().await.lane(1).is_some());
+
+        ctx.config.write().await.supervision.enabled = false;
+        let mut held = HashMap::new();
+        let mut stalls = HashMap::new();
+        supervision_step(&ctx, &mut held, &mut stalls).await;
+
+        let snapshot = ctx.supervision.read().await;
+        assert!(!snapshot.master);
+        assert!(snapshot.lanes.is_empty());
+        drop(snapshot);
+        assert!(backend.sent_text.lock().unwrap().is_empty());
+        assert!(backend.sent_keys.lock().unwrap().is_empty());
+        assert!(
+            ctx.store
+                .supervision_log(Some(1), 10, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn supervised_reads_refreshed_state() {
         let ctx = test_ctx().await;
 
@@ -1321,7 +1090,7 @@ mod tests {
         assert_eq!(pol.nudge_retries, 2);
     }
 
-    // ---- Supervised wake-on-mail (T9) ----
+    // ---- Lane/session fixtures -------------------------------------------------------------
 
     use repomon_core::model::{AgentAddress, Repo, ResolvedAgentAddress, Worktree, WorktreeState};
 
@@ -1365,301 +1134,6 @@ mod tests {
             last_activity_at: Utc::now(),
             pinned: false,
         }
-    }
-
-    fn mail_recipient(lane_id: LaneId, window: &str) -> ResolvedAgentAddress {
-        ResolvedAgentAddress {
-            address: AgentAddress::new("lane-1/1"),
-            lane_id: Some(lane_id),
-            slot: Some(1),
-            window: Some(window.to_string()),
-            session_id: Some("sess-123".into()),
-            agent_kind: Some("claude-code".into()),
-        }
-    }
-
-    fn mail_sender() -> ResolvedAgentAddress {
-        ResolvedAgentAddress {
-            address: AgentAddress::new("operator"),
-            lane_id: None,
-            slot: None,
-            window: None,
-            session_id: None,
-            agent_kind: None,
-        }
-    }
-
-    async fn queue_test_message(
-        ctx: &Ctx,
-        lane_id: LaneId,
-        window: &str,
-        body: &str,
-    ) -> FleetMessage {
-        ctx.store
-            .send_message(
-                AgentAddress::new("lane-1/1"),
-                mail_sender(),
-                mail_recipient(lane_id, window),
-                body.to_string(),
-                None,
-            )
-            .await
-            .unwrap()
-    }
-
-    fn mail_policy_overrides(
-        lane_id: LaneId,
-        mode: Option<MailDeliveryMode>,
-    ) -> SupervisionOverrides {
-        SupervisionOverrides {
-            lane_id,
-            enabled: true,
-            classes: std::collections::BTreeMap::new(),
-            mail_mode: mode,
-            nudge_text: Some("check your repomon mail".into()),
-            stall_mins: None,
-            nudge_retries: None,
-            expect_work: true,
-            updated_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn decide_mail_table() {
-        let now = Utc::now();
-
-        // No sched at all: fresh, so send.
-        assert_eq!(decide_mail(None, now), MailAction::Send);
-
-        // First attempt just made, still inside backoff: wait.
-        let within_backoff = MailSched {
-            attempts: 1,
-            next_at: now + chrono::Duration::seconds(30),
-            gave_up: false,
-        };
-        assert_eq!(decide_mail(Some(&within_backoff), now), MailAction::Wait);
-
-        // First attempt's backoff has elapsed: send the one retry.
-        let past_backoff = MailSched {
-            attempts: 1,
-            next_at: now - chrono::Duration::seconds(1),
-            gave_up: false,
-        };
-        assert_eq!(decide_mail(Some(&past_backoff), now), MailAction::Send);
-
-        // Second attempt already made and its backoff elapsed too: give up.
-        let second_attempt = MailSched {
-            attempts: 2,
-            next_at: now - chrono::Duration::seconds(1),
-            gave_up: false,
-        };
-        assert_eq!(decide_mail(Some(&second_attempt), now), MailAction::GiveUp);
-
-        // Latched give-up: wait forever, regardless of attempts/next_at.
-        let given_up = MailSched {
-            attempts: 2,
-            next_at: now - chrono::Duration::seconds(100),
-            gave_up: true,
-        };
-        assert_eq!(decide_mail(Some(&given_up), now), MailAction::Wait);
-    }
-
-    #[tokio::test]
-    async fn nudge_mode_sends_single_line_and_leaves_message_queued() {
-        let backend = Arc::new(ScriptedBackend::new(vec![]));
-        let ctx = make_ctx(backend.clone());
-
-        ctx.store
-            .set_lane_policy(mail_policy_overrides(1, Some(MailDeliveryMode::Nudge)))
-            .await
-            .unwrap();
-        refresh(&ctx).await;
-        let snapshot = ctx.supervision.read().await.clone();
-
-        let msg = queue_test_message(&ctx, 1, "win-lane-1", "please look at this").await;
-        let lane = lane_with_session(1, sample_session(None));
-        let mut scheds = HashMap::new();
-        let now = Utc::now();
-
-        mail_phase(&ctx, &[lane], &snapshot, &mut scheds, now).await;
-
-        let sent = backend.sent_text.lock().unwrap().clone();
-        assert_eq!(
-            sent,
-            vec![(
-                "win-lane-1".to_string(),
-                "check your repomon mail".to_string()
-            )]
-        );
-
-        let updated = ctx.store.get_message(msg.id.clone()).await.unwrap();
-        assert!(updated.delivered_at.is_none(), "message must stay queued");
-
-        let sched = scheds.get(&msg.id).expect("sched recorded");
-        assert_eq!(sched.attempts, 1);
-
-        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].trigger, "mail");
-        assert_eq!(log[0].decision, "nudge");
-        assert_eq!(log[0].outcome, "sent");
-    }
-
-    #[tokio::test]
-    async fn full_body_mode_marks_delivered() {
-        let backend = Arc::new(ScriptedBackend::new(vec![]));
-        let ctx = make_ctx(backend.clone());
-
-        ctx.store
-            .set_lane_policy(mail_policy_overrides(1, Some(MailDeliveryMode::FullBody)))
-            .await
-            .unwrap();
-        refresh(&ctx).await;
-        let snapshot = ctx.supervision.read().await.clone();
-
-        let msg = queue_test_message(&ctx, 1, "win-lane-1", "please look at this").await;
-        let lane = lane_with_session(1, sample_session(None));
-        let mut scheds = HashMap::new();
-        let now = Utc::now();
-
-        mail_phase(&ctx, &[lane], &snapshot, &mut scheds, now).await;
-
-        let sent = backend.sent_text.lock().unwrap().clone();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].1.contains("REPOMON MAIL"));
-
-        let updated = ctx.store.get_message(msg.id.clone()).await.unwrap();
-        assert!(
-            updated.delivered_at.is_some(),
-            "message must be marked delivered"
-        );
-        assert!(
-            !scheds.contains_key(&msg.id),
-            "sched must be dropped on success"
-        );
-
-        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].trigger, "mail");
-        assert_eq!(log[0].outcome, "sent");
-    }
-
-    #[tokio::test]
-    async fn busy_agent_is_not_an_attempt() {
-        let backend = Arc::new(ScriptedBackend::new(vec![]));
-        let ctx = make_ctx(backend.clone());
-
-        ctx.store
-            .set_lane_policy(mail_policy_overrides(1, Some(MailDeliveryMode::Nudge)))
-            .await
-            .unwrap();
-        refresh(&ctx).await;
-        let snapshot = ctx.supervision.read().await.clone();
-
-        let msg = queue_test_message(&ctx, 1, "win-lane-1", "please look at this").await;
-        let mut busy = sample_session(None);
-        busy.status = AgentStatus::Running;
-        let lane = lane_with_session(1, busy);
-        let mut scheds = HashMap::new();
-        let now = Utc::now();
-
-        mail_phase(&ctx, &[lane], &snapshot, &mut scheds, now).await;
-
-        assert!(
-            backend
-                .capture_calls
-                .load(std::sync::atomic::Ordering::SeqCst)
-                == 0,
-            "an ineligible session must never reach verified_send"
-        );
-        assert!(backend.sent_text.lock().unwrap().is_empty());
-        assert!(
-            !scheds.contains_key(&msg.id),
-            "not an attempt: no sched at all"
-        );
-
-        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
-        assert!(log.is_empty());
-    }
-
-    #[tokio::test]
-    async fn give_up_sets_delivery_error_and_notifies_once() {
-        let backend = Arc::new(ScriptedBackend::new(vec![
-            BOXED_DIALOG_PANE.to_string(),
-            BOXED_DIALOG_PANE.to_string(),
-        ]));
-        let ctx = make_ctx(backend.clone());
-        let mut events = ctx.events.subscribe();
-
-        ctx.store
-            .set_lane_policy(mail_policy_overrides(1, Some(MailDeliveryMode::Nudge)))
-            .await
-            .unwrap();
-        refresh(&ctx).await;
-        let snapshot = ctx.supervision.read().await.clone();
-
-        let msg = queue_test_message(&ctx, 1, "win-lane-1", "please look at this").await;
-        let lane = lane_with_session(1, sample_session(None));
-        let mut scheds = HashMap::new();
-        let t0 = Utc::now();
-
-        // Attempt 1: fresh sched -> Send -> a dialog is on screen -> Skipped, consumes attempt 1.
-        mail_phase(
-            &ctx,
-            std::slice::from_ref(&lane),
-            &snapshot,
-            &mut scheds,
-            t0,
-        )
-        .await;
-        assert_eq!(scheds.get(&msg.id).unwrap().attempts, 1);
-
-        // Attempt 2: backoff elapsed -> Send (the one retry) -> Skipped again, consumes attempt 2.
-        let t1 = t0 + chrono::Duration::seconds(31);
-        mail_phase(
-            &ctx,
-            std::slice::from_ref(&lane),
-            &snapshot,
-            &mut scheds,
-            t1,
-        )
-        .await;
-        assert_eq!(scheds.get(&msg.id).unwrap().attempts, 2);
-
-        // Attempt 3: two attempts already made and backoff elapsed -> GiveUp.
-        let t2 = t1 + chrono::Duration::seconds(31);
-        mail_phase(
-            &ctx,
-            std::slice::from_ref(&lane),
-            &snapshot,
-            &mut scheds,
-            t2,
-        )
-        .await;
-        assert!(scheds.get(&msg.id).unwrap().gave_up);
-
-        // Extra tick: the give-up latch must not repeat the notification.
-        let t3 = t2 + chrono::Duration::seconds(31);
-        mail_phase(&ctx, &[lane], &snapshot, &mut scheds, t3).await;
-
-        let updated = ctx.store.get_message(msg.id.clone()).await.unwrap();
-        assert!(updated.delivery_error.is_some());
-        assert!(updated.delivered_at.is_none());
-
-        let mut notifications = 0;
-        while let Ok(value) = events.try_recv() {
-            if value["method"] == "event.notification" {
-                notifications += 1;
-                assert_eq!(value["params"]["kind"], "needs_you");
-                assert!(
-                    value["params"]["body"]
-                        .as_str()
-                        .unwrap()
-                        .contains("could not be delivered")
-                );
-            }
-        }
-        assert_eq!(notifications, 1, "give-up must notify exactly once");
     }
 
     // ---- Supervised stall nudge & escalation (T10) ----
@@ -1741,6 +1215,72 @@ mod tests {
         assert_eq!(
             decide_stall(Some(&escalated), 10, true, 5, 2, now),
             StallAction::Nothing
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_mail_never_becomes_a_wrong_window_stall_nudge() {
+        let backend = Arc::new(ScriptedBackend::new(vec![]));
+        let ctx = make_ctx(backend.clone());
+        ctx.store
+            .set_lane_policy(stall_policy_overrides(1, 5, 2, false))
+            .await
+            .unwrap();
+        refresh(&ctx).await;
+        let snapshot = ctx.supervision.read().await.clone();
+
+        ctx.store
+            .send_message(
+                AgentAddress::new("lane-1/2"),
+                ResolvedAgentAddress {
+                    address: AgentAddress::new("lane-9/1"),
+                    lane_id: Some(9),
+                    slot: Some(1),
+                    window: Some("lane-9".into()),
+                    session_id: Some("sender".into()),
+                    agent_kind: Some("claude-code".into()),
+                },
+                ResolvedAgentAddress {
+                    address: AgentAddress::new("lane-1/2"),
+                    lane_id: Some(1),
+                    slot: Some(2),
+                    window: Some("win-lane-1-2".into()),
+                    session_id: Some("other-recipient".into()),
+                    agent_kind: Some("claude-code".into()),
+                },
+                "mail for another pane".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut session = sample_session(None);
+        session.status = AgentStatus::Waiting;
+        let now = Utc::now();
+        session.last_activity_at = now - chrono::Duration::minutes(30);
+        ctx.pane_seen.lock().await.insert(
+            "win-lane-1".to_string(),
+            (1, now - chrono::Duration::minutes(30)),
+        );
+        let mut scheds = HashMap::new();
+
+        stall_phase(
+            &ctx,
+            &[lane_with_session(1, session)],
+            &snapshot,
+            &mut scheds,
+            now,
+        )
+        .await;
+
+        assert!(backend.sent_text.lock().unwrap().is_empty());
+        assert!(scheds.is_empty());
+        assert!(
+            ctx.store
+                .supervision_log(Some(1), 10, None)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

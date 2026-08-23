@@ -1401,6 +1401,11 @@ fn message_event(message: &repomon_core::model::FleetMessage) -> Value {
     })
 }
 
+fn announce_message_stored(ctx: &Ctx, message: &repomon_core::model::FleetMessage) {
+    ctx.broadcast("event.message.stored", message_event(message));
+    ctx.wake_mail_delivery();
+}
+
 /// Resize a shared agent pane and notify every byte-watching renderer when its authoritative grid
 /// actually changed. The caller still receives its normal RPC response; this additive event closes
 /// the gap for other viewers, whose xterm instances would otherwise keep parsing repaint bytes at
@@ -1879,7 +1884,7 @@ pub async fn dispatch(
                     .send_message(AgentAddress::new(to), sender, recipient, p.body, p.reply_to)
                     .await
                     .map_err(internal)?;
-                ctx.broadcast("event.message.stored", message_event(&message));
+                announce_message_stored(ctx, &message);
                 to_value(message)
             } else {
                 // A list and/or a wildcard: fan out one `send_message` per resolved recipient,
@@ -1908,7 +1913,7 @@ pub async fn dispatch(
                                 .await
                             {
                                 Ok(message) => {
-                                    ctx.broadcast("event.message.stored", message_event(&message));
+                                    announce_message_stored(ctx, &message);
                                     sent_count += 1;
                                     results.push(json!({
                                         "to": target,
@@ -2865,6 +2870,8 @@ pub async fn dispatch(
         }
         "config.set" => {
             let p: ConfigSet = parse(params)?;
+            let injection_policy_changed =
+                p.message_inject_agents.is_some() || p.message_inject_operator.is_some();
             {
                 let mut cfg = ctx.config.write().await;
                 let prev = cfg.clone();
@@ -3017,6 +3024,9 @@ pub async fn dispatch(
                     drop(cfg);
                     crate::supervision::refresh(ctx).await;
                 }
+            }
+            if injection_policy_changed {
+                ctx.wake_mail_delivery();
             }
             let cfg = ctx.config.read().await;
             let value = config_json(&cfg);
@@ -5428,6 +5438,10 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             }
         }
     }
+
+    // A managed pane becoming idle is the event-driven retry edge for durable mail. This runs
+    // after dialog/rate-limit/stall overlays so eligibility reflects the final public state.
+    crate::mail::note_eligible_windows(ctx, lanes).await;
 
     // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
     // intermittent "sessions disappear after idle" report names its own cause in the log.
@@ -7884,6 +7898,31 @@ mod tests {
             last_activity_at: now,
             pinned: false,
         }
+    }
+
+    #[tokio::test]
+    async fn stored_message_event_wakes_push_delivery() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let ctx = Ctx::new(store.clone(), repomon_core::Config::default(), None);
+        let lane = mail_lane(7, &[None]);
+        let message = store
+            .send_message(
+                AgentAddress::new("lane-7/1"),
+                resolved_named("operator", None),
+                resolved_lane(&lane, 1).unwrap(),
+                "wake now".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        announce_message_stored(&ctx, &message);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ctx.mail_delivery.notified(),
+        )
+        .await
+        .expect("message storage should wake the delivery worker");
     }
 
     #[test]

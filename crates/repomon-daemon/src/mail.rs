@@ -1,13 +1,17 @@
 //! Durable fleet-message delivery into safe managed agent windows.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use repomon_core::model::{AgentSession, AgentStatus, FleetMessage};
+use repomon_core::model::{AgentSession, AgentStatus, FleetMessage, Lane};
+use serde_json::json;
 
 use crate::Ctx;
+use crate::inject::{self, AuditSeed, Expectation, Payload, SendOutcome};
 
-const INJECT_BODY_CHARS: usize = 1000;
+const DELIVERY_SWEEP: Duration = Duration::from_secs(1);
+const FAILURE_NOTIFY_AFTER: u32 = 2;
 
 pub fn injection_line(message: &FleetMessage) -> String {
     let collapsed: String = message
@@ -17,10 +21,7 @@ pub fn injection_line(message: &FleetMessage) -> String {
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(INJECT_BODY_CHARS)
-        .collect();
+        .join(" ");
     let reply_to = message.reply_to.as_deref().unwrap_or("none");
     format!(
         "[REPOMON MAIL id={} from={} reply_to={reply_to}] {collapsed} [END REPOMON MAIL]",
@@ -29,19 +30,44 @@ pub fn injection_line(message: &FleetMessage) -> String {
 }
 
 pub fn injection_eligible(session: &AgentSession) -> bool {
-    session.tmux_window.is_some()
+    !session.external
+        && session.tmux_window.is_some()
         && session.pending_dialog.is_none()
         && session.pending_prompt.is_none()
         && !session.stale
-        && !matches!(
-            session.status,
-            AgentStatus::Running | AgentStatus::RateLimited
-        )
-        || session.tmux_window.is_some()
-            && session.pending_dialog.is_none()
-            && session.pending_prompt.is_none()
-            && !session.stale
-            && session.ended_turn
+        && session.status != AgentStatus::RateLimited
+        && (session.status != AgentStatus::Running || session.ended_turn)
+}
+
+/// Pure routing decision for one queued message. Policy-blocked messages stay durable for inbox
+/// pickup, unresolved/busy recipients wait, and only a safe managed pane is injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryAction {
+    PolicyBlocked,
+    Wait,
+    Inject,
+}
+
+fn decide_delivery(
+    policy_allows: bool,
+    recipient_resolved: bool,
+    recipient_eligible: bool,
+) -> DeliveryAction {
+    if !policy_allows {
+        DeliveryAction::PolicyBlocked
+    } else if !recipient_resolved || !recipient_eligible {
+        DeliveryAction::Wait
+    } else {
+        DeliveryAction::Inject
+    }
+}
+
+fn injection_allowed(message: &FleetMessage, inject_agents: bool, inject_operator: bool) -> bool {
+    if message.sender.lane_id.is_some() {
+        inject_agents
+    } else {
+        inject_operator
+    }
 }
 
 pub(crate) fn resolve_recipient_session<'a>(
@@ -67,86 +93,205 @@ pub(crate) fn resolve_recipient_session<'a>(
     Some(session)
 }
 
-pub(crate) async fn try_deliver(ctx: &Ctx, message: FleetMessage) {
-    let inject = {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttemptOutcome {
+    Delivered,
+    Deferred,
+    Failed(String),
+}
+
+async fn try_deliver(ctx: &Ctx, lanes: &[Lane], message: &FleetMessage) -> AttemptOutcome {
+    let (inject_agents, inject_operator) = {
         let config = ctx.config.read().await;
-        if message.sender.lane_id.is_some() {
-            config.message_inject_agents
-        } else {
-            config.message_inject_operator
-        }
+        (config.message_inject_agents, config.message_inject_operator)
     };
-    if !inject {
-        return;
-    }
+    let policy_allows = injection_allowed(message, inject_agents, inject_operator);
     let Some(lane_id) = message.recipient.lane_id else {
-        return;
+        return AttemptOutcome::Deferred;
     };
-    if crate::supervision::supervised(ctx, lane_id).await.is_some() {
-        return;
+    let Some(lane) = lanes.iter().find(|l| l.id == lane_id) else {
+        return AttemptOutcome::Deferred;
+    };
+    let session = resolve_recipient_session(lane, message);
+    let action = decide_delivery(
+        policy_allows,
+        session.is_some(),
+        session.is_some_and(injection_eligible),
+    );
+    if action != DeliveryAction::Inject {
+        return AttemptOutcome::Deferred;
     }
-    let lanes = match crate::rpc::lanes_with_agents(ctx).await {
-        Ok(lanes) => lanes,
+    let session = session.expect("inject decision requires a resolved recipient");
+    let window = session
+        .tmux_window
+        .clone()
+        .expect("inject decision requires a managed window");
+    let seed = AuditSeed {
+        lane_id,
+        window,
+        session_id: session.session_id.clone(),
+        agent_kind: Some(session.agent.as_str().to_string()),
+        trigger: "mail".to_string(),
+        dialog_class: None,
+        repo_scoped: None,
+        decision: "full_body".to_string(),
+        policy_source: None,
+        reason: Some("durable push delivery".to_string()),
+        subject: None,
+        pane_excerpt: None,
+    };
+    match inject::verified_send(
+        ctx,
+        Expectation::IdleNoDialog,
+        Payload::Line(injection_line(message)),
+        seed,
+    )
+    .await
+    {
+        SendOutcome::Sent { .. } => {
+            match ctx.store.mark_message_delivered(message.id.clone()).await {
+                Ok(_) => AttemptOutcome::Delivered,
+                Err(error) => AttemptOutcome::Failed(error.to_string()),
+            }
+        }
+        SendOutcome::Skipped { .. } => AttemptOutcome::Deferred,
+        SendOutcome::Failed { error, .. } => AttemptOutcome::Failed(error),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FailureState {
+    attempts: u32,
+    notified: bool,
+}
+
+fn record_failure(state: &mut FailureState) -> bool {
+    state.attempts = state.attempts.saturating_add(1);
+    if state.attempts < FAILURE_NOTIFY_AFTER || state.notified {
+        return false;
+    }
+    state.notified = true;
+    true
+}
+
+fn delivery_failure_payload(lane: &Lane, message: &FleetMessage) -> serde_json::Value {
+    json!({
+        "kind": "needs_you",
+        "title": format!("{} needs you", lane.repo.name),
+        "body": format!("queued mail could not be delivered to {}", message.recipient.address),
+        "lane_id": lane.id,
+    })
+}
+
+async fn delivery_pass(ctx: &Ctx, failures: &mut HashMap<String, FailureState>) {
+    let (inject_agents, inject_operator) = {
+        let config = ctx.config.read().await;
+        (config.message_inject_agents, config.message_inject_operator)
+    };
+    let queued = match ctx
+        .store
+        .queued_messages_for_injection(inject_agents, inject_operator, 200)
+        .await
+    {
+        Ok(messages) => messages,
         Err(error) => {
-            let _ = ctx
-                .store
-                .set_message_delivery_error(message.id, error.message)
-                .await;
+            tracing::warn!("message delivery query failed: {error}");
             return;
         }
     };
-    let Some(lane) = lanes.iter().find(|l| l.id == lane_id) else {
-        return;
-    };
-    let Some(session) = resolve_recipient_session(lane, &message) else {
-        return;
-    };
-    if !injection_eligible(session) {
+    let queued_ids: HashSet<&str> = queued.iter().map(|message| message.id.as_str()).collect();
+    failures.retain(|id, _| queued_ids.contains(id.as_str()));
+    if queued.is_empty() {
         return;
     }
-    let Some(window) = session.tmux_window.clone() else {
-        return;
-    };
-    let line = injection_line(&message);
-    let backend = ctx.backend.clone();
-    let result = tokio::task::spawn_blocking(move || backend.send_text_named(&window, &line)).await;
-    match result {
-        Ok(Ok(())) => {
-            let _ = ctx.store.mark_message_delivered(message.id).await;
-        }
-        Ok(Err(error)) => {
-            let _ = ctx
-                .store
-                .set_message_delivery_error(message.id, error.to_string())
-                .await;
-        }
+
+    let lanes = match crate::rpc::lanes_with_agents(ctx).await {
+        Ok(lanes) => lanes,
         Err(error) => {
-            let _ = ctx
-                .store
-                .set_message_delivery_error(message.id, error.to_string())
-                .await;
+            tracing::warn!("message delivery failed to inspect lanes: {error:?}");
+            return;
+        }
+    };
+
+    // Never inject two queued messages into one pane from the same overlay snapshot: the first
+    // send may start generation before transcript state catches up. Later messages remain queued
+    // for an idle transition or the next fallback sweep.
+    let mut attempted_windows = HashSet::new();
+    for message in &queued {
+        let resolved_window = message
+            .recipient
+            .lane_id
+            .and_then(|lane_id| lanes.iter().find(|lane| lane.id == lane_id))
+            .and_then(|lane| resolve_recipient_session(lane, message))
+            .filter(|session| injection_eligible(session))
+            .and_then(|session| session.tmux_window.as_deref());
+        let Some(window) = resolved_window else {
+            continue;
+        };
+        if !attempted_windows.insert(window) {
+            continue;
+        }
+        let lane = message
+            .recipient
+            .lane_id
+            .and_then(|lane_id| lanes.iter().find(|lane| lane.id == lane_id));
+        match try_deliver(ctx, &lanes, message).await {
+            AttemptOutcome::Delivered => {
+                failures.remove(&message.id);
+            }
+            AttemptOutcome::Deferred => {}
+            AttemptOutcome::Failed(error) => {
+                let _ = ctx
+                    .store
+                    .set_message_delivery_error(message.id.clone(), error)
+                    .await;
+                let state = failures.entry(message.id.clone()).or_default();
+                if record_failure(state) {
+                    if let Some(lane) = lane {
+                        ctx.broadcast(
+                            "event.notification",
+                            delivery_failure_payload(lane, message),
+                        );
+                    }
+                }
+            }
         }
     }
 }
 
+/// Update eligibility for every window present in this overlay and wake delivery on transitions
+/// into an injection-safe state. This is deliberately transition-based: unconditional wakes from
+/// inside `lanes_with_agents` would make a busy durable queue spin in a tight self-triggered loop.
+pub(crate) async fn note_eligible_windows(ctx: &Ctx, lanes: &[Lane]) {
+    let mut previous = ctx.mail_eligible_windows.lock().await;
+    let mut became_eligible = false;
+    for session in lanes.iter().flat_map(|lane| lane.agent_sessions.iter()) {
+        let Some(window) = session.tmux_window.as_ref() else {
+            continue;
+        };
+        if injection_eligible(session) {
+            became_eligible |= previous.insert(window.clone());
+        } else {
+            previous.remove(window);
+        }
+    }
+    drop(previous);
+    if became_eligible {
+        ctx.wake_mail_delivery();
+    }
+}
+
 pub async fn delivery_worker(ctx: Arc<Ctx>) {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(DELIVERY_SWEEP);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut failures = HashMap::new();
     loop {
         tokio::select! {
             _ = ctx.shutdown.notified() => return,
-            _ = tick.tick() => {}
+            _ = tick.tick() => {},
+            _ = ctx.mail_delivery.notified() => {},
         }
-        let queued = match ctx.store.queued_messages(100).await {
-            Ok(messages) => messages,
-            Err(error) => {
-                tracing::warn!("message delivery query failed: {error}");
-                continue;
-            }
-        };
-        for message in queued {
-            try_deliver(&ctx, message).await;
-        }
+        delivery_pass(&ctx, &mut failures).await;
     }
 }
 
@@ -160,7 +305,8 @@ mod tests {
     };
     use repomon_core::agent::supervision::SupervisionOverrides;
     use repomon_core::model::{
-        AgentAddress, AgentKind, MessageDeliveryState, MessageReadState, ResolvedAgentAddress,
+        AgentAddress, AgentKind, MessageDeliveryState, MessageReadState, Repo,
+        ResolvedAgentAddress, Worktree, WorktreeState,
     };
     use repomon_core::{Config, Store};
     use std::path::PathBuf;
@@ -231,12 +377,90 @@ mod tests {
         }
     }
 
+    fn lane_with_session(session: AgentSession) -> Lane {
+        let head = "0000000000000000000000000000000000000000".parse().unwrap();
+        Lane {
+            id: 2,
+            repo: Repo {
+                id: 2,
+                name: "repo-2".into(),
+                path: PathBuf::from("/repo-2"),
+                added_at: Utc::now(),
+                worktree_root_template: None,
+                hidden: false,
+                position: None,
+                label: None,
+            },
+            worktree: Worktree {
+                id: 2,
+                repo_id: 2,
+                path: PathBuf::from("/repo-2"),
+                branch: Some("feat/mail".into()),
+                head,
+                is_main: false,
+                name: "feat-mail".into(),
+            },
+            state: WorktreeState {
+                worktree_id: 2,
+                head,
+                branch: Some("feat/mail".into()),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                dirty: Default::default(),
+                last_commit_at: None,
+                locked: false,
+                prunable: false,
+                last_change_at: None,
+            },
+            agent_sessions: vec![session],
+            last_activity_at: Utc::now(),
+            pinned: false,
+        }
+    }
+
     #[test]
     fn frame_strips_controls_and_collapses_whitespace() {
         assert_eq!(
             injection_line(&message("hello\n\t fleet\u{7}  now")),
             "[REPOMON MAIL id=mail-1 from=operator reply_to=none] hello fleet now [END REPOMON MAIL]"
         );
+    }
+
+    #[test]
+    fn frame_keeps_the_complete_long_body_and_closing_marker() {
+        let body = "x".repeat(8 * 1024);
+        let line = injection_line(&message(&body));
+        assert!(line.contains(&body));
+        assert!(line.ends_with("[END REPOMON MAIL]"));
+    }
+
+    #[test]
+    fn delivery_decision_table_respects_policy_resolution_and_safety() {
+        assert_eq!(
+            decide_delivery(false, true, true),
+            DeliveryAction::PolicyBlocked
+        );
+        assert_eq!(decide_delivery(true, false, true), DeliveryAction::Wait);
+        assert_eq!(decide_delivery(true, true, false), DeliveryAction::Wait);
+        assert_eq!(decide_delivery(true, true, true), DeliveryAction::Inject);
+
+        let operator = message("operator mail");
+        assert!(injection_allowed(&operator, false, true));
+        let mut agent = operator;
+        agent.sender.lane_id = Some(9);
+        assert!(!injection_allowed(&agent, false, true));
+        assert!(injection_allowed(&agent, true, false));
+    }
+
+    #[test]
+    fn repeated_delivery_failure_raises_attention_exactly_once() {
+        let mut state = FailureState::default();
+        assert!(!record_failure(&mut state));
+        assert!(record_failure(&mut state));
+        assert!(!record_failure(&mut state));
+        assert_eq!(state.attempts, 3);
+        assert!(state.notified);
     }
 
     #[test]
@@ -256,7 +480,34 @@ mod tests {
         assert!(injection_eligible(&ended));
     }
 
-    // ---- supervised-lane handoff (T9) ----
+    #[tokio::test]
+    async fn pane_became_idle_wakes_delivery_once() {
+        let backend = Arc::new(ScriptedBackend::new());
+        let ctx = make_mail_ctx(backend);
+        let mut busy = session(AgentStatus::Running);
+        busy.ended_turn = false;
+        note_eligible_windows(&ctx, &[lane_with_session(busy)]).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), ctx.mail_delivery.notified())
+                .await
+                .is_err()
+        );
+
+        note_eligible_windows(&ctx, &[lane_with_session(session(AgentStatus::Waiting))]).await;
+        tokio::time::timeout(Duration::from_millis(100), ctx.mail_delivery.notified())
+            .await
+            .expect("busy-to-idle transition should wake delivery");
+
+        note_eligible_windows(&ctx, &[lane_with_session(session(AgentStatus::Waiting))]).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), ctx.mail_delivery.notified())
+                .await
+                .is_err(),
+            "unchanged eligibility must not self-trigger a delivery loop"
+        );
+    }
+
+    // ---- delivery integration --------------------------------------------------------------
 
     struct ScriptedBackend {
         sent_keys: StdMutex<Vec<(String, String)>>,
@@ -389,11 +640,8 @@ mod tests {
         )
     }
 
-    /// `try_deliver`'s ONE early return for T9: a supervised lane's mail is owned entirely by
-    /// `supervision.rs`'s mail phase, so the plain delivery worker must never touch it — the
-    /// message stays queued and untouched by the backend.
     #[tokio::test]
-    async fn supervised_lane_is_skipped_by_delivery_worker() {
+    async fn supervised_lane_receives_the_actual_body() {
         let backend = Arc::new(ScriptedBackend::new());
         let ctx = make_mail_ctx(backend.clone());
 
@@ -438,15 +686,20 @@ mod tests {
             .await
             .unwrap();
 
-        try_deliver(&ctx, queued.clone()).await;
+        let lane = lane_with_session(session(AgentStatus::Waiting));
+        let outcome = try_deliver(&ctx, &[lane], &queued).await;
 
-        assert!(backend.sent_text.lock().unwrap().is_empty());
+        assert_eq!(outcome, AttemptOutcome::Delivered);
+        let sent = backend.sent_text.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.contains("please look at this"));
+        assert!(sent[0].1.ends_with("[END REPOMON MAIL]"));
         assert!(backend.sent_keys.lock().unwrap().is_empty());
 
         let refreshed = ctx.store.get_message(queued.id.clone()).await.unwrap();
         assert!(
-            refreshed.delivered_at.is_none(),
-            "supervised lane delivery is owned by the mail phase, not the worker"
+            refreshed.delivered_at.is_some(),
+            "push delivery marks supervised mail delivered"
         );
     }
 }

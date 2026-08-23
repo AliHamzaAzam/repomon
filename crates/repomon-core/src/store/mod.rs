@@ -996,39 +996,32 @@ impl Store {
         self.call(move |c| get_message(c, &id)).await
     }
 
-    pub async fn queued_messages(&self, limit: usize) -> Result<Vec<FleetMessage>> {
+    /// Oldest queued messages whose sender class is currently allowed for pane injection.
+    /// Policy-blocked mail remains durable and inbox-readable, but cannot occupy the worker's
+    /// bounded delivery page and starve deliverable messages behind it.
+    pub async fn queued_messages_for_injection(
+        &self,
+        inject_agents: bool,
+        inject_operator: bool,
+        limit: usize,
+    ) -> Result<Vec<FleetMessage>> {
         self.call(move |c| {
             let mut stmt = c.prepare(&format!(
                 "SELECT {MESSAGE_COLS} FROM messages
-                 WHERE delivered_at IS NULL ORDER BY created_at, id LIMIT ?1"
+                 WHERE delivered_at IS NULL
+                   AND ((?1 = 1 AND sender_lane_id IS NOT NULL)
+                     OR (?2 = 1 AND sender_lane_id IS NULL))
+                 ORDER BY created_at, id LIMIT ?3"
             ))?;
             let rows = stmt.query_map(
-                params![limit.clamp(1, MESSAGE_PAGE_MAX) as i64],
+                params![
+                    i64::from(inject_agents),
+                    i64::from(inject_operator),
+                    limit.clamp(1, MESSAGE_PAGE_MAX) as i64,
+                ],
                 message_from_row,
             )?;
             collect(rows)
-        })
-        .await
-    }
-
-    /// Whether `lane_id` has mail genuinely still waiting to be picked up: `delivered_at IS
-    /// NULL`, the same "queued" test [`queued_messages`] and the mail delivery worker use.
-    ///
-    /// Deliberately NOT `read_state`: a recipient that answers a message conversationally,
-    /// without ever calling `message.mark_read`, leaves it `Unread` in the database forever —
-    /// checking read state here would read as "still outstanding" indefinitely and nudge/stall
-    /// a lane that has no actual undelivered mail. `delivered_at` is authoritative: the daemon
-    /// itself sets it, either when the recipient pulls `message.inbox` or when a full-body
-    /// injection lands, so it can't go stale the way a human-driven read flag can.
-    pub async fn lane_has_queued_mail(&self, lane_id: LaneId) -> Result<bool> {
-        self.call(move |c| {
-            let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM messages
-                 WHERE recipient_lane_id = ?1 AND delivered_at IS NULL",
-                params![lane_id],
-                |r| r.get(0),
-            )?;
-            Ok(n > 0)
         })
         .await
     }
@@ -3275,6 +3268,43 @@ mod tests {
         let read = s.mark_message_read(message.id).await.unwrap();
         assert_eq!(read.read_state, MessageReadState::Read);
         assert!(read.read_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn injection_queue_filters_sender_policy_before_the_limit() {
+        let s = store().await;
+        s.send_message(
+            AgentAddress::new("lane-2/1"),
+            address("lane-9/1"),
+            address("lane-2/1"),
+            "agent mail blocked by policy".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        s.send_message(
+            AgentAddress::new("lane-2/1"),
+            address("operator"),
+            address("lane-2/1"),
+            "operator mail remains deliverable".into(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let operator_only = s
+            .queued_messages_for_injection(false, true, 1)
+            .await
+            .unwrap();
+        assert_eq!(operator_only.len(), 1);
+        assert_eq!(operator_only[0].body, "operator mail remains deliverable");
+
+        let agent_only = s
+            .queued_messages_for_injection(true, false, 1)
+            .await
+            .unwrap();
+        assert_eq!(agent_only.len(), 1);
+        assert_eq!(agent_only[0].body, "agent mail blocked by policy");
     }
 
     #[tokio::test]
