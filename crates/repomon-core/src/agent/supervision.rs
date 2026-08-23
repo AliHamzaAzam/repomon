@@ -660,9 +660,12 @@ fn is_path_in_scope(token: &str, scope: &DialogScope) -> bool {
     if clean.starts_with('~') {
         return false;
     }
-    // Absolute paths must start with worktree or repo_root
+    // Rooted paths must start with worktree or repo_root. `has_root()` is
+    // intentionally broader than `is_absolute()`: on Windows, `/etc/passwd`
+    // is rooted but has no drive prefix, so `is_absolute()` would treat it as
+    // a repo-relative path.
     let p = Path::new(clean);
-    if p.is_absolute() {
+    if p.has_root() {
         if p.starts_with(&scope.worktree) || p.starts_with(&scope.repo_root) {
             return true;
         }

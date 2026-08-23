@@ -800,6 +800,7 @@ impl TmuxRuntime {
     /// whichever one was current at that moment. So the window name is requested alongside the
     /// pid and checked against what was actually asked for; a mismatch means "not found",
     /// exactly like the other exact-match operations here already assume.
+    #[cfg(unix)]
     fn pane_pid(&self, window: &str) -> Option<u32> {
         let out = self
             .run_allow_absent(&[
@@ -846,17 +847,22 @@ impl TmuxRuntime {
     /// teardown deterministic and prevents those children becoming untracked orphans.
     fn terminate_pane_processes(&self, window: &str) {
         #[cfg(unix)]
-        if let Some(root) = self.pane_pid(window) {
-            // Children first: the pane shell should not disappear before its descendants have
-            // received the explicit termination signal.
-            for pid in Self::process_tree(root).into_iter().rev() {
-                let pid_arg = pid.to_string();
-                let _ = Command::new("kill")
-                    .args(["-TERM", &pid_arg])
-                    .stderr(Stdio::null())
-                    .output();
+        {
+            if let Some(root) = self.pane_pid(window) {
+                // Children first: the pane shell should not disappear before its descendants have
+                // received the explicit termination signal.
+                for pid in Self::process_tree(root).into_iter().rev() {
+                    let pid_arg = pid.to_string();
+                    let _ = Command::new("kill")
+                        .args(["-TERM", &pid_arg])
+                        .stderr(Stdio::null())
+                        .output();
+                }
             }
         }
+
+        #[cfg(not(unix))]
+        let _ = window;
     }
 
     /// Whether `window`'s app is on the *alternate screen* — i.e. a full-screen TUI (Claude, vim, …)
@@ -1243,7 +1249,7 @@ fn process_fingerprint(pid: u32) -> Option<String> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after_comm = stat.rsplit_once(") ")?.1;
         // `/proc/<pid>/stat` field 22 is starttime; after the comm field, field 3 is index 0.
-        return after_comm.split_whitespace().nth(19).map(str::to_string);
+        after_comm.split_whitespace().nth(19).map(str::to_string)
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
