@@ -199,5 +199,3 @@ export function ResizableSplit(props: ResizableSplitProps): JSX.Element {
     />
   );
 }
-
-export default ResizableSplit;

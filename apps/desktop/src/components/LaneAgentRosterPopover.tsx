@@ -329,5 +329,3 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
     </Show>
   );
 }
-
-export default LaneAgentRosterPopover;

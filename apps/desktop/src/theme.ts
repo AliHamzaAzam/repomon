@@ -183,11 +183,6 @@ export function nextTheme(theme: Theme): Theme {
   return THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
 }
 
-export function themeLabel(theme: Theme): string {
-  const found = THEME_PRESETS.find((p) => p.id === theme);
-  return found?.name ?? theme;
-}
-
 export function applyAccent(accent?: string | null): void {
   if (typeof document === "undefined") return;
   const value = accent?.trim().toLowerCase();

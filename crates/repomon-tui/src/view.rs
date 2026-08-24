@@ -674,7 +674,7 @@ fn render_timeline(f: &mut Frame, app: &App) {
                 mid.format(axis_fmt).to_string(),
                 to.format(axis_fmt).to_string(),
             );
-            let mut axis = l.clone();
+            let mut axis = l;
             let mid_start = avail.saturating_sub(m.chars().count()) / 2;
             while axis.chars().count() < mid_start {
                 axis.push(' ');
