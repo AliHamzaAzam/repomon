@@ -24,7 +24,7 @@ pub fn injection_line(message: &FleetMessage) -> String {
         .join(" ");
     let reply_to = message.reply_to.as_deref().unwrap_or("none");
     format!(
-        "[REPOMON MAIL id={} from={} reply_to={reply_to}] {collapsed} [END REPOMON MAIL]",
+        "[REPOMAIL id={} from={} reply_to={reply_to}] {collapsed} [END REPOMAIL]",
         message.id, message.sender.address
     )
 }
@@ -423,7 +423,7 @@ mod tests {
     fn frame_strips_controls_and_collapses_whitespace() {
         assert_eq!(
             injection_line(&message("hello\n\t fleet\u{7}  now")),
-            "[REPOMON MAIL id=mail-1 from=operator reply_to=none] hello fleet now [END REPOMON MAIL]"
+            "[REPOMAIL id=mail-1 from=operator reply_to=none] hello fleet now [END REPOMAIL]"
         );
     }
 
@@ -432,7 +432,7 @@ mod tests {
         let body = "x".repeat(8 * 1024);
         let line = injection_line(&message(&body));
         assert!(line.contains(&body));
-        assert!(line.ends_with("[END REPOMON MAIL]"));
+        assert!(line.ends_with("[END REPOMAIL]"));
     }
 
     #[test]
@@ -693,7 +693,7 @@ mod tests {
         let sent = backend.sent_text.lock().unwrap().clone();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].1.contains("please look at this"));
-        assert!(sent[0].1.ends_with("[END REPOMON MAIL]"));
+        assert!(sent[0].1.ends_with("[END REPOMAIL]"));
         assert!(backend.sent_keys.lock().unwrap().is_empty());
 
         let refreshed = ctx.store.get_message(queued.id.clone()).await.unwrap();

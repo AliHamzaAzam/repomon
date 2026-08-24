@@ -99,7 +99,7 @@ impl Default for SupervisionConfig {
 
         Self {
             enabled: false,
-            nudge_text: "Check your repomon mail and act on it.".to_string(),
+            nudge_text: "Check your repomail and act on it.".to_string(),
             mail_mode: MailDeliveryMode::Nudge,
             stall_mins: 20,
             nudge_retries: 2,
@@ -1602,7 +1602,7 @@ Do you want to proceed?\n\
     /// dialog BOXLESS (no ╭/│ glyphs). See `.briefs/live-fixture-claude-bash-approval.txt`.
     /// Includes the unrelated preceding agent-transcript lines (mail check, acceptance-test
     /// reply) that used to get mis-picked as the subject.
-    const FIXTURE_LIVE_CLAUDE_BOXLESS_BASH: &str = " ⚠ 4 MCP servers need authentication · run /mcp\n\n❯ Check your repomon mail and act on it.\n\n⏺ I'll check your repomon messages and handle any pending items.\n\n  Called repomon\n\n⏺ You have one acceptance test message. I'll mark it read and respond.\n\n  Called repomon 2 times\n\n⏺ Done. Checked your inbox and replied to acceptance test A1 with \"DONE-A1\". The message is queued for delivery to the operator.\n\n✻ Crunched for 14s\n\n❯ Run this exact shell command now: cargo --version\n\n  Checking cargo version\n  ⎿  $ cargo --version\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n Bash command\n\n   cargo --version\n   Check cargo version\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don\u{2019}t ask again for: cargo *\n   3. No\n\n Esc to cancel · Tab to amend · ctrl+e to explain";
+    const FIXTURE_LIVE_CLAUDE_BOXLESS_BASH: &str = " ⚠ 4 MCP servers need authentication · run /mcp\n\n❯ Check your repomail and act on it.\n\n⏺ I'll check your repomon messages and handle any pending items.\n\n  Called repomon\n\n⏺ You have one acceptance test message. I'll mark it read and respond.\n\n  Called repomon 2 times\n\n⏺ Done. Checked your inbox and replied to acceptance test A1 with \"DONE-A1\". The message is queued for delivery to the operator.\n\n✻ Crunched for 14s\n\n❯ Run this exact shell command now: cargo --version\n\n  Checking cargo version\n  ⎿  $ cargo --version\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n Bash command\n\n   cargo --version\n   Check cargo version\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don\u{2019}t ask again for: cargo *\n   3. No\n\n Esc to cancel · Tab to amend · ctrl+e to explain";
 
     #[test]
     fn test_1_claude_boxed_bash_permission_dialog_option_mapping() {
@@ -2059,7 +2059,7 @@ Do you want to proceed?\n\
     fn default_config_matches_spec() {
         let def = SupervisionConfig::default();
         assert!(!def.enabled);
-        assert_eq!(def.nudge_text, "Check your repomon mail and act on it.");
+        assert_eq!(def.nudge_text, "Check your repomail and act on it.");
         assert_eq!(def.mail_mode, MailDeliveryMode::Nudge);
         assert_eq!(def.stall_mins, 20);
         assert_eq!(def.nudge_retries, 2);

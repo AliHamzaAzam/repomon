@@ -734,7 +734,7 @@ mod tests {
         assert!(!cfg.supervision.enabled);
         assert_eq!(
             cfg.supervision.nudge_text,
-            "Check your repomon mail and act on it."
+            "Check your repomail and act on it."
         );
         assert_eq!(
             cfg.supervision.mail_mode,

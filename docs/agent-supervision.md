@@ -104,7 +104,7 @@ and again in `supervise_dialog`'s routing check.
 ```toml
 [supervision]
 enabled = false
-nudge_text = "Check your repomon mail and act on it."
+nudge_text = "Check your repomail and act on it."
 mail_mode = "nudge"
 stall_mins = 20
 nudge_retries = 2
@@ -142,11 +142,11 @@ injection (`mail::injection_eligible`, the same busy/dialog/rate-limit/stall gat
 delivery uses), the watch loop's mail phase delivers according to `mail_mode`:
 
 - **`nudge`** (the default): sends the lane's `nudge_text` as one line (e.g. "Check your
-  repomon mail and act on it.") rather than the mail body itself; the agent is expected to pull
+  repomail and act on it.") rather than the mail body itself; the agent is expected to pull
   its own inbox (via the `message_inbox` MCP tool) once nudged. Every currently-queued message
   for that session is covered by the single nudge.
 - **`full_body`**: injects each queued message's full compact line directly (the same
-  `[REPOMON MAIL id=... from=...] <body> [END REPOMON MAIL]` format unsupervised delivery uses)
+  `[REPOMAIL id=... from=...] <body> [END REPOMAIL]` format unsupervised delivery uses)
   and marks it delivered on a confirmed send.
 
 Delivery to a supervised lane is retried **once**: the first attempt backs off 30 seconds
@@ -336,7 +336,7 @@ Four short walkthroughs, each exercising a distinct part of the feature end to e
 3. The agent reads its own inbox (its MCP `message_inbox` tool) to see the actual message. The
    activity log shows a `trigger: "mail"`, `decision: "nudge"` row.
 4. Switch `mail_mode` to `Full body` and send another message: this time the compact
-   `[REPOMON MAIL ...]` line lands directly, and the message is marked delivered on a
+   `[REPOMAIL ...]` line lands directly, and the message is marked delivered on a
    confirmed send.
 
 ### 3. Stall past the threshold and see it escalate

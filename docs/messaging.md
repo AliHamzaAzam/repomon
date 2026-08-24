@@ -98,7 +98,7 @@ The injected text is one compact line. Control characters are removed and whites
 for this line, while the full original body remains in SQLite:
 
 ```text
-[REPOMON MAIL id=<id> from=<address> reply_to=<id>] <body> [END REPOMON MAIL]
+[REPOMAIL id=<id> from=<address> reply_to=<id>] <body> [END REPOMAIL]
 ```
 
 `reply_to` is `none` for a root message. Successful injection sets `delivered_at`. Polling an inbox
