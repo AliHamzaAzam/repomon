@@ -61,7 +61,6 @@ const config = (): ConfigView => ({
   supervision: {
     enabled: false,
     nudge_text: "Repomon: checking in on this lane.",
-    mail_mode: "nudge",
     stall_mins: 15,
     nudge_retries: 2,
     classes: {},

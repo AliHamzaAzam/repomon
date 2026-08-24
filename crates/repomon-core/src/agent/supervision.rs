@@ -42,17 +42,6 @@ pub enum PolicyAction {
     Hold,
 }
 
-/// Delivery mode for agent supervisor nudges / mail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export))]
-pub enum MailDeliveryMode {
-    #[default]
-    Nudge,
-    FullBody,
-}
-
 /// Origin / rationale for the resolved policy decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,7 +67,6 @@ pub enum PolicySource {
 pub struct SupervisionConfig {
     pub enabled: bool,
     pub nudge_text: String,
-    pub mail_mode: MailDeliveryMode,
     pub stall_mins: u32,
     pub nudge_retries: u32,
     pub classes: BTreeMap<DialogClass, PolicyAction>,
@@ -100,7 +88,6 @@ impl Default for SupervisionConfig {
         Self {
             enabled: false,
             nudge_text: "Check your repomon mail and act on it.".to_string(),
-            mail_mode: MailDeliveryMode::Nudge,
             stall_mins: 20,
             nudge_retries: 2,
             classes,
@@ -120,8 +107,6 @@ pub struct SupervisionOverrides {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub classes: BTreeMap<DialogClass, PolicyAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mail_mode: Option<MailDeliveryMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nudge_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_mins: Option<u32>,
@@ -139,7 +124,6 @@ pub struct SupervisionOverrides {
 pub struct SupervisionPolicy {
     pub enabled: bool,
     pub classes: BTreeMap<DialogClass, PolicyAction>,
-    pub mail_mode: MailDeliveryMode,
     pub nudge_text: String,
     pub stall_mins: u32,
     pub nudge_retries: u32,
@@ -171,7 +155,6 @@ pub fn resolve(
 
     let enabled = defaults.enabled && lane.is_some_and(|l| l.enabled);
     let mut classes = default_classes;
-    let mut mail_mode = defaults.mail_mode;
     let mut nudge_text = defaults.nudge_text.clone();
     let mut stall_mins = defaults.stall_mins;
     let mut nudge_retries = defaults.nudge_retries;
@@ -180,9 +163,6 @@ pub fn resolve(
     if let Some(l) = lane {
         for (k, v) in &l.classes {
             classes.insert(*k, *v);
-        }
-        if let Some(m) = l.mail_mode {
-            mail_mode = m;
         }
         if let Some(ref n) = l.nudge_text {
             nudge_text = n.clone();
@@ -199,7 +179,6 @@ pub fn resolve(
     SupervisionPolicy {
         enabled,
         classes,
-        mail_mode,
         nudge_text,
         stall_mins,
         nudge_retries,
@@ -1769,7 +1748,6 @@ Do you want to proceed?\n\
         let mut policy = SupervisionPolicy {
             enabled: true,
             classes: BTreeMap::new(),
-            mail_mode: MailDeliveryMode::Nudge,
             nudge_text: "test".into(),
             stall_mins: 20,
             nudge_retries: 2,
@@ -1821,7 +1799,6 @@ Do you want to proceed?\n\
                 lane_id: 1,
                 enabled: true,
                 classes: BTreeMap::new(),
-                mail_mode: None,
                 nudge_text: None,
                 stall_mins: None,
                 nudge_retries: None,
@@ -1978,7 +1955,6 @@ Do you want to proceed?\n\
         let defaults = SupervisionConfig {
             enabled: true,
             nudge_text: "default nudge".to_string(),
-            mail_mode: MailDeliveryMode::Nudge,
             stall_mins: 20,
             nudge_retries: 2,
             classes: BTreeMap::new(),
@@ -1990,7 +1966,6 @@ Do you want to proceed?\n\
             lane_id: 42,
             enabled: true,
             classes: lane_classes,
-            mail_mode: None,
             nudge_text: Some("lane nudge".to_string()),
             stall_mins: None,
             nudge_retries: None,
@@ -2018,7 +1993,6 @@ Do you want to proceed?\n\
             Some(&PolicyAction::Hold)
         );
         assert_eq!(p.nudge_text, "lane nudge");
-        assert_eq!(p.mail_mode, MailDeliveryMode::Nudge);
         assert_eq!(p.stall_mins, 20);
         assert_eq!(p.nudge_retries, 2);
         assert!(p.expect_work);
@@ -2034,7 +2008,6 @@ Do you want to proceed?\n\
             lane_id: 1,
             enabled: true,
             classes: BTreeMap::new(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
@@ -2060,7 +2033,6 @@ Do you want to proceed?\n\
         let def = SupervisionConfig::default();
         assert!(!def.enabled);
         assert_eq!(def.nudge_text, "Check your repomon mail and act on it.");
-        assert_eq!(def.mail_mode, MailDeliveryMode::Nudge);
         assert_eq!(def.stall_mins, 20);
         assert_eq!(def.nudge_retries, 2);
         assert_eq!(def.classes.len(), 9);

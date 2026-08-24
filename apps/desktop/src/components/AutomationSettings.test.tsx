@@ -10,7 +10,6 @@ function baseSupervisionConfig() {
   return {
     enabled: true,
     nudge_text: "Repomon: checking in on this lane.",
-    mail_mode: "nudge",
     stall_mins: 15,
     nudge_retries: 2,
     classes: {
@@ -173,7 +172,6 @@ describe("AutomationSettings component", () => {
     const supervision = (params as { supervision: Record<string, unknown> }).supervision;
     expect(supervision.enabled).toBe(false);
     expect(supervision.nudge_text).toBe("Repomon: checking in on this lane.");
-    expect(supervision.mail_mode).toBe("nudge");
     expect(supervision.stall_mins).toBe(15);
     expect(supervision.nudge_retries).toBe(2);
   });

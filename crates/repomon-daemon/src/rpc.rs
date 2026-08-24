@@ -979,8 +979,6 @@ struct SupervisionSet {
         >,
     >,
     #[serde(default)]
-    mail_mode: Option<repomon_core::agent::supervision::MailDeliveryMode>,
-    #[serde(default)]
     nudge_text: Option<String>,
     #[serde(default)]
     stall_mins: Option<u32>,
@@ -4580,7 +4578,6 @@ pub async fn dispatch(
                     lane_id: p.lane_id,
                     enabled: false,
                     classes: std::collections::BTreeMap::new(),
-                    mail_mode: None,
                     nudge_text: None,
                     stall_mins: None,
                     nudge_retries: None,
@@ -4592,9 +4589,6 @@ pub async fn dispatch(
             }
             if let Some(classes) = p.classes {
                 existing.classes = classes;
-            }
-            if p.mail_mode.is_some() {
-                existing.mail_mode = p.mail_mode;
             }
             if p.nudge_text.is_some() {
                 existing.nudge_text = p.nudge_text;

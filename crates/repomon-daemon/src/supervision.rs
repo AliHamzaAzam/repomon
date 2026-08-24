@@ -544,7 +544,7 @@ mod tests {
     };
     use repomon_core::agent::prompt::detect_dialog;
     use repomon_core::agent::supervision::{
-        DialogClass, MailDeliveryMode, PolicyAction, PolicySource, SupervisionOverrides,
+        DialogClass, PolicyAction, PolicySource, SupervisionOverrides,
     };
     use repomon_core::model::{AgentKind, AgentStatus};
     use repomon_core::{Config, Store};
@@ -840,7 +840,6 @@ mod tests {
             classes: [(DialogClass::CommandExec, PolicyAction::AutoApprove)]
                 .into_iter()
                 .collect(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
@@ -894,7 +893,6 @@ mod tests {
             classes: [(DialogClass::CommandExec, PolicyAction::Hold)]
                 .into_iter()
                 .collect(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
@@ -957,7 +955,6 @@ mod tests {
             classes: [(DialogClass::CommandExec, PolicyAction::AutoApprove)]
                 .into_iter()
                 .collect(),
-            mail_mode: Some(MailDeliveryMode::Nudge),
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
@@ -971,7 +968,6 @@ mod tests {
             lane_id: 2,
             enabled: false,
             classes: std::collections::BTreeMap::new(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
@@ -1000,7 +996,6 @@ mod tests {
             lane_id: 1,
             enabled: true,
             classes: std::collections::BTreeMap::new(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
@@ -1025,7 +1020,6 @@ mod tests {
                 lane_id: 1,
                 enabled: true,
                 classes: std::collections::BTreeMap::new(),
-                mail_mode: None,
                 nudge_text: Some("must not send".into()),
                 stall_mins: Some(5),
                 nudge_retries: Some(1),
@@ -1069,7 +1063,6 @@ mod tests {
             classes: [(DialogClass::Deletion, PolicyAction::AutoDeny)]
                 .into_iter()
                 .collect(),
-            mail_mode: None,
             nudge_text: Some("nudge 10".into()),
             stall_mins: Some(20),
             nudge_retries: Some(2),
@@ -1148,7 +1141,6 @@ mod tests {
             lane_id,
             enabled: true,
             classes: std::collections::BTreeMap::new(),
-            mail_mode: None,
             nudge_text: Some("please continue".into()),
             stall_mins: Some(stall_mins),
             nudge_retries: Some(nudge_retries),

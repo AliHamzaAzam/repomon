@@ -38,7 +38,6 @@ function defaultDefaults(): SupervisionConfig {
   return {
     enabled: true,
     nudge_text: "Repomon: checking in on this lane.",
-    mail_mode: "nudge",
     stall_mins: 15,
     nudge_retries: 2,
     classes: {
@@ -59,7 +58,6 @@ function defaultEffective(overrides?: Partial<SupervisionPolicy>): SupervisionPo
   return {
     enabled: true,
     nudge_text: "Repomon: checking in on this lane.",
-    mail_mode: "nudge",
     stall_mins: 15,
     nudge_retries: 2,
     expect_work: false,

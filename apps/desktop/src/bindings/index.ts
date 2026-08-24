@@ -26,7 +26,6 @@ export type { FleetMessage } from "./FleetMessage";
 export type { GitDoctorInfo } from "./GitDoctorInfo";
 export type { JournalEntry } from "./JournalEntry";
 export type { Lane } from "./Lane";
-export type { MailDeliveryMode } from "./MailDeliveryMode";
 export type { MarketplaceInfo } from "./MarketplaceInfo";
 export type { MessageDeliveryState } from "./MessageDeliveryState";
 export type { MessagePage } from "./MessagePage";
@@ -53,4 +52,3 @@ export type { TmuxDoctorInfo } from "./TmuxDoctorInfo";
 export type { TmuxDoctorSource } from "./TmuxDoctorSource";
 export type { TranscriptItem } from "./TranscriptItem";
 export type { WorkSession } from "./WorkSession";
-

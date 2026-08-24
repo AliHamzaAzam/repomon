@@ -736,10 +736,6 @@ mod tests {
             cfg.supervision.nudge_text,
             "Check your repomon mail and act on it."
         );
-        assert_eq!(
-            cfg.supervision.mail_mode,
-            crate::agent::supervision::MailDeliveryMode::Nudge
-        );
         assert_eq!(cfg.supervision.stall_mins, 20);
         assert_eq!(cfg.supervision.nudge_retries, 2);
         assert_eq!(
@@ -775,7 +771,6 @@ mod tests {
                 lane_id: 1,
                 enabled: true,
                 classes: std::collections::BTreeMap::new(),
-                mail_mode: None,
                 nudge_text: None,
                 stall_mins: None,
                 nudge_retries: None,
@@ -821,7 +816,6 @@ mod tests {
         c.supervision.stall_mins = 45;
         c.supervision.nudge_retries = 5;
         c.supervision.nudge_text = "Custom nudge message".to_string();
-        c.supervision.mail_mode = crate::agent::supervision::MailDeliveryMode::FullBody;
         c.supervision.classes.insert(
             crate::agent::supervision::DialogClass::Deletion,
             crate::agent::supervision::PolicyAction::AutoDeny,
@@ -834,10 +828,6 @@ mod tests {
         assert_eq!(loaded.supervision.stall_mins, 45);
         assert_eq!(loaded.supervision.nudge_retries, 5);
         assert_eq!(loaded.supervision.nudge_text, "Custom nudge message");
-        assert_eq!(
-            loaded.supervision.mail_mode,
-            crate::agent::supervision::MailDeliveryMode::FullBody
-        );
         assert_eq!(
             loaded
                 .supervision

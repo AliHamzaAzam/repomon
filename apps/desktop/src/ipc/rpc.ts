@@ -16,7 +16,6 @@ import type {
   JournalEntry,
   Lane,
   FleetMessage,
-  MailDeliveryMode,
   MessagePage,
   PendingDialog,
   Playbook,
@@ -324,7 +323,6 @@ interface RpcMap {
       lane_id: number;
       enabled?: boolean;
       classes?: Partial<Record<DialogClass, PolicyAction>>;
-      mail_mode?: MailDeliveryMode;
       nudge_text?: string;
       stall_mins?: number;
       nudge_retries?: number;

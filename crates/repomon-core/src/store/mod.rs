@@ -14,7 +14,7 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use sha2::{Digest, Sha256};
 
-use crate::agent::supervision::{MailDeliveryMode, SupervisionOverrides};
+use crate::agent::supervision::SupervisionOverrides;
 use crate::error::{Error, Result};
 use crate::model::*;
 
@@ -1586,17 +1586,12 @@ impl Store {
         self.call(move |c| {
             let classes_json =
                 serde_json::to_string(&p.classes).unwrap_or_else(|_| "{}".to_string());
-            let mail_mode_str = p.mail_mode.map(|m| match m {
-                MailDeliveryMode::Nudge => "nudge",
-                MailDeliveryMode::FullBody => "full_body",
-            });
             c.execute(
-                "INSERT INTO lane_policies(lane_id, enabled, classes, mail_mode, nudge_text, stall_mins, nudge_retries, expect_work, updated_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO lane_policies(lane_id, enabled, classes, nudge_text, stall_mins, nudge_retries, expect_work, updated_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(lane_id) DO UPDATE SET
                      enabled       = excluded.enabled,
                      classes       = excluded.classes,
-                     mail_mode     = excluded.mail_mode,
                      nudge_text    = excluded.nudge_text,
                      stall_mins    = excluded.stall_mins,
                      nudge_retries = excluded.nudge_retries,
@@ -1606,7 +1601,6 @@ impl Store {
                     p.lane_id,
                     if p.enabled { 1 } else { 0 },
                     classes_json,
-                    mail_mode_str,
                     p.nudge_text,
                     p.stall_mins.map(|v| v as i64),
                     p.nudge_retries.map(|v| v as i64),
@@ -2185,31 +2179,24 @@ fn session_from_row(r: &Row) -> rusqlite::Result<AgentSession> {
     })
 }
 
-const LANE_POLICY_COLS: &str = "lane_id, enabled, classes, mail_mode, nudge_text, stall_mins, nudge_retries, expect_work, updated_at";
+const LANE_POLICY_COLS: &str =
+    "lane_id, enabled, classes, nudge_text, stall_mins, nudge_retries, expect_work, updated_at";
 
 fn lane_policy_from_row(row: &Row) -> rusqlite::Result<SupervisionOverrides> {
     let lane_id: i64 = row.get(0)?;
     let enabled_int: i64 = row.get(1)?;
     let classes_str: String = row.get(2)?;
-    let mail_mode_str: Option<String> = row.get(3)?;
-    let nudge_text: Option<String> = row.get(4)?;
-    let stall_mins: Option<u32> = row.get::<_, Option<i64>>(5)?.map(|v| v as u32);
-    let nudge_retries: Option<u32> = row.get::<_, Option<i64>>(6)?.map(|v| v as u32);
-    let expect_work_int: i64 = row.get(7)?;
-    let updated_at = dt_col(row, 8)?;
+    let nudge_text: Option<String> = row.get(3)?;
+    let stall_mins: Option<u32> = row.get::<_, Option<i64>>(4)?.map(|v| v as u32);
+    let nudge_retries: Option<u32> = row.get::<_, Option<i64>>(5)?.map(|v| v as u32);
+    let expect_work_int: i64 = row.get(6)?;
+    let updated_at = dt_col(row, 7)?;
 
     let classes = serde_json::from_str(&classes_str).unwrap_or_default();
-    let mail_mode = match mail_mode_str.as_deref() {
-        Some("nudge") => Some(MailDeliveryMode::Nudge),
-        Some("full_body") => Some(MailDeliveryMode::FullBody),
-        _ => None,
-    };
-
     Ok(SupervisionOverrides {
         lane_id,
         enabled: enabled_int != 0,
         classes,
-        mail_mode,
         nudge_text,
         stall_mins,
         nudge_retries,
@@ -3550,7 +3537,6 @@ mod tests {
             lane_id: 10,
             enabled: true,
             classes,
-            mail_mode: Some(MailDeliveryMode::FullBody),
             nudge_text: Some("nudge lane".to_string()),
             stall_mins: Some(15),
             nudge_retries: Some(3),
@@ -3572,7 +3558,6 @@ mod tests {
             read.classes.get(&DialogClass::Deletion),
             Some(&PolicyAction::AutoDeny)
         );
-        assert_eq!(read.mail_mode, Some(MailDeliveryMode::FullBody));
         assert_eq!(read.nudge_text.as_deref(), Some("nudge lane"));
         assert_eq!(read.stall_mins, Some(15));
         assert_eq!(read.nudge_retries, Some(3));
@@ -3587,13 +3572,11 @@ mod tests {
         let mut p_updated = p;
         p_updated.enabled = false;
         p_updated.classes.clear();
-        p_updated.mail_mode = None;
         s.set_lane_policy(p_updated).await.unwrap();
 
         let read2 = s.lane_policy(10).await.unwrap().unwrap();
         assert!(!read2.enabled);
         assert!(read2.classes.is_empty());
-        assert_eq!(read2.mail_mode, None);
 
         // Delete policy
         s.delete_lane_policy(10).await.unwrap();
