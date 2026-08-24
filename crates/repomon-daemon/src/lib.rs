@@ -351,6 +351,12 @@ pub struct Ctx {
     pub inject_latch: Mutex<HashMap<String, (String, Instant)>>,
     /// Cached snapshot of active supervision policies across all enabled lanes.
     pub supervision: RwLock<supervision::PolicySnapshot>,
+    /// Wakes durable fleet-mail delivery immediately after storage or when a managed pane
+    /// transitions into an injection-safe state. The worker still has a periodic fallback.
+    pub mail_delivery: Notify,
+    /// Managed windows last observed as injection-eligible. Overlay updates turn each observed
+    /// pane's busy-to-idle edge into an event instead of waiting for the fallback sweep.
+    pub mail_eligible_windows: Mutex<HashSet<String>>,
     pub shutdown: Notify,
 }
 
@@ -471,6 +477,8 @@ impl Ctx {
             in_flight_naming: Arc::new(Mutex::new(HashSet::new())),
             inject_latch: Mutex::new(HashMap::new()),
             supervision: RwLock::new(supervision::PolicySnapshot::default()),
+            mail_delivery: Notify::new(),
+            mail_eligible_windows: Mutex::new(HashSet::new()),
             shutdown: Notify::new(),
         })
     }
@@ -571,6 +579,12 @@ impl Ctx {
             // Err just means no subscribers; that's fine.
             let _ = self.events.send(value);
         }
+    }
+
+    /// Request an immediate durable-mail delivery pass. `notify_one` stores one permit when the
+    /// worker is between waits, so an on-send wake cannot be lost; additional sends coalesce.
+    pub fn wake_mail_delivery(&self) {
+        self.mail_delivery.notify_one();
     }
 
     /// Signal the accept loop to stop.
