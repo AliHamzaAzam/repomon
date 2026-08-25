@@ -8,9 +8,10 @@
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use repomon_core::agent::backend::CaptureOpts;
+use repomon_core::agent::backend::{CaptureOpts, Cursor, SessionBackend};
 use repomon_core::agent::detect_usage_limit;
 use repomon_core::agent::prompt::detect_dialog;
+use repomon_core::agent::text::strip_ansi;
 use repomon_core::model::{LaneId, SupervisionEntry};
 
 use crate::{Ctx, pubsub};
@@ -20,6 +21,14 @@ pub const LATCH_COOLDOWN: Duration = Duration::from_secs(90);
 
 /// Hard ceiling on pane capture time before abandoning injection.
 pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A line submission gets one initial Enter plus two verified retries. Codex needs a short
+/// repaint window after each Enter before its live composer can be inspected reliably.
+const SUBMIT_VERIFY_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const SUBMIT_VERIFY_SETTLE: Duration = Duration::from_millis(180);
+#[cfg(test)]
+const SUBMIT_VERIFY_SETTLE: Duration = Duration::ZERO;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expectation {
@@ -31,6 +40,11 @@ pub enum Expectation {
 pub enum Payload {
     Keys(Vec<String>), // sent one by one via backend.send_key_named
     Line(String),      // sent via backend.send_text_named (text + Enter)
+    /// A line whose trailing marker must leave the live composer before delivery counts as sent.
+    VerifiedLine {
+        text: String,
+        marker: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +320,22 @@ pub async fn verified_send_with_timeout(
                 }
             }
         }
+        Payload::VerifiedLine { text, marker } => {
+            match send_verified_line(
+                ctx.backend.clone(),
+                &seed.window,
+                text,
+                marker,
+                capture_timeout,
+            )
+            .await
+            {
+                Ok(keys) => keys,
+                Err(error) => {
+                    return finish(ctx, seed, excerpt, InternalOutcome::Failed(error)).await;
+                }
+            }
+        }
     };
 
     // 6. Mark input and invalidate overlay
@@ -328,8 +358,147 @@ fn expectation_fingerprint(expect: &Expectation, payload: &Payload) -> String {
         Expectation::IdleNoDialog => match payload {
             Payload::Keys(keys) => keys.join(" "),
             Payload::Line(line) => line.clone(),
+            Payload::VerifiedLine { text, .. } => text.clone(),
         },
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerState {
+    Pending,
+    Clear,
+    CursorUnavailable,
+}
+
+async fn send_verified_line(
+    backend: std::sync::Arc<dyn SessionBackend>,
+    window: &str,
+    text: &str,
+    marker: &str,
+    capture_timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+
+    // If an earlier bounded attempt left this exact frame in the composer, resume by pressing
+    // Enter instead of typing a duplicate body on the next durable delivery sweep.
+    let already_pending = matches!(
+        capture_composer_state(backend.clone(), window, marker, capture_timeout).await,
+        Ok(ComposerState::Pending)
+    );
+    if already_pending {
+        send_key(backend.clone(), window, "Enter").await?;
+        keys.push("Enter".to_string());
+    } else {
+        let send_text = text.to_string();
+        let send_window = window.to_string();
+        let send_backend = backend.clone();
+        tokio::task::spawn_blocking(move || send_backend.send_text_named(&send_window, &send_text))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        keys.push(format!("<literal:{}>", truncate_chars(text, 120)));
+        keys.push("Enter".to_string());
+    }
+
+    let mut last_state = ComposerState::CursorUnavailable;
+    let mut last_error = None;
+    for attempt in 0..SUBMIT_VERIFY_ATTEMPTS {
+        tokio::time::sleep(SUBMIT_VERIFY_SETTLE).await;
+        match capture_composer_state(backend.clone(), window, marker, capture_timeout).await {
+            Ok(ComposerState::Clear) => return Ok(keys),
+            Ok(state) => {
+                last_state = state;
+                last_error = None;
+                if state == ComposerState::Pending && attempt + 1 < SUBMIT_VERIFY_ATTEMPTS {
+                    send_key(backend.clone(), window, "Enter").await?;
+                    keys.push("Enter".to_string());
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let detail = match last_error {
+        Some(error) => error,
+        None if last_state == ComposerState::Pending => {
+            format!(
+                "composer still contains {marker} after {SUBMIT_VERIFY_ATTEMPTS} Enter attempts"
+            )
+        }
+        None => "composer cursor unavailable after submission".to_string(),
+    };
+    Err(format!("submission could not be verified: {detail}"))
+}
+
+async fn send_key(
+    backend: std::sync::Arc<dyn SessionBackend>,
+    window: &str,
+    key: &str,
+) -> Result<(), String> {
+    let send_window = window.to_string();
+    let send_key = key.to_string();
+    tokio::task::spawn_blocking(move || backend.send_key_named(&send_window, &send_key))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+async fn capture_composer_state(
+    backend: std::sync::Arc<dyn SessionBackend>,
+    window: &str,
+    marker: &str,
+    capture_timeout: Duration,
+) -> Result<ComposerState, String> {
+    let capture_window = window.to_string();
+    let capture = tokio::time::timeout(
+        capture_timeout,
+        tokio::task::spawn_blocking(move || {
+            let pane = backend.capture_named(&capture_window, CaptureOpts::visible())?;
+            let cursor = backend.cursor_named(&capture_window);
+            Ok::<_, repomon_core::Error>((pane, cursor))
+        }),
+    )
+    .await
+    .map_err(|_| "composer capture timed out".to_string())?
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+
+    let (pane, Some(cursor)) = capture else {
+        return Ok(ComposerState::CursorUnavailable);
+    };
+    Ok(if marker_at_cursor(&pane, cursor, marker) {
+        ComposerState::Pending
+    } else {
+        ComposerState::Clear
+    })
+}
+
+fn marker_at_cursor(pane: &str, cursor: Cursor, marker: &str) -> bool {
+    let lines: Vec<String> = pane.lines().map(strip_ansi).collect();
+    let row = usize::from(cursor.row);
+    let Some(current) = lines.get(row) else {
+        return false;
+    };
+    if current.contains(marker) {
+        return true;
+    }
+
+    let previous = row.checked_sub(1).and_then(|previous| lines.get(previous));
+    if let Some(previous) = previous {
+        let current = current.trim_start();
+        if !current.is_empty()
+            && current.chars().count() < marker.chars().count()
+            && marker.ends_with(current)
+            && format!("{}{current}", previous.trim_end()).contains(marker)
+        {
+            return true;
+        }
+    }
+
+    // A marker ending in the pane's final column wraps the cursor onto the next indented editor
+    // row. Only consult that immediately preceding row when the cursor is at its left edge; this
+    // cannot confuse a submitted frame in transcript history with the live empty composer.
+    cursor.col <= 2 && previous.is_some_and(|line| line.contains(marker))
 }
 
 fn tail_chars(s: &str, max_chars: usize) -> &str {
@@ -448,6 +617,8 @@ mod tests {
     struct ScriptedBackend {
         captures: StdMutex<Vec<String>>,
         last_capture: StdMutex<Option<String>>,
+        cursors: StdMutex<Vec<Option<Cursor>>>,
+        last_cursor: StdMutex<Option<Cursor>>,
         sent_keys: StdMutex<Vec<(String, String)>>,
         sent_text: StdMutex<Vec<(String, String)>>,
         capture_delay: Option<Duration>,
@@ -460,6 +631,8 @@ mod tests {
             Self {
                 captures: StdMutex::new(captures),
                 last_capture: StdMutex::new(None),
+                cursors: StdMutex::new(Vec::new()),
+                last_cursor: StdMutex::new(None),
                 sent_keys: StdMutex::new(Vec::new()),
                 sent_text: StdMutex::new(Vec::new()),
                 capture_delay: None,
@@ -475,6 +648,11 @@ mod tests {
 
         fn with_send_error(mut self, err: &str) -> Self {
             self.send_error = Some(err.to_string());
+            self
+        }
+
+        fn with_cursors(self, cursors: Vec<Option<Cursor>>) -> Self {
+            *self.cursors.lock().unwrap() = cursors;
             self
         }
     }
@@ -532,8 +710,15 @@ mod tests {
             };
             Ok(cap)
         }
-        fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
-            None
+        fn cursor_named(&self, _window: &str) -> Option<Cursor> {
+            let mut cursors = self.cursors.lock().unwrap();
+            if !cursors.is_empty() {
+                let cursor = cursors.remove(0);
+                *self.last_cursor.lock().unwrap() = cursor;
+                cursor
+            } else {
+                *self.last_cursor.lock().unwrap()
+            }
         }
         fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
             Some((80, 24))
@@ -1000,5 +1185,155 @@ mod tests {
             log[0].keys,
             Some(vec!["<literal:cargo build>".into(), "Enter".into()])
         );
+    }
+
+    const CLEAR_COMPOSER: &str = "› Ask Codex to do anything";
+    const PENDING_MAIL: &str =
+        "› [REPOMAIL id=mail-1 from=operator reply_to=none] hello [END REPOMAIL]";
+    const SUBMITTED_MAIL: &str = "› [REPOMAIL id=mail-1 from=operator reply_to=none] hello [END REPOMAIL]\n\n\
+        • Working\n\n\
+        › Ask Codex to do anything";
+
+    fn verified_mail_payload() -> Payload {
+        Payload::VerifiedLine {
+            text: PENDING_MAIL.trim_start_matches("› ").to_string(),
+            marker: "[END REPOMAIL]".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn verified_line_retries_enter_until_marker_leaves_composer() {
+        let backend = Arc::new(
+            ScriptedBackend::new(vec![
+                IDLE_PANE.to_string(),
+                CLEAR_COMPOSER.to_string(),
+                PENDING_MAIL.to_string(),
+                SUBMITTED_MAIL.to_string(),
+            ])
+            .with_cursors(vec![
+                Some(Cursor { col: 2, row: 0 }),
+                Some(Cursor { col: 70, row: 0 }),
+                Some(Cursor { col: 2, row: 4 }),
+            ]),
+        );
+        let ctx = make_ctx(backend.clone());
+
+        let outcome = verified_send(
+            &ctx,
+            Expectation::IdleNoDialog,
+            verified_mail_payload(),
+            test_seed("lane-1"),
+        )
+        .await;
+
+        let SendOutcome::Sent { keys, .. } = outcome else {
+            panic!("expected verified send, got {outcome:?}");
+        };
+        assert_eq!(
+            keys,
+            vec![
+                format!("<literal:{}>", PENDING_MAIL.trim_start_matches("› ")),
+                "Enter".to_string(),
+                "Enter".to_string(),
+            ]
+        );
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+        assert_eq!(
+            backend.sent_keys.lock().unwrap().as_slice(),
+            &[("lane-1".to_string(), "Enter".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_line_failure_is_audited_when_marker_never_leaves() {
+        let backend = Arc::new(
+            ScriptedBackend::new(vec![
+                IDLE_PANE.to_string(),
+                CLEAR_COMPOSER.to_string(),
+                PENDING_MAIL.to_string(),
+                PENDING_MAIL.to_string(),
+                PENDING_MAIL.to_string(),
+            ])
+            .with_cursors(vec![
+                Some(Cursor { col: 2, row: 0 }),
+                Some(Cursor { col: 70, row: 0 }),
+                Some(Cursor { col: 70, row: 0 }),
+                Some(Cursor { col: 70, row: 0 }),
+            ]),
+        );
+        let ctx = make_ctx(backend.clone());
+
+        let outcome = verified_send(
+            &ctx,
+            Expectation::IdleNoDialog,
+            verified_mail_payload(),
+            test_seed("lane-1"),
+        )
+        .await;
+
+        let SendOutcome::Failed { error, .. } = outcome else {
+            panic!("expected failed verification, got {outcome:?}");
+        };
+        assert!(error.contains("after 3 Enter attempts"));
+        assert_eq!(backend.sent_keys.lock().unwrap().len(), 2);
+        let log = ctx.store.supervision_log(None, 10, None).await.unwrap();
+        assert_eq!(log[0].outcome, "failed");
+        assert!(
+            log[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("composer still contains"))
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_line_resumes_pending_frame_without_retyping_it() {
+        let backend = Arc::new(
+            ScriptedBackend::new(vec![
+                IDLE_PANE.to_string(),
+                PENDING_MAIL.to_string(),
+                SUBMITTED_MAIL.to_string(),
+            ])
+            .with_cursors(vec![
+                Some(Cursor { col: 70, row: 0 }),
+                Some(Cursor { col: 2, row: 4 }),
+            ]),
+        );
+        let ctx = make_ctx(backend.clone());
+
+        let outcome = verified_send(
+            &ctx,
+            Expectation::IdleNoDialog,
+            verified_mail_payload(),
+            test_seed("lane-1"),
+        )
+        .await;
+
+        assert!(matches!(outcome, SendOutcome::Sent { .. }));
+        assert!(backend.sent_text.lock().unwrap().is_empty());
+        assert_eq!(
+            backend.sent_keys.lock().unwrap().as_slice(),
+            &[("lane-1".to_string(), "Enter".to_string())]
+        );
+    }
+
+    #[test]
+    fn composer_marker_detection_handles_ansi_and_wrapped_final_column() {
+        let pane = "\u{1b}[36m› body [END REPOMAIL]\u{1b}[0m\n  ";
+        assert!(marker_at_cursor(
+            pane,
+            Cursor { col: 2, row: 1 },
+            "[END REPOMAIL]"
+        ));
+        assert!(!marker_at_cursor(
+            pane,
+            Cursor { col: 8, row: 1 },
+            "[END REPOMAIL]"
+        ));
+        assert!(marker_at_cursor(
+            "› body [END RE\n  POMAIL]",
+            Cursor { col: 9, row: 1 },
+            "[END REPOMAIL]"
+        ));
     }
 }

@@ -143,7 +143,10 @@ async fn try_deliver(ctx: &Ctx, lanes: &[Lane], message: &FleetMessage) -> Attem
     match inject::verified_send(
         ctx,
         Expectation::IdleNoDialog,
-        Payload::Line(injection_line(message)),
+        Payload::VerifiedLine {
+            text: injection_line(message),
+            marker: "[END REPOMAIL]".to_string(),
+        },
         seed,
     )
     .await
@@ -560,10 +563,10 @@ mod tests {
             Ok("target".into())
         }
         fn capture_named(&self, _window: &str, _opts: CaptureOpts) -> repomon_core::Result<String> {
-            Ok(String::new())
+            Ok("› Ask Codex to do anything".to_string())
         }
         fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
-            None
+            Some(repomon_core::agent::Cursor { col: 2, row: 0 })
         }
         fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
             Some((80, 24))
