@@ -1,6 +1,6 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
-import type { ApprovalRule, JournalEntry, MailDeliveryMode, Playbook, PolicyAction, Schedule, SupervisionConfig } from "../bindings";
+import type { ApprovalRule, JournalEntry, Playbook, PolicyAction, Schedule, SupervisionConfig } from "../bindings";
 import { daemonCall, subscribeDaemon, type ConfigView } from "../ipc/rpc";
 import {
   formatTime,
@@ -10,7 +10,6 @@ import {
   scheduleAddParams,
   SUPERVISION_ACTION_OPTIONS,
   SUPERVISION_DIALOG_CLASSES,
-  SUPERVISION_MAIL_MODE_OPTIONS,
   supervisionClassActionColor,
   updatedSupervisionClasses,
 } from "./automation";
@@ -555,19 +554,8 @@ export default function AutomationSettings(props: AutomationSettingsProps) {
                 <div>
                   <p class="section-label">Delivery and thresholds</p>
                   <p class="mt-0.5 text-[11px] text-muted">
-                    Defaults for mail mode, nudge messaging, and stall detection.
+                    Defaults for nudge messaging and stall detection.
                   </p>
-                </div>
-
-                <div class="space-y-1.5">
-                  <span class="section-label block">Default mail delivery mode</span>
-                  <Select
-                    ariaLabel="Default mail delivery mode"
-                    size="sm"
-                    options={SUPERVISION_MAIL_MODE_OPTIONS}
-                    value={sup().mail_mode}
-                    onChange={(val) => patchSupervision({ mail_mode: val as MailDeliveryMode })}
-                  />
                 </div>
 
                 <div class="space-y-1.5">

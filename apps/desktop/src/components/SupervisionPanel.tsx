@@ -3,7 +3,6 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } f
 import type {
   DialogClass,
   Lane,
-  MailDeliveryMode,
   PolicyAction,
   SupervisionConfig,
   SupervisionEntry,
@@ -20,7 +19,6 @@ import {
   formatTime,
   SUPERVISION_ACTION_OPTIONS,
   SUPERVISION_DIALOG_CLASSES,
-  SUPERVISION_MAIL_MODE_OPTIONS,
 } from "./automation";
 import {
   IconChevronDown,
@@ -154,7 +152,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
               lane_id: currentLane.id,
               enabled,
               classes: {},
-              mail_mode: null,
               nudge_text: null,
               stall_mins: null,
               nudge_retries: null,
@@ -188,7 +185,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
               lane_id: currentLane.id,
               enabled: false,
               classes: newClasses,
-              mail_mode: null,
               nudge_text: null,
               stall_mins: null,
               nudge_retries: null,
@@ -213,21 +209,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
       });
       setEffectivePolicy(res.effective);
       setLaneOverrides((prev) => (prev ? { ...prev, classes: currentClasses } : null));
-    } catch (cause) {
-      setError(translateError(cause));
-    }
-  }
-
-  async function updateMailMode(mode: MailDeliveryMode) {
-    const currentLane = lane();
-    if (!currentLane) return;
-    try {
-      const res = await daemonCall("supervision.set", {
-        lane_id: currentLane.id,
-        mail_mode: mode,
-      });
-      setEffectivePolicy(res.effective);
-      setLaneOverrides((prev) => (prev ? { ...prev, mail_mode: mode } : null));
     } catch (cause) {
       setError(translateError(cause));
     }
@@ -526,22 +507,10 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
           <section class="space-y-3">
             <div>
               <p class="section-label">Delivery and thresholds</p>
-              <p class="mt-0.5 text-[11px] text-muted">Mail injection mode and wake-on-mail parameters.</p>
+              <p class="mt-0.5 text-[11px] text-muted">Wake-on-mail and stall detection parameters.</p>
             </div>
 
             <div class="space-y-3 rounded-xl border border-line bg-raised/20 p-3">
-              <div class="space-y-1.5">
-                <span class="section-label block">Mail delivery mode</span>
-                <Select
-                  ariaLabel="Mail delivery mode"
-                  size="sm"
-                  options={SUPERVISION_MAIL_MODE_OPTIONS}
-                  value={laneOverrides()?.mail_mode ?? effectivePolicy()?.mail_mode ?? defaults()?.mail_mode ?? "nudge"}
-                  disabled={isMasterOff() || loading()}
-                  onChange={(val) => updateMailMode(val as MailDeliveryMode)}
-                />
-              </div>
-
               <div class="space-y-1.5">
                 <span class="section-label block">Nudge message text</span>
                 <input

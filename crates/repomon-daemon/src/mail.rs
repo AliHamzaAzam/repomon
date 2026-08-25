@@ -649,7 +649,6 @@ mod tests {
             lane_id: 2,
             enabled: true,
             classes: std::collections::BTreeMap::new(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,

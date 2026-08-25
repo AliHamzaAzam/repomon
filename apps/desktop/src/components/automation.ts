@@ -73,11 +73,6 @@ export const SUPERVISION_ACTION_OPTIONS: SelectOption[] = [
   { value: "hold", label: "Hold for human" },
 ];
 
-export const SUPERVISION_MAIL_MODE_OPTIONS: SelectOption[] = [
-  { value: "nudge", label: "Nudge" },
-  { value: "full_body", label: "Full body" },
-];
-
 export function supervisionClassActionColor(action: PolicyAction): string {
   switch (action) {
     case "auto_approve":

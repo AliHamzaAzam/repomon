@@ -1019,7 +1019,6 @@ mod legacy_auto_approve_tests {
             classes: [(DialogClass::CommandExec, PolicyAction::AutoApprove)]
                 .into_iter()
                 .collect(),
-            mail_mode: None,
             nudge_text: None,
             stall_mins: None,
             nudge_retries: None,
