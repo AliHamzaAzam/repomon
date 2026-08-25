@@ -85,6 +85,8 @@ const MAX_REMOTE_DEVICES: usize = 16;
 const MESSAGE_MAX_BYTES: usize = 8 * 1024;
 const MESSAGE_THREAD_HOPS: u8 = 6;
 const MESSAGE_PAGE_MAX: usize = 200;
+const AGENT_INJECTION_DISABLED_ERROR: &str =
+    "blocked: agent-to-agent injection disabled (message_inject_agents=false)";
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -1006,6 +1008,20 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<FleetMessage>> {
         self.call(move |c| {
+            let limit = limit.clamp(1, MESSAGE_PAGE_MAX) as i64;
+            if !inject_agents {
+                c.execute(
+                    "UPDATE messages SET delivery_error = ?1
+                     WHERE id IN (
+                         SELECT id FROM messages
+                         WHERE delivered_at IS NULL
+                           AND delivery_error IS NULL
+                           AND sender_lane_id IS NOT NULL
+                         ORDER BY created_at, id LIMIT ?2
+                     )",
+                    params![AGENT_INJECTION_DISABLED_ERROR, limit],
+                )?;
+            }
             let mut stmt = c.prepare(&format!(
                 "SELECT {MESSAGE_COLS} FROM messages
                  WHERE delivered_at IS NULL
@@ -1014,11 +1030,7 @@ impl Store {
                  ORDER BY created_at, id LIMIT ?3"
             ))?;
             let rows = stmt.query_map(
-                params![
-                    i64::from(inject_agents),
-                    i64::from(inject_operator),
-                    limit.clamp(1, MESSAGE_PAGE_MAX) as i64,
-                ],
+                params![i64::from(inject_agents), i64::from(inject_operator), limit,],
                 message_from_row,
             )?;
             collect(rows)
@@ -3305,6 +3317,107 @@ mod tests {
             .unwrap();
         assert_eq!(agent_only.len(), 1);
         assert_eq!(agent_only[0].body, "agent mail blocked by policy");
+    }
+
+    #[tokio::test]
+    async fn injection_queue_marks_agent_mail_blocked_once_and_inbox_still_reads_it() {
+        let s = store().await;
+        let message = s
+            .send_message(
+                AgentAddress::new("lane-9/1"),
+                address("lane-2/1"),
+                address("lane-9/1"),
+                "agent mail remains available to the recipient".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            s.queued_messages_for_injection(false, true, 200)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let blocked = s.get_message(message.id.clone()).await.unwrap();
+        assert_eq!(
+            blocked.delivery_error.as_deref(),
+            Some(AGENT_INJECTION_DISABLED_ERROR)
+        );
+        assert!(blocked.delivered_at.is_none());
+
+        assert!(
+            s.queued_messages_for_injection(false, true, 200)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let inbox = s
+            .list_messages(
+                Some(AgentAddress::new("lane-9/1")),
+                None,
+                false,
+                20,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(inbox.messages.len(), 1);
+        assert_eq!(
+            inbox.messages[0].body,
+            "agent mail remains available to the recipient"
+        );
+        assert_eq!(inbox.messages[0].delivery_error, None);
+        assert!(inbox.messages[0].delivered_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn injection_queue_policy_stamp_is_bounded_and_preserves_existing_errors() {
+        let s = store().await;
+        let first = s
+            .send_message(
+                AgentAddress::new("lane-9/1"),
+                address("lane-2/1"),
+                address("lane-9/1"),
+                "first".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let second = s
+            .send_message(
+                AgentAddress::new("lane-9/2"),
+                address("lane-2/1"),
+                address("lane-9/2"),
+                "second".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        s.set_message_delivery_error(first.id.clone(), "transient failure".into())
+            .await
+            .unwrap();
+
+        s.queued_messages_for_injection(false, true, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_message(first.id)
+                .await
+                .unwrap()
+                .delivery_error
+                .as_deref(),
+            Some("transient failure")
+        );
+        assert_eq!(
+            s.get_message(second.id)
+                .await
+                .unwrap()
+                .delivery_error
+                .as_deref(),
+            Some(AGENT_INJECTION_DISABLED_ERROR)
+        );
     }
 
     #[tokio::test]

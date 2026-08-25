@@ -92,7 +92,8 @@ stored and visible in the recipient inbox regardless of policy.
 A daemon worker retries queued messages. Terminal injection is eligible only when the recipient is
 a live managed window and its current overlay is Waiting, Idle, or at an ended turn. Injection is
 blocked while the recipient is working, has a pending permission or decision dialog, is rate
-limited, or is stalled. A blocked message remains queued without losing its place.
+limited, or is stalled. Recipient-state blocks remain queued without losing their place; a sender
+policy block records a durable `delivery_error` so it is distinguishable from retryable pending mail.
 
 The injected text is one compact line. Control characters are removed and whitespace is collapsed
 for this line, while the full original body remains in SQLite:
