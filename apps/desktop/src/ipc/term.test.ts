@@ -194,14 +194,14 @@ describe("createInputCoalescer", () => {
     // agent.send_input call became one oversized `tmux send-keys -l` argv on the backend,
     // risking an ARG_MAX failure or a stall the whole app appeared frozen behind. Each chunk
     // must stay at or under the coalescer's cap regardless of input size.
-    const big = "x".repeat(40 * 1024); // 40 KiB, > the 16 KiB chunk cap
+    const big = "x".repeat(40 * 1024); // 40 KiB, > the 8 KiB chunk cap
     const coalescer = createInputCoalescer(target);
     coalescer.push(big);
     await coalescer.flush();
 
-    expect(daemonCallMock).toHaveBeenCalledTimes(3);
+    expect(daemonCallMock).toHaveBeenCalledTimes(5);
     const sentTexts = daemonCallMock.mock.calls.map((call) => (call[1] as { text: string }).text);
-    expect(sentTexts.every((text) => text.length <= 16 * 1024)).toBe(true);
+    expect(sentTexts.every((text) => text.length <= 8 * 1024)).toBe(true);
     expect(sentTexts.join("")).toBe(big);
   });
 
@@ -209,7 +209,7 @@ describe("createInputCoalescer", () => {
     // An astral character (e.g. an emoji) is two UTF-16 code units. Slicing between them
     // would hand the backend two lone, invalid surrogates instead of one valid character.
     const emoji = "\u{1F600}"; // one astral character = a high + low surrogate pair
-    const padding = "y".repeat(16 * 1024 - 1); // chunk boundary lands exactly on the pair
+    const padding = "y".repeat(8 * 1024 - 1); // chunk boundary lands exactly on the pair
     const big = padding + emoji + "z".repeat(10);
     const coalescer = createInputCoalescer(target);
     coalescer.push(big);

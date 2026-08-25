@@ -253,10 +253,10 @@ export async function watchTerminal(
 }
 
 export function createInputCoalescer(target: TerminalTarget, onError?: (error: unknown) => void) {
-  // Keep each RPC/tmux argv well below the platform ARG_MAX limit. Large pastes arrive from
-  // xterm as one data event, so without this bound a multi-megabyte image/text paste can make
-  // `tmux send-keys -l` fail or stall the daemon while the frontend awaits the RPC.
-  const MAX_INPUT_CHUNK = 16 * 1024;
+  // Empirically, a real tmux `send-keys` call on this machine accepts at most 16,331 bytes;
+  // the target/window string consumes part of that same argv budget, so keep a wide margin
+  // across varying lane/window names and prevent large pastes from stalling the daemon.
+  const MAX_INPUT_CHUNK = 8 * 1024;
   let pending = "";
   let running: Promise<void> | null = null;
   const reportError = onError ?? (() => undefined);
