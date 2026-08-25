@@ -1,9 +1,10 @@
 import { clearMocks } from "@tauri-apps/api/mocks";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DaemonRpcError } from "./rpc";
 import {
   asTransportError,
+  createInputCoalescer,
   createTerminalFrameGate,
   decodeTerminalChannelFrame,
   isTerminalReleaseChord,
@@ -13,8 +14,18 @@ import {
   wheelLines,
 } from "./term";
 
+const daemonCallMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+vi.mock("./rpc", async () => {
+  const actual = await vi.importActual<typeof import("./rpc")>("./rpc");
+  return {
+    ...actual,
+    daemonCall: (...args: unknown[]) => daemonCallMock(...args),
+  };
+});
+
 afterEach(() => {
   clearMocks();
+  daemonCallMock.mockClear();
 });
 
 function key(value: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent {
@@ -158,5 +169,60 @@ describe("terminalPointerCell", () => {
       row: 40,
     });
     expect(terminalPointerCell(1, 1, 0, 0, 0, 0, 0, 0)).toEqual({ col: 1, row: 1 });
+  });
+});
+
+describe("createInputCoalescer", () => {
+  const target = { laneId: 1, window: "lane-1" };
+
+  it("sends a small paste as a single agent.send_input call", async () => {
+    const coalescer = createInputCoalescer(target);
+    coalescer.push("hello");
+    await coalescer.flush();
+
+    expect(daemonCallMock).toHaveBeenCalledTimes(1);
+    expect(daemonCallMock).toHaveBeenCalledWith("agent.send_input", {
+      lane_id: 1,
+      window: "lane-1",
+      text: "hello",
+      enter: false,
+    });
+  });
+
+  it("splits a paste larger than the chunk cap into multiple bounded sends", async () => {
+    // Regression: a multi-megabyte paste (e.g. a base64-encoded image) sent as one
+    // agent.send_input call became one oversized `tmux send-keys -l` argv on the backend,
+    // risking an ARG_MAX failure or a stall the whole app appeared frozen behind. Each chunk
+    // must stay at or under the coalescer's cap regardless of input size.
+    const big = "x".repeat(40 * 1024); // 40 KiB, > the 16 KiB chunk cap
+    const coalescer = createInputCoalescer(target);
+    coalescer.push(big);
+    await coalescer.flush();
+
+    expect(daemonCallMock).toHaveBeenCalledTimes(3);
+    const sentTexts = daemonCallMock.mock.calls.map((call) => (call[1] as { text: string }).text);
+    expect(sentTexts.every((text) => text.length <= 16 * 1024)).toBe(true);
+    expect(sentTexts.join("")).toBe(big);
+  });
+
+  it("never splits a UTF-16 surrogate pair across a chunk boundary", async () => {
+    // An astral character (e.g. an emoji) is two UTF-16 code units. Slicing between them
+    // would hand the backend two lone, invalid surrogates instead of one valid character.
+    const emoji = "\u{1F600}"; // one astral character = a high + low surrogate pair
+    const padding = "y".repeat(16 * 1024 - 1); // chunk boundary lands exactly on the pair
+    const big = padding + emoji + "z".repeat(10);
+    const coalescer = createInputCoalescer(target);
+    coalescer.push(big);
+    await coalescer.flush();
+
+    const sentTexts = daemonCallMock.mock.calls.map((call) => (call[1] as { text: string }).text);
+    expect(sentTexts.join("")).toBe(big);
+    for (const text of sentTexts) {
+      // A lone surrogate at either edge means the pair was split.
+      const firstCode = text.charCodeAt(0);
+      const lastCode = text.charCodeAt(text.length - 1);
+      expect(lastCode >= 0xd800 && lastCode <= 0xdbff).toBe(false);
+      expect(firstCode >= 0xdc00 && firstCode <= 0xdfff).toBe(false);
+    }
   });
 });
