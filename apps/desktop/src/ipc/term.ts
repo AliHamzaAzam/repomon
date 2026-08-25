@@ -253,6 +253,10 @@ export async function watchTerminal(
 }
 
 export function createInputCoalescer(target: TerminalTarget, onError?: (error: unknown) => void) {
+  // Keep each RPC/tmux argv well below the platform ARG_MAX limit. Large pastes arrive from
+  // xterm as one data event, so without this bound a multi-megabyte image/text paste can make
+  // `tmux send-keys -l` fail or stall the daemon while the frontend awaits the RPC.
+  const MAX_INPUT_CHUNK = 16 * 1024;
   let pending = "";
   let running: Promise<void> | null = null;
   const reportError = onError ?? (() => undefined);
@@ -266,8 +270,11 @@ export function createInputCoalescer(target: TerminalTarget, onError?: (error: u
       running = (async () => {
         try {
           while (pending) {
-            const text = pending;
-            pending = "";
+            const size = Math.min(MAX_INPUT_CHUNK, pending.length);
+            // Avoid splitting a UTF-16 surrogate pair at a chunk boundary.
+            const end = size > 0 && size < pending.length && pending.charCodeAt(size - 1) >= 0xd800 && pending.charCodeAt(size - 1) <= 0xdbff ? size - 1 : size;
+            const text = pending.slice(0, end || size);
+            pending = pending.slice(text.length);
             await daemonCall("agent.send_input", {
               lane_id: target.laneId,
               window: target.window,
