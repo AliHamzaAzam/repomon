@@ -1020,7 +1020,7 @@ pub fn is_supported_agent_program(program: &str) -> bool {
         .rsplit_once('.')
         .map(|(stem, _ext)| stem)
         .unwrap_or(&base);
-    matches!(stem, "claude" | "codex" | "opencode" | "agy")
+    matches!(stem, "claude" | "codex" | "hermes" | "opencode" | "agy")
 }
 
 #[cfg(test)]
@@ -1218,6 +1218,7 @@ mod tests {
             r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
         ));
         assert!(is_supported_agent_program("codex"));
+        assert!(is_supported_agent_program("hermes.exe"));
         assert!(is_supported_agent_program("opencode.exe"));
         assert!(is_supported_agent_program("agy.cmd"));
         assert!(!is_supported_agent_program("claude-helper.exe"));

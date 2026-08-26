@@ -62,6 +62,7 @@ pub fn default_monitors() -> Vec<Box<dyn AgentMonitor>> {
         Box::new(ClaudeMonitor),
         Box::new(AiderMonitor),
         Box::new(CodexMonitor),
+        Box::new(HermesMonitor),
         Box::new(OpenCodeMonitor),
         Box::new(AntigravityMonitor),
     ]
@@ -112,6 +113,21 @@ impl AgentMonitor for CodexMonitor {
     fn kind(&self) -> AgentKind {
         AgentKind::Codex
     }
+    fn summary_for(&self, _cwd: &Path) -> Option<TranscriptSummary> {
+        None
+    }
+}
+
+/// Hermes keeps its durable conversation state in a private SQLite schema. Repomon relies on
+/// managed-window liveness until that schema exposes a stable read API.
+#[derive(Debug, Clone, Default)]
+pub struct HermesMonitor;
+
+impl AgentMonitor for HermesMonitor {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Hermes
+    }
+
     fn summary_for(&self, _cwd: &Path) -> Option<TranscriptSummary> {
         None
     }

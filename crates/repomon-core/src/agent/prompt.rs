@@ -144,6 +144,21 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
                     context,
                 });
             }
+            // Hermes 0.19's dangerous-command panel has a title, command and numbered choices,
+            // but deliberately no question sentence. Recognize that exact branded layout instead
+            // of weakening the generic question requirement for arbitrary numbered menus.
+            if let Some((title, question, body, context)) =
+                describe_hermes_approval(&stripped, &cleaned, start)
+            {
+                return Some(PendingDialog {
+                    title,
+                    question,
+                    body,
+                    options: opts,
+                    selected,
+                    context,
+                });
+            }
             // Claude's folder-trust dialog ("Security guide" / "Yes, I trust this folder").
             // On a freshly spawned worker the question line ("Do you trust the files in this
             // folder?") can be scrolled out of the capture window entirely, so `describe`
@@ -189,6 +204,33 @@ pub fn dialog_select_keys(dialog: &PendingDialog, target: usize) -> Vec<String> 
 }
 
 type DialogDescription = (Option<String>, String, Vec<String>, Vec<String>);
+
+fn describe_hermes_approval(
+    stripped: &[String],
+    cleaned: &[String],
+    menu_start: usize,
+) -> Option<DialogDescription> {
+    let border = (menu_start.saturating_sub(HEADER_REACH)..menu_start)
+        .rev()
+        .find(|&i| stripped[i].trim_start().starts_with('╭'))?;
+    let title_idx = (border + 1..menu_start).find(|&i| !cleaned[i].trim().is_empty())?;
+    let title = cleaned[title_idx].trim();
+    if !title.contains("Dangerous Command") {
+        return None;
+    }
+    let body = (title_idx + 1..menu_start)
+        .map(|i| cleaned[i].trim())
+        .filter(|line| !line.is_empty())
+        .take(BODY_MAX_LINES)
+        .map(|line| truncate(line, 120))
+        .collect();
+    Some((
+        Some("Dangerous Command".into()),
+        "Do you want to allow this command?".into(),
+        body,
+        Vec::new(),
+    ))
+}
 
 /// Describe the dialog whose menu starts at line `menu_start`: the question line just above
 /// it, the header (the first content line under the box's `╭` border), the body lines
@@ -663,6 +705,30 @@ mod tests {
             Some("Allow the repomon MCP server to run tool \"fleet_status\"?")
         );
         assert_eq!(classify_prompt(&summary.unwrap()), PromptClass::Permission);
+    }
+
+    #[test]
+    fn detects_hermes_dangerous_command_dialog_without_question_line() {
+        // Hermes 0.19's live renderer deliberately provides a title, command, and choices but
+        // no question sentence. Keep this branded fixture narrow so ordinary numbered menus
+        // without questions remain invisible to the prompt detector.
+        let pane = "╭──────────────────────────────────────╮\n\
+            │ ⚠️  Dangerous Command                │\n\
+            │                                      │\n\
+            │ cargo clean                          │\n\
+            │                                      │\n\
+            │ ❯ 1. Allow once                      │\n\
+            │   2. Allow for this session          │\n\
+            │   3. Add to permanent allowlist      │\n\
+            │   4. Deny                            │\n\
+            ╰──────────────────────────────────────╯";
+        let dialog = detect_dialog(pane).expect("Hermes approval dialog");
+        assert_eq!(dialog.title.as_deref(), Some("Dangerous Command"));
+        assert_eq!(dialog.question, "Do you want to allow this command?");
+        assert_eq!(dialog.body, ["cargo clean"]);
+        assert_eq!(dialog.options.len(), 4);
+        assert_eq!(dialog.selected, Some(0));
+        assert_eq!(dialog.class(), PromptClass::Permission);
     }
 
     #[test]

@@ -89,6 +89,7 @@ describe("LaneAgentRosterPopover", () => {
   it("formats agent display names and status details accurately", () => {
     expect(agentKindDisplayName("claude-code")).toBe("Claude Code");
     expect(agentKindDisplayName("antigravity")).toBe("Antigravity");
+    expect(agentKindDisplayName("hermes")).toBe("Hermes Agent");
     expect(agentKindDisplayName("codex")).toBe("Codex");
     expect(agentKindDisplayName("opencode")).toBe("OpenCode");
 

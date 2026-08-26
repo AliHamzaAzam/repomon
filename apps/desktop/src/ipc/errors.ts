@@ -109,7 +109,7 @@ export function translateError(
     };
   }
 
-  const knownBinaries = ["claude", "cursor-agent", "codex", "opencode", "antigravity", "agy", "aider"];
+  const knownBinaries = ["claude", "cursor-agent", "codex", "hermes", "opencode", "antigravity", "agy", "aider"];
   for (const known of knownBinaries) {
     if (lowerRaw.includes(known)) {
       return {

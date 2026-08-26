@@ -435,6 +435,7 @@ export default function SettingsModal(props: SettingsModalProps) {
       "cursor",
       "aider",
       "codex",
+      "hermes",
       "antigravity",
       "opencode",
     ];

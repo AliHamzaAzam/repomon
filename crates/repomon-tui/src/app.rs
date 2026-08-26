@@ -51,7 +51,7 @@ const NOTIF_LATCH_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
 const NOTIF_HISTORY_CAP: usize = 200;
 
 /// Agent kinds offered when creating a lane (cycled with Tab).
-pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "aider"];
+pub const AGENT_KINDS: &[&str] = &["claude-code", "codex", "hermes", "aider"];
 
 /// Timeline zoom levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

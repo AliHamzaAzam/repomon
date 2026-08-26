@@ -387,6 +387,7 @@ pub enum AgentKind {
     Cursor,
     Aider,
     Codex,
+    Hermes,
     Antigravity,
     OpenCode,
     Other(String),
@@ -400,6 +401,7 @@ impl AgentKind {
             AgentKind::Cursor => Cow::Borrowed("cursor"),
             AgentKind::Aider => Cow::Borrowed("aider"),
             AgentKind::Codex => Cow::Borrowed("codex"),
+            AgentKind::Hermes => Cow::Borrowed("hermes"),
             AgentKind::Antigravity => Cow::Borrowed("antigravity"),
             AgentKind::OpenCode => Cow::Borrowed("opencode"),
             AgentKind::Other(s) => Cow::Owned(s.clone()),
@@ -413,6 +415,7 @@ impl AgentKind {
             AgentKind::Cursor => "cursor",
             AgentKind::Aider => "aider",
             AgentKind::Codex => "codex",
+            AgentKind::Hermes => "hermes",
             AgentKind::Antigravity => "agy",
             AgentKind::OpenCode => "opencode",
             AgentKind::Other(s) => s,
@@ -424,6 +427,7 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Hermes => "hermes",
             AgentKind::Antigravity => "agy",
             AgentKind::OpenCode => "opencode",
             AgentKind::Aider => "aider",
@@ -437,6 +441,7 @@ impl AgentKind {
         match s {
             "claude-code" | "claude" => AgentKind::ClaudeCode,
             "codex" => AgentKind::Codex,
+            "hermes" | "hermes-agent" => AgentKind::Hermes,
             "antigravity" | "agy" => AgentKind::Antigravity,
             "opencode" | "open-code" => AgentKind::OpenCode,
             "aider" => AgentKind::Aider,
@@ -1036,6 +1041,7 @@ mod tests {
         for k in [
             AgentKind::ClaudeCode,
             AgentKind::Codex,
+            AgentKind::Hermes,
             AgentKind::Aider,
             AgentKind::Cursor,
             AgentKind::Antigravity,
@@ -1047,6 +1053,8 @@ mod tests {
         }
         // "claude" is accepted as an alias for claude-code.
         assert_eq!(AgentKind::from_kind_str("claude"), AgentKind::ClaudeCode);
+        assert_eq!(AgentKind::from_kind_str("hermes-agent"), AgentKind::Hermes);
+        assert_eq!(AgentKind::Hermes.command(), "hermes");
     }
 
     #[test]

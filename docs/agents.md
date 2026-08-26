@@ -30,8 +30,8 @@ route to the cursored one.
 
 ## Choosing an agent
 
-New Lane lists the **auto-detected** built-ins (claude-code / codex / opencode / antigravity /
-aider / cursor, marked ✓ if on
+New Lane lists the **auto-detected** built-ins (claude-code / codex / hermes / opencode /
+antigravity / aider / cursor, marked ✓ if on
 PATH) plus any **custom agents** you define — cycle them with Tab (Shift+Tab to go back). The
 **default** agent (marked ★) is preselected.
 
@@ -137,6 +137,7 @@ the real terminal with `↵`.
 |---------------|----------------|
 | `claude-code` | `claude`       |
 | `codex`       | `codex`        |
+| `hermes`      | `hermes chat --tui` |
 | `opencode`    | `opencode`     |
 | `antigravity` | `agy`          |
 | `aider`       | `aider`        |
@@ -208,7 +209,7 @@ renamed until their transcript appears.) See `session.rename` in `docs/protocol.
 
 ## Fleet mail for managed agents
 
-Managed Claude, Codex, OpenCode, Antigravity, and Cursor sessions receive a restricted local
+Managed Claude, Codex, Hermes, OpenCode, Antigravity, and Cursor sessions receive a restricted local
 `repomon` MCP server at spawn or adopt time. It exposes `fleet_status`, `message_send`,
 `message_inbox`, and `message_mark_read`. It does not expose repomind's mutating fleet tools. The
 agent process inherits a one-time identity token; only its SHA-256 hash is stored, and the
@@ -221,6 +222,13 @@ registration. repomon merges only `mcpServers.repomon`, never writes `.agents/mc
 a repository, and keeps identity in the managed process environment. Antigravity may still show its
 normal workspace trust and tool permission prompts; Cursor's `--approve-mcps` flag is available for
 headless/non-interactive workflows.
+
+Hermes is launched in its persistent modern TUI. Because Hermes filters nonstandard variables
+before starting stdio MCP servers, repomon registers `${REPOMON_MCP_*}` placeholders through
+Hermes's own atomic config writer; the per-session values are resolved only in the managed process.
+An opening task is submitted after Hermes reports that its composer is ready (`-q` is deliberately
+not used because it exits after one turn). Adopt resumes with `hermes chat --resume <id>` and keeps
+the lane worktree with `--no-restore-cwd`.
 
 **Aider**: has no native MCP client support as of its current release. The identity token and
 socket are still passed via the process environment in case a future version adds support, but

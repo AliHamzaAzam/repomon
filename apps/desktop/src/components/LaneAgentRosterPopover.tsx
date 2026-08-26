@@ -91,6 +91,7 @@ export function agentKindDisplayName(agent?: string | null): string {
   const raw = agent?.toLowerCase().trim() ?? "";
   if (raw === "claude-code" || raw === "claude") return "Claude Code";
   if (raw === "antigravity" || raw === "agy") return "Antigravity";
+  if (raw === "hermes" || raw === "hermes-agent") return "Hermes Agent";
   if (raw === "codex") return "Codex";
   if (raw === "opencode") return "OpenCode";
   if (raw === "cursor") return "Cursor";

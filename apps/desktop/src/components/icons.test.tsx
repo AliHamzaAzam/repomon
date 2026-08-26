@@ -26,9 +26,11 @@ describe("Agent icon resolution and catalog", () => {
     }
   });
 
-  it("resolves official brand marks as defaults for Claude, Antigravity, Codex, OpenCode, Cursor", () => {
+  it("resolves official brand marks as defaults for supported agents", () => {
     expect(resolveAgentIconKey("claude-code")).toBe("brand-claude");
     expect(resolveAgentIconKey("claude")).toBe("brand-claude");
+    expect(resolveAgentIconKey("hermes")).toBe("brand-hermes");
+    expect(resolveAgentIconKey("hermes-agent")).toBe("brand-hermes");
     expect(resolveAgentIconKey("antigravity")).toBe("brand-antigravity");
     expect(resolveAgentIconKey("agy")).toBe("brand-antigravity");
     expect(resolveAgentIconKey("codex")).toBe("brand-openai");
@@ -84,5 +86,8 @@ describe("Agent icon resolution and catalog", () => {
 
     const { container: c7 } = render(() => <AgentIcon agent="my-bot" iconKey="brand-claude" />);
     expect(c7.querySelector("svg")).toBeTruthy();
+
+    const { container: c8 } = render(() => <AgentIcon agent="hermes" />);
+    expect(c8.querySelector("svg")).toBeTruthy();
   });
 });

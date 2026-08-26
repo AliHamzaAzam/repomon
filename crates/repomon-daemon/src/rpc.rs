@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use repomon_core::agent::backend::{CaptureOpts, ScrollEvent, SpawnSpec};
 use repomon_core::agent::{self, shell_quote};
@@ -3112,7 +3113,7 @@ pub async fn dispatch(
             } else {
                 plan.command
             };
-            let mut spec = SpawnSpec::new(command, path);
+            let mut spec = agent_spawn_spec(command, path, &kind);
             spec.env.extend([
                 (
                     "REPOMON_MCP_SOCKET".into(),
@@ -3123,8 +3124,14 @@ pub async fn dispatch(
             ]);
             configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
             let inject = plan.effort_inject;
-            let inject_task = if inject.is_some() { task.clone() } else { None };
-            if inject.is_none() {
+            // Hermes has no persistent-mode initial-prompt flag: `-q` is single-turn and exits.
+            // Defer its task until the real TUI reports ready, then submit it like an operator.
+            let inject_task = if inject.is_some() || matches!(kind, AgentKind::Hermes) {
+                task.clone()
+            } else {
+                None
+            };
+            if inject.is_none() && !matches!(kind, AgentKind::Hermes) {
                 if let Some(task) = task {
                     spec = match kind {
                         AgentKind::OpenCode => spec.arg("--prompt").arg(task),
@@ -3141,13 +3148,18 @@ pub async fn dispatch(
                 let _ = tmux.set_window_agent_kind(&window, &kind_str);
                 // Best-effort: set the effort level and type the task once the TUI is up. Operators
                 // do exactly this by hand; a short settle lets claude start reading input.
+                if inject_task.is_some() && kind_str == "hermes" {
+                    wait_for_hermes_composer(tmux.as_ref(), &window);
+                }
                 if let Some(eff) = inject {
                     std::thread::sleep(std::time::Duration::from_millis(2000));
                     tmux.send_text_named(&window, &eff)?;
-                    if let Some(task) = inject_task {
+                }
+                if let Some(task) = inject_task {
+                    if kind_str != "hermes" {
                         std::thread::sleep(std::time::Duration::from_millis(600));
-                        tmux.send_text_named(&window, &task)?;
                     }
+                    tmux.send_text_named(&window, &task)?;
                 }
                 Ok(window)
             })
@@ -3270,6 +3282,7 @@ pub async fn dispatch(
                     cwd: path,
                     env: Vec::new(),
                 },
+                AgentKind::Hermes => hermes_adopt_spec(path, session_id),
                 AgentKind::Cursor => SpawnSpec {
                     // cursor-agent has no session-resume flag; re-launch fresh in the worktree.
                     program: "cursor-agent".into(),
@@ -6186,7 +6199,14 @@ fn browse_dir(start: Option<PathBuf>, added: &std::collections::HashSet<PathBuf>
 
 /// Built-in agent kinds with a fixed binary name. Claude is handled separately (one variant
 /// per detected config dir). These names can't be used for a custom agent.
-const BUILTIN_AGENTS: [&str; 5] = ["codex", "opencode", "antigravity", "aider", "cursor"];
+const BUILTIN_AGENTS: [&str; 6] = [
+    "codex",
+    "hermes",
+    "opencode",
+    "antigravity",
+    "aider",
+    "cursor",
+];
 
 /// A name is reserved (can't be added/removed as a custom) if it's a fixed built-in or one of
 /// the autodetected Claude variants (claude-code, claude-work, …).
@@ -6491,8 +6511,11 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
         .filter_map(|line| {
             let (pid, comm) = line.trim_start().split_once(char::is_whitespace)?;
             let base = comm.trim().rsplit('/').next().unwrap_or("");
-            matches!(base, "claude" | "opencode" | "agy" | "codex" | "cursor")
-                .then(|| pid.to_string())
+            matches!(
+                base,
+                "claude" | "opencode" | "agy" | "codex" | "hermes" | "cursor"
+            )
+            .then(|| pid.to_string())
         })
         .collect();
     let mut counts: HashMap<PathBuf, usize> = HashMap::new();
@@ -6520,7 +6543,7 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
 #[cfg(target_os = "linux")]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     let mut combined = HashMap::new();
-    for name in ["claude", "opencode", "agy", "codex", "cursor"] {
+    for name in ["claude", "opencode", "agy", "codex", "hermes", "cursor"] {
         for (path, count) in live_cwds_by_name(name)? {
             *combined.entry(path).or_insert(0) += count;
         }
@@ -6698,6 +6721,7 @@ fn detect_all_agents(cfg: &repomon_core::Config) -> Vec<RawDetectedAgent> {
     }
     for kind in [
         AgentKind::Codex,
+        AgentKind::Hermes,
         AgentKind::OpenCode,
         AgentKind::Antigravity,
         AgentKind::Aider,
@@ -7164,6 +7188,7 @@ fn kind_from_command(command: &str) -> AgentKind {
     match program_of(command).map(program_basename) {
         Some("claude") => AgentKind::ClaudeCode,
         Some("codex") => AgentKind::Codex,
+        Some("hermes") => AgentKind::Hermes,
         Some("opencode") => AgentKind::OpenCode,
         Some("agy") => AgentKind::Antigravity,
         Some("aider") => AgentKind::Aider,
@@ -7171,6 +7196,63 @@ fn kind_from_command(command: &str) -> AgentKind {
         Some(other) => AgentKind::Other(other.to_string()),
         None => AgentKind::Other(String::new()),
     }
+}
+
+fn hermes_composer_ready(capture: &str) -> bool {
+    // The modern Hermes TUI exposes this stable status token once its composer accepts input.
+    // Keep the prompt glyph as a fallback for older 0.x releases that omit the status bar.
+    capture.contains(" ready │") || capture.lines().rev().take(4).any(|line| line.contains('❯'))
+}
+
+fn agent_spawn_spec(command: String, path: PathBuf, kind: &AgentKind) -> SpawnSpec {
+    let spec = SpawnSpec::new(command, path);
+    if matches!(kind, AgentKind::Hermes) && spec.program.trim() == "hermes" {
+        spec.arg("chat").arg("--tui")
+    } else {
+        spec
+    }
+}
+
+fn hermes_adopt_spec(path: PathBuf, session_id: Option<String>) -> SpawnSpec {
+    SpawnSpec {
+        program: "hermes".into(),
+        args: session_id
+            .map(|sid| {
+                vec![
+                    "chat".into(),
+                    "--tui".into(),
+                    "--no-restore-cwd".into(),
+                    "--resume".into(),
+                    sid,
+                ]
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    "chat".into(),
+                    "--tui".into(),
+                    "--no-restore-cwd".into(),
+                    "--continue".into(),
+                ]
+            }),
+        cwd: path,
+        env: Vec::new(),
+    }
+}
+
+fn wait_for_hermes_composer(
+    backend: &dyn repomon_core::agent::backend::SessionBackend,
+    window: &str,
+) {
+    for _ in 0..100 {
+        if backend
+            .capture_named(window, CaptureOpts::visible())
+            .is_ok_and(|capture| hermes_composer_ready(&capture))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    tracing::warn!("spawn: Hermes composer did not report ready within 15s; submitting task");
 }
 
 /// The basename of a program path (`/usr/bin/claude` → `claude`).
@@ -7267,6 +7349,9 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
                 .push(("OPENCODE_CONFIG_CONTENT".into(), config_json));
         }
         AgentKind::Antigravity => ensure_antigravity_mcp_registration()?,
+        AgentKind::Hermes => {
+            ensure_hermes_mcp_registration(program_of(&spec.program).unwrap_or("hermes"))?
+        }
         AgentKind::Cursor => ensure_cursor_mcp_registration()?,
         AgentKind::Aider => {
             // Aider has no native MCP client support; fleet mail is unavailable for Aider agents.
@@ -7396,6 +7481,83 @@ fn ensure_cursor_mcp_registration() -> Result<(), String> {
     let encoded = serde_json::to_vec_pretty(&root).map_err(|error| error.to_string())?;
     std::fs::write(&temporary, encoded).map_err(|error| error.to_string())?;
     std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+static HERMES_MCP_READY: AtomicBool = AtomicBool::new(false);
+
+/// Register Repomon in Hermes without persisting a session identity.
+///
+/// Hermes intentionally filters nonstandard variables before starting stdio MCP servers, so the
+/// config names the three allowed values as `${VAR}` placeholders. Hermes resolves them from each
+/// managed agent process immediately before launching `repomond mcp`. Its config CLI performs the
+/// YAML merge atomically and preserves unrelated user settings.
+fn ensure_hermes_mcp_registration(resolved_command: &str) -> Result<(), String> {
+    if HERMES_MCP_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let wrapper = std::env::var("REPOMON_HERMES_MCP_WRAPPER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| config::config_dir().join("agent-mcp/hermes-repomon-mcp"));
+    let parent = wrapper
+        .parent()
+        .ok_or_else(|| "Hermes MCP wrapper has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let repomond = repomon_core::service::repomond_path();
+    #[cfg(unix)]
+    let body = format!(
+        "#!/bin/sh\nexec {} mcp\n",
+        shell_quote(&repomond.to_string_lossy())
+    );
+    #[cfg(windows)]
+    let body = format!("@echo off\r\n\"{}\" mcp\r\n", repomond.to_string_lossy());
+    std::fs::write(&wrapper, body).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&wrapper)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&wrapper, permissions).map_err(|error| error.to_string())?;
+    }
+
+    let hermes =
+        std::env::var("REPOMON_HERMES_COMMAND").unwrap_or_else(|_| resolved_command.to_string());
+    let wrapper_value = wrapper.to_string_lossy().into_owned();
+    let settings = [
+        ("mcp_servers.repomon.command", wrapper_value.as_str()),
+        ("mcp_servers.repomon.enabled", "true"),
+        (
+            "mcp_servers.repomon.env.REPOMON_MCP_SOCKET",
+            "${REPOMON_MCP_SOCKET}",
+        ),
+        (
+            "mcp_servers.repomon.env.REPOMON_MCP_MODE",
+            "${REPOMON_MCP_MODE}",
+        ),
+        (
+            "mcp_servers.repomon.env.REPOMON_MCP_IDENTITY_TOKEN",
+            "${REPOMON_MCP_IDENTITY_TOKEN}",
+        ),
+    ];
+    for (key, value) in settings {
+        let output = std::process::Command::new(&hermes)
+            .args(["config", "set", "--force", key, value])
+            .env_remove("REPOMON_MCP_SOCKET")
+            .env_remove("REPOMON_MCP_MODE")
+            .env_remove("REPOMON_MCP_IDENTITY_TOKEN")
+            .output()
+            .map_err(|error| format!("failed to run Hermes config command: {error}"))?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!(
+                "Hermes rejected Repomon MCP registration for {key}: {detail}"
+            ));
+        }
+    }
+    HERMES_MCP_READY.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -9152,6 +9314,7 @@ mod tests {
         // claude-code is always present (the default config dir is always listed).
         assert!(is_builtin("claude-code"));
         assert!(is_builtin("codex"));
+        assert!(is_builtin("hermes"));
         assert!(!is_builtin("claude-yolo"));
     }
 
@@ -9610,6 +9773,50 @@ mod tests {
         assert_eq!(spec.env, env_before, "Aider must not alter spec.env");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn hermes_mcp_registration_persists_only_environment_placeholders() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake_hermes = dir.path().join("hermes");
+        let log = dir.path().join("hermes.log");
+        let wrapper = dir.path().join("repomon-mcp");
+        std::fs::write(
+            &fake_hermes,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_HERMES_LOG\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_hermes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        unsafe {
+            std::env::set_var("REPOMON_HERMES_COMMAND", &fake_hermes);
+            std::env::set_var("REPOMON_HERMES_MCP_WRAPPER", &wrapper);
+            std::env::set_var("FAKE_HERMES_LOG", &log);
+            std::env::set_var("REPOMON_MCP_IDENTITY_TOKEN", "must-never-hit-disk");
+        }
+
+        ensure_hermes_mcp_registration("unused").unwrap();
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.contains("mcp_servers.repomon.command"));
+        assert!(calls.contains("${REPOMON_MCP_SOCKET}"));
+        assert!(calls.contains("${REPOMON_MCP_MODE}"));
+        assert!(calls.contains("${REPOMON_MCP_IDENTITY_TOKEN}"));
+        assert!(!calls.contains("must-never-hit-disk"));
+        assert!(
+            !std::fs::read_to_string(&wrapper)
+                .unwrap()
+                .contains("must-never-hit-disk")
+        );
+
+        unsafe {
+            std::env::remove_var("REPOMON_HERMES_COMMAND");
+            std::env::remove_var("REPOMON_HERMES_MCP_WRAPPER");
+            std::env::remove_var("FAKE_HERMES_LOG");
+            std::env::remove_var("REPOMON_MCP_IDENTITY_TOKEN");
+        }
+    }
+
     #[test]
     fn launch_options_default_path_is_byte_identical() {
         // The whole point: with no options requested, the command is returned VERBATIM (and no
@@ -9797,10 +10004,49 @@ mod tests {
             kind_from_command("/opt/homebrew/bin/codex --full-auto"),
             AgentKind::Codex
         );
+        assert_eq!(
+            kind_from_command("/Users/me/.local/bin/hermes chat --tui"),
+            AgentKind::Hermes
+        );
         // An unrecognized wrapper stays Other (launch options are then ignored, never guessed).
         assert_eq!(
             kind_from_command("my-wrapper.sh"),
             AgentKind::Other("my-wrapper.sh".into())
+        );
+    }
+
+    #[test]
+    fn hermes_composer_readiness_matches_live_tui_status() {
+        assert!(hermes_composer_ready("─ ready │ hy3:free │ 1s\n ❯ "));
+        assert!(hermes_composer_ready("banner\n ❯ "));
+        assert!(!hermes_composer_ready("loading tools…"));
+    }
+
+    #[test]
+    fn hermes_new_session_uses_persistent_chat_tui() {
+        let spec = agent_spawn_spec("hermes".into(), PathBuf::from("/repo"), &AgentKind::Hermes);
+        assert_eq!(spec.program, "hermes");
+        assert_eq!(spec.args, ["chat", "--tui"]);
+        let custom = agent_spawn_spec(
+            "/opt/hermes chat --cli".into(),
+            PathBuf::from("/repo"),
+            &AgentKind::Hermes,
+        );
+        assert!(custom.args.is_empty());
+    }
+
+    #[test]
+    fn hermes_adopt_uses_persistent_resume_and_continue_flags() {
+        let resumed = hermes_adopt_spec(PathBuf::from("/repo"), Some("a17da062".into()));
+        assert_eq!(resumed.program, "hermes");
+        assert_eq!(
+            resumed.args,
+            ["chat", "--tui", "--no-restore-cwd", "--resume", "a17da062"]
+        );
+        let continued = hermes_adopt_spec(PathBuf::from("/repo"), None);
+        assert_eq!(
+            continued.args,
+            ["chat", "--tui", "--no-restore-cwd", "--continue"]
         );
     }
 
