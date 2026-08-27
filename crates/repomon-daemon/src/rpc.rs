@@ -4721,7 +4721,10 @@ pub async fn dispatch(
             let outcome = crate::inject::verified_send(
                 ctx,
                 crate::inject::Expectation::IdleNoDialog,
-                crate::inject::Payload::Line(text),
+                crate::inject::Payload::VerifiedLine {
+                    marker: text.clone(),
+                    text,
+                },
                 seed,
             )
             .await;

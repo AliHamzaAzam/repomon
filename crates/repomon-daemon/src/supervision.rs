@@ -481,6 +481,7 @@ async fn stall_phase(
             match action {
                 StallAction::Nothing => {}
                 StallAction::Nudge => {
+                    let nudge_text = policy.nudge_text.clone();
                     let seed = AuditSeed {
                         lane_id: lane.id,
                         window: window.clone(),
@@ -498,7 +499,10 @@ async fn stall_phase(
                     let _ = inject::verified_send(
                         ctx,
                         Expectation::IdleNoDialog,
-                        Payload::Line(policy.nudge_text.clone()),
+                        Payload::VerifiedLine {
+                            marker: nudge_text.clone(),
+                            text: nudge_text,
+                        },
                         seed,
                     )
                     .await;
@@ -707,7 +711,7 @@ mod tests {
             }
         }
         fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
-            None
+            Some(repomon_core::agent::Cursor { col: 0, row: 0 })
         }
         fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
             Some((80, 24))
@@ -1278,7 +1282,12 @@ mod tests {
 
     #[tokio::test]
     async fn stall_nudge_sends_and_journals() {
-        let backend = Arc::new(ScriptedBackend::new(vec![]));
+        let backend = Arc::new(ScriptedBackend::new(vec![
+            String::new(),
+            "› Ask Codex to do anything".to_string(),
+            "› please continue".to_string(),
+            "• Working\n\n› Ask Codex to do anything".to_string(),
+        ]));
         let ctx = make_ctx(backend.clone());
 
         ctx.store
@@ -1318,6 +1327,64 @@ mod tests {
         assert_eq!(log[0].trigger, "stall");
         assert_eq!(log[0].decision, "nudge");
         assert_eq!(log[0].outcome, "sent");
+        assert_eq!(
+            backend.sent_keys.lock().unwrap().as_slice(),
+            &[("win-lane-1".to_string(), "Enter".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_stall_nudge_is_journaled_and_consumes_one_watchdog_attempt() {
+        let backend = Arc::new(ScriptedBackend::new(vec![
+            String::new(),
+            "› Ask Codex to do anything".to_string(),
+            "› please continue".to_string(),
+            "› please continue".to_string(),
+            "› please continue".to_string(),
+        ]));
+        let ctx = make_ctx(backend.clone());
+
+        ctx.store
+            .set_lane_policy(stall_policy_overrides(1, 5, 2, true))
+            .await
+            .unwrap();
+        refresh(&ctx).await;
+        let snapshot = ctx.supervision.read().await.clone();
+
+        let mut session = sample_session(None);
+        session.status = AgentStatus::Waiting;
+        let now = Utc::now();
+        session.last_activity_at = now - chrono::Duration::minutes(30);
+        ctx.pane_seen.lock().await.insert(
+            "win-lane-1".to_string(),
+            (1u64, now - chrono::Duration::minutes(10)),
+        );
+
+        let mut scheds = HashMap::new();
+        stall_phase(
+            &ctx,
+            &[lane_with_session(1, session)],
+            &snapshot,
+            &mut scheds,
+            now,
+        )
+        .await;
+
+        let sched = scheds.get("win-lane-1").expect("attempt recorded");
+        assert_eq!(sched.nudges_sent, 1);
+        assert!(!sched.escalated);
+        assert_eq!(backend.sent_keys.lock().unwrap().len(), 2);
+
+        let log = ctx.store.supervision_log(Some(1), 10, None).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].trigger, "stall");
+        assert_eq!(log[0].outcome, "failed");
+        assert!(
+            log[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("composer still contains please continue"))
+        );
     }
 
     #[tokio::test]
