@@ -204,10 +204,20 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
 
   const mountedTargets = createMemo(() => {
     const byWindow = new Map(targets().map((target) => [target.window, target]));
-    return warmWindows().flatMap((window) => {
+    const warm = warmWindows().flatMap((window) => {
       const target = byWindow.get(window);
       return target ? [target] : [];
     });
+    // `warmWindows` is bookkeeping maintained by a createEffect, which can lag one tick behind
+    // the synchronous `visibleTargets()` memo it reads (e.g. right after a layout toggle or a
+    // picker selection change). A window counted in "N panes" and given a CSS grid placement
+    // must never end up with no mounted <TerminalPane> behind it — that's an empty, borderless
+    // grid cell the operator sees as a blank pane. Union in anything currently visible that the
+    // warm cache hasn't caught up to yet, so the render is always a strict superset of what's
+    // selected.
+    const mountedWindows = new Set(warm.map((target) => target.window));
+    const missing = visibleTargets().filter((target) => !mountedWindows.has(target.window));
+    return missing.length ? [...warm, ...missing] : warm;
   });
 
   createEffect(() => {
@@ -647,11 +657,18 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               ));
               const closing = createMemo(() => isTargetClosing(target));
               const paneSpan = createMemo(() => props.workspace.multitaskSpans()[target.window] ?? { columns: 1, rows: 1 });
+              // Only worth calling out the active pane when there's more than one on screen to
+              // tell apart — a lone focused pane is already unambiguous.
+              const isActivePane = createMemo(() => (
+                visible() && !closing() && effectiveLayout() !== "focused" && activeWindow() === target.window
+              ));
               return (
                 <div
                   class={`min-h-0 min-w-0 border-line transition-all duration-200 ${multitasking() ? "multitask-pane" : ""} ${
                     visible() ? "" : "warm-terminal-hidden"
-                  } ${closing() ? "pointer-events-none opacity-0 scale-[0.98]" : ""}`}
+                  } ${closing() ? "pointer-events-none opacity-0 scale-[0.98]" : ""} ${
+                    isActivePane() ? "is-active-pane ring-1 ring-inset ring-signal/60" : ""
+                  }`}
                   style={{
                     order: visible() ? visibleIndex() : undefined,
                     "grid-column": multitasking() && visible()
