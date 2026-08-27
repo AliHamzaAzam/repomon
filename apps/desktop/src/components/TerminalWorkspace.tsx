@@ -220,16 +220,32 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     return missing.length ? [...warm, ...missing] : warm;
   });
 
-  createEffect(() => {
+  const syncViewport = () => {
     const visible = visibleTargets();
-    void daemonCall("viewport.set", {
+    return daemonCall("viewport.set", {
       lane_ids: [...new Set(visible.map((target) => target.laneId))],
       focus_lane: multitasking()
         ? visible.find((target) => target.window === activeWindow())?.laneId
         : props.fleet.selectedLaneId() ?? undefined,
       focus_window: activeWindow() ?? undefined,
+      fit_windows: visible.filter((target) => !target.shell).map((target) => target.window),
       windows: visible.filter((target) => target.shell).map((target) => target.window),
-    }).catch(() => undefined);
+    }).then(() => undefined).catch(() => undefined);
+  };
+
+  createEffect(() => {
+    // After the daemon installs this viewport's fit claims, retry local pane geometry. A first
+    // ResizeObserver callback can race the RPC during a layout switch and receive the old shared
+    // grid; this post-ack pass guarantees it is corrected against the now-authoritative claims.
+    void syncViewport().finally(() => notifyLayoutChanged());
+  });
+
+  onMount(() => {
+    // Keep multi-pane fit ownership fresh just like the TUI's viewport heartbeat. Without this,
+    // an unchanged desktop layout loses its 15s claim and a later resize can again be denied by a
+    // peer that continues heartbeating.
+    const timer = window.setInterval(() => void syncViewport(), 5_000);
+    onCleanup(() => window.clearInterval(timer));
   });
 
   const chooseLayout = props.workspace.chooseLayout;

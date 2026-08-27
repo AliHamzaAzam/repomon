@@ -37,9 +37,12 @@ pub struct ConnSession {
     /// Which agent window the focused lane streams (Tab in Focus/Split), if a specific session is
     /// selected. Lanes not named here stream their first slot.
     pub viewport_focus: Mutex<Option<(LaneId, String)>>,
+    /// Managed agent windows this connection renders concurrently and therefore needs to fit to
+    /// its own pane geometry. Unlike `viewport_focus`, this can contain every pane in a grid.
+    pub viewport_fit_windows: Mutex<Vec<String>>,
     /// When this connection last (re)asserted its viewport. The client heartbeats `viewport.set`
-    /// every few seconds; a focus is treated as size-owning (and cadence-boosting) only while this
-    /// is fresh, so a crashed or closed client releases its hold within seconds.
+    /// every few seconds; its focus and fit windows are size-owning only while this is fresh, so a
+    /// crashed or closed client releases its hold within seconds. Focus also boosts capture cadence.
     pub viewport_focus_at: Mutex<Option<Instant>>,
     /// Plain-terminal windows (`term-{lane}-{n}`) this connection has visible as Grid tiles.
     pub viewport_windows: Mutex<Vec<String>>,
@@ -69,6 +72,7 @@ impl ConnSession {
             kind,
             viewport: Mutex::new(Vec::new()),
             viewport_focus: Mutex::new(None),
+            viewport_fit_windows: Mutex::new(Vec::new()),
             viewport_focus_at: Mutex::new(None),
             viewport_windows: Mutex::new(Vec::new()),
             watched_bytes: std::sync::Mutex::new(HashSet::new()),
