@@ -124,7 +124,7 @@ export default function PanePicker(props: PanePickerProps) {
             <p class="mt-1 text-xs leading-relaxed text-muted">
               {props.multitasking
                 ? "Choose agents, set their footprint, and reorder the fleet view."
-                : "Choose which agents stay visible in split and grid layouts."}
+                : "Choose and reorder the agents visible in split and grid layouts."}
             </p>
           </div>
 
@@ -165,7 +165,7 @@ export default function PanePicker(props: PanePickerProps) {
                         </Show>
                       </div>
 
-                      <Show when={props.multitasking && selected()}>
+                      <Show when={selected()}>
                         <div class="flex shrink-0 items-center gap-0.5">
                           <button
                             type="button"
