@@ -150,7 +150,10 @@ export function createWorkspaceStore(fleet: FleetStore) {
     if (laneId === null) return [];
     return liveSelection(laneTargets(), lanePaneSelections()[String(laneId)]);
   });
-  const multitaskTargets = createMemo(() => liveSelection(targets(), multitaskSelection() ?? undefined, 4));
+  // 6, not 4: matches the cap `stableVisibleTargets` uses for non-multitasking grid layout, and
+  // the warm-cache capacity below. A lower default here just meant the fleet-wide view undershot
+  // what the fleet actually had running, with nothing about the mismatch visible to the user.
+  const multitaskTargets = createMemo(() => liveSelection(targets(), multitaskSelection() ?? undefined, 6));
 
   function setActiveWindow(window: string | null) {
     setActiveWindowSignal(window);

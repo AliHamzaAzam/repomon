@@ -143,3 +143,33 @@ describe("TerminalPane transport recovery", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
+
+describe("TerminalPane header containment (bug 5: header can disappear under high-throughput panes)", () => {
+  it("always mounts the header bar, and clips the terminal host to its own box below it", async () => {
+    watchTerminalMock.mockResolvedValue({
+      ack: { cols: 120, rows: 40, generation: 1, sequence: 9 },
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { container } = render(() => <TerminalPane laneId={7} window="lane-7-1" label="Codex" />);
+    await flushMicrotasks();
+
+    // Header render is unconditional in TerminalPane.tsx — no <Show> gates it — so it must
+    // always be present regardless of transport/view state.
+    expect(screen.getByText("Codex")).toBeInTheDocument();
+
+    const section = container.querySelector("section[aria-label='Codex']");
+    expect(section).not.toBeNull();
+    // Each pane gets its own stacking context, so a sibling pane's header/canvas can never win a
+    // paint-order tie against this one regardless of DOM position.
+    expect(section!.classList.contains("isolate")).toBe(true);
+
+    const host = container.querySelector(".terminal-host");
+    expect(host).not.toBeNull();
+    // The terminal host is clipped at its own box (starting below the h-7 header, `top-7`), not
+    // just at the section's full-pane bounds — so an oversized/mis-sized xterm canvas during a
+    // burst of live output can't paint upward over the header strip.
+    expect(host!.classList.contains("overflow-hidden")).toBe(true);
+    expect(host!.classList.contains("top-7")).toBe(true);
+  });
+});
