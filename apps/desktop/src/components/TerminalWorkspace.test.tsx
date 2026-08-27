@@ -121,6 +121,53 @@ async function mountedWorkspace(sessions: AgentSession[], terminals: Array<{ lan
 }
 
 describe("terminal workspace tab strip ordering and rename", () => {
+  it("keeps split/grid visibility scoped to the selected lane while fleet panes stay warm", async () => {
+    const current = lane([
+      session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),
+      session({ id: 2, agent: "claude-code", tmux_window: "lane-10-2", session_id: "s2" }),
+    ]);
+    const other: Lane = {
+      ...lane([session({ id: 3, agent: "opencode", tmux_window: "lane-20-1", session_id: "s3" })]),
+      id: 20,
+      repo: { ...current.repo, id: 2, name: "other", path: "/code/other" },
+      worktree: { ...current.worktree, id: 2, repo_id: 2, name: "feature", branch: "feature", path: "/code/other-feature" },
+    };
+    const source: FleetSource = {
+      load: () => Promise.resolve({
+        repos: [current.repo, other.repo],
+        lanes: [current, other],
+        usage: [],
+        terminals: [],
+        sortReposByActivity: false,
+        sortMode: "default",
+        tabSortMode: "activity",
+      }),
+      refreshUsage: () => Promise.resolve(),
+      subscribe: () => Promise.resolve(() => undefined),
+    };
+    const actions = { spawn: vi.fn(), stopAgent: vi.fn(), adoptAgent: vi.fn(), rename: vi.fn(), setAgentTabOrder: vi.fn() };
+    const { dispose } = await createRoot(async (dispose) => {
+      const fleet = createFleetStore(source);
+      const workspace = createWorkspaceStore(fleet);
+      fleet.start();
+      await waitFor(() => expect(fleet.synced()).toBe(true));
+      fleet.setSelectedLaneId(10);
+      workspace.chooseLayout("grid");
+      render(() => <TerminalWorkspace fleet={fleet} actions={actions as never} workspace={workspace} />);
+      return { dispose };
+    });
+
+    await waitFor(() => {
+      const viewportCalls = daemonCallMock.mock.calls.filter(([method]) => method === "viewport.set");
+      expect(viewportCalls[viewportCalls.length - 1]?.[1]).toMatchObject({ lane_ids: [10] });
+    });
+    const visiblePanes = [...document.querySelectorAll(".terminal-layout > div")]
+      .filter((element) => !element.classList.contains("warm-terminal-hidden"));
+    expect(visiblePanes).toHaveLength(2);
+    expect(visiblePanes.some((element) => element.querySelector("section")?.getAttribute("aria-label")?.includes("opencode"))).toBe(false);
+    dispose();
+  });
+
   it("drags a pill past its neighbor's midpoint to reorder, and commits on release", async () => {
     const { actions, dispose } = await mountedWorkspace([
       session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),

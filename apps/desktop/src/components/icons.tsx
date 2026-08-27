@@ -566,6 +566,29 @@ export function IconGrid(props: IconProps): JSX.Element {
   );
 }
 
+export function IconMultitask(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 13;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <rect x="3" y="4" width="8" height="7" rx="1.5" />
+      <rect x="13" y="4" width="8" height="11" rx="1.5" />
+      <rect x="3" y="13" width="8" height="7" rx="1.5" />
+      <path d="M15 19h4" />
+    </svg>
+  );
+}
+
 export function IconFocus(props: IconProps): JSX.Element {
   const s = () => props.size ?? 13;
   return (

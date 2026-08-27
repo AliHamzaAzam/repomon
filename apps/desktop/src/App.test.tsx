@@ -114,6 +114,28 @@ describe("Repomon desktop shell", () => {
     await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "false"));
   });
 
+  it("toggles the fleet-wide Multitasking workspace and hides the lane sidebar", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const button = within(container).getByRole("button", { name: "Multitasking" });
+    expect(button).toHaveAttribute("aria-pressed", "false");
+    expect(within(container).getByRole("navigation", { name: "Fleet" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "9", code: "Digit9", metaKey: true });
+    await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "true"));
+    expect(within(container).queryByRole("navigation", { name: "Fleet" })).not.toBeInTheDocument();
+    expect(within(container).getByText("Multitasking", { selector: ".section-label" })).toBeInTheDocument();
+
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "false"));
+    expect(within(container).getByRole("navigation", { name: "Fleet" })).toBeInTheDocument();
+  });
+
   it("opens settings on the system tab when the footer connection pill is clicked", async () => {
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "connected",

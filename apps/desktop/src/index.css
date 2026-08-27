@@ -163,6 +163,10 @@
   grid-template-columns: 18rem minmax(0, 1fr) var(--right-panel-width, 20rem);
 }
 
+.mission-grid.is-multitasking {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .repomind-panel {
   display: none;
   overflow: hidden;
@@ -206,6 +210,22 @@
 .terminal-layout.is-grid.count-1,
 .terminal-layout.is-grid.count-2 {
   grid-template-rows: minmax(0, 1fr);
+}
+
+.terminal-layout.is-multitasking {
+  grid-auto-flow: row dense;
+  grid-auto-rows: minmax(14rem, 1fr);
+  overflow: auto;
+  gap: 3px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--line) 75%, var(--background));
+}
+
+.multitask-pane {
+  position: relative;
+  overflow: hidden;
+  border-left: 3px solid var(--pane-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--pane-accent) 22%, var(--line));
 }
 
 .repomind-message {

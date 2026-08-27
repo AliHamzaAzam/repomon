@@ -1,5 +1,9 @@
 export interface PaneTarget {
   laneId: number;
+  repoId?: number;
+  repoName?: string;
+  laneName?: string;
+  branch?: string | null;
   window: string;
   label: string;
   shell: boolean;
@@ -8,6 +12,24 @@ export interface PaneTarget {
   /// UI action identity; managed transcript-less sessions use their tmux window.
   targetId: string | null;
   agent?: string | null;
+}
+
+const PANE_ACCENTS = [
+  "#2dd4bf",
+  "#60a5fa",
+  "#c084fc",
+  "#fb7185",
+  "#f59e0b",
+  "#84cc16",
+  "#22d3ee",
+  "#f97316",
+] as const;
+
+/// Stable lane color for the fleet-wide workspace. Repo id carries most of the grouping signal;
+/// lane id breaks ties so sibling worktrees remain distinguishable without changing on refresh.
+export function paneAccent(target: Pick<PaneTarget, "repoId" | "laneId">): string {
+  const seed = (target.repoId ?? 0) * 31 + target.laneId * 17;
+  return PANE_ACCENTS[Math.abs(seed) % PANE_ACCENTS.length];
 }
 
 export function dedupe(targets: PaneTarget[]): PaneTarget[] {
@@ -80,6 +102,10 @@ export function stabilizeTargets(
       return target;
     }
     prev.laneId = target.laneId;
+    prev.repoId = target.repoId;
+    prev.repoName = target.repoName;
+    prev.laneName = target.laneName;
+    prev.branch = target.branch;
     prev.label = target.label;
     prev.shell = target.shell;
     prev.sessionId = target.sessionId;

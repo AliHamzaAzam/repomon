@@ -1,5 +1,5 @@
-import { createRoot } from "solid-js";
-import { describe, expect, it, vi } from "vitest";
+import { createRoot, createSignal } from "solid-js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PaneTarget } from "../components/terminalTargets";
 import { createWorkspaceStore } from "./workspace";
@@ -21,6 +21,52 @@ function fleetStub(overrides: Partial<FleetStore> = {}): FleetStore {
     ...overrides,
   } as unknown as FleetStore;
 }
+
+function lane(id: number, windows: string[]): import("../bindings").Lane {
+  return {
+    id,
+    repo: { id, name: `repo-${id}`, path: `/repo-${id}`, added_at: "", worktree_root_template: null, hidden: false, position: null, label: null },
+    worktree: { id, repo_id: id, name: `lane-${id}`, branch: `lane-${id}`, path: `/repo-${id}/lane`, head: "abc", is_main: false },
+    state: { worktree_id: id, head: "abc", branch: `lane-${id}`, upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, last_change_at: null, locked: false, prunable: false },
+    agent_sessions: windows.map((window, index) => ({
+      id: id * 10 + index,
+      agent: "codex",
+      repo_id: id,
+      worktree_id: id,
+      started_at: "",
+      last_activity_at: "",
+      ended_at: null,
+      manifest_path: "",
+      tool_call_count: 0,
+      title: window,
+      status: "running",
+      external: false,
+      session_id: `session-${window}`,
+      resume_at: null,
+      inferred: false,
+      tmux_window: window,
+      last_message: null,
+      pending_prompt: null,
+      pending_dialog: null,
+      stale: false,
+      stalled_since: null,
+      subagent_running: null,
+      gate: null,
+      config_dir: null,
+      custom_label: null,
+      generated_label: null,
+    })),
+    last_activity_at: "",
+    pinned: false,
+  };
+}
+
+beforeEach(() => {
+  localStorage.removeItem("repomon.workspace.lane-panes.v1");
+  localStorage.removeItem("repomon.workspace.multitask-panes.v1");
+  localStorage.removeItem("repomon.workspace.multitask-columns");
+  localStorage.removeItem("repomon.workspace.multitask-spans.v1");
+});
 
 describe("workspace store", () => {
   it("cycles tabs with wraparound in both directions", () => {
@@ -75,7 +121,8 @@ describe("workspace store", () => {
       const ws = createWorkspaceStore(fleetStub({
         lanes: () => [{
           id: 7,
-          worktree: { name: "main", branch: "main", root: "/tmp", clean: true },
+          repo: { id: 7, name: "repo", label: null },
+          worktree: { name: "main", branch: "main" },
           state: "idle",
           agent_sessions: [
             { tmux_window: "lane-7-1", agent: "claude-code", session_id: "s1" },
@@ -95,6 +142,63 @@ describe("workspace store", () => {
 
       ws.unmarkClosing("lane-7-1");
       expect(ws.isClosing("lane-7-1")).toBe(false);
+      dispose();
+    });
+  });
+
+  it("keeps lane pane selections lane-scoped and persists them", () => {
+    createRoot((dispose) => {
+      const [selectedLaneId] = createSignal<number | null>(7);
+      const ws = createWorkspaceStore(fleetStub({
+        selectedLaneId,
+        lanes: () => [lane(7, ["a", "b", "new"]), lane(8, ["other"])],
+      }));
+
+      ws.setLanePaneSelection(7, ["b", "a"]);
+      expect(ws.selectedLaneTargets().map((item) => item.window)).toEqual(["b", "a"]);
+      expect(ws.selectedLaneTargets().some((item) => item.window === "other")).toBe(false);
+      expect(localStorage.getItem("repomon.workspace.lane-panes.v1")).toBe('{"7":["b","a"]}');
+      dispose();
+    });
+  });
+
+  it("restores the last viewed live agent independently for each lane", async () => {
+    await createRoot(async (dispose) => {
+      const [selectedLaneId, setSelectedLaneId] = createSignal<number | null>(7);
+      const ws = createWorkspaceStore(fleetStub({
+        selectedLaneId,
+        lanes: () => [lane(7, ["a1", "a2"]), lane(8, ["b1", "b2"])],
+      }));
+
+      expect(ws.activeWindow()).toBe("a1");
+      ws.setActiveWindow("a2");
+      setSelectedLaneId(8);
+      await Promise.resolve();
+      expect(ws.activeWindow()).toBe("b1");
+      ws.setActiveWindow("b2");
+      setSelectedLaneId(7);
+      await Promise.resolve();
+      expect(ws.activeWindow()).toBe("a2");
+      setSelectedLaneId(8);
+      await Promise.resolve();
+      expect(ws.activeWindow()).toBe("b2");
+      dispose();
+    });
+  });
+
+  it("persists fleet-wide multitasking order, columns, and pane footprints", () => {
+    createRoot((dispose) => {
+      const ws = createWorkspaceStore(fleetStub({
+        lanes: () => [lane(7, ["a", "b"]), lane(8, ["c"])],
+      }));
+
+      ws.setMultitaskPaneSelection(["c", "a"]);
+      ws.setMultitaskColumns(3);
+      ws.setMultitaskSpan("c", { columns: 2, rows: 2 });
+      expect(ws.multitaskTargets().map((item) => item.window)).toEqual(["c", "a"]);
+      expect(ws.multitaskColumns()).toBe(3);
+      expect(ws.multitaskSpans().c).toEqual({ columns: 2, rows: 2 });
+      expect(localStorage.getItem("repomon.workspace.multitask-panes.v1")).toBe('["c","a"]');
       dispose();
     });
   });

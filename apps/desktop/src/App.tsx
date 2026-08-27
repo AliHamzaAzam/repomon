@@ -34,7 +34,7 @@ import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
-import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconSettings, IconShield, IconSparkles } from "./components/icons";
+import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -195,6 +195,14 @@ function App(props: AppProps) {
     notifyLayoutChanged();
   });
 
+  createEffect(() => {
+    if (!workspace.multitasking()) return;
+    setExtensionsOpen(false);
+    setRepomindOpen(false);
+    setRepomindFull(false);
+    persistRepomindOpen(false);
+  });
+
   // Shared open/switch/toggle-close behavior for the git, editor, and supervision right-rail
   // tabs, used by both the mod+3 / mod+7 / mod+8 shortcuts and their header icon-button
   // counterparts (item 4) so the entry points can never drift apart.
@@ -236,6 +244,7 @@ function App(props: AppProps) {
     switch (binding.id) {
       case "panel.control": actions.toggleControl(); break;
       case "panel.settings": actions.openSettings(); break;
+      case "panel.multitasking": workspace.toggleMultitasking(); break;
       case "panel.extensions": setExtensionsOpen((open) => !open); break;
       case "panel.git": openPanelTab("git"); break;
       case "panel.editor": openPanelTab("editor"); break;
@@ -396,6 +405,21 @@ function App(props: AppProps) {
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              workspace.multitasking()
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={workspace.toggleMultitasking}
+            aria-pressed={workspace.multitasking()}
+            title="Multitasking (⌘9)"
+          >
+            <IconMultitask size={13} />
+            <span>Multitasking</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
               repomindOpen() && rightPanelTab() === "git"
                 ? "text-signal font-semibold"
                 : "text-muted hover:text-foreground"
@@ -505,8 +529,9 @@ function App(props: AppProps) {
         </div>
       </Show>
 
-      <div class={`mission-grid ${repomindOpen() ? "is-repomind-open" : ""}`}>
-        <nav
+      <div class={`mission-grid ${repomindOpen() ? "is-repomind-open" : ""} ${workspace.multitasking() ? "is-multitasking" : ""}`}>
+        <Show when={!workspace.multitasking()}>
+          <nav
           aria-label="Fleet"
           class="flex min-h-0 flex-col border-r border-line bg-surface outline-none"
           tabIndex={0}
@@ -528,7 +553,8 @@ function App(props: AppProps) {
               setExtensionsOpen(true);
             }}
           />
-        </nav>
+          </nav>
+        </Show>
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
           <div
