@@ -202,4 +202,20 @@ describe("workspace store", () => {
       dispose();
     });
   });
+
+  it("keeps the unconfigured multitasking fallback stable across activity reordering", () => {
+    createRoot((dispose) => {
+      const first = lane(7, ["a", "b"]);
+      const second = lane(8, ["c", "d"]);
+      const [lanes, setLanes] = createSignal([first, second]);
+      const ws = createWorkspaceStore(fleetStub({ lanes }));
+
+      expect(ws.multitaskTargets().map((item) => item.window)).toEqual(["a", "b", "c", "d"]);
+      // Activity sorting in the fleet can reverse lane order between polls. The default grid
+      // should keep its established window positions until the user explicitly reorders it.
+      setLanes([second, first]);
+      expect(ws.multitaskTargets().map((item) => item.window)).toEqual(["a", "b", "c", "d"]);
+      dispose();
+    });
+  });
 });

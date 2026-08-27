@@ -150,10 +150,24 @@ export function createWorkspaceStore(fleet: FleetStore) {
     if (laneId === null) return [];
     return liveSelection(laneTargets(), lanePaneSelections()[String(laneId)]);
   });
-  // 6, not 4: matches the cap `stableVisibleTargets` uses for non-multitasking grid layout, and
-  // the warm-cache capacity below. A lower default here just meant the fleet-wide view undershot
-  // what the fleet actually had running, with nothing about the mismatch visible to the user.
-  const multitaskTargets = createMemo(() => liveSelection(targets(), multitaskSelection() ?? undefined, 6));
+  // Until the user saves a picker order, retain the first live order we saw and only append/remove
+  // windows. `fleet.lanes()` may be activity-sorted and is rebuilt on every poll; slicing it
+  // directly made every pane jump when another agent emitted output. Once configured, the saved
+  // selection remains the authority and `liveSelection` filters out stopped agents.
+  const multitaskTargets = createMemo<PaneTarget[]>((previous) => {
+    const available = targets();
+    const saved = multitaskSelection();
+    if (saved !== null) return liveSelection(available, saved, 6);
+
+    const byWindow = new Map(available.map((target) => [target.window, target]));
+    const retained = previous.flatMap((target) => {
+      const live = byWindow.get(target.window);
+      return live ? [live] : [];
+    });
+    const retainedWindows = new Set(retained.map((target) => target.window));
+    const appended = available.filter((target) => !retainedWindows.has(target.window));
+    return [...retained, ...appended].slice(0, 6);
+  }, []);
 
   function setActiveWindow(window: string | null) {
     setActiveWindowSignal(window);

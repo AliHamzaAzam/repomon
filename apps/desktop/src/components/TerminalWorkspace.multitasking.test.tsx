@@ -172,6 +172,29 @@ describe("TerminalWorkspace multitasking: every selected pane is actually mounte
     dispose();
   });
 
+  it("keeps proactively warmed non-selected terminals out of grid flow", async () => {
+    const laneA = mkLane(10, Array.from({ length: 8 }, (_, index) => session({
+      id: index + 1,
+      tmux_window: `lane-10-${index + 1}`,
+      session_id: `s${index + 1}`,
+    })));
+    const { workspace, dispose } = await mountFleet([laneA], { multitasking: true });
+    workspace.setMultitaskPaneSelection(["lane-10-1", "lane-10-2"]);
+
+    await settle(() => expect(paneWrapperDivs().length).toBeGreaterThan(2));
+    const hidden = paneWrapperDivs().filter((pane) => pane.classList.contains("warm-terminal-hidden"));
+    expect(hidden.length).toBeGreaterThan(0);
+    for (const pane of hidden) {
+      // This is the exact cascade that regressed live: hidden wrappers also carried
+      // `.multitask-pane`, whose later `position: relative` overrode the absolute warm rule.
+      expect(pane.classList.contains("multitask-pane")).toBe(false);
+      expect(pane.style.gridColumn).toBe("");
+      expect(pane.getAttribute("aria-hidden")).toBe("true");
+    }
+    expect(visiblePaneWrapperDivs()).toHaveLength(2);
+    dispose();
+  });
+
   it("keeps every visible pane mounted through a picker selection change to previously-unmounted agents", async () => {
     const laneA = mkLane(10, [
       session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),

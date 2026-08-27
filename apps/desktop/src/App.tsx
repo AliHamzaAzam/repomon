@@ -207,6 +207,9 @@ function App(props: AppProps) {
   // tabs, used by both the mod+3 / mod+7 / mod+8 shortcuts and their header icon-button
   // counterparts (item 4) so the entry points can never drift apart.
   const openPanelTab = (id: "repomind" | "git" | "editor" | "supervision") => {
+    // The right rail and fleet-wide grid use mutually exclusive mission-grid column models.
+    // Entering multitasking already closes the rail above; make opening a rail tab symmetric.
+    workspace.setMultitasking(false);
     if (!repomindOpen()) {
       // Closed → open already on the requested tab. RightPanelHost consults `requestTab.id` on its
       // very first render, so bumping this in the same tick as opening is enough — no need to wait
@@ -245,7 +248,10 @@ function App(props: AppProps) {
       case "panel.control": actions.toggleControl(); break;
       case "panel.settings": actions.openSettings(); break;
       case "panel.multitasking": workspace.toggleMultitasking(); break;
-      case "panel.extensions": setExtensionsOpen((open) => !open); break;
+      case "panel.extensions":
+        workspace.setMultitasking(false);
+        setExtensionsOpen((open) => !open);
+        break;
       case "panel.git": openPanelTab("git"); break;
       case "panel.editor": openPanelTab("editor"); break;
       case "panel.supervision": openPanelTab("supervision"); break;
@@ -253,6 +259,7 @@ function App(props: AppProps) {
         openPanelTab("repomind");
         break;
       case "panel.repomindFull":
+        workspace.setMultitasking(false);
         if (!repomindFull()) {
           setRepomindOpen(true);
           persistRepomindOpen(true);
@@ -456,7 +463,10 @@ function App(props: AppProps) {
                 ? "text-signal font-semibold"
                 : "text-muted hover:text-foreground"
             }`}
-            onClick={() => setExtensionsOpen(!extensionsOpen())}
+            onClick={() => {
+              workspace.setMultitasking(false);
+              setExtensionsOpen(!extensionsOpen());
+            }}
             aria-pressed={extensionsOpen()}
             title="Extensions (⌘4)"
           >
