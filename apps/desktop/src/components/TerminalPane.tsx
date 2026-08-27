@@ -638,13 +638,21 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
   return (
     <section
-      class="relative h-full min-h-0 overflow-hidden bg-background"
+      class="relative isolate h-full min-h-0 overflow-hidden bg-background"
       style={{ "background-color": paneBg() || undefined }}
       aria-label={props.label}
     >
+      {/* `overflow-hidden` here (in addition to the section's own) gives xterm's canvas a clip
+          boundary at exactly `top-7` — the header's own edge — instead of only the section's
+          full-pane bounds. The section-level clip alone still lets an oversized/mis-sized canvas
+          (a resize race during a burst of live output, or a WebGL layer-promotion quirk) paint
+          upward into the header's reserved strip, since that's still "inside" the section as far
+          as that clip is concerned. `isolate` on the section above pins the header's z-10 (and
+          this container's implicit stacking) to a stacking context scoped to this pane, so it
+          can't be beaten by paint-order quirks from a sibling pane's own canvas either. */}
       <div
         ref={container}
-        class={`terminal-host absolute inset-x-2 bottom-0 top-7 ${view() === "live" ? "" : "invisible pointer-events-none"}`}
+        class={`terminal-host absolute inset-x-2 bottom-0 top-7 overflow-hidden ${view() === "live" ? "" : "invisible pointer-events-none"}`}
         style={{ "background-color": paneBg() || undefined }}
         aria-hidden={view() !== "live"}
       />
