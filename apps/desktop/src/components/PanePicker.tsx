@@ -1,4 +1,5 @@
-import { For, Show, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createSignal, createUniqueId, onCleanup, onMount, type JSX } from "solid-js";
+import { Portal } from "solid-js/web";
 
 import type { PaneSpan } from "../stores/workspace";
 import { paneAccent, type PaneTarget } from "./terminalTargets";
@@ -15,21 +16,50 @@ interface PanePickerProps {
 
 export default function PanePicker(props: PanePickerProps) {
   let root: HTMLDivElement | undefined;
+  let trigger: HTMLButtonElement | undefined;
+  let dialog: HTMLElement | undefined;
   const [open, setOpen] = createSignal(false);
+  const [dialogStyle, setDialogStyle] = createSignal<JSX.CSSProperties>({});
+  const dialogId = createUniqueId();
   const selectedWindows = () => props.selected.map((target) => target.window);
 
   const closeOnOutside = (event: PointerEvent) => {
-    if (root && !root.contains(event.target as Node)) setOpen(false);
+    const target = event.target as Node;
+    if (root && !root.contains(target) && !dialog?.contains(target)) setOpen(false);
   };
 
   const toggleOpen = () => {
-    const next = !open();
-    setOpen(next);
-    if (next) document.addEventListener("pointerdown", closeOnOutside);
-    else document.removeEventListener("pointerdown", closeOnOutside);
+    setOpen((value) => !value);
   };
 
-  onCleanup(() => document.removeEventListener("pointerdown", closeOnOutside));
+  const positionDialog = () => {
+    if (!open() || !trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const viewportPadding = 8;
+    const width = Math.min(384, window.innerWidth - viewportPadding * 2);
+    setDialogStyle({
+      top: `${rect.bottom + 8}px`,
+      left: `${Math.max(viewportPadding, Math.min(rect.right - width, window.innerWidth - width - viewportPadding))}px`,
+      width: `${width}px`,
+      "max-height": `${Math.max(160, window.innerHeight - rect.bottom - 16)}px`,
+    });
+  };
+
+  onMount(() => {
+    window.addEventListener("pointerdown", closeOnOutside);
+    window.addEventListener("resize", positionDialog);
+    window.addEventListener("scroll", positionDialog, true);
+  });
+
+  onCleanup(() => {
+    window.removeEventListener("pointerdown", closeOnOutside);
+    window.removeEventListener("resize", positionDialog);
+    window.removeEventListener("scroll", positionDialog, true);
+  });
+
+  createEffect(() => {
+    if (open()) positionDialog();
+  });
 
   const toggle = (target: PaneTarget) => {
     const current = selectedWindows();
@@ -54,15 +84,25 @@ export default function PanePicker(props: PanePickerProps) {
   const spanOf = (window: string): PaneSpan => props.spans?.[window] ?? { columns: 1, rows: 1 };
 
   return (
-    <div ref={root} class="relative">
+    <div ref={root} class="relative shrink-0">
       <button
+        ref={trigger}
         type="button"
         class={`focus-ring flex h-6 items-center gap-1.5 rounded-md border px-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
           open() ? "border-signal/50 bg-signal/10 text-signal" : "border-line bg-raised/40 text-muted hover:bg-raised hover:text-foreground"
         }`}
         aria-haspopup="dialog"
         aria-expanded={open()}
+        aria-controls={open() ? dialogId : undefined}
+        aria-label={props.multitasking ? "Configure multitasking panes" : "Configure lane panes"}
         onClick={toggleOpen}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && open()) {
+            event.preventDefault();
+            setOpen(false);
+            trigger?.focus();
+          }
+        }}
       >
         <IconGrid size={11} />
         <span>Panes</span>
@@ -70,11 +110,15 @@ export default function PanePicker(props: PanePickerProps) {
       </button>
 
       <Show when={open()}>
-        <section
-          role="dialog"
-          aria-label={props.multitasking ? "Choose multitasking panes" : "Choose lane panes"}
-          class="absolute right-0 top-8 z-[60] w-[24rem] overflow-hidden rounded-xl border border-line bg-surface shadow-[0_18px_55px_var(--shadow)]"
-        >
+        <Portal>
+          <section
+            ref={dialog}
+            id={dialogId}
+            role="dialog"
+            aria-label={props.multitasking ? "Choose multitasking panes" : "Choose lane panes"}
+            style={dialogStyle()}
+            class="fixed z-[100] flex flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-[0_18px_55px_var(--shadow)]"
+          >
           <div class="border-b border-line bg-raised/30 px-3.5 py-3">
             <p class="section-label">{props.multitasking ? "Fleet workspace" : "Lane workspace"}</p>
             <p class="mt-1 text-xs leading-relaxed text-muted">
@@ -84,7 +128,7 @@ export default function PanePicker(props: PanePickerProps) {
             </p>
           </div>
 
-          <div class="max-h-[25rem] overflow-y-auto p-1.5">
+          <div class="min-h-0 overflow-y-auto p-1.5">
             <For each={props.available}>
               {(target) => {
                 const selected = () => selectedWindows().includes(target.window);
@@ -176,7 +220,8 @@ export default function PanePicker(props: PanePickerProps) {
               }}
             </For>
           </div>
-        </section>
+          </section>
+        </Portal>
       </Show>
     </div>
   );

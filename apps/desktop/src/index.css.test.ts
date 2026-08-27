@@ -82,4 +82,17 @@ describe("index.css multitasking grid row sizing", () => {
     expect(computed.isolation).toBe("isolate");
     el.remove();
   });
+
+  it("takes warmed multitasking panes completely out of grid flow", () => {
+    const grid = elementWithClasses("terminal-layout is-grid is-multitasking");
+    const pane = document.createElement("div");
+    pane.className = "warm-terminal-hidden";
+    grid.appendChild(pane);
+
+    const computed = getComputedStyle(pane);
+    expect(computed.position).toBe("absolute");
+    expect(computed.visibility).toBe("hidden");
+    expect(getComputedStyle(grid).gridAutoFlow).toBe("row");
+    grid.remove();
+  });
 });

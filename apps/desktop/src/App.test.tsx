@@ -136,6 +136,29 @@ describe("Repomon desktop shell", () => {
     expect(within(container).getByRole("navigation", { name: "Fleet" })).toBeInTheDocument();
   });
 
+  it("exits Multitasking before opening every right-rail panel", async () => {
+    localStorage.setItem("repomon.repomind_open", "false");
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const multitasking = within(container).getByRole("button", { name: "Multitasking" });
+    for (const panel of ["Git", "Editor", "Supervision", "Repomind"]) {
+      if (multitasking.getAttribute("aria-pressed") !== "true") fireEvent.click(multitasking);
+      await waitFor(() => expect(multitasking).toHaveAttribute("aria-pressed", "true"));
+      const panelButton = within(container).getByRole("button", { name: panel });
+      fireEvent.click(panelButton);
+      await waitFor(() => {
+        expect(multitasking).toHaveAttribute("aria-pressed", "false");
+        expect(panelButton).toHaveAttribute("aria-pressed", "true");
+      });
+    }
+    localStorage.setItem("repomon.repomind_open", "false");
+  });
+
   it("opens settings on the system tab when the footer connection pill is clicked", async () => {
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "connected",

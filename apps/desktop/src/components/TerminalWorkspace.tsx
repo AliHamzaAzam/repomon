@@ -664,7 +664,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               ));
               return (
                 <div
-                  class={`min-h-0 min-w-0 border-line transition-all duration-200 ${multitasking() ? "multitask-pane" : ""} ${
+                  class={`min-h-0 min-w-0 border-line transition-[opacity,transform,box-shadow] duration-200 ${multitasking() && visible() ? "multitask-pane" : ""} ${
                     visible() ? "" : "warm-terminal-hidden"
                   } ${closing() ? "pointer-events-none opacity-0 scale-[0.98]" : ""} ${
                     isActivePane() ? "is-active-pane ring-1 ring-inset ring-signal/60" : ""
