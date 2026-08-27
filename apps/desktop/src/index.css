@@ -224,8 +224,7 @@
 .multitask-pane {
   position: relative;
   overflow: hidden;
-  border-left: 3px solid var(--pane-accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--pane-accent) 22%, var(--line));
+  border-left: 2px solid var(--pane-accent);
 }
 
 .repomind-message {
