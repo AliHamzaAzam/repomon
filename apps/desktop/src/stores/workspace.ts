@@ -13,6 +13,48 @@ import type { FleetStore } from "./fleet";
 
 export type WorkspaceLayout = "auto" | "focused" | "split" | "grid";
 
+export interface PaneSpan {
+  columns: number;
+  rows: number;
+}
+
+const LANE_PANES_KEY = "repomon.workspace.lane-panes.v1";
+const MULTITASK_PANES_KEY = "repomon.workspace.multitask-panes.v1";
+const MULTITASK_COLUMNS_KEY = "repomon.workspace.multitask-columns";
+const MULTITASK_SPANS_KEY = "repomon.workspace.multitask-spans.v1";
+
+function readRecord<T>(key: string): Record<string, T> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, T>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function persist(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
+function liveSelection(
+  available: PaneTarget[],
+  saved: string[] | undefined,
+  fallbackLimit?: number,
+): PaneTarget[] {
+  if (!Array.isArray(saved)) return fallbackLimit ? available.slice(0, fallbackLimit) : available;
+  const byWindow = new Map(available.map((target) => [target.window, target]));
+  const selected = saved.flatMap((window) => {
+    const target = byWindow.get(window);
+    return target ? [target] : [];
+  });
+  if (selected.length) return selected;
+  return fallbackLimit ? available.slice(0, fallbackLimit) : available;
+}
+
 function readLayout(): WorkspaceLayout {
   const value = localStorage.getItem("repomon.workspace.layout");
   return value === "auto" || value === "split" || value === "grid" || value === "focused" ? value : "auto";
@@ -31,7 +73,27 @@ function readRenderer(): TerminalRenderer {
 export function createWorkspaceStore(fleet: FleetStore) {
   const [layout, setLayout] = createSignal<WorkspaceLayout>(readLayout());
   const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
-  const [activeWindow, setActiveWindow] = createSignal<string | null>(null);
+  const [activeWindow, setActiveWindowSignal] = createSignal<string | null>(null);
+  const [multitasking, setMultitasking] = createSignal(false);
+  const [lanePaneSelections, setLanePaneSelections] = createSignal<Record<string, string[]>>(
+    readRecord<string[]>(LANE_PANES_KEY),
+  );
+  const [multitaskSelection, setMultitaskSelection] = createSignal<string[] | null>((() => {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(MULTITASK_PANES_KEY) ?? "null");
+      return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : null;
+    } catch {
+      return null;
+    }
+  })());
+  const [multitaskColumns, setMultitaskColumnsSignal] = createSignal((() => {
+    const value = Number(localStorage.getItem(MULTITASK_COLUMNS_KEY));
+    return value >= 1 && value <= 3 ? value : 2;
+  })());
+  const [multitaskSpans, setMultitaskSpans] = createSignal<Record<string, PaneSpan>>(
+    readRecord<PaneSpan>(MULTITASK_SPANS_KEY),
+  );
+  const lastWindowByLane = new Map<number, string>();
 
   // The fleet store attributes account usage to the agent in view, so it needs to know which pane
   // that is. This store owns the tab state, so mirror it across rather than duplicating the state.
@@ -54,6 +116,10 @@ export function createWorkspaceStore(fleet: FleetStore) {
   const targets = createMemo(() => stabilizeTargets(targetCache, dedupe(lanes().flatMap((lane) => [
     ...lane.agent_sessions.flatMap((agent): PaneTarget[] => agent.tmux_window ? [{
       laneId: lane.id,
+      repoId: lane.repo.id,
+      repoName: lane.repo.label || lane.repo.name,
+      laneName: lane.worktree.name,
+      branch: lane.worktree.branch,
       window: agent.tmux_window,
       label: agentLabel(agent),
       shell: false,
@@ -65,6 +131,10 @@ export function createWorkspaceStore(fleet: FleetStore) {
       .filter((terminal) => terminal.lane_id === lane.id)
       .map((terminal): PaneTarget => ({
         laneId: lane.id,
+        repoId: lane.repo.id,
+        repoName: lane.repo.label || lane.repo.name,
+        laneName: lane.worktree.name,
+        branch: lane.worktree.branch,
         window: terminal.id,
         label: `shell ${terminal.id.split("-").slice(-1)[0]}`,
         shell: true,
@@ -75,6 +145,79 @@ export function createWorkspaceStore(fleet: FleetStore) {
   ]))), undefined, { equals: sameTargets });
 
   const laneTargets = createMemo(() => targets().filter((target) => target.laneId === fleet.selectedLaneId()));
+  const selectedLaneTargets = createMemo(() => {
+    const laneId = fleet.selectedLaneId();
+    if (laneId === null) return [];
+    return liveSelection(laneTargets(), lanePaneSelections()[String(laneId)]);
+  });
+  const multitaskTargets = createMemo(() => liveSelection(targets(), multitaskSelection() ?? undefined, 4));
+
+  function setActiveWindow(window: string | null) {
+    setActiveWindowSignal(window);
+    const target = targets().find((item) => item.window === window);
+    if (target && !target.shell) lastWindowByLane.set(target.laneId, target.window);
+  }
+
+  let previousLaneId: number | null | undefined;
+  createRenderEffect(() => {
+    const laneId = fleet.selectedLaneId();
+    const available = laneTargets();
+    const active = activeWindow();
+    if (laneId !== previousLaneId) {
+      const remembered = laneId === null ? null : lastWindowByLane.get(laneId);
+      const desired = available.find((target) => target.window === active)?.window
+        ?? available.find((target) => target.window === remembered)?.window
+        ?? available[0]?.window
+        ?? null;
+      setActiveWindowSignal(desired);
+      const desiredTarget = available.find((target) => target.window === desired);
+      if (laneId !== null && desiredTarget && !desiredTarget.shell) {
+        lastWindowByLane.set(laneId, desiredTarget.window);
+      }
+      previousLaneId = laneId;
+      return;
+    }
+    const activeTarget = available.find((target) => target.window === active);
+    if (laneId !== null && activeTarget && !activeTarget.shell) {
+      lastWindowByLane.set(laneId, activeTarget.window);
+    } else if (laneId !== null && available.length && (!active || !targets().some((target) => target.window === active))) {
+      setActiveWindow(available[0].window);
+    }
+  });
+
+  function setLanePaneSelection(laneId: number, windows: string[]) {
+    const next = { ...lanePaneSelections(), [String(laneId)]: [...new Set(windows)] };
+    setLanePaneSelections(next);
+    persist(LANE_PANES_KEY, next);
+  }
+
+  function setMultitaskPaneSelection(windows: string[]) {
+    const next = [...new Set(windows)];
+    setMultitaskSelection(next);
+    persist(MULTITASK_PANES_KEY, next);
+  }
+
+  function setMultitaskColumns(columns: number) {
+    const next = Math.max(1, Math.min(3, Math.round(columns)));
+    setMultitaskColumnsSignal(next);
+    try { localStorage.setItem(MULTITASK_COLUMNS_KEY, String(next)); } catch {}
+  }
+
+  function setMultitaskSpan(window: string, span: PaneSpan) {
+    const next = {
+      ...multitaskSpans(),
+      [window]: {
+        columns: Math.max(1, Math.min(3, Math.round(span.columns))),
+        rows: Math.max(1, Math.min(2, Math.round(span.rows))),
+      },
+    };
+    setMultitaskSpans(next);
+    persist(MULTITASK_SPANS_KEY, next);
+  }
+
+  function toggleMultitasking() {
+    setMultitasking((value) => !value);
+  }
 
   function chooseLayout(next: WorkspaceLayout) {
     setLayout(next);
@@ -161,8 +304,21 @@ export function createWorkspaceStore(fleet: FleetStore) {
     chooseRenderer,
     activeWindow,
     setActiveWindow,
+    multitasking,
+    setMultitasking,
+    toggleMultitasking,
     targets,
     laneTargets,
+    selectedLaneTargets,
+    lanePaneSelections,
+    setLanePaneSelection,
+    multitaskTargets,
+    multitaskSelection,
+    setMultitaskPaneSelection,
+    multitaskColumns,
+    setMultitaskColumns,
+    multitaskSpans,
+    setMultitaskSpan,
     cycleTab,
     openShell,
     closingWindows,

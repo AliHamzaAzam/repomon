@@ -68,6 +68,7 @@ describe("matchChord", () => {
 
   it("still matches unshifted digit chords", () => {
     expect(matchChord(key({ key: "4", code: "Digit4", metaKey: true }), "mac")?.id).toBe("panel.extensions");
+    expect(matchChord(key({ key: "9", code: "Digit9", metaKey: true }), "mac")?.id).toBe("panel.multitasking");
   });
 });
 

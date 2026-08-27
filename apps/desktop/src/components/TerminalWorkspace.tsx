@@ -6,11 +6,13 @@ import type { FleetStore } from "../stores/fleet";
 import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import { notifyLayoutChanged } from "../stores/uiSettings";
 import Select from "./controls/Select";
+import PanePicker from "./PanePicker";
 import { agentLabel } from "./agentLabel";
 import { agentSessionOrderKey, agentSessionTargetId } from "./agentIdentity";
 import { agentSessionTitle } from "./LaneAgentRosterPopover";
 import { createPointerReorder } from "./pointerReorder";
 import {
+  paneAccent,
   stableVisibleTargets,
   warmTargetWindows,
   type PaneTarget,
@@ -73,6 +75,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const setActiveWindow = props.workspace.setActiveWindow;
   const targets = () => props.workspace.targets();
   const laneTargets = () => props.workspace.laneTargets();
+  const selectedLaneTargets = () => props.workspace.selectedLaneTargets();
+  const multitasking = () => props.workspace.multitasking();
 
   // Manual tab mode (settings): agent pills drag-to-reorder, right-click renames. Shells are
   // plain terminals and stay out of both. The optimistic order holds the strip steady until the
@@ -158,25 +162,20 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   });
   const labelOf = (target: PaneTarget) => labelByWindow().get(target.window) ?? target.label;
 
-  createEffect(() => {
-    const available = laneTargets();
-    if (!available.some((target) => target.window === activeWindow())) {
-      setActiveWindow(available[0]?.window ?? null);
-    }
-  });
-
   const effectiveLayout = createMemo(() => {
+    if (multitasking()) return "grid" as const;
     const l = layout();
     if (l !== "auto") return l;
-    const count = laneTargets().length;
+    const count = selectedLaneTargets().length;
     if (count <= 1) return "focused";
     if (count === 2) return "split";
     return "grid";
   });
 
   const visibleTargets = createMemo(() => {
-    const all = targets();
-    const active = all.find((target) => target.window === activeWindow()) ?? laneTargets()[0];
+    if (multitasking()) return props.workspace.multitaskTargets();
+    const all = selectedLaneTargets();
+    const active = laneTargets().find((target) => target.window === activeWindow()) ?? laneTargets()[0];
     if (!active) return [];
     const eff = effectiveLayout();
     if (eff === "focused") return [active];
@@ -187,7 +186,12 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   createEffect(() => {
     const available = targets();
     const visible = visibleTargets();
-    setWarmWindows((previous) => warmTargetWindows(previous, visible, available));
+    setWarmWindows((previous) => warmTargetWindows(
+      previous,
+      visible,
+      available,
+      multitasking() ? Math.max(6, visible.length) : 6,
+    ));
   });
 
   createEffect(() => {
@@ -210,7 +214,9 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     const visible = visibleTargets();
     void daemonCall("viewport.set", {
       lane_ids: [...new Set(visible.map((target) => target.laneId))],
-      focus_lane: props.fleet.selectedLaneId() ?? undefined,
+      focus_lane: multitasking()
+        ? visible.find((target) => target.window === activeWindow())?.laneId
+        : props.fleet.selectedLaneId() ?? undefined,
       focus_window: activeWindow() ?? undefined,
       windows: visible.filter((target) => target.shell).map((target) => target.window),
     }).catch(() => undefined);
@@ -283,8 +289,45 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   return (
     <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)] bg-background">
       <div class="flex h-10 shrink-0 min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
+        <Show when={multitasking()}>
+          <div class="flex min-w-0 flex-1 items-center gap-3">
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="section-label text-foreground">Multitasking</span>
+              <span class="truncate font-mono text-[9px] uppercase tracking-wider text-muted">
+                {new Set(visibleTargets().map((target) => target.laneId)).size} lanes · {visibleTargets().length} panes
+              </span>
+            </div>
+            <div class="ml-auto flex shrink-0 items-center gap-2">
+              <div class="flex items-center rounded-md border border-line bg-raised/35 p-0.5" role="group" aria-label="Multitasking columns">
+                <For each={[1, 2, 3]}>
+                  {(columns) => (
+                    <button
+                      type="button"
+                      class={`focus-ring flex size-5 items-center justify-center rounded font-mono text-[9px] transition-colors ${
+                        props.workspace.multitaskColumns() === columns
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted hover:text-foreground"
+                      }`}
+                      aria-label={`${columns} multitasking ${columns === 1 ? "column" : "columns"}`}
+                      aria-pressed={props.workspace.multitaskColumns() === columns}
+                      onClick={() => props.workspace.setMultitaskColumns(columns)}
+                    >{columns}</button>
+                  )}
+                </For>
+              </div>
+              <PanePicker
+                multitasking
+                available={targets()}
+                selected={props.workspace.multitaskTargets()}
+                spans={props.workspace.multitaskSpans()}
+                onChange={props.workspace.setMultitaskPaneSelection}
+                onSpanChange={props.workspace.setMultitaskSpan}
+              />
+            </div>
+          </div>
+        </Show>
         {/* Scrollable Tab Strip Container with Edge Masks and Overflow Controls */}
-        <div class="relative flex min-w-0 flex-1 items-center">
+        <div class={`relative min-w-0 flex-1 items-center ${multitasking() ? "hidden" : "flex"}`}>
           <Show when={canScrollLeft()}>
             <div class="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-16 items-center bg-gradient-to-r from-surface from-40% via-surface/70 to-transparent pl-0.5">
               <button
@@ -427,7 +470,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </Show>
         </div>
 
-        <div class="ml-3 flex shrink-0 items-center">
+        <div class={`ml-3 shrink-0 items-center ${multitasking() ? "hidden" : "flex"}`}>
           <div class="flex items-center" role="group" aria-label="Layout view mode">
             <button
               type="button"
@@ -471,6 +514,17 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               <IconGrid size={13} />
             </button>
           </div>
+
+          <span class="h-3.5 w-px bg-line/60 mx-1.5" aria-hidden="true" />
+
+          <PanePicker
+            available={laneTargets()}
+            selected={selectedLaneTargets()}
+            onChange={(windows) => {
+              const laneId = props.fleet.selectedLaneId();
+              if (laneId !== null) props.workspace.setLanePaneSelection(laneId, windows);
+            }}
+          />
 
           <span class="h-3.5 w-px bg-line/60 mx-1.5" aria-hidden="true" />
 
@@ -578,7 +632,12 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
           </div>
         }
       >
-        <div class={`terminal-layout is-${effectiveLayout()} count-${visibleTargets().length}`}>
+        <div
+          class={`terminal-layout is-${effectiveLayout()} count-${visibleTargets().length} ${multitasking() ? "is-multitasking" : ""}`}
+          style={multitasking()
+            ? { "grid-template-columns": `repeat(${props.workspace.multitaskColumns()}, minmax(0, 1fr))` }
+            : undefined}
+        >
           <For each={mountedTargets()}>
             {(target) => {
               const visibleIndex = createMemo(() => visibleTargets().findIndex((item) => item.window === target.window));
@@ -587,12 +646,20 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                 targets().find((item) => item.window === target.window)?.sessionId ?? null
               ));
               const closing = createMemo(() => isTargetClosing(target));
+              const paneSpan = createMemo(() => props.workspace.multitaskSpans()[target.window] ?? { columns: 1, rows: 1 });
               return (
                 <div
-                  class={`min-h-0 min-w-0 border-line transition-all duration-200 ${
+                  class={`min-h-0 min-w-0 border-line transition-all duration-200 ${multitasking() ? "multitask-pane" : ""} ${
                     visible() ? "" : "warm-terminal-hidden"
                   } ${closing() ? "pointer-events-none opacity-0 scale-[0.98]" : ""}`}
-                  style={{ order: visible() ? visibleIndex() : undefined }}
+                  style={{
+                    order: visible() ? visibleIndex() : undefined,
+                    "grid-column": multitasking() && visible()
+                      ? `span ${Math.min(paneSpan().columns, props.workspace.multitaskColumns())}`
+                      : undefined,
+                    "grid-row": multitasking() && visible() ? `span ${paneSpan().rows}` : undefined,
+                    "--pane-accent": multitasking() ? paneAccent(target) : undefined,
+                  }}
                   aria-hidden={visible() && !closing() ? undefined : "true"}
                   inert={!visible() || closing()}
                   onPointerDown={() => {
@@ -604,7 +671,9 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                   <TerminalPane
                     laneId={target.laneId}
                     window={target.window}
-                    label={labelOf(target)}
+                    label={multitasking()
+                      ? `${target.repoName ?? "repo"} / ${target.branch || target.laneName || `lane ${target.laneId}`} · ${labelOf(target)}`
+                      : labelOf(target)}
                     renderer={renderer()}
                     focused={activeWindow() === target.window}
                     visible={visible()}
