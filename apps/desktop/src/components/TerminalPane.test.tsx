@@ -7,6 +7,7 @@ import TerminalPane from "./TerminalPane";
 const watchTerminalMock = vi.hoisted(() => vi.fn());
 const daemonCallMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 const terminalInstances = vi.hoisted(() => [] as Array<{
+  rows: number;
   scrollToBottom: ReturnType<typeof vi.fn>;
 }>);
 
@@ -43,7 +44,16 @@ vi.mock("@xterm/xterm", () => ({
     }
 
     loadAddon() {}
-    open(element: HTMLElement) { this.element = element; }
+    open(element: HTMLElement) {
+      this.element = element;
+      const screen = document.createElement("div");
+      screen.className = "xterm-screen";
+      Object.defineProperty(screen, "getBoundingClientRect", {
+        configurable: true,
+        value: () => new DOMRect(0, 28, 1200, this.rows * 16.5),
+      });
+      element.appendChild(screen);
+    }
     attachCustomKeyEventHandler() {}
     onData() { return { dispose() {} }; }
     write(_data: string | Uint8Array, callback?: () => void) { callback?.(); }
@@ -102,6 +112,62 @@ beforeEach(() => {
 });
 
 describe("TerminalPane multitasking tail follow", () => {
+  it("reports enough grid height for every daemon-authoritative row", async () => {
+    const [visible, setVisible] = createSignal(false);
+    const onMinimumHeight = vi.fn();
+    watchTerminalMock.mockImplementation(async (
+      _target: unknown,
+      _bytes: unknown,
+      onAck: (ack: { cols: number; rows: number }) => void,
+    ) => {
+      // A warm pane can still carry its old full-screen grid. It must not make that stale height
+      // the multitasking row floor before the visible cell gets its own fit.
+      onAck({ cols: 211, rows: 60 });
+      return {
+        ack: { cols: 211, rows: 60, generation: 1, sequence: 9 },
+        stop: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+    daemonCallMock.mockImplementation(async (method: string) => (
+      method === "agent.fit" ? { cols: 166, rows: 24 } : null
+    ));
+
+    const { container } = render(() => (
+      <TerminalPane
+        laneId={7}
+        window="lane-7-1"
+        label="Codex"
+        visible={visible()}
+        followTail
+        onMinimumHeight={onMinimumHeight}
+      />
+    ));
+    await flushMicrotasks();
+    expect(terminalInstances[0].rows).toBe(60);
+    expect(onMinimumHeight).not.toHaveBeenCalled();
+    const pane = container.querySelector<HTMLElement>("section")!;
+    const host = container.querySelector<HTMLElement>(".terminal-host")!;
+    Object.defineProperties(host, {
+      clientWidth: { configurable: true, value: 1184 },
+      clientHeight: { configurable: true, value: 196 },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => new DOMRect(8, 28, 1184, 196),
+      },
+    });
+    Object.defineProperty(pane, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 1200, 224),
+    });
+
+    setVisible(true);
+    await flushMicrotasks();
+
+    // 24 actual xterm rows × 16.5px plus the measured 28px header/chrome.
+    expect(onMinimumHeight).toHaveBeenCalledWith(424);
+    expect(terminalInstances[0].rows).toBe(24);
+  });
+
   it("retries a zero-size warm pane until its visible grid cell is measurable", async () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {

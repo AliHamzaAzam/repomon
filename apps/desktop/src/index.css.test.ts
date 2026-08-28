@@ -5,16 +5,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 /// Regression coverage for the multitasking-grid CSS specificity bug (bug 3 in the
 /// fix/multitasking-layout-bugs report): `.terminal-layout.is-grid.count-1` /
 /// `.terminal-layout.is-grid.count-2` (3 classes, added so a 1-2 pane non-multitasking grid
-/// fills the bay instead of sitting at its 14rem auto-row floor) has higher specificity than
+/// fills the bay instead of sitting at its auto-row floor) has higher specificity than
 /// `.terminal-layout.is-multitasking` (2 classes) and — before the `:not(.is-multitasking)`
 /// guard — silently won for a *multitasking* session with only 1-2 panes selected too, since
 /// `effectiveLayout()` reports "grid" for multitasking regardless of pane count. That collapsed
-/// `grid-auto-rows: minmax(14rem, 1fr)`'s real floor down to `minmax(0, 1fr)` for that row,
+/// the measured `grid-auto-rows` floor down to `minmax(0, 1fr)` for that row,
 /// letting it compress toward zero height and clip the composer at the bottom of the terminal.
 ///
 /// This loads the actual shipped stylesheet into jsdom and asks the real cascade/specificity
 /// engine to resolve it — not a hand-rolled specificity calculation — so it breaks if the
-/// selector guard (or the 14rem floor) ever regresses.
+/// selector guard (or the shared measured-height variable) ever regresses.
 describe("index.css multitasking grid row sizing", () => {
   let style: HTMLStyleElement;
 
@@ -51,7 +51,7 @@ describe("index.css multitasking grid row sizing", () => {
       // The count-1/2 shrink-to-fit rule must not apply here: no explicit grid-template-rows.
       expect(computed.gridTemplateRows).toBe("");
       // So the multitasking auto-row minimum is what actually governs row height.
-      expect(computed.gridAutoRows).toBe("minmax(14rem, 1fr)");
+      expect(computed.gridAutoRows).toBe("minmax(var(--multitask-row-min-height, 14rem), 1fr)");
       el.remove();
     }
   });
@@ -67,14 +67,14 @@ describe("index.css multitasking grid row sizing", () => {
   it("leaves 3+ pane grids on the multitasking auto-row minimum either way", () => {
     const el = elementWithClasses("terminal-layout is-grid count-4 is-multitasking");
     expect(getComputedStyle(el).gridTemplateRows).toBe("");
-    expect(getComputedStyle(el).gridAutoRows).toBe("minmax(14rem, 1fr)");
+    expect(getComputedStyle(el).gridAutoRows).toBe("minmax(var(--multitask-row-min-height, 14rem), 1fr)");
     el.remove();
   });
 
   it("gives .multitask-pane a real min-height floor independent of grid track sizing", () => {
     const el = elementWithClasses("multitask-pane");
     const computed = getComputedStyle(el);
-    expect(computed.minHeight).toBe("14rem");
+    expect(computed.minHeight).toBe("var(--multitask-row-min-height, 14rem)");
     // No second overflow:hidden clip layered on top of TerminalPane's own root clip.
     expect(computed.overflow).toBe("");
     // Each pane gets its own stacking context so a sibling's header/tooltip/canvas can never
