@@ -1979,8 +1979,7 @@ pub async fn dispatch(
                 .get_message(p.id.clone())
                 .await
                 .map_err(internal)?;
-            if sender.address.as_str() != "operator" && current.recipient.address != sender.address
-            {
+            if current.recipient.address != sender.address {
                 return Err(RpcError::invalid_params(
                     "message does not belong to this inbox",
                 ));
@@ -10448,6 +10447,88 @@ mod tests {
         let s = window_placeholder_session(&lane, kind, "lane-7".into());
         assert_eq!(s.agent, AgentKind::from_kind_str("unknown"));
         assert_eq!(s.agent.as_str(), "unknown");
+    }
+
+    #[tokio::test]
+    async fn message_mark_read_is_owned_by_the_actual_recipient() {
+        let store = repomon_core::Store::open_in_memory().unwrap();
+        let ctx = Ctx::new(store, repomon_core::Config::default(), None);
+        let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
+        let operator = resolved_named("operator", None);
+        let agent = ResolvedAgentAddress {
+            address: AgentAddress::new("lane-7/1"),
+            lane_id: Some(7),
+            slot: Some(1),
+            window: Some("lane-7".into()),
+            session_id: Some("session-7".into()),
+            agent_kind: Some("codex".into()),
+        };
+        let message = ctx
+            .store
+            .send_message(
+                agent.address.clone(),
+                operator,
+                agent.clone(),
+                "agent inbox mail".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let error = dispatch(
+            &ctx,
+            &sess,
+            "message.mark_read",
+            Some(json!({ "id": message.id })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "message does not belong to this inbox");
+        assert_eq!(
+            ctx.store
+                .get_message(message.id.clone())
+                .await
+                .unwrap()
+                .read_state,
+            repomon_core::model::MessageReadState::Unread
+        );
+
+        let token = ctx
+            .store
+            .create_mcp_identity(agent.clone(), None)
+            .await
+            .unwrap();
+        let marked = dispatch(
+            &ctx,
+            &sess,
+            "message.mark_read",
+            Some(json!({ "id": message.id, "identity_token": token })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(marked["read_state"], json!("read"));
+
+        let operator_message = ctx
+            .store
+            .send_message(
+                AgentAddress::new("operator"),
+                agent,
+                resolved_named("operator", None),
+                "operator inbox mail".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let marked = dispatch(
+            &ctx,
+            &sess,
+            "message.mark_read",
+            Some(json!({ "id": operator_message.id })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(marked["read_state"], json!("read"));
     }
 
     #[test]

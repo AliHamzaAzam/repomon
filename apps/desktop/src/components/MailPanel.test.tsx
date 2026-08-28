@@ -181,6 +181,7 @@ describe("MailPanel", () => {
     expect(within(reply).queryByRole("button", { name: /Force send/ })).toBeNull();
 
     const queued = screen.getByText("beta lane mail").closest("article")!;
+    expect(within(queued).queryByRole("button", { name: "Mark read" })).toBeNull();
     fireEvent.click(within(queued).getByRole("button", { name: /Force send/ }));
     await waitFor(() => expect(fixtureData.forceSend).toHaveBeenCalledWith("3"));
 
