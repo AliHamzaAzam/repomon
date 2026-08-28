@@ -863,10 +863,16 @@ impl Store {
             let id = random_hex(16);
             let (thread_id, linked_reply, remaining_hops) = match parent {
                 Some(parent) => {
-                    if parent.remaining_hops == 0 {
+                    let operator_authored = sender.address.as_str() == "operator";
+                    if parent.remaining_hops == 0 && !operator_authored {
                         return Err(Error::Other("message thread hop limit exhausted".into()));
                     }
-                    (parent.thread_id, Some(parent.id), parent.remaining_hops - 1)
+                    let remaining_hops = if operator_authored {
+                        MESSAGE_THREAD_HOPS
+                    } else {
+                        parent.remaining_hops - 1
+                    };
+                    (parent.thread_id, Some(parent.id), remaining_hops)
                 }
                 None => (id.clone(), None, MESSAGE_THREAD_HOPS),
             };
@@ -3465,9 +3471,9 @@ mod tests {
         let s = store().await;
         let root = s
             .send_message(
-                AgentAddress::new("lane-3/1"),
-                address("operator"),
+                AgentAddress::new("lane-4/1"),
                 address("lane-3/1"),
+                address("lane-4/1"),
                 "root".into(),
                 None,
             )
@@ -3483,9 +3489,9 @@ mod tests {
             .await
             .unwrap();
             let (sender, recipient) = if hop % 2 == 0 {
-                (address("lane-3/1"), address("operator"))
+                (address("lane-4/1"), address("lane-3/1"))
             } else {
-                (address("operator"), address("lane-3/1"))
+                (address("lane-3/1"), address("lane-4/1"))
             };
             parent = s
                 .send_message(
@@ -3508,9 +3514,9 @@ mod tests {
         .unwrap();
         assert!(
             s.send_message(
-                AgentAddress::new("operator"),
+                AgentAddress::new("lane-3/1"),
+                address("lane-4/1"),
                 address("lane-3/1"),
-                address("operator"),
                 "one too far".into(),
                 Some(parent.id),
             )
@@ -3519,6 +3525,67 @@ mod tests {
             .to_string()
             .contains("hop limit")
         );
+    }
+
+    #[tokio::test]
+    async fn operator_reply_refreshes_an_exhausted_thread_budget() {
+        let s = store().await;
+        let parent = s
+            .send_message(
+                AgentAddress::new("operator"),
+                address("lane-5/1"),
+                address("operator"),
+                "legacy exhausted thread".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Existing installations can already contain a legitimate operator thread at zero from
+        // the old every-reply-decrements behavior. The operator must be able to continue it.
+        let parent_id = parent.id.clone();
+        s.call(move |c| {
+            c.execute(
+                "UPDATE messages SET remaining_hops = 0, created_at = ?1 WHERE id = ?2",
+                params![
+                    to_iso(&(Utc::now() - chrono::Duration::seconds(2))),
+                    parent_id
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let operator_reply = s
+            .send_message(
+                AgentAddress::new("lane-5/1"),
+                address("operator"),
+                address("lane-5/1"),
+                "continue under human supervision".into(),
+                Some(parent.id.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator_reply.thread_id, parent.thread_id);
+        assert_eq!(operator_reply.remaining_hops, MESSAGE_THREAD_HOPS);
+
+        let agent_reply = s
+            .send_message(
+                AgentAddress::new("operator"),
+                address("lane-5/1"),
+                address("operator"),
+                "agent response".into(),
+                Some(operator_reply.id.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_reply.thread_id, parent.thread_id);
+        assert_eq!(
+            agent_reply.reply_to.as_deref(),
+            Some(operator_reply.id.as_str())
+        );
+        assert_eq!(agent_reply.remaining_hops, MESSAGE_THREAD_HOPS - 1);
     }
 
     #[tokio::test]
@@ -3546,7 +3613,7 @@ mod tests {
             .unwrap();
         assert_eq!(reply.reply_to.as_deref(), Some(inbound.id.as_str()));
         assert_eq!(reply.thread_id, inbound.thread_id);
-        assert_eq!(reply.remaining_hops, inbound.remaining_hops - 1);
+        assert_eq!(reply.remaining_hops, MESSAGE_THREAD_HOPS);
     }
 
     #[test]

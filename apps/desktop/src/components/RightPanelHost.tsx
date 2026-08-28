@@ -2,12 +2,14 @@ import { For, createEffect, createMemo, createSignal, type JSX } from "solid-js"
 
 import FileEditorPanel from "./FileEditorPanel";
 import GitExplorerPanel from "./GitExplorerPanel";
+import MailPanel from "./MailPanel";
 import RepomindPanel from "./RepomindPanel";
 import SupervisionPanel from "./SupervisionPanel";
-import { IconGitBranch, IconLayers, IconShield, IconSparkles, type IconProps } from "./icons";
+import { IconGitBranch, IconLayers, IconMail, IconShield, IconSparkles, type IconProps } from "./icons";
 import { readRightPanelActiveTab, saveRightPanelActiveTab } from "../stores/uiSettings";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
+import type { MessageStore } from "../stores/messages";
 
 /**
  * F2: the right rail generalizes from "the Repomind panel" into a tabbed host any number of
@@ -42,6 +44,8 @@ export interface RightPanelHostProps {
   fleet?: FleetStore;
   /** Threaded to SupervisionPanel for deep-linking into settings tabs. */
   actions?: ActionsStore;
+  /** Shared durable-mail store used by the Repomail management panel. */
+  messages?: MessageStore;
   /**
    * One-shot activation command some external shortcut can push to select a tab even after the
    * host has already mounted — e.g. App.tsx's `panel.git` binding switching away from an
@@ -59,6 +63,7 @@ function buildDefaultPanels(
   onToggleFullscreen: () => void,
   fleet?: FleetStore,
   actions?: ActionsStore,
+  messages?: MessageStore,
 ): RightPanelTabDef[] {
   return [
     {
@@ -73,6 +78,9 @@ function buildDefaultPanels(
 
     // D4: file tree + multi-tab editor for the active lane's worktree.
     { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} /> },
+
+    // Durable fleet mail across every lane, grouped by conversation thread.
+    { id: "mail", label: "Repomail", icon: IconMail, component: () => <MailPanel fleet={fleet} messages={messages} /> },
 
     // E1: agent supervision policies and live audit log for the active lane.
     {
@@ -93,7 +101,7 @@ export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 320; // 20rem — matches the pre-F2
 
 export default function RightPanelHost(props: RightPanelHostProps) {
   const panels = createMemo(() =>
-    props.panels ?? buildDefaultPanels(props.onToggleFullscreen, props.fleet, props.actions),
+    props.panels ?? buildDefaultPanels(props.onToggleFullscreen, props.fleet, props.actions, props.messages),
   );
 
   const [activeId, setActiveId] = createSignal((() => {
