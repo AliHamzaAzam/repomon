@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { createRoot } from "solid-js";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -293,7 +293,7 @@ describe("TerminalWorkspace: active pane highlight (bug 4)", () => {
 /// jsdom performs no real layout: `getBoundingClientRect()` reports zero for every element
 /// regardless of CSS. To honestly test the geometric claims in the bug report ("composer has
 /// nonzero visible height", "no two panes overlap") we model exactly what the *fixed* CSS
-/// guarantees — a `multitaskColumns()`-wide grid where every row is at least the 14rem
+/// guarantees — a three-column grid where every row is at least the 14rem
 /// `.multitask-pane` floor confirmed in index.css.test.ts — and stub each element's rect from
 /// that model. This proves the arithmetic behind the fix is sound; it does not substitute for
 /// looking at the app in a real browser (see the task's final report for what's unverified).
@@ -303,7 +303,7 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
   const CONTAINER_WIDTH = 1200;
   const CONTAINER_HEIGHT = 900;
 
-  it("keeps composer height positive and pane rects non-overlapping for a 5-pane / 2-column layout", async () => {
+  it("locks the controls and geometry to a non-overlapping 5-pane / 3-column layout", async () => {
     const laneA = mkLane(10, [
       session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),
       session({ id: 2, agent: "claude-code", tmux_window: "lane-10-2", session_id: "s2" }),
@@ -313,13 +313,16 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
       session({ id: 4, agent: "gemini", tmux_window: "lane-20-1", session_id: "s4" }),
       session({ id: 5, agent: "hermes", tmux_window: "lane-20-2", session_id: "s5" }),
     ]);
-    const { workspace, dispose } = await mountFleet([laneA, laneB], { multitasking: true });
-    workspace.setMultitaskColumns(2);
+    const { dispose } = await mountFleet([laneA, laneB], { multitasking: true });
 
     await settle(() => expect(visiblePaneWrapperDivs().length).toBe(5));
-    const columns = workspace.multitaskColumns();
+    const columns = 3;
     const panes = visiblePaneWrapperDivs();
     expect(panes).toHaveLength(5);
+    expect(screen.queryByRole("group", { name: "Multitasking columns" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /multitasking columns?$/i })).toBeNull();
+    const layout = document.querySelector<HTMLElement>(".terminal-layout.is-multitasking");
+    expect(layout?.style.gridTemplateColumns).toBe("repeat(3, minmax(0, 1fr))");
 
     const colWidth = CONTAINER_WIDTH / columns;
     const rects: DOMRect[] = panes.map((_, index) => {
@@ -359,6 +362,34 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
       }
     }
     void CONTAINER_HEIGHT;
+    dispose();
+  });
+
+  it("keeps the pane picker reachable and applies selection and footprint changes", async () => {
+    const laneA = mkLane(10, [
+      session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),
+      session({ id: 2, agent: "claude-code", tmux_window: "lane-10-2", session_id: "s2" }),
+      session({ id: 3, agent: "opencode", tmux_window: "lane-10-3", session_id: "s3" }),
+    ]);
+    const { workspace, dispose } = await mountFleet([laneA], { multitasking: true });
+    await settle(() => expect(visiblePaneWrapperDivs()).toHaveLength(3));
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure multitasking panes" }));
+    expect(screen.getByRole("dialog", { name: "Choose multitasking panes" })).toBeTruthy();
+
+    const [first, , last] = workspace.multitaskTargets();
+    fireEvent.click(screen.getByRole("button", { name: `${first.label}: two columns wide` }));
+    await settle(() => {
+      const firstPane = visiblePaneWrapperDivs().find((pane) => (
+        pane.querySelector("section")?.getAttribute("aria-label")?.includes(first.label)
+      ));
+      expect(firstPane?.style.gridColumn).toBe("span 2");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: `Hide ${last.label}` }));
+    await settle(() => expect(visiblePaneWrapperDivs()).toHaveLength(2));
+    const layout = document.querySelector<HTMLElement>(".terminal-layout.is-multitasking");
+    expect(layout?.style.gridTemplateColumns).toBe("repeat(3, minmax(0, 1fr))");
     dispose();
   });
 });

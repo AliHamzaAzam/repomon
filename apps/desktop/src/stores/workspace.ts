@@ -20,7 +20,6 @@ export interface PaneSpan {
 
 const LANE_PANES_KEY = "repomon.workspace.lane-panes.v1";
 const MULTITASK_PANES_KEY = "repomon.workspace.multitask-panes.v1";
-const MULTITASK_COLUMNS_KEY = "repomon.workspace.multitask-columns";
 const MULTITASK_SPANS_KEY = "repomon.workspace.multitask-spans.v1";
 
 function readRecord<T>(key: string): Record<string, T> {
@@ -85,10 +84,6 @@ export function createWorkspaceStore(fleet: FleetStore) {
     } catch {
       return null;
     }
-  })());
-  const [multitaskColumns, setMultitaskColumnsSignal] = createSignal((() => {
-    const value = Number(localStorage.getItem(MULTITASK_COLUMNS_KEY));
-    return value >= 1 && value <= 3 ? value : 2;
   })());
   const [multitaskSpans, setMultitaskSpans] = createSignal<Record<string, PaneSpan>>(
     readRecord<PaneSpan>(MULTITASK_SPANS_KEY),
@@ -214,12 +209,6 @@ export function createWorkspaceStore(fleet: FleetStore) {
     persist(MULTITASK_PANES_KEY, next);
   }
 
-  function setMultitaskColumns(columns: number) {
-    const next = Math.max(1, Math.min(3, Math.round(columns)));
-    setMultitaskColumnsSignal(next);
-    try { localStorage.setItem(MULTITASK_COLUMNS_KEY, String(next)); } catch {}
-  }
-
   function setMultitaskSpan(window: string, span: PaneSpan) {
     const next = {
       ...multitaskSpans(),
@@ -332,8 +321,6 @@ export function createWorkspaceStore(fleet: FleetStore) {
     multitaskTargets,
     multitaskSelection,
     setMultitaskPaneSelection,
-    multitaskColumns,
-    setMultitaskColumns,
     multitaskSpans,
     setMultitaskSpan,
     cycleTab,
