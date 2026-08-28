@@ -2,15 +2,17 @@ import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
 
 import type { FleetMessage } from "../bindings";
 import { translateError } from "../ipc/errors";
+import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import type { MessageStore } from "../stores/messages";
 import { formatTime } from "./automation";
 import Select from "./controls/Select";
-import { IconChevronRight, IconMail, IconRefresh } from "./icons";
+import { IconChevronRight, IconMail, IconRefresh, IconTrash, IconZap } from "./icons";
 
 export interface MailPanelProps {
   fleet?: FleetStore;
   messages?: MessageStore;
+  actions?: ActionsStore;
 }
 
 export interface MailThread {
@@ -70,6 +72,11 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
       label: `${lane.repo.label || lane.repo.name} · ${lane.worktree.branch || lane.worktree.name}`,
     })),
   ]);
+  const laneLabels = createMemo(() => new Map(
+    laneOptions()
+      .filter((option) => option.value !== "all")
+      .map((option) => [Number(option.value), option.label]),
+  ));
 
   const filtered = createMemo(() => {
     const selectedLane = laneFilter() === "all" ? null : Number(laneFilter());
@@ -102,6 +109,28 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
 
   function loadOlder() {
     if (props.messages) void run(() => props.messages!.loadMore());
+  }
+
+  function confirmDelete(message: FleetMessage) {
+    if (!props.actions || !props.messages) return;
+    props.actions.confirm({
+      title: "Delete repomail?",
+      message: "Permanently remove this message from its thread. This cannot be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm: async () => {
+        setBusyId(message.id);
+        setError(null);
+        try {
+          await props.messages!.deleteMessage(message.id);
+        } catch (cause) {
+          setError(translateError(cause).friendly);
+          throw cause;
+        } finally {
+          setBusyId(null);
+        }
+      },
+    });
   }
 
   return (
@@ -192,12 +221,23 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
             <For each={threads()}>
               {(thread) => {
                 const root = () => thread.messages[thread.messages.length - 1];
+                const laneLabel = () => {
+                  const laneId = messageLane(root());
+                  return laneId === null ? null : laneLabels().get(laneId) ?? null;
+                };
                 return (
                   <section aria-label={`Mail thread ${thread.id}`}>
                     <div class="mb-1.5 flex min-w-0 items-center justify-between gap-2 px-1">
-                      <div class="flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted">
-                        <span class="truncate">{root().sender.address} ↔ {root().recipient.address}</span>
-                        <span class="shrink-0 text-muted/60">· {thread.messages.length} {thread.messages.length === 1 ? "message" : "messages"}</span>
+                      <div class="min-w-0">
+                        <div class="flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted">
+                          <span class="max-w-[7rem] truncate">{root().sender.address}</span>
+                          <IconChevronRight size={9} class="shrink-0 text-muted/60" />
+                          <span class="max-w-[7rem] truncate">{root().recipient.address}</span>
+                          <span class="shrink-0 text-muted/60">· {thread.messages.length} {thread.messages.length === 1 ? "message" : "messages"}</span>
+                        </div>
+                        <Show when={laneLabel()} keyed>
+                          {(label) => <div class="mt-0.5 truncate text-[10px] text-foreground/70" title={label}>{label}</div>}
+                        </Show>
                       </div>
                       <span class="shrink-0 font-mono text-[9px] text-muted/60" title={thread.id}>
                         {thread.id.slice(0, 8)}
@@ -233,13 +273,24 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
                                 )}
                               </Show>
 
-                              <div class="mt-2.5 flex items-center justify-between gap-2 border-t border-line/50 pt-2">
+                              <div class="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-line/50 pt-2">
                                 <div class="min-w-0 font-mono text-[9px] uppercase tracking-wide text-muted">
                                   <span>{formatTime(message.created_at)}</span>
                                   <span class="mx-1 text-muted/40">·</span>
                                   <span class={message.read_state === "unread" ? "text-attention" : ""}>{message.read_state}</span>
                                 </div>
-                                <div class="flex shrink-0 items-center gap-1">
+                                <div class="ml-auto flex flex-wrap items-center justify-end gap-1">
+                                  <Show when={message.delivery_state !== "delivered" && message.recipient.lane_id !== null}>
+                                    <button
+                                      type="button"
+                                      class="focus-ring flex items-center gap-1 rounded px-1.5 py-1 font-mono text-[9px] font-semibold text-attention transition-colors hover:bg-attention/15 disabled:opacity-40"
+                                      disabled={!props.messages || busyId() === message.id}
+                                      onClick={() => props.messages && void run(() => props.messages!.forceSend(message.id), message.id)}
+                                    >
+                                      <IconZap size={8} />
+                                      Force send
+                                    </button>
+                                  </Show>
                                   <Show when={message.read_state === "unread"}>
                                     <button
                                       type="button"
@@ -262,6 +313,15 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
                                       <IconChevronRight size={8} />
                                     </button>
                                   </Show>
+                                  <button
+                                    type="button"
+                                    class="focus-ring flex items-center gap-1 rounded px-1.5 py-1 font-mono text-[9px] text-muted transition-colors hover:bg-fault/10 hover:text-fault disabled:opacity-40"
+                                    disabled={!props.actions || !props.messages || busyId() === message.id}
+                                    onClick={() => confirmDelete(message)}
+                                  >
+                                    <IconTrash size={8} />
+                                    Delete
+                                  </button>
                                 </div>
                               </div>
                             </article>

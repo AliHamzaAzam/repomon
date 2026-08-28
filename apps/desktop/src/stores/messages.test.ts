@@ -103,4 +103,35 @@ describe("message store", () => {
       dispose();
     }
   });
+
+  it("merges a force-send result and removes deleted mail", async () => {
+    const forceSend = vi.fn(async (id: string) => ({
+      ...message(id),
+      delivered_at: "2026-08-13T00:02:00.000Z",
+      delivery_state: "delivered" as const,
+    }));
+    const deleteMessage = vi.fn(async () => undefined);
+    const { store, dispose } = createRoot((dispose) => ({
+      store: createMessageStore(undefined, {
+        list: async () => ({ messages: [message("1"), message("2")], next_before: null }),
+        forceSend,
+        deleteMessage,
+        subscribe: async () => () => undefined,
+      }),
+      dispose,
+    }));
+    try {
+      await store.start();
+      await store.forceSend("1");
+      expect(forceSend).toHaveBeenCalledWith("1");
+      expect(store.items().find((item) => item.id === "1")?.delivery_state).toBe("delivered");
+
+      await store.deleteMessage("2");
+      expect(deleteMessage).toHaveBeenCalledWith("2");
+      expect(store.items().map((item) => item.id)).toEqual(["1"]);
+    } finally {
+      store.stop();
+      dispose();
+    }
+  });
 });

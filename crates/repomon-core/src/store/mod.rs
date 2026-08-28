@@ -1004,6 +1004,17 @@ impl Store {
         self.call(move |c| get_message(c, &id)).await
     }
 
+    pub async fn delete_message(&self, id: String) -> Result<()> {
+        self.call(move |c| {
+            let changed = c.execute("DELETE FROM messages WHERE id = ?1", params![&id])?;
+            if changed == 0 {
+                return Err(Error::NotFound(format!("message {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Oldest queued messages whose sender class is currently allowed for pane injection.
     /// Policy-blocked mail remains durable and inbox-readable, but cannot occupy the worker's
     /// bounded delivery page and starve deliverable messages behind it.
@@ -3273,6 +3284,36 @@ mod tests {
         let read = s.mark_message_read(message.id).await.unwrap();
         assert_eq!(read.read_state, MessageReadState::Read);
         assert!(read.read_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn message_delete_removes_exactly_one_stored_row() {
+        let s = store().await;
+        let keep = s
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                address("operator"),
+                address("lane-2/1"),
+                "keep".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let deleted = s
+            .send_message(
+                AgentAddress::new("lane-3/1"),
+                address("operator"),
+                address("lane-3/1"),
+                "delete".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        s.delete_message(deleted.id.clone()).await.unwrap();
+        assert!(s.get_message(deleted.id.clone()).await.is_err());
+        assert_eq!(s.get_message(keep.id).await.unwrap().body, "keep");
+        assert!(s.delete_message(deleted.id).await.is_err());
     }
 
     #[tokio::test]

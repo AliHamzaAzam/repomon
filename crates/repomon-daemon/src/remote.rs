@@ -674,16 +674,18 @@ mod tests {
             "playbook.list",
             "playbook.approve",
             "playbook.delete",
-            // message.send/inbox/mark_read/list are the fleet-mail RPC surface. They stay
+            // The fleet-mail RPC surface stays
             // local-only: the sending identity derives from the Unix-socket caller's registered
             // MCP token (local daemon only), and fleet-mail delivery targets managed sessions by
             // lane address — a remote caller with no local session context has no meaningful
-            // identity to send from. Reads are also excluded: fleet mail content is internal
-            // agent-to-agent coordination, not a remote-companion view surface.
+            // identity to send from. Reads are also excluded because the content is internal
+            // agent coordination; force_send and delete additionally mutate that coordination.
             "message.send",
             "message.inbox",
             "message.mark_read",
             "message.list",
+            "message.force_send",
+            "message.delete",
             "terminal.open",
             "terminal.close",
             "terminal.target",

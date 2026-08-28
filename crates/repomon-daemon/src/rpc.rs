@@ -472,6 +472,10 @@ struct MessageMarkRead {
     source: Option<String>,
 }
 #[derive(Deserialize)]
+struct MessageId {
+    id: String,
+}
+#[derive(Deserialize)]
 struct MessageList {
     #[serde(default)]
     lane_id: Option<repomon_core::model::LaneId>,
@@ -1998,6 +2002,22 @@ pub async fn dispatch(
                     .await
                     .map_err(internal)?,
             )
+        }
+        // LOCAL-ONLY: the remote bridge deliberately withholds both management methods. Force
+        // send is a one-message policy override; delete permanently removes coordination data.
+        "message.force_send" => {
+            let p: MessageId = parse(params)?;
+            let message = ctx.store.get_message(p.id).await.map_err(internal)?;
+            let lanes = lanes_with_agents(ctx).await?;
+            let delivered = crate::mail::force_deliver(ctx, &lanes, &message)
+                .await
+                .map_err(|error| RpcError::new(-32000, error))?;
+            to_value(delivered)
+        }
+        "message.delete" => {
+            let p: MessageId = parse(params)?;
+            ctx.store.delete_message(p.id).await.map_err(internal)?;
+            Ok(Value::Null)
         }
         "lane.create" => {
             let mut p: CreateLaneParams = parse(params)?;
