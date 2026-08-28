@@ -693,6 +693,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     renderer={renderer()}
                     focused={activeWindow() === target.window}
                     visible={visible()}
+                    followTail={multitasking()}
                     shell={target.shell}
                     sessionId={sessionId()}
                   />

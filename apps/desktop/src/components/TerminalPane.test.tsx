@@ -1,10 +1,14 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import TerminalPane from "./TerminalPane";
 
 const watchTerminalMock = vi.hoisted(() => vi.fn());
 const daemonCallMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+const terminalInstances = vi.hoisted(() => [] as Array<{
+  scrollToBottom: ReturnType<typeof vi.fn>;
+}>);
 
 vi.mock("../ipc/term", async () => {
   const actual = await vi.importActual<typeof import("../ipc/term")>("../ipc/term");
@@ -35,18 +39,20 @@ vi.mock("@xterm/xterm", () => ({
 
     constructor(options: Record<string, unknown>) {
       this.options = options;
+      terminalInstances.push(this);
     }
 
     loadAddon() {}
     open(element: HTMLElement) { this.element = element; }
     attachCustomKeyEventHandler() {}
     onData() { return { dispose() {} }; }
-    write() {}
+    write(_data: string | Uint8Array, callback?: () => void) { callback?.(); }
     resize(cols: number, rows: number) { this.cols = cols; this.rows = rows; }
     refresh() {}
     focus() {}
     blur() {}
     scrollLines() {}
+    scrollToBottom = vi.fn();
     dispose() {}
   },
 }));
@@ -54,7 +60,7 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit() {}
-    proposeDimensions() { return undefined; }
+    proposeDimensions() { return { cols: 40, rows: 5 }; }
   },
 }));
 vi.mock("@xterm/addon-search", () => ({
@@ -92,6 +98,92 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", vi.fn());
   watchTerminalMock.mockReset();
   daemonCallMock.mockClear();
+  terminalInstances.splice(0);
+});
+
+describe("TerminalPane multitasking tail follow", () => {
+  it("resizes and restores the tail when a warm pane becomes visible", async () => {
+    const [visible, setVisible] = createSignal(false);
+    watchTerminalMock.mockResolvedValue({
+      ack: { cols: 120, rows: 40, generation: 1, sequence: 9 },
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    daemonCallMock.mockImplementation(async (method: string) => (
+      method === "agent.fit" ? { cols: 40, rows: 5 } : null
+    ));
+
+    const { container } = render(() => (
+      <TerminalPane
+        laneId={7}
+        window="lane-7-1"
+        label="Codex"
+        visible={visible()}
+        followTail
+      />
+    ));
+    await flushMicrotasks();
+    expect(daemonCallMock).not.toHaveBeenCalledWith("agent.fit", expect.anything());
+    expect(terminalInstances[0].scrollToBottom).not.toHaveBeenCalled();
+    const host = container.querySelector<HTMLElement>(".terminal-host")!;
+    Object.defineProperties(host, {
+      clientWidth: { configurable: true, value: 400 },
+      clientHeight: { configurable: true, value: 100 },
+    });
+
+    setVisible(true);
+    await flushMicrotasks();
+
+    expect(daemonCallMock).toHaveBeenCalledWith("agent.fit", {
+      lane_id: 7,
+      window: "lane-7-1",
+      cols: 40,
+      rows: 5,
+    });
+    expect(terminalInstances[0].scrollToBottom).toHaveBeenCalled();
+  });
+
+  it("keeps a visible multitasking pane at the tail after long output", async () => {
+    let onBytes: ((bytes: Uint8Array) => void) | undefined;
+    watchTerminalMock.mockImplementation(async (_target, bytes) => {
+      onBytes = bytes;
+      return {
+        ack: { cols: 40, rows: 5, generation: 1, sequence: 9 },
+        stop: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+    daemonCallMock.mockImplementation(async (method: string) => (
+      method === "agent.fit" ? { cols: 40, rows: 5 } : null
+    ));
+
+    render(() => (
+      <TerminalPane laneId={7} window="lane-7-1" label="Codex" visible followTail />
+    ));
+    await flushMicrotasks();
+    terminalInstances[0].scrollToBottom.mockClear();
+
+    onBytes?.(new TextEncoder().encode(
+      `${Array.from({ length: 80 }, (_, index) => `line-${index}`).join("\r\n")}\r\nPROMPT> `,
+    ));
+
+    expect(terminalInstances[0].scrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves manual scrollback outside multitasking", async () => {
+    let onBytes: ((bytes: Uint8Array) => void) | undefined;
+    watchTerminalMock.mockImplementation(async (_target, bytes) => {
+      onBytes = bytes;
+      return {
+        ack: { cols: 40, rows: 5, generation: 1, sequence: 9 },
+        stop: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+
+    render(() => <TerminalPane laneId={7} window="lane-7-1" label="Codex" visible />);
+    await flushMicrotasks();
+    onBytes?.(new TextEncoder().encode("new output while reviewing history"));
+
+    expect(terminalInstances[0].scrollToBottom).not.toHaveBeenCalled();
+  });
 });
 
 afterEach(() => {
