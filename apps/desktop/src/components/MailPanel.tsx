@@ -291,7 +291,7 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
                                       Force send
                                     </button>
                                   </Show>
-                                  <Show when={message.read_state === "unread"}>
+                                  <Show when={message.read_state === "unread" && message.recipient.address === "operator"}>
                                     <button
                                       type="button"
                                       class="focus-ring rounded px-1.5 py-1 font-mono text-[9px] text-muted transition-colors hover:bg-surface hover:text-foreground disabled:opacity-40"

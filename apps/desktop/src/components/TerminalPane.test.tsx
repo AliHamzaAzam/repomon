@@ -102,7 +102,12 @@ beforeEach(() => {
 });
 
 describe("TerminalPane multitasking tail follow", () => {
-  it("resizes and restores the tail when a warm pane becomes visible", async () => {
+  it("retries a zero-size warm pane until its visible grid cell is measurable", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
     const [visible, setVisible] = createSignal(false);
     watchTerminalMock.mockResolvedValue({
       ack: { cols: 120, rows: 40, generation: 1, sequence: 9 },
@@ -125,12 +130,23 @@ describe("TerminalPane multitasking tail follow", () => {
     expect(daemonCallMock).not.toHaveBeenCalledWith("agent.fit", expect.anything());
     expect(terminalInstances[0].scrollToBottom).not.toHaveBeenCalled();
     const host = container.querySelector<HTMLElement>(".terminal-host")!;
+    let laidOut = false;
     Object.defineProperties(host, {
-      clientWidth: { configurable: true, value: 400 },
-      clientHeight: { configurable: true, value: 100 },
+      clientWidth: { configurable: true, get: () => (laidOut ? 400 : 0) },
+      clientHeight: { configurable: true, get: () => (laidOut ? 100 : 0) },
     });
 
     setVisible(true);
+    await flushMicrotasks();
+    expect(frames).toHaveLength(1);
+
+    frames.shift()!(0);
+    await flushMicrotasks();
+    expect(daemonCallMock).not.toHaveBeenCalledWith("agent.fit", expect.anything());
+    expect(frames).toHaveLength(1);
+
+    laidOut = true;
+    frames.shift()!(16);
     await flushMicrotasks();
 
     expect(daemonCallMock).toHaveBeenCalledWith("agent.fit", {

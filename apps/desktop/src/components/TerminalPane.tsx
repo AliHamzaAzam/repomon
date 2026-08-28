@@ -39,6 +39,12 @@ interface TerminalPaneProps extends TerminalTarget {
 
 type PaneView = "live" | "history";
 
+// A warm terminal can become visible before CSS Grid has assigned its cell geometry. Live tmux
+// evidence showed that some panes never received the fit attempted on that first frame; keep
+// sampling for roughly half a second at 60 Hz so the first measurable frame cannot be missed,
+// while still bounding work if the pane stays collapsed.
+const VISIBLE_LAYOUT_RETRY_FRAMES = 30;
+
 function terminalTheme(element: HTMLElement, appearance?: TerminalAppearance) {
   // The theme vars hold modern color syntax (space-separated hsl()) that xterm's color
   // parser rejects — it then silently falls back to its defaults (pure-black background,
@@ -105,6 +111,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let wheelListener: ((event: WheelEvent) => void) | undefined;
   let wheelFrame: number | undefined;
   let visibilityFrame: number | undefined;
+  let visibleSyncFrame: number | undefined;
   let stopWatch: (() => Promise<void>) | undefined;
   let syncSize: (() => Promise<void>) | undefined;
   let rendererEpoch = 0;
@@ -198,19 +205,40 @@ export default function TerminalPane(props: TerminalPaneProps) {
     const visible = ready() && props.visible !== false;
     const focused = props.focused;
     const followTail = props.followTail;
+    if (visibleSyncFrame !== undefined) {
+      cancelAnimationFrame(visibleSyncFrame);
+      visibleSyncFrame = undefined;
+    }
     if (!visible || view() !== "live" || disposed) return;
-    if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
-    visibilityFrame = requestAnimationFrame(() => {
-      visibilityFrame = undefined;
-      if (disposed || !terminal || !container?.isConnected) return;
-      const finish = () => {
-        if (followTail) followTailIfNeeded();
-        if (focused && !disposed && terminal) terminal.focus();
-      };
-      const syncing = syncSize?.();
-      if (syncing) void syncing.then(finish, finish);
-      else finish();
-    });
+    let retriesRemaining = VISIBLE_LAYOUT_RETRY_FRAMES;
+    const syncVisiblePane = () => {
+      visibleSyncFrame = requestAnimationFrame(() => {
+        visibleSyncFrame = undefined;
+        if (
+          disposed
+          || props.visible === false
+          || view() !== "live"
+          || !terminal
+          || !container?.isConnected
+        ) return;
+        if (
+          (container.clientWidth === 0 || container.clientHeight === 0)
+          && retriesRemaining > 0
+        ) {
+          retriesRemaining -= 1;
+          syncVisiblePane();
+          return;
+        }
+        const finish = () => {
+          if (followTail) followTailIfNeeded();
+          if (focused && !disposed && terminal) terminal.focus();
+        };
+        const syncing = syncSize?.();
+        if (syncing) void syncing.then(finish, finish);
+        else finish();
+      });
+    };
+    syncVisiblePane();
   });
 
   createEffect(() => {
@@ -613,6 +641,10 @@ export default function TerminalPane(props: TerminalPaneProps) {
     if (visibilityFrame !== undefined) {
       cancelAnimationFrame(visibilityFrame);
       visibilityFrame = undefined;
+    }
+    if (visibleSyncFrame !== undefined) {
+      cancelAnimationFrame(visibleSyncFrame);
+      visibleSyncFrame = undefined;
     }
     if (wheelFrame !== undefined) {
       cancelAnimationFrame(wheelFrame);
