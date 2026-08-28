@@ -64,7 +64,6 @@ function lane(id: number, windows: string[]): import("../bindings").Lane {
 beforeEach(() => {
   localStorage.removeItem("repomon.workspace.lane-panes.v1");
   localStorage.removeItem("repomon.workspace.multitask-panes.v1");
-  localStorage.removeItem("repomon.workspace.multitask-columns");
   localStorage.removeItem("repomon.workspace.multitask-spans.v1");
 });
 
@@ -186,17 +185,15 @@ describe("workspace store", () => {
     });
   });
 
-  it("persists fleet-wide multitasking order, columns, and pane footprints", () => {
+  it("persists fleet-wide multitasking order and pane footprints", () => {
     createRoot((dispose) => {
       const ws = createWorkspaceStore(fleetStub({
         lanes: () => [lane(7, ["a", "b"]), lane(8, ["c"])],
       }));
 
       ws.setMultitaskPaneSelection(["c", "a"]);
-      ws.setMultitaskColumns(3);
       ws.setMultitaskSpan("c", { columns: 2, rows: 2 });
       expect(ws.multitaskTargets().map((item) => item.window)).toEqual(["c", "a"]);
-      expect(ws.multitaskColumns()).toBe(3);
       expect(ws.multitaskSpans().c).toEqual({ columns: 2, rows: 2 });
       expect(localStorage.getItem("repomon.workspace.multitask-panes.v1")).toBe('["c","a"]');
       dispose();

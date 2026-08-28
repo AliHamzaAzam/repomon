@@ -324,23 +324,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               </span>
             </div>
             <div class="ml-auto flex shrink-0 items-center gap-2">
-              <div class="flex items-center rounded-md border border-line bg-raised/35 p-0.5" role="group" aria-label="Multitasking columns">
-                <For each={[1, 2, 3]}>
-                  {(columns) => (
-                    <button
-                      type="button"
-                      class={`focus-ring flex size-5 items-center justify-center rounded font-mono text-[9px] transition-colors ${
-                        props.workspace.multitaskColumns() === columns
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted hover:text-foreground"
-                      }`}
-                      aria-label={`${columns} multitasking ${columns === 1 ? "column" : "columns"}`}
-                      aria-pressed={props.workspace.multitaskColumns() === columns}
-                      onClick={() => props.workspace.setMultitaskColumns(columns)}
-                    >{columns}</button>
-                  )}
-                </For>
-              </div>
               <PanePicker
                 multitasking
                 available={targets()}
@@ -661,7 +644,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         <div
           class={`terminal-layout is-${effectiveLayout()} count-${visibleTargets().length} ${multitasking() ? "is-multitasking" : ""}`}
           style={multitasking()
-            ? { "grid-template-columns": `repeat(${props.workspace.multitaskColumns()}, minmax(0, 1fr))` }
+            ? { "grid-template-columns": "repeat(3, minmax(0, 1fr))" }
             : undefined}
         >
           <For each={mountedTargets()}>
@@ -688,7 +671,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                   style={{
                     order: visible() ? visibleIndex() : undefined,
                     "grid-column": multitasking() && visible()
-                      ? `span ${Math.min(paneSpan().columns, props.workspace.multitaskColumns())}`
+                      ? `span ${Math.min(paneSpan().columns, 3)}`
                       : undefined,
                     "grid-row": multitasking() && visible() ? `span ${paneSpan().rows}` : undefined,
                     "--pane-accent": multitasking() ? paneAccent(target) : undefined,
