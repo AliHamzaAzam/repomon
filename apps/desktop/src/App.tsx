@@ -34,7 +34,7 @@ import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
-import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
+import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -106,10 +106,10 @@ function App(props: AppProps) {
   const actions = createActionsStore(fleet, workspace);
   const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
-  const messages = createMessageStore((laneId, slot) => {
+  const messages = createMessageStore((laneId, slot, sourceWindow) => {
     fleet.setSelectedLaneId(laneId);
     const lane = fleet.lanes().find((item) => item.id === laneId);
-    const window = lane?.agent_sessions[(slot ?? 1) - 1]?.tmux_window;
+    const window = sourceWindow ?? lane?.agent_sessions[(slot ?? 1) - 1]?.tmux_window;
     if (window) fleet.setFocusedWindow(window);
   });
   let stopListening: (() => void) | undefined;
@@ -203,10 +203,10 @@ function App(props: AppProps) {
     persistRepomindOpen(false);
   });
 
-  // Shared open/switch/toggle-close behavior for the git, editor, and supervision right-rail
-  // tabs, used by both the mod+3 / mod+7 / mod+8 shortcuts and their header icon-button
+  // Shared open/switch/toggle-close behavior for the mail, git, editor, and supervision right-rail
+  // tabs, used by both the mod+2 / mod+3 / mod+7 / mod+8 shortcuts and their header icon-button
   // counterparts (item 4) so the entry points can never drift apart.
-  const openPanelTab = (id: "repomind" | "git" | "editor" | "supervision") => {
+  const openPanelTab = (id: "repomind" | "git" | "editor" | "mail" | "supervision") => {
     // The right rail and fleet-wide grid use mutually exclusive mission-grid column models.
     // Entering multitasking already closes the rail above; make opening a rail tab symmetric.
     workspace.setMultitasking(false);
@@ -254,6 +254,7 @@ function App(props: AppProps) {
         break;
       case "panel.git": openPanelTab("git"); break;
       case "panel.editor": openPanelTab("editor"); break;
+      case "panel.mail": openPanelTab("mail"); break;
       case "panel.supervision": openPanelTab("supervision"); break;
       case "panel.repomind":
         openPanelTab("repomind");
@@ -422,6 +423,24 @@ function App(props: AppProps) {
           >
             <IconMultitask size={13} />
             <span>Multitasking</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              repomindOpen() && rightPanelTab() === "mail"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => openPanelTab("mail")}
+            aria-pressed={repomindOpen() && rightPanelTab() === "mail"}
+            title="Repomail (⌘2)"
+          >
+            <IconMail size={13} />
+            <span>Repomail</span>
+            <Show when={messages.unread() > 0}>
+              <span class="rounded-full bg-signal/15 px-1 font-mono text-[9px] text-signal">{messages.unread()}</span>
+            </Show>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
@@ -608,6 +627,7 @@ function App(props: AppProps) {
                   onToggleFullscreen={() => setRepomindFull(true)}
                   fleet={fleet}
                   actions={actions}
+                  messages={messages}
                   requestTab={panelTabRequest()}
                   onActiveTabChange={setRightPanelTab}
                 />

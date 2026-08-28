@@ -146,7 +146,7 @@ describe("Repomon desktop shell", () => {
     })} />);
 
     const multitasking = within(container).getByRole("button", { name: "Multitasking" });
-    for (const panel of ["Git", "Editor", "Supervision", "Repomind"]) {
+    for (const panel of ["Repomail", "Git", "Editor", "Supervision", "Repomind"]) {
       if (multitasking.getAttribute("aria-pressed") !== "true") fireEvent.click(multitasking);
       await waitFor(() => expect(multitasking).toHaveAttribute("aria-pressed", "true"));
       const panelButton = within(container).getByRole("button", { name: panel });
@@ -157,6 +157,27 @@ describe("Repomon desktop shell", () => {
       });
     }
     localStorage.setItem("repomon.repomind_open", "false");
+  });
+
+  it("opens and closes the Repomail panel with mod+2", async () => {
+    localStorage.setItem("repomon.repomind_open", "false");
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const button = within(container).getByRole("button", { name: "Repomail" });
+    expect(button).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
+    await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "true"));
+    const panel = within(container).getByRole("complementary", { name: "Repomind" });
+    expect(within(panel).getByText("Repomail", { selector: "span.text-xs.font-semibold" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
+    await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "false"));
   });
 
   it("opens settings on the system tab when the footer connection pill is clicked", async () => {

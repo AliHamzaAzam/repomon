@@ -62,8 +62,42 @@ describe("message store", () => {
       expect(store.items()).toHaveLength(2);
       await store.open(store.items().find((item) => item.id === "1")!);
       expect(markRead).toHaveBeenCalledWith("1");
-      expect(jump).toHaveBeenCalledWith(2, 1);
+      expect(jump).toHaveBeenCalledWith(2, 1, "lane-2");
       expect(store.unread()).toBe(1);
+
+      const inbound = {
+        ...message("inbound", 4, true),
+        sender: { address: "lane-4/1", lane_id: 4, slot: 1, window: "lane-4", session_id: "s-4", agent_kind: "codex" },
+        recipient: { address: "operator", lane_id: null, slot: null, window: null, session_id: null, agent_kind: null },
+      };
+      await store.open(inbound);
+      expect(jump).toHaveBeenLastCalledWith(4, 1, "lane-4");
+    } finally {
+      store.stop();
+      dispose();
+    }
+  });
+
+  it("paginates older mail without dropping the newest page", async () => {
+    const list = vi.fn(async (params?: { before?: string }) => params?.before
+      ? { messages: [message("0")], next_before: null }
+      : { messages: [message("2"), message("1")], next_before: "older-cursor" });
+    const { store, dispose } = createRoot((dispose) => ({
+      store: createMessageStore(undefined, {
+        list,
+        subscribe: async () => () => undefined,
+      }),
+      dispose,
+    }));
+    try {
+      await store.start();
+      expect(store.nextBefore()).toBe("older-cursor");
+
+      await store.loadMore();
+
+      expect(list).toHaveBeenLastCalledWith({ limit: 200, before: "older-cursor" });
+      expect(store.items().map((item) => item.id)).toEqual(["2", "1", "0"]);
+      expect(store.nextBefore()).toBeNull();
     } finally {
       store.stop();
       dispose();
