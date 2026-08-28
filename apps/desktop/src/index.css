@@ -212,7 +212,7 @@
    load-bearing — `effectiveLayout()` reports "grid" for multitasking too (see
    TerminalWorkspace.tsx), so a fleet-wide session with just 1-2 panes selected also picks up
    `.count-1`/`.count-2`. Without the exclusion, this selector's higher specificity (3 classes vs.
-   `.is-multitasking`'s 2) overrides `grid-auto-rows: minmax(14rem, 1fr)` below with `minmax(0,
+   `.is-multitasking`'s 2) overrides the measured `grid-auto-rows` floor below with `minmax(0,
    1fr)` for the row those panes live in — no more real height guarantee, so the row can compress
    toward zero and clip the composer at the bottom of the terminal. */
 .terminal-layout.is-grid.count-1:not(.is-multitasking),
@@ -223,7 +223,7 @@
 .terminal-layout.is-multitasking {
   /* Never backfill a later pane ahead of an earlier configured pane. */
   grid-auto-flow: row;
-  grid-auto-rows: minmax(14rem, 1fr);
+  grid-auto-rows: minmax(var(--multitask-row-min-height, 14rem), 1fr);
   overflow: auto;
   gap: 3px;
   padding: 3px;
@@ -236,16 +236,14 @@
      `position: absolute` with their own z-index) can never paint over a sibling pane, even under
      row-height edge cases or GPU layer-promotion quirks from the terminal canvas. */
   isolation: isolate;
-  /* A real floor, independent of `grid-auto-rows: minmax(14rem, 1fr)` above: that minimum only
-     holds as long as nothing else overrides the row track (see the `count-1`/`count-2` note
-     above, and any per-pane `grid-row: span N` interaction with dense packing). Grid track sizing
-     also grows a track to fit an item's own `min-height`, so this stays the pane's actual floor
-     even if the row track's own minimum is ever compressed — enough to fit the h-7 header plus a
-     usable composer row underneath.
+  /* TerminalPane replaces the 14rem fallback with the real rendered xterm screen height plus its
+     pane chrome. The same custom property drives both this item and the grid track above: setting
+     only the item's min-height lets a smaller fixed track remain in place and neighboring rows
+     overlap. Keeping both floors aligned makes all authoritative pty rows physically visible.
      No `overflow: hidden` here: TerminalPane's own root section already clips to its box
      (`h-full` + `overflow-hidden`), so a second clip on this wrapper was pure redundancy that
      bought nothing and only added another place row-height math could go wrong. */
-  min-height: 14rem;
+  min-height: var(--multitask-row-min-height, 14rem);
   border-left: 2px solid var(--pane-accent);
 }
 

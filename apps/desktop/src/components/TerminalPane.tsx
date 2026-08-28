@@ -32,6 +32,9 @@ interface TerminalPaneProps extends TerminalTarget {
   visible?: boolean;
   /// Keep dashboard panes pinned to their live prompt instead of preserving stale scrollback.
   followTail?: boolean;
+  /// Report the rendered height needed to show every authoritative terminal row. Multitasking
+  /// uses this to grow its grid item when the daemon's safety floor exceeds FitAddon's proposal.
+  onMinimumHeight?: (pixels: number) => void;
   /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
   shell?: boolean;
   sessionId?: string | null;
@@ -94,6 +97,7 @@ function terminalTheme(element: HTMLElement, appearance?: TerminalAppearance) {
 }
 
 export default function TerminalPane(props: TerminalPaneProps) {
+  let pane!: HTMLElement;
   let container!: HTMLDivElement;
   let searchInput!: HTMLInputElement;
   let terminal: Terminal | undefined;
@@ -146,6 +150,25 @@ export default function TerminalPane(props: TerminalPaneProps) {
     ) {
       terminal?.scrollToBottom();
     }
+  }
+
+  function reportMinimumHeight() {
+    if (
+      !props.followTail
+      || props.visible === false
+      || !terminal
+      || !pane?.isConnected
+      || !container?.isConnected
+    ) return;
+    const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+    if (!screen) return;
+    const paneRect = pane.getBoundingClientRect();
+    const hostRect = container.getBoundingClientRect();
+    const screenRect = screen.getBoundingClientRect();
+    if (paneRect.height <= 0 || hostRect.height <= 0 || screenRect.height <= 0) return;
+    const chromeHeight = Math.max(0, hostRect.top - paneRect.top)
+      + Math.max(0, paneRect.bottom - hostRect.bottom);
+    props.onMinimumHeight?.(Math.ceil(chromeHeight + screenRect.height));
   }
 
   async function preloadTerminalFont() {
@@ -351,6 +374,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         } catch {
           // ignore
         }
+        reportMinimumHeight();
         followTailIfNeeded();
       }
 
@@ -690,6 +714,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
   return (
     <section
+      ref={pane}
       class="relative isolate h-full min-h-0 overflow-hidden bg-background"
       style={{ "background-color": paneBg() || undefined }}
       aria-label={props.label}

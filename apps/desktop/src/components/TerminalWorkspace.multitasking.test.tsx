@@ -293,12 +293,11 @@ describe("TerminalWorkspace: active pane highlight (bug 4)", () => {
 /// jsdom performs no real layout: `getBoundingClientRect()` reports zero for every element
 /// regardless of CSS. To honestly test the geometric claims in the bug report ("composer has
 /// nonzero visible height", "no two panes overlap") we model exactly what the *fixed* CSS
-/// guarantees — a three-column grid where every row is at least the 14rem
-/// `.multitask-pane` floor confirmed in index.css.test.ts — and stub each element's rect from
-/// that model. This proves the arithmetic behind the fix is sound; it does not substitute for
-/// looking at the app in a real browser (see the task's final report for what's unverified).
+/// guarantees — a three-column grid where every row grows to the measured 24-row xterm screen
+/// height plus its header — and stub each element's rect from that model. This proves the
+/// arithmetic behind the fix is sound; it does not substitute for the real-browser evidence.
 describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3)", () => {
-  const ROW_MIN_PX = 224; // 14rem at the standard 16px root font size, per index.css.
+  const ROW_MIN_PX = 424; // 24 × 16.5px rendered rows + the 28px pane header.
   const HEADER_PX = 28; // h-7, TerminalPane.tsx's header bar.
   const CONTAINER_WIDTH = 1200;
   const CONTAINER_HEIGHT = 900;
@@ -323,6 +322,7 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
     expect(screen.queryByRole("button", { name: /multitasking columns?$/i })).toBeNull();
     const layout = document.querySelector<HTMLElement>(".terminal-layout.is-multitasking");
     expect(layout?.style.gridTemplateColumns).toBe("repeat(3, minmax(0, 1fr))");
+    expect(layout?.style.getPropertyValue("--multitask-row-min-height")).toBe("224px");
 
     const colWidth = CONTAINER_WIDTH / columns;
     const rects: DOMRect[] = panes.map((_, index) => {
@@ -340,7 +340,7 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
     });
 
     // Bug 3: the composer's container must have real, positive, in-bounds height under the
-    // fixed 14rem floor — not clipped to zero by an under-sized grid row.
+    // measured terminal-row floor — not clipped by an under-sized grid row.
     for (const pane of panes) {
       const host = pane.querySelector<HTMLElement>(".terminal-host")!;
       const paneRect = pane.getBoundingClientRect();

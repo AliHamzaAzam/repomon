@@ -31,6 +31,8 @@ import {
 } from "./icons";
 
 const TerminalPane = lazy(() => import("./TerminalPane"));
+// Used only until a live xterm reports its authoritative rendered screen height.
+const MULTITASK_FALLBACK_ROW_HEIGHT_PX = 224;
 
 interface TerminalWorkspaceProps {
   fleet: FleetStore;
@@ -46,6 +48,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [adopting, setAdopting] = createSignal(false);
   const [workspaceError, setWorkspaceError] = createSignal<string | null>(null);
   const [warmWindows, setWarmWindows] = createSignal<string[]>([]);
+  const [paneMinimumHeights, setPaneMinimumHeights] = createSignal<Record<string, number>>({});
 
   const updateScrollIndicators = () => {
     if (!tabStripRef) return;
@@ -182,6 +185,21 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     // Split/grid use a selection-independent order: clicking an agent moves focus, not the grid.
     return stableVisibleTargets(all, active.window, eff);
   });
+
+  const multitaskRowMinimum = createMemo(() => Math.max(
+    MULTITASK_FALLBACK_ROW_HEIGHT_PX,
+    ...visibleTargets().flatMap((target) => {
+      const height = paneMinimumHeights()[target.window];
+      return height ? [height] : [];
+    }),
+  ));
+
+  const recordPaneMinimumHeight = (window: string, pixels: number) => {
+    setPaneMinimumHeights((current) => {
+      if (current[window] === pixels) return current;
+      return { ...current, [window]: pixels };
+    });
+  };
 
   createEffect(() => {
     const available = targets();
@@ -644,7 +662,10 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
         <div
           class={`terminal-layout is-${effectiveLayout()} count-${visibleTargets().length} ${multitasking() ? "is-multitasking" : ""}`}
           style={multitasking()
-            ? { "grid-template-columns": "repeat(3, minmax(0, 1fr))" }
+            ? {
+                "grid-template-columns": "repeat(3, minmax(0, 1fr))",
+                "--multitask-row-min-height": `${multitaskRowMinimum()}px`,
+              }
             : undefined}
         >
           <For each={mountedTargets()}>
@@ -694,6 +715,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     focused={activeWindow() === target.window}
                     visible={visible()}
                     followTail={multitasking()}
+                    onMinimumHeight={(pixels) => recordPaneMinimumHeight(target.window, pixels)}
                     shell={target.shell}
                     sessionId={sessionId()}
                   />
