@@ -30,6 +30,8 @@ interface TerminalPaneProps extends TerminalTarget {
   renderer?: TerminalRenderer;
   focused?: boolean;
   visible?: boolean;
+  /// Keep dashboard panes pinned to their live prompt instead of preserving stale scrollback.
+  followTail?: boolean;
   /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
   shell?: boolean;
   sessionId?: string | null;
@@ -128,6 +130,17 @@ export default function TerminalPane(props: TerminalPaneProps) {
     return error instanceof Error ? error.message : String(error);
   }
 
+  function followTailIfNeeded() {
+    if (
+      !disposed
+      && props.followTail
+      && props.visible !== false
+      && view() === "live"
+    ) {
+      terminal?.scrollToBottom();
+    }
+  }
+
   async function preloadTerminalFont() {
     if (typeof document === "undefined" || !document.fonts) return;
     await document.fonts.load('12px "Berkeley Mono"');
@@ -184,13 +197,19 @@ export default function TerminalPane(props: TerminalPaneProps) {
   createEffect(() => {
     const visible = ready() && props.visible !== false;
     const focused = props.focused;
+    const followTail = props.followTail;
     if (!visible || view() !== "live" || disposed) return;
     if (visibilityFrame !== undefined) cancelAnimationFrame(visibilityFrame);
     visibilityFrame = requestAnimationFrame(() => {
       visibilityFrame = undefined;
       if (disposed || !terminal || !container?.isConnected) return;
-      void syncSize?.();
-      if (focused && !disposed && terminal) terminal.focus();
+      const finish = () => {
+        if (followTail) followTailIfNeeded();
+        if (focused && !disposed && terminal) terminal.focus();
+      };
+      const syncing = syncSize?.();
+      if (syncing) void syncing.then(finish, finish);
+      else finish();
     });
   });
 
@@ -273,7 +292,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
           bufferedWrites.push(bytes);
         } else {
           recordTrace("XTERM_DIRECT_WRITE", props.window, bytes);
-          terminal.write(bytes);
+          terminal.write(bytes, followTailIfNeeded);
         }
       }
 
@@ -283,7 +302,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
           const chunk = bufferedWrites.shift();
           if (chunk && !disposed && terminal) {
             recordTrace("XTERM_FLUSHED_WRITE", props.window, chunk);
-            terminal.write(chunk);
+            terminal.write(chunk, followTailIfNeeded);
           }
         }
       }
@@ -304,6 +323,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         } catch {
           // ignore
         }
+        followTailIfNeeded();
       }
 
       // Keep xterm and the backend pane on one authoritative grid. GUI-owned shells can be
