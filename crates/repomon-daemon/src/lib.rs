@@ -549,7 +549,7 @@ impl Ctx {
             }
             // A window is focused (fast cadence + cursor) if any FRESH-beat session focuses it.
             let at = *sess.viewport_focus_at.lock().await;
-            let fresh = at.is_some_and(|t| now.duration_since(t) < rpc::FOCUS_OWNED_TTL);
+            let fresh = at.is_some_and(|t| now.duration_since(t) < rpc::VIEWPORT_OWNED_TTL);
             if fresh {
                 if let Some((_, w)) = &focus {
                     focused.insert(w.clone());
@@ -1017,7 +1017,7 @@ mod stream_tests {
         *stale.viewport.lock().await = vec![7];
         *stale.viewport_focus.lock().await = Some((7, "lane-7".to_string()));
         *stale.viewport_focus_at.lock().await =
-            Some(Instant::now() - rpc::FOCUS_OWNED_TTL - Duration::from_secs(1));
+            Some(Instant::now() - rpc::VIEWPORT_OWNED_TTL - Duration::from_secs(1));
 
         let snap = ctx.viewport_snapshot().await;
         assert_eq!(snap.targets, vec![(7, "lane-7".to_string())]);

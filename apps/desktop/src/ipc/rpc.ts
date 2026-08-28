@@ -268,7 +268,7 @@ interface RpcMap {
   "terminal.list_all": { params: undefined; result: Array<{ lane_id: number; id: string }> };
   "terminal.close": { params: { id: string }; result: null };
   "fs.browse": { params: { path?: string }; result: BrowseResult };
-  "viewport.set": { params: { lane_ids: number[]; focus_lane?: number; focus_window?: string; windows?: string[] }; result: null };
+  "viewport.set": { params: { lane_ids: number[]; focus_lane?: number; focus_window?: string; fit_windows?: string[]; windows?: string[] }; result: null };
   "commit.recent": { params: { lane_id?: number; repo_id?: number; limit?: number }; result: Commit[] };
   "commit.search": { params: { query: string; limit?: number }; result: Commit[] };
   // Local-only (see remote.rs's remote_method_allowed) - same reasoning as the worktree

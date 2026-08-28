@@ -1098,6 +1098,10 @@ struct ViewportSet {
     focus_lane: Option<repomon_core::model::LaneId>,
     #[serde(default)]
     focus_window: Option<String>,
+    /// Managed agent windows visible concurrently and eligible to fit this connection's panes.
+    /// Additive/default-empty for older clients that only claim their single focused window.
+    #[serde(default)]
+    fit_windows: Vec<String>,
     /// Plain-terminal windows (`term-{lane}-{n}`) visible as Grid tiles, streamed alongside
     /// the lane panes. Non-terminal names are ignored.
     #[serde(default)]
@@ -4120,6 +4124,13 @@ pub async fn dispatch(
             // client can't point the capture loop at arbitrary windows.
             p.windows
                 .retain(|w| TmuxRuntime::parse_term_window(w).is_some());
+            let visible_lanes: std::collections::HashSet<_> = p.lane_ids.iter().copied().collect();
+            let mut seen_fit_windows = std::collections::HashSet::new();
+            p.fit_windows.retain(|window| {
+                TmuxRuntime::parse_lane_window(window).is_some_and(|(lane, _)| {
+                    visible_lanes.contains(&lane) && seen_fit_windows.insert(window.clone())
+                })
+            });
             // This handler is the single writer of the viewport fields, so it also rewrites the
             // std-Mutex `output_filter` snapshot the event-forward loops read to filter
             // `event.agent.output` (they must not await; see `ConnSession::output_filter`). Build
@@ -4128,12 +4139,13 @@ pub async fn dispatch(
                 p.lane_ids.iter().copied().collect(),
                 p.windows.iter().cloned().collect(),
             );
-            // Per connection now: each device writes its OWN viewport/focus into its session, and
-            // the capture loop streams the union across all live sessions. Wire shape unchanged.
+            // Per connection: each device writes its OWN viewport/focus/fit claims into its
+            // session, and the capture loop streams the union across all live sessions.
             *sess.viewport.lock().await = p.lane_ids;
             *sess.viewport_focus.lock().await = p.focus_lane.zip(p.focus_window);
-            // The focus heartbeat: `agent.fit` treats the focused window as size-owned while
-            // this is fresh. A client re-asserts its viewport every few seconds, so a crashed
+            *sess.viewport_fit_windows.lock().await = p.fit_windows;
+            // The viewport heartbeat: `agent.fit` treats the focused and fit windows as
+            // size-owned while this is fresh. A client re-asserts every few seconds, so a crashed
             // or closed client releases ownership when the beat stops.
             *sess.viewport_focus_at.lock().await = Some(std::time::Instant::now());
             *sess.viewport_windows.lock().await = p.windows;
@@ -5474,11 +5486,11 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
     }
 }
 
-/// How long a viewport focus keeps owning its window's size after the last `viewport.set`, and how
+/// How long a viewport claim keeps owning its windows' sizes after the last `viewport.set`, and how
 /// long the capture loop treats a session's focus as cadence-boosting. Three missed ~5s client
 /// heartbeats — generous against a busy tick, short enough that a closed/crashed client frees the
 /// pane for reflow within seconds. `pub(crate)` so [`crate::Ctx::viewport_snapshot`] shares it.
-pub(crate) const FOCUS_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const VIEWPORT_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A transcript that should get a sticky binding this tick, pending pane evidence: the
 /// fingerprint of its last message must be visible in exactly one of the lane's unclaimed
@@ -5940,7 +5952,9 @@ struct SessSnapshot {
     local: bool,
     /// The window this session focuses, if any (with its lane, unused by the arbitration).
     focus: Option<(repomon_core::model::LaneId, String)>,
-    /// When this session last (re)asserted its viewport — its focus beat's freshness clock.
+    /// Other agent windows visible in the same multi-pane viewport.
+    fit_windows: Vec<String>,
+    /// When this session last (re)asserted its viewport — its ownership beat's freshness clock.
     focus_at: Option<std::time::Instant>,
     /// When this session last drove an agent (for remote-vs-remote last-interaction-wins).
     last_interaction: Option<std::time::Instant>,
@@ -5952,11 +5966,13 @@ async fn sess_snapshot(sess: &ConnSession) -> SessSnapshot {
     // footgun). Order doesn't matter here since they never overlap.
     let local = sess.is_local();
     let focus = sess.viewport_focus.lock().await.clone();
+    let fit_windows = sess.viewport_fit_windows.lock().await.clone();
     let focus_at = *sess.viewport_focus_at.lock().await;
     let last_interaction = *sess.last_interaction.lock().await;
     SessSnapshot {
         local,
         focus,
+        fit_windows,
         focus_at,
         last_interaction,
     }
@@ -5994,12 +6010,20 @@ fn fit_allowed(
     now: std::time::Instant,
 ) -> bool {
     for o in others {
-        // Does this other session hold a FRESH focus beat on the target window?
-        let focuses_window = o.focus.as_ref().is_some_and(|(_, w)| w == window);
-        let fresh = o
-            .focus_at
-            .is_some_and(|at| now.duration_since(at) < FOCUS_OWNED_TTL);
-        if !(focuses_window && fresh) {
+        if !fit_claims_window(o, window, now) {
+            continue;
+        }
+
+        // A fresh, newer claim by the caller means it has just exposed this window in its own
+        // viewport and needs to fit the shared pane to that geometry. This is the multi-pane
+        // extension of the old single-focus ownership model. Transport precedence remains: a
+        // remote client cannot displace a Local/TUI claim merely by sending a newer heartbeat.
+        let caller_claim_is_newer = fit_claims_window(caller, window, now)
+            && match (caller.focus_at, o.focus_at) {
+                (Some(mine), Some(theirs)) => mine > theirs,
+                _ => false,
+            };
+        if caller_claim_is_newer && (caller.local || !o.local) {
             continue;
         }
         if o.local {
@@ -6016,6 +6040,15 @@ fn fit_allowed(
         }
     }
     true
+}
+
+fn fit_claims_window(session: &SessSnapshot, window: &str, now: std::time::Instant) -> bool {
+    let visible = session.focus.as_ref().is_some_and(|(_, w)| w == window)
+        || session.fit_windows.iter().any(|w| w == window);
+    visible
+        && session
+            .focus_at
+            .is_some_and(|at| now.duration_since(at) < VIEWPORT_OWNED_TTL)
 }
 
 /// How long a managed agent's pane must sit unchanged — with no dialog up and its turn not
@@ -8311,6 +8344,7 @@ mod tests {
         SessSnapshot {
             local,
             focus: focus_window.map(|w| (7i64, w.to_string())),
+            fit_windows: Vec::new(),
             focus_at,
             last_interaction,
         }
@@ -8371,6 +8405,58 @@ mod tests {
         // A remote peer with a STALE focus beat doesn't arbitrate, however recent its interaction.
         let peer_stale = fit_snap(false, Some("lane-7"), stale, later);
         assert!(fit_allowed(&caller_old, &[peer_stale], "lane-7", now));
+    }
+
+    #[test]
+    fn multitasking_inactive_window_has_no_fit_claim_in_legacy_shape() {
+        let now = std::time::Instant::now();
+        let caller_interaction = Some(now - std::time::Duration::from_secs(10));
+        let peer_interaction = Some(now - std::time::Duration::from_secs(1));
+        let fresh = Some(now - std::time::Duration::from_secs(2));
+
+        // This is the pre-fix multitasking shape: the caller can see lane-7-2 but its one
+        // `focus_window` points elsewhere, while another live session still owns lane-7-2.
+        // The denied fit makes agent.fit return the existing (larger) tmux grid to the small pane.
+        let multitasking_caller = fit_snap(false, Some("lane-9"), fresh, caller_interaction);
+        let peer = fit_snap(false, Some("lane-7-2"), fresh, peer_interaction);
+        assert!(!fit_allowed(&multitasking_caller, &[peer], "lane-7-2", now));
+    }
+
+    #[test]
+    fn multitasking_visible_window_gets_newer_fit_claim() {
+        let now = std::time::Instant::now();
+        let mut multitasking_caller = fit_snap(
+            false,
+            Some("lane-9"),
+            Some(now - std::time::Duration::from_secs(1)),
+            Some(now - std::time::Duration::from_secs(10)),
+        );
+        multitasking_caller.fit_windows = vec!["lane-7-2".to_string(), "lane-8".to_string()];
+        let peer = fit_snap(
+            false,
+            Some("lane-7-2"),
+            Some(now - std::time::Duration::from_secs(2)),
+            Some(now - std::time::Duration::from_millis(500)),
+        );
+
+        // Even though the peer drove the agent more recently, the caller has just asserted that
+        // lane-7-2 is visible and must fit its smaller multitasking cell. Before fit_windows, the
+        // caller had no claim and this exact shape was denied by the test above.
+        assert!(fit_allowed(&multitasking_caller, &[peer], "lane-7-2", now));
+
+        // A remote caller still cannot displace a Local/TUI owner.
+        let local_peer = fit_snap(
+            true,
+            Some("lane-7-2"),
+            Some(now - std::time::Duration::from_secs(2)),
+            None,
+        );
+        assert!(!fit_allowed(
+            &multitasking_caller,
+            &[local_peer],
+            "lane-7-2",
+            now
+        ));
     }
 
     #[test]

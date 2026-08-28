@@ -172,6 +172,27 @@ describe("TerminalWorkspace multitasking: every selected pane is actually mounte
     dispose();
   });
 
+  it("claims fit ownership for every visible agent pane, not only the active one", async () => {
+    const laneA = mkLane(10, [
+      session({ id: 1, agent: "codex", tmux_window: "lane-10", session_id: "s1" }),
+      session({ id: 2, agent: "claude-code", tmux_window: "lane-10-2", session_id: "s2" }),
+    ]);
+    const laneB = mkLane(20, [
+      session({ id: 3, agent: "opencode", tmux_window: "lane-20", session_id: "s3" }),
+    ]);
+    const { dispose } = await mountFleet([laneA, laneB], { multitasking: true });
+
+    await settle(() => {
+      const viewportCalls = daemonCallMock.mock.calls.filter(([method]) => method === "viewport.set");
+      const params = viewportCalls[viewportCalls.length - 1]?.[1] as
+        | { focus_window?: string; fit_windows?: string[] }
+        | undefined;
+      expect(params?.focus_window).toBe("lane-10");
+      expect(params?.fit_windows).toEqual(["lane-10", "lane-10-2", "lane-20"]);
+    });
+    dispose();
+  });
+
   it("keeps proactively warmed non-selected terminals out of grid flow", async () => {
     const laneA = mkLane(10, Array.from({ length: 8 }, (_, index) => session({
       id: index + 1,
