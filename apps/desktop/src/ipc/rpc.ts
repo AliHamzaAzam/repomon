@@ -235,6 +235,8 @@ interface RpcMap {
   "message.inbox": { params: { unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
   "message.mark_read": { params: { id: string }; result: FleetMessage };
   "message.list": { params: { lane_id?: number; unread_only?: boolean; limit?: number; before?: string }; result: MessagePage };
+  "message.force_send": { params: { id: string }; result: FleetMessage };
+  "message.delete": { params: { id: string }; result: null };
   "agent.detect": { params: undefined; result: AgentChoice[] };
   "agent.add": { params: { name: string; command: string }; result: null };
   "agent.remove": { params: { name: string }; result: null };

@@ -11,6 +11,8 @@ interface StoredMessageEvent {
 interface MessageStoreOptions {
   list?: (params?: { limit?: number; before?: string }) => Promise<MessagePage>;
   markRead?: (id: string) => Promise<FleetMessage>;
+  forceSend?: (id: string) => Promise<FleetMessage>;
+  deleteMessage?: (id: string) => Promise<void>;
   subscribe?: (onEvent: (event: DaemonEvent) => void) => Promise<() => void>;
 }
 
@@ -39,6 +41,8 @@ export function createMessageStore(
   const [nextBefore, setNextBefore] = createSignal<string | null>(null);
   const list = options.list ?? ((params) => daemonCall("message.list", { limit: 200, ...params }));
   const mark = options.markRead ?? ((id) => daemonCall("message.mark_read", { id }));
+  const force = options.forceSend ?? ((id) => daemonCall("message.force_send", { id }));
+  const remove = options.deleteMessage ?? ((id) => daemonCall("message.delete", { id }));
   const subscribe = options.subscribe ?? subscribeDaemon;
   let active = false;
   let unsubscribe: (() => void) | undefined;
@@ -107,6 +111,17 @@ export function createMessageStore(
     return updated;
   }
 
+  async function forceSend(id: string) {
+    const updated = await force(id);
+    setItems((current) => mergeMessages(current, [updated]));
+    return updated;
+  }
+
+  async function deleteMessage(id: string) {
+    await remove(id);
+    setItems((current) => current.filter((message) => message.id !== id));
+  }
+
   async function open(message: FleetMessage) {
     const updated = message.read_state === "read" ? message : await markRead(message.id);
     const source = updated.sender.lane_id !== null ? updated.sender : updated.recipient;
@@ -115,7 +130,20 @@ export function createMessageStore(
     }
   }
 
-  return { items, unread, unreadByLane, nextBefore, refresh, loadMore, start, stop, markRead, open };
+  return {
+    items,
+    unread,
+    unreadByLane,
+    nextBefore,
+    refresh,
+    loadMore,
+    start,
+    stop,
+    markRead,
+    forceSend,
+    deleteMessage,
+    open,
+  };
 }
 
 export type MessageStore = ReturnType<typeof createMessageStore>;

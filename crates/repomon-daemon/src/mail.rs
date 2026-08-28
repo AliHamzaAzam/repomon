@@ -100,12 +100,28 @@ enum AttemptOutcome {
     Failed(String),
 }
 
-async fn try_deliver(ctx: &Ctx, lanes: &[Lane], message: &FleetMessage) -> AttemptOutcome {
-    let (inject_agents, inject_operator) = {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryMode {
+    Automatic,
+    Force,
+}
+
+async fn try_deliver(
+    ctx: &Ctx,
+    lanes: &[Lane],
+    message: &FleetMessage,
+    mode: DeliveryMode,
+) -> AttemptOutcome {
+    let policy_allows = if mode == DeliveryMode::Force {
+        true
+    } else {
         let config = ctx.config.read().await;
-        (config.message_inject_agents, config.message_inject_operator)
+        injection_allowed(
+            message,
+            config.message_inject_agents,
+            config.message_inject_operator,
+        )
     };
-    let policy_allows = injection_allowed(message, inject_agents, inject_operator);
     let Some(lane_id) = message.recipient.lane_id else {
         return AttemptOutcome::Deferred;
     };
@@ -159,6 +175,36 @@ async fn try_deliver(ctx: &Ctx, lanes: &[Lane], message: &FleetMessage) -> Attem
         }
         SendOutcome::Skipped { .. } => AttemptOutcome::Deferred,
         SendOutcome::Failed { error, .. } => AttemptOutcome::Failed(error),
+    }
+}
+
+/// Attempt one operator-requested delivery immediately. This overrides only the configured
+/// sender-class policy for this message; recipient resolution, idle/dialog safety, and the
+/// self-verifying composer submission path remain identical to automatic delivery.
+pub(crate) async fn force_deliver(
+    ctx: &Ctx,
+    lanes: &[Lane],
+    message: &FleetMessage,
+) -> Result<FleetMessage, String> {
+    if message.delivered_at.is_some() {
+        return Err("message is already delivered".to_string());
+    }
+    match try_deliver(ctx, lanes, message, DeliveryMode::Force).await {
+        AttemptOutcome::Delivered => ctx
+            .store
+            .get_message(message.id.clone())
+            .await
+            .map_err(|error| error.to_string()),
+        AttemptOutcome::Deferred => {
+            Err("recipient is not currently safe for message injection".to_string())
+        }
+        AttemptOutcome::Failed(error) => {
+            let _ = ctx
+                .store
+                .set_message_delivery_error(message.id.clone(), error.clone())
+                .await;
+            Err(error)
+        }
     }
 }
 
@@ -238,7 +284,7 @@ async fn delivery_pass(ctx: &Ctx, failures: &mut HashMap<String, FailureState>) 
             .recipient
             .lane_id
             .and_then(|lane_id| lanes.iter().find(|lane| lane.id == lane_id));
-        match try_deliver(ctx, &lanes, message).await {
+        match try_deliver(ctx, &lanes, message, DeliveryMode::Automatic).await {
             AttemptOutcome::Delivered => {
                 failures.remove(&message.id);
             }
@@ -689,7 +735,7 @@ mod tests {
             .unwrap();
 
         let lane = lane_with_session(session(AgentStatus::Waiting));
-        let outcome = try_deliver(&ctx, &[lane], &queued).await;
+        let outcome = try_deliver(&ctx, &[lane], &queued, DeliveryMode::Automatic).await;
 
         assert_eq!(outcome, AttemptOutcome::Delivered);
         let sent = backend.sent_text.lock().unwrap().clone();
@@ -703,5 +749,62 @@ mod tests {
             refreshed.delivered_at.is_some(),
             "push delivery marks supervised mail delivered"
         );
+    }
+
+    #[tokio::test]
+    async fn force_delivery_overrides_policy_but_keeps_verified_send() {
+        let backend = Arc::new(ScriptedBackend::new());
+        let ctx = make_mail_ctx(backend.clone());
+        {
+            let mut config = ctx.config.write().await;
+            config.message_inject_operator = false;
+        }
+        let queued = ctx
+            .store
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                ResolvedAgentAddress {
+                    address: AgentAddress::new("operator"),
+                    lane_id: None,
+                    slot: None,
+                    window: None,
+                    session_id: None,
+                    agent_kind: None,
+                },
+                ResolvedAgentAddress {
+                    address: AgentAddress::new("lane-2/1"),
+                    lane_id: Some(2),
+                    slot: Some(1),
+                    window: Some("lane-2".into()),
+                    session_id: Some("session-2".into()),
+                    agent_kind: Some("claude-code".into()),
+                },
+                "force this one message".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let lane = lane_with_session(session(AgentStatus::Waiting));
+
+        assert_eq!(
+            try_deliver(
+                &ctx,
+                std::slice::from_ref(&lane),
+                &queued,
+                DeliveryMode::Automatic,
+            )
+            .await,
+            AttemptOutcome::Deferred,
+        );
+        let delivered = force_deliver(&ctx, &[lane], &queued).await.unwrap();
+
+        assert!(delivered.delivered_at.is_some());
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+        assert!(
+            backend.sent_text.lock().unwrap()[0]
+                .1
+                .ends_with("[END REPOMAIL]")
+        );
+        assert!(backend.sent_keys.lock().unwrap().is_empty());
     }
 }

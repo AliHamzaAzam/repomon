@@ -80,7 +80,7 @@ function buildDefaultPanels(
     { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} /> },
 
     // Durable fleet mail across every lane, grouped by conversation thread.
-    { id: "mail", label: "Repomail", icon: IconMail, component: () => <MailPanel fleet={fleet} messages={messages} /> },
+    { id: "mail", label: "Repomail", icon: IconMail, component: () => <MailPanel fleet={fleet} messages={messages} actions={actions} /> },
 
     // E1: agent supervision policies and live audit log for the active lane.
     {

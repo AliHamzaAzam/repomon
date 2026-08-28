@@ -3,6 +3,8 @@ import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FleetMessage, Lane } from "../bindings";
+import type { ConfirmOptions } from "./ConfirmDialog";
+import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import type { MessageStore } from "../stores/messages";
 import MailPanel, { groupMailThreads } from "./MailPanel";
@@ -90,6 +92,13 @@ function fixture() {
     const current = items().find((item) => item.id === id)!;
     return { ...current, read_state: "read" as const, read_at: "2026-08-28T00:01:00.000Z" };
   });
+  const forceSend = vi.fn(async (id: string) => ({
+    ...items().find((item) => item.id === id)!,
+    delivery_state: "delivered" as const,
+    delivered_at: "2026-08-28T00:02:00.000Z",
+    delivery_error: null,
+  }));
+  const deleteMessage = vi.fn(async () => undefined);
   const store = {
     items,
     unread: () => items().filter((item) => item.read_state === "unread").length,
@@ -100,12 +109,28 @@ function fixture() {
     start: vi.fn(async () => undefined),
     stop: vi.fn(),
     markRead,
+    forceSend,
+    deleteMessage,
     open,
   } as unknown as MessageStore;
   const fleet = {
     lanes: () => [lane(2, "alpha", "feature/alpha"), lane(3, "beta", "feature/beta")],
   } as unknown as FleetStore;
-  return { store, fleet, failedReply, open, markRead };
+  let confirmOptions: ConfirmOptions | null = null;
+  const confirm = vi.fn((options: ConfirmOptions) => { confirmOptions = options; });
+  const actions = { confirm } as unknown as ActionsStore;
+  return {
+    store,
+    fleet,
+    actions,
+    failedReply,
+    open,
+    markRead,
+    forceSend,
+    deleteMessage,
+    confirm,
+    getConfirmOptions: () => confirmOptions,
+  };
 }
 
 afterEach(cleanup);
@@ -141,6 +166,29 @@ describe("MailPanel", () => {
     expect(screen.getByText("beta lane mail")).toBeInTheDocument();
     expect(screen.queryByText("operator request")).not.toBeInTheDocument();
     expect(screen.queryByText("agent reply")).not.toBeInTheDocument();
+  });
+
+  it("labels threads and exposes force-send plus confirmed deletion", async () => {
+    const fixtureData = fixture();
+    const { container } = render(() => (
+      <MailPanel messages={fixtureData.store} fleet={fixtureData.fleet} actions={fixtureData.actions} />
+    ));
+    const thread = screen.getByRole("region", { name: "Mail thread thread-a" });
+
+    expect(within(thread).getByText("alpha · feature/alpha")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("↔");
+    const reply = within(thread).getByText("agent reply").closest("article")!;
+    expect(within(reply).queryByRole("button", { name: /Force send/ })).toBeNull();
+
+    const queued = screen.getByText("beta lane mail").closest("article")!;
+    fireEvent.click(within(queued).getByRole("button", { name: /Force send/ }));
+    await waitFor(() => expect(fixtureData.forceSend).toHaveBeenCalledWith("3"));
+
+    fireEvent.click(within(reply).getByRole("button", { name: /Delete/ }));
+    expect(fixtureData.confirm).toHaveBeenCalledTimes(1);
+    expect(fixtureData.getConfirmOptions()?.danger).toBe(true);
+    await fixtureData.getConfirmOptions()?.onConfirm();
+    expect(fixtureData.deleteMessage).toHaveBeenCalledWith("2");
   });
 });
 
