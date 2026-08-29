@@ -7,7 +7,7 @@
 //! land in [`Ctx::usage`] for the `usage.get` RPC, keyed so the TUI can attribute usage to the
 //! focused agent's account (Claude config dir, or `"codex"`).
 //!
-//! It is opt-in and frugal: nothing runs unless `[usage_probe]` is enabled AND a local TUI is
+//! It is opt-in and frugal: nothing runs unless `[usage_probe]` is enabled AND a local UI is
 //! attached; it re-probes only every few minutes and never sends a model prompt (just the usage
 //! command + Esc). Probe windows are named `usage-probe-…` (not `lane-…`) and run in a neutral cwd,
 //! so they never pollute repomon's own lane/agent detection. The parsing is the pure, fixture-
@@ -34,7 +34,7 @@ const TICK: Duration = Duration::from_secs(20);
 /// How long a usage reading stays fresh before the next probe round. Usage moves slowly and each
 /// round spawns a hidden session per account, so this is generous.
 const REFRESH: Duration = Duration::from_secs(300);
-/// How long since the local TUI's last request before we treat it as gone and stop probing (we
+/// How long since the local UI's last request before we treat it as gone and stop probing (we
 /// keep the last reading so reopening shows it instantly).
 const LOCAL_TTL: Duration = Duration::from_secs(60);
 /// Hard ceiling on a single probe. One normally finishes in well under 35s; if a `tmux` call ever
@@ -98,9 +98,9 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
             last_round = None;
             continue;
         }
-        let tui_active =
+        let ui_active =
             (*ctx.local_watcher_seen.lock().await).is_some_and(|t| t.elapsed() < LOCAL_TTL);
-        if !tui_active {
+        if !ui_active {
             continue;
         }
         if !usage_round_due(last_round, forced) {
@@ -203,7 +203,7 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
 }
 
 /// A manual refresh bypasses only the slow freshness cadence. The watcher still applies its
-/// normal opt-in, local-TUI, active-kind, and probe-timeout rules around this decision.
+/// normal opt-in, local-UI, active-kind, and probe-timeout rules around this decision.
 fn usage_round_due(last_round: Option<Instant>, forced: bool) -> bool {
     forced || last_round.is_none_or(|t| t.elapsed() >= REFRESH)
 }
@@ -439,6 +439,8 @@ fn probe_once(
         .ok()?;
 
     let mut ready = false;
+    #[cfg(test)]
+    let mut last_nonempty_pane = String::new();
     for _ in 0..40 {
         // Bail to the cleanup below if the watcher abandoned us (deadline passed / aborted), so
         // this blocking thread doesn't keep driving tmux after its round was given up on.
@@ -449,13 +451,23 @@ fn probe_once(
         let pane = tmux
             .capture_named(window, CaptureOpts::visible())
             .unwrap_or_default();
+        #[cfg(test)]
+        if !pane.trim().is_empty() {
+            last_nonempty_pane.clone_from(&pane);
+        }
         match probe_state(&pane, spec) {
             ProbeState::Ready => {
                 ready = true;
                 break;
             }
             ProbeState::Trust => {
-                let _ = tmux.send_key_named(window, "Enter"); // accept "trust this folder/contents"
+                // Claude 2.1.251 defaults its safety prompt to "No, exit". Pressing Enter here
+                // used to terminate the hidden session before `/usage` could run. Preserve the
+                // simple Enter path for older Claude/Codex/Antigravity prompts whose affirmative
+                // choice is already selected, but explicitly move off the known rejection row.
+                for key in trust_accept_keys(&pane) {
+                    let _ = tmux.send_key_named(window, key);
+                }
             }
             ProbeState::NotYet => {}
         }
@@ -483,6 +495,10 @@ fn probe_once(
                 let pane = tmux
                     .capture_named(window, CaptureOpts::visible())
                     .unwrap_or_default();
+                #[cfg(test)]
+                if !pane.trim().is_empty() {
+                    last_nonempty_pane.clone_from(&pane);
+                }
                 if let Some(r) = (spec.parse)(&pane) {
                     report = Some(r);
                     break 'attempts;
@@ -490,6 +506,11 @@ fn probe_once(
             }
         }
         let _ = tmux.send_key_named(window, "Escape");
+    }
+
+    #[cfg(test)]
+    if report.is_none() {
+        eprintln!("usage probe failed; ready={ready}; last pane:\n{last_nonempty_pane}");
     }
 
     let _ = tmux.kill_named(window);
@@ -513,6 +534,21 @@ fn probe_state(pane: &str, spec: &ProbeSpec) -> ProbeState {
         return ProbeState::Ready;
     }
     ProbeState::NotYet
+}
+
+/// Keys that accept a recognized folder-trust prompt. Current Claude puts the cursor on
+/// "No, exit" and the affirmative row immediately below it; older supported CLIs select the
+/// affirmative choice already, where Enter remains correct.
+fn trust_accept_keys(pane: &str) -> &'static [&'static str] {
+    let rejection_selected = pane.lines().any(|line| {
+        let clean = agent::text::strip_ansi(line);
+        clean.contains('❯') && clean.to_ascii_lowercase().contains("no, exit")
+    });
+    if rejection_selected {
+        &["Down", "Enter"]
+    } else {
+        &["Enter"]
+    }
 }
 
 #[cfg(test)]
@@ -652,6 +688,17 @@ mod tests {
             probe_state("Antigravity CLI\n Models & Quota", &agy),
             ProbeState::Ready
         );
+    }
+
+    #[test]
+    fn trust_prompt_moves_off_claudes_selected_rejection() {
+        let current_claude = "Quick safety check: Is this a project you created or one you trust?\n\
+            \u{1b}[94m❯\u{1b}[39m \u{1b}[94mNo,\u{1b}[39m \u{1b}[94mexit\u{1b}[39m\n  Yes, I trust this folder";
+        assert_eq!(trust_accept_keys(current_claude), ["Down", "Enter"]);
+
+        let affirmative_selected =
+            "Do you trust the contents of this directory?\n❯ Yes, continue\n  No, exit";
+        assert_eq!(trust_accept_keys(affirmative_selected), ["Enter"]);
     }
 
     #[test]

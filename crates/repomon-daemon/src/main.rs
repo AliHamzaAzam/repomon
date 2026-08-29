@@ -215,8 +215,8 @@ async fn run() {
     // nothing until a schedule exists.
     tokio::spawn(repomon_daemon::standing::standing_watch(ctx.clone()));
 
-    // Probe Claude's `/usage` for the TUI's account-usage corner. Self-gates per tick on
-    // `[usage_probe]` and a TUI being attached, so it costs nothing until enabled and watched.
+    // Probe Claude's `/usage` for local UIs' account-usage display. Self-gates per tick on
+    // `[usage_probe]` and a local UI being active, so it costs nothing until enabled and watched.
     tokio::spawn(repomon_daemon::usage_watch::usage_watcher(ctx.clone()));
 
     // Reap orphaned `lane-<id>` windows whose id no longer maps to the worktree they claim —
