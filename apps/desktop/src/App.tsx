@@ -413,39 +413,6 @@ function App(props: AppProps) {
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
-              workspace.multitasking()
-                ? "text-signal font-semibold"
-                : "text-muted hover:text-foreground"
-            }`}
-            onClick={workspace.toggleMultitasking}
-            aria-pressed={workspace.multitasking()}
-            title="Multitasking (⌘9)"
-          >
-            <IconMultitask size={13} />
-            <span>Multitasking</span>
-          </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
-          <button
-            type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
-              repomindOpen() && rightPanelTab() === "mail"
-                ? "text-signal font-semibold"
-                : "text-muted hover:text-foreground"
-            }`}
-            onClick={() => openPanelTab("mail")}
-            aria-pressed={repomindOpen() && rightPanelTab() === "mail"}
-            title="Repomail (⌘2)"
-          >
-            <IconMail size={13} />
-            <span>Repomail</span>
-            <Show when={messages.unread() > 0}>
-              <span class="rounded-full bg-signal/15 px-1 font-mono text-[9px] text-signal">{messages.unread()}</span>
-            </Show>
-          </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
-          <button
-            type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
               repomindOpen() && rightPanelTab() === "git"
                 ? "text-signal font-semibold"
                 : "text-muted hover:text-foreground"
@@ -478,6 +445,21 @@ function App(props: AppProps) {
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              workspace.multitasking()
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={workspace.toggleMultitasking}
+            aria-pressed={workspace.multitasking()}
+            title="Multitasking (⌘9)"
+          >
+            <IconMultitask size={13} />
+            <span>Multitasking</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
               extensionsOpen()
                 ? "text-signal font-semibold"
                 : "text-muted hover:text-foreground"
@@ -506,6 +488,24 @@ function App(props: AppProps) {
           >
             <IconShield size={13} />
             <span>Supervision</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              repomindOpen() && rightPanelTab() === "mail"
+                ? "text-signal font-semibold"
+                : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => openPanelTab("mail")}
+            aria-pressed={repomindOpen() && rightPanelTab() === "mail"}
+            title="Repomail (⌘2)"
+          >
+            <IconMail size={13} />
+            <span>Repomail</span>
+            <Show when={messages.unread() > 0}>
+              <span class="rounded-full bg-signal/15 px-1 font-mono text-[9px] text-signal">{messages.unread()}</span>
+            </Show>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
