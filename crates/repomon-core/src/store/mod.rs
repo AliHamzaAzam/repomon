@@ -1055,12 +1055,15 @@ impl Store {
         .await
     }
 
-    pub async fn mark_message_delivered(&self, id: String) -> Result<FleetMessage> {
+    /// Record a successful push injection. Since the message was typed into the recipient's
+    /// live terminal, delivery and reading are the same observable event for this path.
+    pub async fn mark_message_push_delivered(&self, id: String) -> Result<FleetMessage> {
         self.call(move |c| {
+            let now = to_iso(&Utc::now());
             let changed = c.execute(
                 "UPDATE messages SET delivered_at = COALESCE(delivered_at, ?2),
-                    delivery_error = NULL WHERE id = ?1",
-                params![&id, to_iso(&Utc::now())],
+                    read_at = COALESCE(read_at, ?2), delivery_error = NULL WHERE id = ?1",
+                params![&id, now],
             )?;
             if changed == 0 {
                 return Err(Error::NotFound(format!("message {id}")));
@@ -3281,9 +3284,31 @@ mod tests {
             page.messages[0].delivery_state,
             MessageDeliveryState::Delivered
         );
+        assert_eq!(page.messages[0].read_state, MessageReadState::Unread);
+        assert!(page.messages[0].read_at.is_none());
         let read = s.mark_message_read(message.id).await.unwrap();
         assert_eq!(read.read_state, MessageReadState::Read);
         assert!(read.read_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn push_delivery_marks_the_message_read_atomically() {
+        let s = store().await;
+        let message = s
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                address("operator"),
+                address("lane-2/1"),
+                "inject this into the live terminal".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let pushed = s.mark_message_push_delivered(message.id).await.unwrap();
+        assert_eq!(pushed.delivery_state, MessageDeliveryState::Delivered);
+        assert_eq!(pushed.read_state, MessageReadState::Read);
+        assert_eq!(pushed.delivered_at, pushed.read_at);
     }
 
     #[tokio::test]

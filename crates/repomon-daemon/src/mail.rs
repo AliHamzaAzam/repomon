@@ -168,7 +168,11 @@ async fn try_deliver(
     .await
     {
         SendOutcome::Sent { .. } => {
-            match ctx.store.mark_message_delivered(message.id.clone()).await {
+            match ctx
+                .store
+                .mark_message_push_delivered(message.id.clone())
+                .await
+            {
                 Ok(_) => AttemptOutcome::Delivered,
                 Err(error) => AttemptOutcome::Failed(error.to_string()),
             }
@@ -749,6 +753,8 @@ mod tests {
             refreshed.delivered_at.is_some(),
             "push delivery marks supervised mail delivered"
         );
+        assert_eq!(refreshed.read_state, MessageReadState::Read);
+        assert_eq!(refreshed.delivered_at, refreshed.read_at);
     }
 
     #[tokio::test]
@@ -799,6 +805,8 @@ mod tests {
         let delivered = force_deliver(&ctx, &[lane], &queued).await.unwrap();
 
         assert!(delivered.delivered_at.is_some());
+        assert_eq!(delivered.read_state, MessageReadState::Read);
+        assert_eq!(delivered.delivered_at, delivered.read_at);
         assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
         assert!(
             backend.sent_text.lock().unwrap()[0]
