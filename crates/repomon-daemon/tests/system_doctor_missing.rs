@@ -111,7 +111,13 @@ async fn system_doctor_honors_repomon_tmux_env_override() {
     let _lock = ENV_MUTEX.lock().await;
     let old_tmux = std::env::var_os("REPOMON_TMUX");
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let fake_tmux = dir.path().join("custom-tmux.cmd");
+    #[cfg(not(windows))]
     let fake_tmux = dir.path().join("custom-tmux");
+    #[cfg(windows)]
+    std::fs::write(&fake_tmux, b"@echo off\r\necho tmux 3.4\r\n").unwrap();
+    #[cfg(not(windows))]
     std::fs::write(&fake_tmux, b"#!/bin/sh\necho tmux 3.4\n").unwrap();
     #[cfg(unix)]
     {
@@ -136,6 +142,7 @@ async fn system_doctor_honors_repomon_tmux_env_override() {
     let res = r.result.expect("system.doctor result");
 
     assert_eq!(res["tmux"]["available"], json!(true));
+    assert_eq!(res["tmux"]["version"], json!("tmux 3.4"));
     assert_eq!(res["tmux"]["source"], json!("system"));
     assert_eq!(res["tmux"]["path"], json!(fake_tmux.to_str().unwrap()));
 
