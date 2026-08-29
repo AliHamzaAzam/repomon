@@ -4218,7 +4218,7 @@ pub async fn dispatch(
 
         // ---- usage ----
         // Per-account Claude usage scraped from `/usage` (empty unless [usage_probe] is on and a
-        // TUI is attached). The TUI matches an entry's `key` to the focused agent's `config_dir`.
+        // local UI is active). Clients match an entry's `key` to the focused agent's `config_dir`.
         "usage.get" => {
             let usage = ctx.usage.lock().await;
             let mut out: Vec<agent::AccountUsage> = usage

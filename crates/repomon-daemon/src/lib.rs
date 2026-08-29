@@ -253,10 +253,10 @@ pub struct Ctx {
     /// Keyed by slot window (`lane-7-2`), not lane: each slot pauses independently.
     pub rate_limits: Mutex<HashMap<String, auto_continue::RateLimit>>,
     /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
-    /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a TUI is attached.
+    /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a local UI is active.
     pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,
     /// Wakes the usage watcher for a user-requested refresh, bypassing the normal five-minute
-    /// cadence while preserving its active-kind and local-TUI gates.
+    /// cadence while preserving its active-kind and local-UI gates.
     pub usage_refresh: Notify,
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
