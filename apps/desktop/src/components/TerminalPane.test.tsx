@@ -2,12 +2,13 @@ import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import TerminalPane from "./TerminalPane";
+import TerminalPane, { devicePixelAlignedInsets } from "./TerminalPane";
 
 const watchTerminalMock = vi.hoisted(() => vi.fn());
 const daemonCallMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 const terminalInstances = vi.hoisted(() => [] as Array<{
   rows: number;
+  refresh: ReturnType<typeof vi.fn>;
   scrollToBottom: ReturnType<typeof vi.fn>;
 }>);
 
@@ -58,7 +59,7 @@ vi.mock("@xterm/xterm", () => ({
     onData() { return { dispose() {} }; }
     write(_data: string | Uint8Array, callback?: () => void) { callback?.(); }
     resize(cols: number, rows: number) { this.cols = cols; this.rows = rows; }
-    refresh() {}
+    refresh = vi.fn();
     focus() {}
     blur() {}
     scrollLines() {}
@@ -112,6 +113,55 @@ beforeEach(() => {
 });
 
 describe("TerminalPane multitasking tail follow", () => {
+  it("preserves host size while snapping fractional grid positions to device pixels", () => {
+    const original = { left: 8, right: 8, top: 28, bottom: 0 };
+    const aligned = devicePixelAlignedInsets(original, 677.6640625, 68.5, 2);
+
+    expect((677.6640625 + aligned.left - original.left) * 2).toBe(1355);
+    expect((68.5 + aligned.top - original.top) * 2).toBe(137);
+    expect(aligned.left + aligned.right).toBe(original.left + original.right);
+    expect(aligned.top + aligned.bottom).toBe(original.top + original.bottom);
+  });
+
+  it("realigns a reused pane when its wrapper moves without changing size", async () => {
+    watchTerminalMock.mockResolvedValue({
+      ack: { cols: 40, rows: 5, generation: 1, sequence: 9 },
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    daemonCallMock.mockImplementation(async (method: string) => (
+      method === "agent.fit" ? { cols: 40, rows: 5 } : null
+    ));
+
+    const { container } = render(() => (
+      <TerminalPane laneId={7} window="lane-7-1" label="Codex" visible followTail />
+    ));
+    await flushMicrotasks();
+    const host = container.querySelector<HTMLElement>(".terminal-host")!;
+    host.style.left = "8px";
+    host.style.right = "8px";
+    host.style.top = "28px";
+    host.style.bottom = "0px";
+    Object.defineProperties(host, {
+      clientWidth: { configurable: true, value: 314 },
+      clientHeight: { configurable: true, value: 232 },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => {
+          const left = 677.6640625 + (Number.parseFloat(host.style.left || "8") - 8);
+          return new DOMRect(left, 68.5, 314, 232);
+        },
+      },
+    });
+
+    const wrapper = host.closest("section")!.parentElement!;
+    wrapper.style.order = "2";
+    await flushMicrotasks();
+
+    const alignedDeviceX = host.getBoundingClientRect().left * 2;
+    expect(alignedDeviceX).toBe(Math.round(alignedDeviceX));
+    expect(terminalInstances[0].refresh).toHaveBeenCalled();
+  });
+
   it("reports enough grid height for every daemon-authoritative row", async () => {
     const [visible, setVisible] = createSignal(false);
     const onMinimumHeight = vi.fn();
