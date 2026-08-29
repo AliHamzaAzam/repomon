@@ -84,6 +84,7 @@ export interface ConfigView {
   notify_sound_update_ready: boolean;
   message_inject_agents?: boolean;
   message_inject_operator?: boolean;
+  message_hop_refresh_senders?: string[];
   notify_show_why: boolean;
   notify_coalesce: boolean;
   notify_click_focus: boolean;

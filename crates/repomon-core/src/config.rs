@@ -101,6 +101,11 @@ pub struct Config {
     /// Allow operator and repomind mail to use safe terminal injection when the recipient is idle.
     /// Storage and inbox access are unaffected.
     pub message_inject_operator: bool,
+    /// Exact canonical addresses, or `lane-<id>/*` patterns, whose replies refresh the fleet-mail
+    /// thread hop budget like the human operator. This is for explicitly designated,
+    /// human-supervised coordinator sessions; ordinary agent-to-agent threads still exhaust.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_hop_refresh_senders: Vec<String>,
     /// Include the agent's actual last message (what it said/asked) in notification bodies,
     /// instead of just the original task title.
     pub notify_show_why: bool,
@@ -209,6 +214,7 @@ impl Default for Config {
             notify_sound_update_ready: true,
             message_inject_agents: false,
             message_inject_operator: true,
+            message_hop_refresh_senders: Vec::new(),
             notify_show_why: true,
             notify_coalesce: true,
             notify_click_focus: true,
@@ -404,6 +410,40 @@ impl Config {
     pub fn tab_sort_mode(&self) -> TabSortMode {
         resolve_tab_sort_mode(self.tab_sort_mode)
     }
+
+    /// Whether this resolved sender represents the human operator or an explicitly configured,
+    /// human-supervised coordinator. Coordinator entries may be exact canonical addresses or a
+    /// `lane-<id>/*` pattern covering every slot in one lane.
+    pub fn message_sender_refreshes_hops(&self, address: &str) -> bool {
+        address == "operator"
+            || self
+                .message_hop_refresh_senders
+                .iter()
+                .any(|pattern| message_address_pattern_matches(pattern, address))
+    }
+}
+
+fn message_address_pattern_matches(pattern: &str, address: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern == address {
+        return true;
+    }
+    let Some(pattern_lane) = pattern
+        .strip_prefix("lane-")
+        .and_then(|rest| rest.strip_suffix("/*"))
+    else {
+        return false;
+    };
+    let Some((address_lane, slot)) = address
+        .strip_prefix("lane-")
+        .and_then(|rest| rest.split_once('/'))
+    else {
+        return false;
+    };
+    !pattern_lane.is_empty()
+        && pattern_lane == address_lane
+        && !slot.is_empty()
+        && !slot.contains('/')
 }
 
 /// The user's home directory (portable — `$HOME` on unix, the profile dir on Windows).
@@ -816,6 +856,7 @@ mod tests {
         c.supervision.stall_mins = 45;
         c.supervision.nudge_retries = 5;
         c.supervision.nudge_text = "Custom nudge message".to_string();
+        c.message_hop_refresh_senders = vec!["lane-81/3".to_string()];
         c.supervision.classes.insert(
             crate::agent::supervision::DialogClass::Deletion,
             crate::agent::supervision::PolicyAction::AutoDeny,
@@ -836,7 +877,27 @@ mod tests {
             Some(&crate::agent::supervision::PolicyAction::AutoDeny)
         );
         assert_eq!(loaded.supervision, c.supervision);
+        assert_eq!(
+            loaded.message_hop_refresh_senders,
+            c.message_hop_refresh_senders
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn message_hop_refresh_senders_require_an_explicit_address_or_lane_pattern() {
+        let mut config = Config::default();
+        assert!(config.message_sender_refreshes_hops("operator"));
+        assert!(!config.message_sender_refreshes_hops("lane-81/3"));
+
+        config.message_hop_refresh_senders =
+            vec!["lane-81/3".into(), " lane-92/* ".into(), "repomind".into()];
+        assert!(config.message_sender_refreshes_hops("lane-81/3"));
+        assert!(!config.message_sender_refreshes_hops("lane-81/4"));
+        assert!(config.message_sender_refreshes_hops("lane-92/1"));
+        assert!(config.message_sender_refreshes_hops("lane-92/12"));
+        assert!(!config.message_sender_refreshes_hops("lane-921/1"));
+        assert!(config.message_sender_refreshes_hops("repomind"));
     }
 }
