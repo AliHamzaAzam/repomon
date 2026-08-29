@@ -42,6 +42,32 @@ interface TerminalPaneProps extends TerminalTarget {
 
 type PaneView = "live" | "history";
 
+interface TerminalHostInsets {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+export function devicePixelAlignedInsets(
+  insets: TerminalHostInsets,
+  left: number,
+  top: number,
+  devicePixelRatio: number,
+): TerminalHostInsets {
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? devicePixelRatio
+    : 1;
+  const dx = Math.round(left * dpr) / dpr - left;
+  const dy = Math.round(top * dpr) / dpr - top;
+  return {
+    left: insets.left + dx,
+    right: insets.right - dx,
+    top: insets.top + dy,
+    bottom: insets.bottom - dy,
+  };
+}
+
 // A warm terminal can become visible before CSS Grid has assigned its cell geometry. Live tmux
 // evidence showed that some panes never received the fit attempted on that first frame; keep
 // sampling for roughly half a second at 60 Hz so the first measurable frame cannot be missed,
@@ -106,6 +132,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let fit: FitAddon | undefined;
   let input: ReturnType<typeof createInputCoalescer> | undefined;
   let resize: ResizeObserver | undefined;
+  let layoutMutation: MutationObserver | undefined;
   let intersection: IntersectionObserver | undefined;
   let onWindowResize: (() => void) | undefined;
   let unsubLayout: (() => void) | undefined;
@@ -119,6 +146,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let stopWatch: (() => Promise<void>) | undefined;
   let syncSize: (() => Promise<void>) | undefined;
   let rendererEpoch = 0;
+  let hostInsets: TerminalHostInsets | undefined;
   let disposed = false;
   let scrollRequestInFlight = false;
   let syncInFlight = false;
@@ -169,6 +197,44 @@ export default function TerminalPane(props: TerminalPaneProps) {
     const chromeHeight = Math.max(0, hostRect.top - paneRect.top)
       + Math.max(0, paneRect.bottom - hostRect.bottom);
     props.onMinimumHeight?.(Math.ceil(chromeHeight + screenRect.height));
+  }
+
+  function alignTerminalHostToDevicePixels() {
+    if (!container?.isConnected) return false;
+    if (!hostInsets) {
+      const style = getComputedStyle(container);
+      const pixels = (value: string) => {
+        const parsed = Number.parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      hostInsets = {
+        left: pixels(style.left),
+        right: pixels(style.right),
+        top: pixels(style.top),
+        bottom: pixels(style.bottom),
+      };
+    }
+
+    // Measure from the unadjusted box each time. Otherwise the correction becomes the next
+    // measurement's baseline and oscillates between aligned and fractional positions.
+    container.style.left = `${hostInsets.left}px`;
+    container.style.right = `${hostInsets.right}px`;
+    container.style.top = `${hostInsets.top}px`;
+    container.style.bottom = `${hostInsets.bottom}px`;
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const aligned = devicePixelAlignedInsets(
+      hostInsets,
+      rect.left,
+      rect.top,
+      window.devicePixelRatio,
+    );
+    const changed = aligned.left !== hostInsets.left || aligned.top !== hostInsets.top;
+    container.style.left = `${aligned.left}px`;
+    container.style.right = `${aligned.right}px`;
+    container.style.top = `${aligned.top}px`;
+    container.style.bottom = `${aligned.bottom}px`;
+    return changed;
   }
 
   async function preloadTerminalFont() {
@@ -360,6 +426,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       function applyGrid(cols?: number | null, rows?: number | null) {
         if (disposed || !terminal || !cols || !rows) return;
+        alignTerminalHostToDevicePixels();
         confirmedGrid = { cols, rows };
         if (cols !== terminal.cols || rows !== terminal.rows) {
           try {
@@ -384,6 +451,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       syncSize = async () => {
         if (disposed || !terminal || !fit || props.visible === false || view() !== "live") return;
         if (!container || !container.isConnected || container.clientWidth === 0 || container.clientHeight === 0) return;
+        const hostRealigned = alignTerminalHostToDevicePixels();
         let proposed: { cols: number; rows: number } | undefined;
         try {
           proposed = fit.proposeDimensions();
@@ -395,6 +463,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
         // Skip firing a redundant resize RPC if the backend is already aligned on this exact geometry.
         if (confirmedGrid && confirmedGrid.cols === cols && confirmedGrid.rows === rows) {
+          if (hostRealigned) {
+            try {
+              terminal.refresh(0, Math.max(0, terminal.rows - 1));
+            } catch {
+              // ignore
+            }
+          }
+          reportMinimumHeight();
           return;
         }
 
@@ -536,6 +612,26 @@ export default function TerminalPane(props: TerminalPaneProps) {
       });
       resize.observe(container);
 
+      // ResizeObserver covers footprint changes that alter the box size, but not a pure position
+      // change such as pane reordering. Watch the wrapper and grid attributes as well so every
+      // layout/style transition re-snaps the persistent WebGL canvas to the physical pixel grid.
+      if (typeof MutationObserver !== "undefined") {
+        layoutMutation = new MutationObserver(() => requestSyncSize(true));
+        const wrapper = pane.parentElement;
+        if (wrapper) {
+          layoutMutation.observe(wrapper, {
+            attributes: true,
+            attributeFilter: ["class", "style", "aria-hidden", "inert"],
+          });
+          if (wrapper.parentElement) {
+            layoutMutation.observe(wrapper.parentElement, {
+              attributes: true,
+              attributeFilter: ["class", "style"],
+            });
+          }
+        }
+      }
+
       if (typeof IntersectionObserver !== "undefined") {
         intersection = new IntersectionObserver((entries) => {
           if (disposed || !container?.isConnected) return;
@@ -676,6 +772,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
     }
     resize?.disconnect();
     resize = undefined;
+    layoutMutation?.disconnect();
+    layoutMutation = undefined;
     intersection?.disconnect();
     intersection = undefined;
     if (onWindowResize) {
