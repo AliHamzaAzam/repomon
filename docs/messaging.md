@@ -64,10 +64,19 @@ and resolved addresses, sender and recipient lane, window, slot and session iden
 fields apply, full body, thread ID, optional reply ID, remaining thread hops, creation time,
 delivery time, read time, and the last delivery error.
 
-The first message in a thread starts with six remaining hops. Each reply inherits the thread and
-decrements that budget. A reply is refused once the budget is exhausted. When a sender writes to a
-recent inbound peer without `reply_to`, the daemon automatically links the send to that recent
-thread. This prevents an agent pair from evading the hop limit by repeatedly starting roots.
+The first message in a thread starts with six remaining hops. Ordinary agent replies inherit the
+thread and decrement that budget; a reply is refused once it is exhausted. Replies authored by the
+reserved `operator` identity refresh the budget to six. An explicitly designated, human-supervised
+coordinator can do the same when its canonical address (or its lane wildcard) is configured:
+
+```toml
+message_hop_refresh_senders = ["lane-81/3", "lane-92/*"]
+```
+
+No lane sender is trusted by default. Exact entries affect only that slot, while `lane-<id>/*`
+affects every slot in the named lane. When a sender writes to a recent inbound peer without
+`reply_to`, the daemon automatically links the send to that recent thread. This prevents an
+ordinary agent pair from evading the hop limit by repeatedly starting roots.
 
 Messages and MCP identities are separate tables. Every spawned managed agent gets a random MCP
 identity token while the daemon holds the spawn lock. Only a cryptographic hash of that token is

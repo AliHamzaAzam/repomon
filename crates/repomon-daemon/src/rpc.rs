@@ -148,7 +148,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
             "(set)".to_string()
         }
     });
-    json!({
+    let mut value = json!({
         "accent": cfg.accent,
         "theme": cfg.theme,
         "auto_continue": cfg.auto_continue,
@@ -190,7 +190,9 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "orchestrator_model": cfg.orchestrator_model,
         "agent_icons": cfg.agent_icons,
         "supervision": cfg.supervision,
-    })
+    });
+    value["message_hop_refresh_senders"] = json!(cfg.message_hop_refresh_senders);
+    value
 }
 
 #[derive(Deserialize)]
@@ -929,6 +931,8 @@ struct ConfigSet {
     message_inject_agents: Option<bool>,
     #[serde(default)]
     message_inject_operator: Option<bool>,
+    #[serde(default)]
+    message_hop_refresh_senders: Option<Vec<String>>,
     #[serde(default)]
     notify_show_why: Option<bool>,
     #[serde(default)]
@@ -1882,13 +1886,25 @@ pub async fn dispatch(
         "message.send" => {
             let p: MessageSend = parse(params)?;
             let sender = message_sender(ctx, p.identity_token, p.source).await?;
+            let refresh_hop_budget = ctx
+                .config
+                .read()
+                .await
+                .message_sender_refreshes_hops(sender.address.as_str());
             if let Some(single) = p.to.as_legacy_single() {
                 // Exact pre-A6 behavior: one address in, one `FleetMessage` out.
                 let to = single.to_string();
                 let recipient = resolve_message_address(ctx, &to).await?;
                 let message = ctx
                     .store
-                    .send_message(AgentAddress::new(to), sender, recipient, p.body, p.reply_to)
+                    .send_message_with_hop_budget_refresh(
+                        AgentAddress::new(to),
+                        sender,
+                        recipient,
+                        p.body,
+                        p.reply_to,
+                        refresh_hop_budget,
+                    )
                     .await
                     .map_err(internal)?;
                 announce_message_stored(ctx, &message);
@@ -1910,12 +1926,13 @@ pub async fn dispatch(
                         Ok(recipient) => {
                             match ctx
                                 .store
-                                .send_message(
+                                .send_message_with_hop_budget_refresh(
                                     AgentAddress::new(target.clone()),
                                     sender.clone(),
                                     recipient,
                                     p.body.clone(),
                                     p.reply_to.clone(),
+                                    refresh_hop_budget,
                                 )
                                 .await
                             {
@@ -2965,6 +2982,15 @@ pub async fn dispatch(
                 }
                 if let Some(b) = p.message_inject_operator {
                     cfg.message_inject_operator = b;
+                }
+                if let Some(mut senders) = p.message_hop_refresh_senders {
+                    for sender in &mut senders {
+                        *sender = sender.trim().to_string();
+                    }
+                    senders.retain(|sender| !sender.is_empty());
+                    senders.sort();
+                    senders.dedup();
+                    cfg.message_hop_refresh_senders = senders;
                 }
                 if let Some(b) = p.notify_show_why {
                     cfg.notify_show_why = b;
@@ -7947,11 +7973,16 @@ mod tests {
         cfg.remote.enabled = true;
         cfg.remote.bind = Some("100.121.102.39:7878".into());
         cfg.remote.token = Some("secret-token-1234".into());
+        cfg.message_hop_refresh_senders = vec!["lane-81/3".into()];
 
         let snapshot = config_json(&cfg);
         assert_eq!(snapshot["remote_enabled"], true);
         assert_eq!(snapshot["remote_bind"], "100.121.102.39:7878");
         assert_eq!(snapshot["remote_token_masked"], "secr…1234");
+        assert_eq!(
+            snapshot["message_hop_refresh_senders"],
+            json!(["lane-81/3"])
+        );
         assert!(!snapshot.to_string().contains("secret-token-1234"));
     }
 

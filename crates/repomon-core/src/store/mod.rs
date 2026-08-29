@@ -812,7 +812,31 @@ impl Store {
         body: String,
         reply_to: Option<String>,
     ) -> Result<FleetMessage> {
+        self.send_message_with_hop_budget_refresh(
+            requested_to,
+            sender,
+            recipient,
+            body,
+            reply_to,
+            false,
+        )
+        .await
+    }
+
+    /// Store one message, allowing an explicitly designated human-supervised coordinator to
+    /// refresh a reply thread's hop budget. The reserved operator identity always refreshes,
+    /// independent of this flag; ordinary callers should use [`Store::send_message`].
+    pub async fn send_message_with_hop_budget_refresh(
+        &self,
+        requested_to: AgentAddress,
+        sender: ResolvedAgentAddress,
+        recipient: ResolvedAgentAddress,
+        body: String,
+        reply_to: Option<String>,
+        refresh_hop_budget: bool,
+    ) -> Result<FleetMessage> {
         validate_message_body(&body)?;
+        let refresh_hop_budget = refresh_hop_budget || sender.address.as_str() == "operator";
         self.call(move |c| {
             let now = Utc::now();
             let one_minute_ago = to_iso(&(now - chrono::Duration::minutes(1)));
@@ -863,11 +887,10 @@ impl Store {
             let id = random_hex(16);
             let (thread_id, linked_reply, remaining_hops) = match parent {
                 Some(parent) => {
-                    let operator_authored = sender.address.as_str() == "operator";
-                    if parent.remaining_hops == 0 && !operator_authored {
+                    if parent.remaining_hops == 0 && !refresh_hop_budget {
                         return Err(Error::Other("message thread hop limit exhausted".into()));
                     }
-                    let remaining_hops = if operator_authored {
+                    let remaining_hops = if refresh_hop_budget {
                         MESSAGE_THREAD_HOPS
                     } else {
                         parent.remaining_hops - 1
@@ -3651,6 +3674,73 @@ mod tests {
             agent_reply.reply_to.as_deref(),
             Some(operator_reply.id.as_str())
         );
+        assert_eq!(agent_reply.remaining_hops, MESSAGE_THREAD_HOPS - 1);
+    }
+
+    #[tokio::test]
+    async fn designated_coordinator_reply_refreshes_an_exhausted_thread_budget() {
+        let s = store().await;
+        let parent = s
+            .send_message(
+                AgentAddress::new("lane-81/3"),
+                address("lane-1/1"),
+                address("lane-81/3"),
+                "approval needed".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let parent_id = parent.id.clone();
+        s.call(move |c| {
+            c.execute(
+                "UPDATE messages SET remaining_hops = 0, created_at = ?1 WHERE id = ?2",
+                params![
+                    to_iso(&(Utc::now() - chrono::Duration::seconds(2))),
+                    parent_id
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let ordinary_error = s
+            .send_message(
+                AgentAddress::new("lane-1/1"),
+                address("lane-81/3"),
+                address("lane-1/1"),
+                "ordinary agent reply remains bounded".into(),
+                Some(parent.id.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(ordinary_error.to_string().contains("hop limit"));
+
+        let coordinator_reply = s
+            .send_message_with_hop_budget_refresh(
+                AgentAddress::new("lane-1/1"),
+                address("lane-81/3"),
+                address("lane-1/1"),
+                "approved under human supervision".into(),
+                Some(parent.id.clone()),
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(coordinator_reply.thread_id, parent.thread_id);
+        assert_eq!(coordinator_reply.remaining_hops, MESSAGE_THREAD_HOPS);
+
+        let agent_reply = s
+            .send_message(
+                AgentAddress::new("lane-81/3"),
+                address("lane-1/1"),
+                address("lane-81/3"),
+                "agent reply".into(),
+                Some(coordinator_reply.id),
+            )
+            .await
+            .unwrap();
         assert_eq!(agent_reply.remaining_hops, MESSAGE_THREAD_HOPS - 1);
     }
 
