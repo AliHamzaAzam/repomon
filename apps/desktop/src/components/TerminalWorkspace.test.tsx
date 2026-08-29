@@ -208,7 +208,7 @@ describe("terminal workspace tab strip ordering and rename", () => {
       session({ id: 1, agent: "codex", tmux_window: "lane-10-1", session_id: "s1" }),
     ]);
 
-    const pill = await screen.findByText("codex 1");
+    const pill = (await screen.findAllByText("codex 1"))[0];
     fireEvent.contextMenu(pill.parentElement!);
 
     expect(actions.rename).toHaveBeenCalledWith({

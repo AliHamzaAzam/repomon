@@ -14,7 +14,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use repomon_core::WindowsBackend;
-use repomon_core::agent::backend::{CaptureOpts, OwnerState, SessionBackend, SpawnSpec};
+use repomon_core::agent::backend::{
+    ByteStreamEvent, CaptureOpts, OwnerState, SessionBackend, SpawnSpec,
+};
 use repomon_core::agent::detect_usage_limit;
 
 /// A per-test session name: unique per process AND per test tag, so parallel tests never
@@ -229,8 +231,10 @@ fn byte_stream_replays_then_follows_live_output() {
         let (got, done) = (got.clone(), done.clone());
         std::thread::spawn(move || {
             let mut rx = stream.rx;
-            while let Some(chunk) = rx.blocking_recv() {
-                got.lock().unwrap().extend_from_slice(&chunk);
+            while let Some(event) = rx.blocking_recv() {
+                if let ByteStreamEvent::Bytes(chunk) = event {
+                    got.lock().unwrap().extend_from_slice(&chunk);
+                }
             }
             done.store(true, std::sync::atomic::Ordering::Relaxed);
         })
