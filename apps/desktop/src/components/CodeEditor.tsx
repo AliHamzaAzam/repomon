@@ -1,8 +1,11 @@
 import {
+  type CompletionResult,
   autocompletion,
   closeBrackets,
   closeBracketsKeymap,
+  completeAnyWord,
   completionKeymap,
+  type CompletionContext,
 } from "@codemirror/autocomplete";
 import {
   copyLineDown,
@@ -44,18 +47,20 @@ import {
   Decoration,
   EditorView,
   ViewPlugin,
+  crosshairCursor,
   drawSelection,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightWhitespace,
   keymap,
   lineNumbers,
+  rectangularSelection,
   type DecorationSet,
   type KeyBinding,
   type ViewUpdate,
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
-import { createEffect, onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup, onMount, untrack } from "solid-js";
 
 export type EditorLanguage =
   | "javascript"
@@ -71,6 +76,13 @@ export type EditorLanguage =
   | "plain"
   | string;
 
+/// Selection state reported alongside cursor position: how many discrete ranges are selected
+/// (more than one implies multi-cursor) and the total number of characters spanned by them.
+export interface EditorSelectionInfo {
+  rangeCount: number;
+  selectedChars: number;
+}
+
 export interface CodeEditorProps {
   value: string;
   path?: string;
@@ -80,7 +92,7 @@ export interface CodeEditorProps {
   languageOverride?: string;
   onChange?: (value: string) => void;
   onSave?: () => void;
-  onCursorActivity?: (cursor: number, scrollTop: number) => void;
+  onCursorActivity?: (cursor: number, scrollTop: number, selection: EditorSelectionInfo) => void;
   initialCursor?: number;
   initialScrollTop?: number;
   class?: string;
@@ -195,12 +207,15 @@ function getBundledSupport(name: string): LanguageSupport | null {
   }
 }
 
+/// `shebangLanguage` is a language name already sniffed from the file's first line (or `null`/
+/// `undefined`), not raw content - callers sniff it once, outside any reactive tracking, so this
+/// resolver never needs the full document to decide a language.
 async function resolveLanguageSupport(
   path: string,
-  content?: string,
+  shebangLanguage?: string | null,
   override?: string,
 ): Promise<LanguageSupport | null> {
-  const target = override || matchSpecialFilename(path) || (content ? sniffShebang(content) : null);
+  const target = override || matchSpecialFilename(path) || shebangLanguage || null;
   if (target) {
     const bundled = getBundledSupport(target);
     if (bundled) return bundled;
@@ -237,8 +252,12 @@ async function resolveLanguageSupport(
   return null;
 }
 
-function getSyncLanguageSupport(path: string, content?: string, override?: string): LanguageSupport | null {
-  const target = override || matchSpecialFilename(path) || (content ? sniffShebang(content) : null);
+function getSyncLanguageSupport(
+  path: string,
+  shebangLanguage?: string | null,
+  override?: string,
+): LanguageSupport | null {
+  const target = override || matchSpecialFilename(path) || shebangLanguage || null;
   if (target) {
     const bundled = getBundledSupport(target);
     if (bundled) return bundled;
@@ -353,18 +372,18 @@ const appTheme = EditorView.theme(
     },
     ".cm-content": {
       padding: "8px 0",
-      caretColor: "var(--accent)",
+      caretColor: "var(--signal)",
       tabSize: 4,
     },
     "&.cm-focused .cm-cursor": {
-      borderLeftColor: "var(--accent)",
+      borderLeftColor: "var(--signal)",
       borderLeftWidth: "2px",
     },
     "&.cm-focused .cm-selectionBackground, ::selection": {
-      backgroundColor: "color-mix(in srgb, var(--accent) 25%, transparent)",
+      backgroundColor: "color-mix(in srgb, var(--signal) 25%, transparent)",
     },
     ".cm-selectionMatch": {
-      backgroundColor: "color-mix(in srgb, var(--accent) 18%, transparent)",
+      backgroundColor: "color-mix(in srgb, var(--attention) 18%, transparent)",
       borderRadius: "2px",
     },
     ".cm-gutters": {
@@ -422,7 +441,7 @@ const appTheme = EditorView.theme(
       outline: "none",
     },
     ".cm-panel.cm-search .cm-textfield:focus": {
-      borderColor: "var(--accent)",
+      borderColor: "var(--signal)",
     },
     ".cm-panel.cm-search .cm-button": {
       backgroundColor: "var(--surface)",
@@ -467,38 +486,78 @@ const appTheme = EditorView.theme(
   { dark: true },
 );
 
+// The app's whole visual identity runs on four accent roles (--signal, --attention, --fault,
+// --muted) layered over --surface/--foreground - see src/index.css. Syntax highlighting reuses
+// exactly those roles instead of inventing a rainbow token palette: keywords/tags read as
+// "structure" (signal), literals read as "data" (attention), comments/punctuation recede (muted),
+// and only genuinely invalid syntax reaches for --fault. Every value below is a var(...) or
+// color-mix(...) reference, so all six themes in index.css repaint the editor automatically.
+// Extended past main's base set with the tags the wider @codemirror/language-data catalog (yaml,
+// toml, shell, go, sql, dockerfile, ...) actually emits, mapped onto the same four roles.
 const highlightStyle = HighlightStyle.define([
-  { tag: t.keyword, color: "#c678dd" },
-  { tag: [t.name, t.deleted, t.character, t.propertyName, t.macroName], color: "#e06c75" },
-  { tag: [t.function(t.variableName), t.labelName], color: "#61afef" },
-  { tag: [t.color, t.constant(t.name), t.standard(t.name)], color: "#d19a66" },
-  { tag: [t.definition(t.name), t.separator], color: "#abb2bf" },
+  { tag: t.comment, color: "var(--muted)", fontStyle: "italic" },
+  { tag: t.lineComment, color: "var(--muted)", fontStyle: "italic" },
+  { tag: t.blockComment, color: "var(--muted)", fontStyle: "italic" },
+  { tag: t.docComment, color: "var(--muted)", fontStyle: "italic" },
+
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "var(--signal)" },
+  { tag: [t.tagName, t.angleBracket], color: "var(--signal)" },
+  { tag: [t.definitionKeyword, t.definition(t.variableName)], color: "var(--signal)", fontWeight: 600 },
+  { tag: [t.macroName, t.labelName, t.modifier], color: "var(--signal)" },
+
   {
-    tag: [
-      t.typeName,
-      t.className,
-      t.number,
-      t.changed,
-      t.annotation,
-      t.modifier,
-      t.self,
-      t.namespace,
-    ],
-    color: "#e5c07b",
+    tag: [t.string, t.special(t.string), t.regexp, t.character],
+    color: "color-mix(in srgb, var(--attention) 88%, var(--foreground))",
   },
-  {
-    tag: [t.operator, t.operatorKeyword, t.url, t.escape, t.regexp, t.link, t.special(t.string)],
-    color: "#56b6c2",
-  },
-  { tag: [t.meta, t.comment], color: "#7f848e", fontStyle: "italic" },
-  { tag: t.strong, fontWeight: "bold" },
+  { tag: [t.number, t.bool, t.atom, t.null], color: "var(--attention)" },
+  { tag: [t.constant(t.name), t.standard(t.name), t.color, t.special(t.variableName)], color: "var(--attention)" },
+  { tag: t.inserted, color: "color-mix(in srgb, var(--attention) 88%, var(--foreground))" },
+
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--foreground)", fontWeight: 600 },
+  { tag: [t.className, t.typeName, t.namespace], color: "var(--foreground)", fontWeight: 600 },
+  { tag: [t.propertyName, t.attributeName], color: "color-mix(in srgb, var(--foreground) 78%, var(--muted))" },
+  { tag: [t.variableName, t.self], color: "var(--foreground)" },
+  { tag: [t.name, t.character], color: "var(--foreground)" },
+
+  { tag: [t.punctuation, t.bracket, t.separator], color: "var(--muted)" },
+  { tag: t.operator, color: "color-mix(in srgb, var(--foreground) 80%, var(--muted))" },
+  { tag: [t.meta, t.annotation, t.url, t.escape, t.processingInstruction], color: "var(--muted)" },
+  { tag: t.heading, color: "var(--signal)", fontWeight: 700 },
+  { tag: t.link, color: "var(--signal)", textDecoration: "underline" },
+  { tag: t.strong, fontWeight: 700 },
   { tag: t.emphasis, fontStyle: "italic" },
   { tag: t.strikethrough, textDecoration: "line-through" },
-  { tag: t.link, color: "#61afef", textDecoration: "underline" },
-  { tag: t.heading, fontWeight: "bold", color: "#e06c75" },
-  { tag: [t.atom, t.bool, t.special(t.variableName)], color: "#d19a66" },
-  { tag: [t.processingInstruction, t.string, t.inserted], color: "#98c379" },
-  { tag: t.invalid, color: "#ffffff", backgroundColor: "#e05252" },
+
+  { tag: t.changed, color: "var(--signal)" },
+  { tag: t.deleted, color: "var(--fault)" },
+  { tag: t.invalid, color: "var(--fault)" },
+]);
+
+const MIN_WORD_COMPLETION_LENGTH = 3;
+
+/// Document-word completion: offers words already present in the open document as completion
+/// candidates, alongside whatever the active language's own completion source contributes.
+/// Wired in as language data (see `wordCompletionData` below) rather than an `autocompletion()`
+/// `override`, so it merges with the language's completions instead of replacing them.
+export function documentWordCompletionSource(
+  context: CompletionContext,
+): CompletionResult | Promise<CompletionResult | null> | null {
+  const result = completeAnyWord(context);
+  if (result && "then" in result) {
+    return result.then((r) => (r ? filterShortWordOptions(r) : r));
+  }
+  return result ? filterShortWordOptions(result) : result;
+}
+
+function filterShortWordOptions(result: CompletionResult): CompletionResult {
+  return {
+    ...result,
+    options: result.options.filter((option) => option.label.length >= MIN_WORD_COMPLETION_LENGTH),
+  };
+}
+
+const wordCompletionData = EditorState.languageData.of(() => [
+  { autocomplete: documentWordCompletionSource },
 ]);
 
 export default function CodeEditor(props: CodeEditorProps) {
@@ -506,6 +565,15 @@ export default function CodeEditor(props: CodeEditorProps) {
   let view: EditorView | undefined;
   let lastKnownDoc = props.value;
   let applyingExternalValue = false;
+  // Guards the cursor/scroll restoration effect below so it fires once per file activation
+  // (a `path` change) rather than on every reactive read - the initial file's restoration is
+  // handled inline in onMount, so this starts equal to the first path to skip a redundant re-run
+  // the moment the effect's initial pass executes.
+  let lastCursorAppliedPath = props.path;
+  // Incremented on every language-resolution request so an async `resolveLanguageSupport` call
+  // that resolves after a newer request has started (e.g. the user switched files again before
+  // the first load finished) can recognize itself as stale and skip its dispatch.
+  let languageRequestId = 0;
 
   const readOnlyCompartment = new Compartment();
   const languageCompartment = new Compartment();
@@ -534,7 +602,12 @@ export default function CodeEditor(props: CodeEditorProps) {
   onMount(() => {
     lastKnownDoc = props.value;
 
-    const initialSupport = getSyncLanguageSupport(props.path ?? "", props.value, props.languageOverride);
+    // Shebang sniffing only ever looks at the file's first line, so it is cheap and safe to do
+    // once, synchronously, off the initial content - it must not become a reactive dependency on
+    // `props.value` (see the language-resolution effect below) or it would re-run on every
+    // keystroke.
+    const initialShebang = sniffShebang(props.value);
+    const initialSupport = getSyncLanguageSupport(props.path ?? "", initialShebang, props.languageOverride);
     const unit = detectIndentUnit(props.value, props.path ?? "");
 
     const state = EditorState.create({
@@ -550,6 +623,10 @@ export default function CodeEditor(props: CodeEditorProps) {
         closeBrackets(),
         indentOnInput(),
         autocompletion(),
+        wordCompletionData,
+        EditorState.allowMultipleSelections.of(true),
+        rectangularSelection(),
+        crosshairCursor(),
         history(),
         indentGuidePlugin,
         readOnlyCompartment.of(EditorState.readOnly.of(props.readOnly ?? false)),
@@ -577,8 +654,16 @@ export default function CodeEditor(props: CodeEditorProps) {
             }
           }
           if (update.selectionSet || update.docChanged) {
-            const head = update.state.selection.main.head;
-            props.onCursorActivity?.(head, update.view.scrollDOM.scrollTop);
+            const selection = update.state.selection;
+            const head = selection.main.head;
+            let selectedChars = 0;
+            for (const range of selection.ranges) {
+              selectedChars += range.to - range.from;
+            }
+            props.onCursorActivity?.(head, update.view.scrollDOM.scrollTop, {
+              rangeCount: selection.ranges.length,
+              selectedChars,
+            });
           }
         }),
       ],
@@ -597,20 +682,17 @@ export default function CodeEditor(props: CodeEditorProps) {
       view.scrollDOM.scrollTop = props.initialScrollTop;
     }
 
-    if (!initialSupport) {
-      void resolveLanguageSupport(props.path ?? "", props.value, props.languageOverride).then((support) => {
-        if (support && view) {
-          view.dispatch({ effects: languageCompartment.reconfigure([support]) });
-        }
-      });
-    }
-
     onCleanup(() => {
       view?.destroy();
       view = undefined;
     });
   });
 
+  // Keeps the live doc in sync with an externally-updated `value` prop that is *not* a file
+  // activation - e.g. a reload after resolving a conflict, or the parent handing our own
+  // `onChange` value straight back down (a no-op here, since it already matches `lastKnownDoc`).
+  // File-activation doc swaps are instead handled inside the path-keyed effect below, together
+  // with cursor restoration, in a single dispatch - see that effect's comment for why.
   createEffect(() => {
     const nextVal = props.value;
     if (!view) return;
@@ -625,6 +707,50 @@ export default function CodeEditor(props: CodeEditorProps) {
     } finally {
       applyingExternalValue = false;
     }
+  });
+
+  // Re-applies cursor/scroll restoration on every file activation, not just the first mount - the
+  // center workspace and the rail panel keep a single CodeEditor instance alive across tab
+  // switches (see EditorWorkspace.tsx and FileEditorPanel.tsx), so `onMount` only ever fires once
+  // for the very first file opened.
+  //
+  // Tracks `path` alone. `value`/`initialCursor`/`initialScrollTop` are read `untrack`ed, at the
+  // instant `path` changes, so this does not also fire on ordinary edits or on the store
+  // recording cursor activity for reasons other than switching files.
+  //
+  // This effect does its OWN (idempotent) doc replacement first, in the same dispatch as the
+  // selection restore, rather than relying on the value-sync effect above to have already swapped
+  // the doc by the time this runs: `path` and `value` change together on a file switch, but
+  // Solid does not guarantee these two sibling effects run in a fixed relative order across
+  // updates (observed empirically to flip between one file switch and the next), and letting the
+  // value-sync effect's default-mapped selection collapse win afterward silently discards the
+  // cursor position this effect just restored.
+  createEffect(() => {
+    const path = props.path ?? "";
+    if (!view) return;
+    if (path === lastCursorAppliedPath) return;
+    lastCursorAppliedPath = path;
+
+    const nextVal = untrack(() => props.value);
+    const cursor = untrack(() => props.initialCursor);
+    const scrollTop = untrack(() => props.initialScrollTop);
+
+    const needsReplace = nextVal !== lastKnownDoc;
+    const docLength = needsReplace ? nextVal.length : view.state.doc.length;
+    const pos = cursor !== undefined && cursor > 0 ? Math.min(cursor, docLength) : 0;
+
+    applyingExternalValue = needsReplace;
+    try {
+      view.dispatch({
+        ...(needsReplace ? { changes: { from: 0, to: view.state.doc.length, insert: nextVal } } : {}),
+        selection: { anchor: pos },
+      });
+      if (needsReplace) lastKnownDoc = nextVal;
+    } finally {
+      applyingExternalValue = false;
+    }
+
+    view.scrollDOM.scrollTop = scrollTop !== undefined && scrollTop > 0 ? scrollTop : 0;
   });
 
   createEffect(() => {
@@ -651,22 +777,33 @@ export default function CodeEditor(props: CodeEditorProps) {
     });
   });
 
+  // Resolves the language for the active file. Depends on `path` and `languageOverride` only -
+  // *not* `props.value` - so it does not re-run on every keystroke; the shebang is re-sniffed
+  // from the current content only at the instant `path` changes (read `untrack`ed, so later edits
+  // to that same file don't retrigger this effect). Every run gets a fresh request id, and an
+  // async `resolveLanguageSupport` result is dropped if a newer request has started or `path` has
+  // since changed again - otherwise a slow load for a file the user already navigated away from
+  // could win the race and paint the wrong language onto whatever is open now.
   createEffect(() => {
     const path = props.path ?? "";
     const override = props.languageOverride;
-    const content = props.value;
     if (!view) return;
 
-    const sync = getSyncLanguageSupport(path, content, override);
+    const shebang = untrack(() => sniffShebang(props.value));
+    const requestId = ++languageRequestId;
+
+    const sync = getSyncLanguageSupport(path, shebang, override);
     if (sync) {
       view.dispatch({ effects: languageCompartment.reconfigure([sync]) });
-    } else {
-      void resolveLanguageSupport(path, content, override).then((support) => {
-        if (view) {
-          view.dispatch({ effects: languageCompartment.reconfigure(support ? [support] : []) });
-        }
-      });
+      return;
     }
+
+    void resolveLanguageSupport(path, shebang, override).then((support) => {
+      if (!view) return;
+      if (requestId !== languageRequestId) return;
+      if ((props.path ?? "") !== path) return;
+      view.dispatch({ effects: languageCompartment.reconfigure(support ? [support] : []) });
+    });
   });
 
   return (

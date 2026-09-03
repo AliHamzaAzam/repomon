@@ -1,10 +1,16 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { cleanup, render } from "@solidjs/testing-library";
+import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { selectNextOccurrence } from "@codemirror/search";
+import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import CodeEditor, {
   detectIndentUnit,
+  documentWordCompletionSource,
   extensionToLanguage,
   matchSpecialFilename,
   sniffShebang,
@@ -219,6 +225,99 @@ describe("CodeEditor", () => {
     const view = getView(container);
 
     view.dispatch({ selection: { anchor: 5 } });
-    expect(onCursor).toHaveBeenCalledWith(5, expect.any(Number));
+    expect(onCursor).toHaveBeenCalledWith(5, expect.any(Number), { rangeCount: 1, selectedChars: 0 });
+  });
+
+  it("reports multiple selection ranges and selected character count", () => {
+    const onCursor = vi.fn();
+    const { container } = render(() => (
+      <CodeEditor value="hello world" path="a.ts" onCursorActivity={onCursor} />
+    ));
+    const view = getView(container);
+
+    view.dispatch({
+      selection: {
+        anchor: 0,
+        head: 5,
+      },
+    });
+    expect(onCursor).toHaveBeenLastCalledWith(5, expect.any(Number), { rangeCount: 1, selectedChars: 5 });
+  });
+
+  it("supports multi-cursor: Mod-d (selectNextOccurrence) twice yields two selection ranges", () => {
+    const { container } = render(() => <CodeEditor value="foo bar foo baz foo" path="a.ts" />);
+    const view = getView(container);
+
+    // Place a plain cursor inside the first "foo".
+    view.dispatch({ selection: { anchor: 1 } });
+
+    // First Mod-d selects the word under the cursor - still a single range.
+    selectNextOccurrence(view);
+    expect(view.state.selection.ranges.length).toBe(1);
+
+    // Second Mod-d adds the next occurrence of "foo" as an additional range. Without
+    // `EditorState.allowMultipleSelections.of(true)`, CodeMirror silently reduces this back to a
+    // single range.
+    selectNextOccurrence(view);
+    expect(view.state.selection.ranges.length).toBe(2);
+  });
+
+  it("restores cursor and scroll position reactively when the active file (path) changes, not just on mount", () => {
+    let setFile!: (f: { path: string; value: string; cursor?: number; scrollTop?: number }) => void;
+    function Harness() {
+      const [file, set] = createSignal({ path: "a.ts", value: "const a = 1;", cursor: 6, scrollTop: 0 });
+      setFile = set;
+      return (
+        <CodeEditor
+          value={file().value}
+          path={file().path}
+          initialCursor={file().cursor}
+          initialScrollTop={file().scrollTop}
+        />
+      );
+    }
+    const { container } = render(() => <Harness />);
+    const view = getView(container);
+
+    // Initial mount applies the first file's cursor.
+    expect(view.state.selection.main.head).toBe(6);
+
+    // Switching to a second file (same CodeEditor instance, as in the center workspace and the
+    // rail panel after the non-keyed Show fix) must re-apply the new file's saved cursor - not
+    // just the first file's, which only ever ran in onMount.
+    setFile({ path: "b.ts", value: "function longer() { return 2; }", cursor: 20, scrollTop: 0 });
+    expect(view.state.doc.toString()).toBe("function longer() { return 2; }");
+    expect(view.state.selection.main.head).toBe(20);
+  });
+});
+
+describe("documentWordCompletionSource (item 7: document-word completion)", () => {
+  it("offers document words of 3+ characters, excluding shorter words", () => {
+    const state = EditorState.create({ doc: "world worldwide hi wo" });
+    const pos = state.doc.length;
+    const context = new CompletionContext(state, pos, false);
+
+    const result = documentWordCompletionSource(context) as CompletionResult | null;
+
+    expect(result).not.toBeNull();
+    const labels = result!.options.map((o) => o.label);
+    expect(labels).toContain("world");
+    expect(labels).toContain("worldwide");
+    // "hi" is a real document word but shorter than the 3-character minimum.
+    expect(labels).not.toContain("hi");
+    expect(labels.every((l) => l.length >= 3)).toBe(true);
+  });
+
+  it("returns null with no content and no explicit request", () => {
+    const state = EditorState.create({ doc: "" });
+    const context = new CompletionContext(state, 0, false);
+    expect(documentWordCompletionSource(context)).toBeNull();
+  });
+});
+
+describe("CodeEditor theme (item 1: theme regression)", () => {
+  it("uses no hard-coded hex color literals - every color is a CSS variable", () => {
+    const src = readFileSync(path.resolve(process.cwd(), "src/components/CodeEditor.tsx"), "utf-8");
+    expect(src).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
   });
 });
