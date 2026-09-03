@@ -211,26 +211,58 @@ export function createEditorStore(fleet: FleetStore) {
   }
 
   async function loadDir(laneId: number, dirPath: string) {
-    setDirCache((cache) => {
-      const next = new Map(cache);
-      next.set(dirPath, { status: "loading" });
-      return next;
-    });
+    // Guard by lane before writing anything: a background lane the store isn't tracking
+    // has nowhere to keep the result, and a mismatched write into the live signal would
+    // otherwise leave the active tree stuck on a "loading" row that nothing ever resolves.
+    const isActive = laneId === activeLaneId;
+    if (!isActive && !laneStates.has(laneId)) return;
+
+    if (isActive) {
+      setDirCache((cache) => {
+        const next = new Map(cache);
+        next.set(dirPath, { status: "loading" });
+        return next;
+      });
+    } else {
+      const memState = laneStates.get(laneId);
+      if (memState) {
+        const next = new Map(memState.dirCache);
+        next.set(dirPath, { status: "loading" });
+        memState.dirCache = next;
+      }
+    }
+
     try {
       const result = await daemonCall("file.list", { lane_id: laneId, path: dirPath });
-      if (activeLaneId !== laneId) return;
-      setDirCache((cache) => {
-        const next = new Map(cache);
-        next.set(dirPath, { status: "loaded", entries: result.entries, truncated: result.truncated });
-        return next;
-      });
+      if (laneId === activeLaneId) {
+        setDirCache((cache) => {
+          const next = new Map(cache);
+          next.set(dirPath, { status: "loaded", entries: result.entries, truncated: result.truncated });
+          return next;
+        });
+      } else {
+        const memState = laneStates.get(laneId);
+        if (memState) {
+          const next = new Map(memState.dirCache);
+          next.set(dirPath, { status: "loaded", entries: result.entries, truncated: result.truncated });
+          memState.dirCache = next;
+        }
+      }
     } catch (cause) {
-      if (activeLaneId !== laneId) return;
-      setDirCache((cache) => {
-        const next = new Map(cache);
-        next.set(dirPath, { status: "error", error: translateError(cause) });
-        return next;
-      });
+      if (laneId === activeLaneId) {
+        setDirCache((cache) => {
+          const next = new Map(cache);
+          next.set(dirPath, { status: "error", error: translateError(cause) });
+          return next;
+        });
+      } else {
+        const memState = laneStates.get(laneId);
+        if (memState) {
+          const next = new Map(memState.dirCache);
+          next.set(dirPath, { status: "error", error: translateError(cause) });
+          memState.dirCache = next;
+        }
+      }
     }
   }
 
@@ -394,11 +426,20 @@ export function createEditorStore(fleet: FleetStore) {
     }));
   }
 
+  // Paths whose save RPC is currently in flight, keyed by `${laneId}:${path}`. The daemon
+  // broadcasts `event.file.changed` before `file.write` returns, so the live-refresh handler
+  // needs this to recognize its own save's echo instead of treating it as an external change.
+  // The value tracks whether an `event.file.changed` for this path arrived while the save was
+  // in flight, so it can be re-checked (via syncExternalChange) once the save settles.
+  const savingPaths = new Map<string, boolean>();
+
   async function saveFile(path: string) {
     const laneId = currentLaneId();
     const file = findOpenFile(path);
     if (!file || laneId == null) return;
     if (file.content === file.savedContent && !file.conflict) return;
+    const saveKey = `${laneId}:${path}`;
+    savingPaths.set(saveKey, false);
     updateOpenFile(path, (f) => ({ ...f, saving: true, saveError: null }));
     try {
       const result = await daemonCall("file.write", {
@@ -430,6 +471,16 @@ export function createEditorStore(fleet: FleetStore) {
         }));
       } else {
         updateOpenFile(path, (f) => ({ ...f, saving: false, saveError: translateError(cause) }));
+      }
+    } finally {
+      const hadEchoDuringSave = savingPaths.get(saveKey) === true;
+      savingPaths.delete(saveKey);
+      if (hadEchoDuringSave) {
+        // An event.file.changed for this path arrived while the write was in flight. It may
+        // have been our own save's echo (now settled, in which case this is a no-op) or a
+        // genuine external change landing at nearly the same time - re-check against the
+        // fresh on-disk mtime now that we have a stable savedContent/mtimeMs to compare.
+        void syncExternalChange(path, laneId);
       }
     }
   }
@@ -486,16 +537,25 @@ export function createEditorStore(fleet: FleetStore) {
     }
   }
 
+  function findLaneOpenFile(laneId: number, path: string): OpenFile | undefined {
+    return laneId === activeLaneId
+      ? findOpenFile(path)
+      : laneStates.get(laneId)?.openFiles.find((f) => f.path === path);
+  }
+
   async function syncExternalChange(path: string, specificLaneId?: number) {
     const laneId = specificLaneId ?? currentLaneId();
     if (laneId == null) return;
-    const file = laneId === activeLaneId
-      ? findOpenFile(path)
-      : laneStates.get(laneId)?.openFiles.find((f) => f.path === path);
-    if (!file) return;
+    if (!findLaneOpenFile(laneId, path)) return;
 
     try {
       const result = await daemonCall("file.read", { lane_id: laneId, path });
+      // Re-read the file record after the await instead of using the pre-await snapshot:
+      // another operation (e.g. our own saveFile) may have completed while this request was
+      // in flight, and a stale savedContent/mtimeMs would misreport a just-saved buffer as
+      // dirty or conflicted.
+      const file = findLaneOpenFile(laneId, path);
+      if (!file) return;
       if (result.mtime_ms === file.mtimeMs) return;
       const isDirty = file.content !== file.savedContent;
       if (laneId === activeLaneId) {
@@ -644,73 +704,97 @@ export function createEditorStore(fleet: FleetStore) {
     setOpenAtTarget({ ...target });
   }
 
-  function handleFileRenamed(from: string, to: string) {
+  // Renames a path (and, for a directory rename, everything nested under it) within one
+  // lane's file/tab bookkeeping: open file paths, the active path, and expanded dirs.
+  function renamePathsInLaneState(state: LaneEditorState, normFrom: string, normTo: string) {
+    const remap = (p: string) =>
+      p === normFrom ? normTo : p.startsWith(normFrom + "/") ? normTo + p.slice(normFrom.length) : p;
+
+    state.openFiles = state.openFiles.map((f) => {
+      const nextPath = remap(f.path);
+      return nextPath === f.path ? f : { ...f, path: nextPath };
+    });
+    if (state.activePath != null) {
+      state.activePath = remap(state.activePath);
+    }
+    const nextExpanded = new Set<string>();
+    for (const dir of state.expandedDirs) nextExpanded.add(remap(dir));
+    state.expandedDirs = nextExpanded;
+  }
+
+  // Marks a path (and, for a directory delete, everything nested under it) as deleted-on-disk
+  // within one lane's open-file bookkeeping.
+  function markPathsDeletedInLaneState(state: LaneEditorState, normPath: string) {
+    const matches = (p: string) => p === normPath || p.startsWith(normPath + "/");
+    state.openFiles = state.openFiles.map((f) =>
+      matches(f.path) ? { ...f, conflict: { deleted: true, actualMtimeMs: null } } : f
+    );
+  }
+
+  // Rename and delete events must be routed by lane: multitasking keeps several lanes in the
+  // viewport at once, so an event for a background lane must never mutate the active lane's
+  // live tabs/tree state. The active lane's own signals are mutated directly; a tracked
+  // background lane's `laneStates` entry is mutated in place; an untracked lane is ignored.
+  function handleFileRenamed(from: string, to: string, laneId: number) {
     const normFrom = from.trim().replace(/\\/g, "/");
     const normTo = to.trim().replace(/\\/g, "/");
 
-    setOpenFiles((files) =>
-      files.map((f) => {
-        if (f.path === normFrom) {
-          return { ...f, path: normTo };
-        }
-        if (f.path.startsWith(normFrom + "/")) {
-          return { ...f, path: normTo + f.path.slice(normFrom.length) };
-        }
-        return f;
-      })
-    );
-
-    const curActive = activePath();
-    if (curActive === normFrom) {
-      setActivePathSignal(normTo);
-    } else if (curActive && curActive.startsWith(normFrom + "/")) {
-      setActivePathSignal(normTo + curActive.slice(normFrom.length));
+    if (laneId === activeLaneId) {
+      const live: LaneEditorState = {
+        openFiles: openFiles(),
+        activePath: activePath(),
+        expandedDirs: expandedDirs(),
+        dirCache: dirCache(),
+      };
+      renamePathsInLaneState(live, normFrom, normTo);
+      setOpenFiles(live.openFiles);
+      setActivePathSignal(live.activePath);
+      setExpandedDirs(live.expandedDirs);
+      persistCurrentLane();
+      return;
     }
 
-    setExpandedDirs((prev) => {
-      const next = new Set<string>();
-      for (const dir of prev) {
-        if (dir === normFrom) {
-          next.add(normTo);
-        } else if (dir.startsWith(normFrom + "/")) {
-          next.add(normTo + dir.slice(normFrom.length));
-        } else {
-          next.add(dir);
-        }
-      }
-      return next;
-    });
-
-    persistCurrentLane();
+    const memState = laneStates.get(laneId);
+    if (!memState) return;
+    renamePathsInLaneState(memState, normFrom, normTo);
   }
 
-  function handleFileDeleted(path: string) {
+  function handleFileDeleted(path: string, laneId: number) {
     const normPath = path.trim().replace(/\\/g, "/");
-    setOpenFiles((files) =>
-      files.map((f) => {
-        if (f.path === normPath || f.path.startsWith(normPath + "/")) {
-          return {
-            ...f,
-            conflict: { deleted: true, actualMtimeMs: null },
-          };
-        }
-        return f;
-      })
-    );
-    persistCurrentLane();
+
+    if (laneId === activeLaneId) {
+      const live: LaneEditorState = {
+        openFiles: openFiles(),
+        activePath: activePath(),
+        expandedDirs: expandedDirs(),
+        dirCache: dirCache(),
+      };
+      markPathsDeletedInLaneState(live, normPath);
+      setOpenFiles(live.openFiles);
+      persistCurrentLane();
+      return;
+    }
+
+    const memState = laneStates.get(laneId);
+    if (!memState) return;
+    markPathsDeletedInLaneState(memState, normPath);
   }
 
-  let pendingReloadDirs = new Set<string>();
+  // Pending directory reloads, keyed by lane so a debounce flush always reloads each
+  // directory in the lane that actually changed - not whichever lane last called
+  // queueDirReload before the timer fired.
+  const pendingReloads = new Map<string, { laneId: number; dir: string }>();
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function queueDirReload(laneId: number, dir: string) {
-    pendingReloadDirs.add(dir);
+    pendingReloads.set(`${laneId}:${dir}`, { laneId, dir });
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-      const toReload = Array.from(pendingReloadDirs);
-      pendingReloadDirs.clear();
-      for (const d of toReload) {
-        void loadDir(laneId, d);
+      const toReload = Array.from(pendingReloads.values());
+      pendingReloads.clear();
+      debounceTimer = null;
+      for (const { laneId: id, dir: d } of toReload) {
+        void loadDir(id, d);
       }
     }, 300);
   }
@@ -742,10 +826,18 @@ export function createEditorStore(fleet: FleetStore) {
         if (fromParentDir !== parentDir) {
           queueDirReload(laneId, fromParentDir);
         }
-        handleFileRenamed(from, path);
+        handleFileRenamed(from, path, laneId);
       } else if (op === "removed") {
-        handleFileDeleted(path);
+        handleFileDeleted(path, laneId);
       } else {
+        const saveKey = `${laneId}:${path}`;
+        if (savingPaths.has(saveKey)) {
+          // Our own save is in flight and the daemon broadcasts the change before file.write
+          // resolves - do not treat this as an external change yet. Record that an event
+          // arrived so saveFile can re-check once it settles.
+          savingPaths.set(saveKey, true);
+          return;
+        }
         void syncExternalChange(path, laneId);
       }
     })

@@ -39,7 +39,7 @@ describe("EditorStore tab retargeting on rename and delete", () => {
       expect(editor.activePath()).toBe("src/utils.ts");
 
       // Rename src/utils.ts to src/helpers.ts
-      editor.handleFileRenamed("src/utils.ts", "src/helpers.ts");
+      editor.handleFileRenamed("src/utils.ts", "src/helpers.ts", 1);
 
       expect(editor.openFiles().map((f) => f.path)).toEqual(["src/index.ts", "src/helpers.ts"]);
       expect(editor.activePath()).toBe("src/helpers.ts");
@@ -57,7 +57,7 @@ describe("EditorStore tab retargeting on rename and delete", () => {
       expect(editor.activePath()).toBe("src/components/Button.tsx");
 
       // Rename directory "src/components" to "src/ui"
-      editor.handleFileRenamed("src/components", "src/ui");
+      editor.handleFileRenamed("src/components", "src/ui", 1);
 
       expect(editor.openFiles().map((f) => f.path)).toEqual([
         "src/ui/Header.tsx",
@@ -76,7 +76,7 @@ describe("EditorStore tab retargeting on rename and delete", () => {
       expect(editor.openFiles()[0].conflict).toBeNull();
 
       // Delete the file
-      editor.handleFileDeleted("src/old.ts");
+      editor.handleFileDeleted("src/old.ts", 1);
 
       const file = editor.openFiles().find((f) => f.path === "src/old.ts");
       expect(file).toBeDefined();
@@ -93,7 +93,7 @@ describe("EditorStore tab retargeting on rename and delete", () => {
       editor.openFile("crates/foo/Cargo.toml");
       editor.openFile("README.md");
 
-      editor.handleFileDeleted("crates/foo");
+      editor.handleFileDeleted("crates/foo", 1);
 
       const files = editor.openFiles();
       const lib = files.find((f) => f.path === "crates/foo/src/lib.rs");
