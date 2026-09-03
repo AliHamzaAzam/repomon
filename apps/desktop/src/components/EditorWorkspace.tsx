@@ -162,6 +162,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   const [langMenuOpen, setLangMenuOpen] = createSignal(false);
   const [cursorLine, setCursorLine] = createSignal(1);
   const [cursorCol, setCursorCol] = createSignal(1);
+  const [selectionCount, setSelectionCount] = createSignal(1);
+  const [selectedChars, setSelectedChars] = createSignal(0);
   const [isResizing, setIsResizing] = createSignal(false);
 
   // Compute line and column from doc length and head
@@ -202,6 +204,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
     function onMouseUp() {
       setIsResizing(false);
+      props.editor.persistTreeColumnWidth();
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     }
@@ -552,9 +555,11 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         whitespace={props.editor.whitespace()}
                         initialCursor={file().cursor}
                         initialScrollTop={file().scrollTop}
-                        onCursorActivity={(cursor, scrollTop) => {
+                        onCursorActivity={(cursor, scrollTop, selection) => {
                           props.editor.updateCursor(file().path, cursor, scrollTop);
                           updateCursorPos(cursor);
+                          setSelectionCount(selection.rangeCount);
+                          setSelectedChars(selection.selectedChars);
                         }}
                         onChange={(content) => props.editor.updateContent(file().path, content)}
                         onSave={() => void props.editor.saveFile(file().path)}
@@ -625,6 +630,15 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
             <span>
               Ln {cursorLine()}, Col {cursorCol()}
             </span>
+
+            <Show when={selectionCount() > 1 || selectedChars() > 0}>
+              <span class="text-line">|</span>
+              <span>
+                {selectionCount() > 1
+                  ? `${selectionCount()} selections`
+                  : `${selectedChars()} char${selectedChars() === 1 ? "" : "s"}`}
+              </span>
+            </Show>
 
             <span class="text-line">|</span>
             <span>{currentIndentUnit()}</span>

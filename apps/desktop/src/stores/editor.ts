@@ -156,11 +156,20 @@ export function createEditorStore(fleet: FleetStore) {
     }
   }
 
+  // Updates the live signal only - safe to call on every `mousemove` of a column-resize drag.
+  // Callers persist the final width once, via `persistTreeColumnWidth`, on `mouseup` - reading
+  // and rewriting the whole localStorage blob on every mousemove event would otherwise thrash
+  // storage dozens of times a second for the length of a single drag.
   function setTreeColumnWidth(width: number) {
     const clamped = Math.max(MIN_TREE_WIDTH_PX, width);
     setTreeColumnWidthSignal(clamped);
+  }
+
+  // Commits the current tree column width to localStorage. Call once, e.g. on drag `mouseup`,
+  // not on every `setTreeColumnWidth` call.
+  function persistTreeColumnWidth() {
     const current = readPersistedStorage();
-    current.treeColumnWidth = clamped;
+    current.treeColumnWidth = treeColumnWidth();
     writePersistedStorage(current);
   }
 
@@ -651,6 +660,7 @@ export function createEditorStore(fleet: FleetStore) {
     dirCache,
     treeColumnWidth,
     setTreeColumnWidth,
+    persistTreeColumnWidth,
     wrap,
     setWrap,
     toggleWrap,

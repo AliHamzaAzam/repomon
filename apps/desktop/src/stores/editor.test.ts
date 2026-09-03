@@ -105,6 +105,28 @@ describe("editor store", () => {
     });
   });
 
+  it("does not write the tree column width to localStorage until persistTreeColumnWidth is called (item 8)", () => {
+    createRoot((dispose) => {
+      const [selectedId] = createSignal<number | null>(7);
+      const store = createEditorStore(fleetStub(selectedId, [lane(7)]));
+
+      // setTreeColumnWidth (called on every mousemove during a drag) updates the live signal
+      // only - it must not thrash localStorage dozens of times a second for the length of a drag.
+      store.setTreeColumnWidth(300);
+      store.setTreeColumnWidth(320);
+      store.setTreeColumnWidth(340);
+      expect(store.treeColumnWidth()).toBe(340);
+      expect(localStorage.getItem(EDITOR_STORAGE_KEY)).toBeNull();
+
+      // The final width is committed once the caller explicitly persists it (e.g. on mouseup).
+      store.persistTreeColumnWidth();
+      const stored = JSON.parse(localStorage.getItem(EDITOR_STORAGE_KEY)!);
+      expect(stored.treeColumnWidth).toBe(340);
+
+      dispose();
+    });
+  });
+
   it("opens a file, updates content, and marks dirty", async () => {
     daemonCallMock.mockImplementation(async (method: string) => {
       if (method === "file.read") {
