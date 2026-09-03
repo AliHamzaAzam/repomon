@@ -48,10 +48,13 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
   const lane = () => props.editor.selectedLane();
   const laneId = () => lane()?.id ?? null;
   const activeFile = () => props.editor.activeFile();
+  let searchRequestId = 0;
 
   function triggerSearch() {
     const q = query().trim();
     const id = laneId();
+    const currentRequestId = ++searchRequestId;
+
     if (!q || id == null) {
       setHits([]);
       setSearching(false);
@@ -72,11 +75,13 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
       max_results: 2000,
     })
       .then((res) => {
+        if (currentRequestId !== searchRequestId || laneId() !== id) return;
         setHits(res.hits);
         setTruncated(res.truncated);
         setSearching(false);
       })
       .catch((err) => {
+        if (currentRequestId !== searchRequestId || laneId() !== id) return;
         setHits([]);
         setTruncated(false);
         setSearching(false);
@@ -94,6 +99,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
 
     if (debounceTimer) clearTimeout(debounceTimer);
     if (!q.trim() || id == null) {
+      ++searchRequestId;
       setHits([]);
       setSearching(false);
       setTruncated(false);

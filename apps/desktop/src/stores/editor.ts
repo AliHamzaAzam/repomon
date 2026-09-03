@@ -640,8 +640,8 @@ export function createEditorStore(fleet: FleetStore) {
     const target = { path, line, column, token };
     setOpenAtTarget(target);
     await openFile(path);
-    // Refresh token after openFile ensures CodeEditor's effect fires even if doc was just created
-    setOpenAtTarget({ ...target, token: ++openAtToken });
+    if (token !== openAtToken) return;
+    setOpenAtTarget({ ...target });
   }
 
   function handleFileRenamed(from: string, to: string) {

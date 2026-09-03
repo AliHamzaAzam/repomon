@@ -78,16 +78,22 @@ export default function FileFinder(props: FileFinderProps) {
 
   const currentLane = () => props.editor.selectedLane();
   const currentLaneId = () => currentLane()?.id ?? null;
+  let indexRequestId = 0;
 
   async function fetchIndex(laneId: number) {
+    const reqId = ++indexRequestId;
     setLoading(true);
     try {
       const res = await daemonCall("file.index", { lane_id: laneId });
+      if (reqId !== indexRequestId || currentLaneId() !== laneId) return;
       setPaths(res.paths);
     } catch {
+      if (reqId !== indexRequestId || currentLaneId() !== laneId) return;
       setPaths([]);
     } finally {
-      setLoading(false);
+      if (reqId === indexRequestId && currentLaneId() === laneId) {
+        setLoading(false);
+      }
     }
   }
 
@@ -97,6 +103,7 @@ export default function FileFinder(props: FileFinderProps) {
       if (id != null) {
         void fetchIndex(id);
       } else {
+        ++indexRequestId;
         setPaths([]);
       }
       setQuery("");
@@ -105,6 +112,8 @@ export default function FileFinder(props: FileFinderProps) {
         inputRef?.focus();
         inputRef?.select();
       });
+    } else {
+      ++indexRequestId;
     }
   });
 

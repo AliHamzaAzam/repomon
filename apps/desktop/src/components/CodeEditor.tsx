@@ -856,7 +856,14 @@ export default function CodeEditor(props: CodeEditorProps) {
 
         const changes: Array<{ from: number; to: number; insert: string }> = [];
         let m: RegExpExecArray | null;
+        let count = 0;
+        const maxIterations = docText.length + 1;
         while ((m = pattern.exec(docText)) !== null) {
+          if (++count > maxIterations) break;
+          if (m[0].length === 0) {
+            pattern.lastIndex = m.index + 1;
+            continue;
+          }
           changes.push({ from: m.index, to: m.index + m[0].length, insert: req.replacement });
         }
         if (changes.length > 0) {

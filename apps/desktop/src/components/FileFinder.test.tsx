@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import FileFinder from "./FileFinder";
@@ -169,5 +170,60 @@ describe("FileFinder component", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
 
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("ignores responses for superseded lane when lane switches while finder is open", async () => {
+    let resolveLane1: (val: any) => void;
+    const p1 = new Promise((res) => {
+      resolveLane1 = res;
+    });
+
+    daemonCallMock.mockImplementation((method: string, params?: any) => {
+      if (method === "file.index") {
+        if (params?.lane_id === 1) return p1;
+        if (params?.lane_id === 2) {
+          return Promise.resolve({
+            paths: ["lane2_file.txt"],
+            truncated: false,
+            generation: 1,
+          });
+        }
+      }
+      return Promise.resolve({});
+    });
+
+    const [currentLaneId, setCurrentLaneId] = createSignal(1);
+    const editor = {
+      selectedLane: () => ({ id: currentLaneId(), worktree: { name: "test-repo", path: "/tmp/test" } }),
+      openFile: vi.fn(),
+    } as unknown as import("../stores/editor").EditorStore;
+
+    render(() => (
+      <FileFinder
+        editor={editor}
+        isOpen={true}
+        onClose={vi.fn()}
+      />
+    ));
+
+    // Switch lane to 2 before lane 1's slow index resolves
+    setCurrentLaneId(2);
+
+    await waitFor(() => {
+      expect(screen.getByText("lane2_file.txt")).toBeDefined();
+    });
+
+    // Now resolve lane 1's slow response
+    resolveLane1!({
+      paths: ["lane1_stale.txt"],
+      truncated: false,
+      generation: 1,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Stale lane 1 response must NOT overwrite lane 2's paths
+    expect(screen.queryByText("lane1_stale.txt")).toBeNull();
+    expect(screen.getByText("lane2_file.txt")).toBeDefined();
   });
 });
