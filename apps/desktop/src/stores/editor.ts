@@ -624,6 +624,10 @@ export function createEditorStore(fleet: FleetStore) {
     switchLane(newLaneId);
   });
 
+  const [finderOpen, setFinderOpen] = createSignal(false);
+  function openFinder() { setFinderOpen(true); }
+  function closeFinder() { setFinderOpen(false); }
+
   onMount(() => {
     let active = true;
     let stop: (() => void) | undefined;
@@ -688,6 +692,9 @@ export function createEditorStore(fleet: FleetStore) {
     revealFile,
     languageOverrides,
     setLanguageOverride,
+    finderOpen,
+    openFinder,
+    closeFinder,
     getLaneState: (id: number) => laneStates.get(id),
   };
 }

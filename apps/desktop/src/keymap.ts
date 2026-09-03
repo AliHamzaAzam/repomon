@@ -31,6 +31,8 @@ export const BINDINGS: Binding[] = [
   { id: "panel.theme", chord: "mod+6", label: "Cycle theme", section: "Panels" },
   { id: "panel.editor", chord: "mod+7", label: "Toggle the editor panel", section: "Panels" },
   { id: "panel.supervision", chord: "mod+8", label: "Toggle the supervision panel", section: "Panels" },
+  { id: "finder.open", chord: "mod+p", label: "Find file in workspace", section: "Panels", when: "lane" },
+  { id: "search.project", chord: "mod+shift+f", label: "Search project files", section: "Panels", when: "lane" },
 
   { id: "layout.focused", chord: "mod+shift+1", label: "Focused layout", section: "Layout" },
   { id: "layout.split", chord: "mod+shift+2", label: "Split layout", section: "Layout" },
@@ -49,7 +51,7 @@ export const BINDINGS: Binding[] = [
 
   { id: "lane.spawn", chord: "mod+e", label: "Spawn agent", section: "Lane", when: "lane" },
   { id: "lane.terminal", chord: "mod+t", label: "Open terminal", section: "Lane", when: "lane" },
-  { id: "lane.pin", chord: "mod+p", label: "Pin or unpin lane", section: "Lane", when: "lane" },
+  { id: "lane.pin", chord: "mod+shift+p", label: "Pin or unpin lane", section: "Lane", when: "lane" },
   { id: "lane.delete", chord: "mod+d", label: "Delete lane", section: "Lane", when: "lane" },
   { id: "lane.merge", chord: "mod+shift+m", label: "Merge lane", section: "Lane", when: "lane" },
   { id: "lane.stop", chord: "mod+.", label: "Stop agent", section: "Lane", when: "agent" },

@@ -81,7 +81,7 @@ function buildDefaultPanels(
     { id: "git", label: "Git", icon: IconGitBranch, component: () => <GitExplorerPanel fleet={fleet} /> },
 
     // D4: file tree + multi-tab editor for the active lane's worktree.
-    { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} editor={editor} /> },
+    { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} editor={editor} onOpenFinder={() => editor?.openFinder()} /> },
 
     // Durable fleet mail across every lane, grouped by conversation thread.
     { id: "mail", label: "Repomail", icon: IconMail, component: () => <MailPanel fleet={fleet} messages={messages} actions={actions} /> },

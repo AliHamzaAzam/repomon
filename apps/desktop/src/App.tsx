@@ -36,6 +36,7 @@ import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
 import EditorWorkspace from "./components/EditorWorkspace";
+import FileFinder from "./components/FileFinder";
 import { IconChevronDown, IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
@@ -277,6 +278,16 @@ function App(props: AppProps) {
       case "panel.editor": openPanelTab("editor"); break;
       case "panel.mail": openPanelTab("mail"); break;
       case "panel.supervision": openPanelTab("supervision"); break;
+      case "finder.open":
+        if (lane) editor.openFinder();
+        break;
+      case "search.project":
+        if (lane) {
+          if (!workspace.editorWorkspace() && (!repomindOpen() || rightPanelTab() !== "editor")) {
+            openPanelTab("editor");
+          }
+        }
+        break;
       case "panel.repomind":
         openPanelTab("repomind");
         break;
@@ -639,7 +650,12 @@ function App(props: AppProps) {
           </Show>
           <Show when={workspace.editorWorkspace()}>
             <div class="absolute inset-0 z-10 bg-background">
-              <EditorWorkspace fleet={fleet} editor={editor} actions={actions} />
+              <EditorWorkspace
+                fleet={fleet}
+                editor={editor}
+                actions={actions}
+                onOpenFinder={() => editor.openFinder()}
+              />
             </div>
           </Show>
         </main>
@@ -743,6 +759,17 @@ function App(props: AppProps) {
         actions={actions}
         notifications={notifications}
         onReplayOnboarding={() => setOnboardingOpen(true)}
+      />
+      <FileFinder
+        editor={editor}
+        isOpen={editor.finderOpen()}
+        onClose={() => editor.closeFinder()}
+        onOpenPath={(path) => {
+          if (!workspace.editorWorkspace() && (!repomindOpen() || rightPanelTab() !== "editor")) {
+            openPanelTab("editor");
+          }
+          void editor.openFile(path);
+        }}
       />
       <Show when={actions.error() ?? fleet.error()}>
         {(message) => (

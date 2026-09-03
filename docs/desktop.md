@@ -78,6 +78,8 @@ macOS** and **Ctrl elsewhere**.
 | `mod+shift+5` | Repomind full screen |
 | `mod+6` | Cycle theme (system, dark, light) |
 | `mod+7` | Toggle the compact in-app editor in the right rail |
+| `mod+p` | Find file in workspace |
+| `mod+shift+f` | Search project files in workspace |
 | `mod+k` | Open the control center |
 
 Git, repomind, and the compact editor share one right-rail panel host: a resizable pane (drag its
@@ -137,7 +139,7 @@ These need a selected lane. With nothing selected they do nothing.
 |---|---|
 | `mod+e` | Spawn agent |
 | `mod+t` | Open terminal |
-| `mod+p` | Pin or unpin lane |
+| `mod+shift+p` | Pin or unpin lane |
 | `mod+d` | Delete lane (asks first) |
 | `mod+shift+m` | Merge lane (asks first) |
 | `mod+.` | Stop the agent in the visible pane (asks first) |
