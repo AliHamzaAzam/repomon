@@ -407,10 +407,10 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                   </div>
                 )}
               </Show>
-              <Show when={activeFile()} keyed>
+              <Show when={activeFile()}>
                 {(file) => (
                   <Show
-                    when={!file.loading}
+                    when={!file().loading}
                     fallback={
                       <div class="flex flex-1 items-center justify-center">
                         <p class="text-xs text-muted">Loading file...</p>
@@ -418,15 +418,15 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                     }
                   >
                     <Show
-                      when={!file.loadError}
+                      when={!file().loadError}
                       fallback={
                         <div class="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
                           <p class="text-xs font-medium text-foreground">Can't open this file</p>
-                          <p class="max-w-[220px] text-xs text-muted">{file.loadError?.friendly}</p>
+                          <p class="max-w-[220px] text-xs text-muted">{file().loadError?.friendly}</p>
                           <button
                             type="button"
                             class="focus-ring rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-foreground hover:bg-raised"
-                            onClick={() => requestClose(file.path)}
+                            onClick={() => requestClose(file().path)}
                           >
                             Close tab
                           </button>
@@ -434,23 +434,23 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                       }
                     >
                       <Switch>
-                        <Match when={file.kind === "image"}>
-                          <ImageViewer laneId={lane()?.id ?? 0} path={file.path} size={file.size} />
+                        <Match when={file().kind === "image"}>
+                          <ImageViewer laneId={lane()?.id ?? 0} path={file().path} size={file().size} />
                         </Match>
-                        <Match when={file.kind === "binary"}>
-                          <BinaryViewer path={file.path} size={file.size} />
+                        <Match when={file().kind === "binary"}>
+                          <BinaryViewer path={file().path} size={file().size} />
                         </Match>
                         <Match when={true}>
                           <CodeEditor
-                            value={file.content}
-                            path={file.path}
+                            value={file().content}
+                            path={file().path}
                             wrap={editor()?.wrap()}
                             whitespace={editor()?.whitespace()}
-                            initialCursor={file.cursor}
-                            initialScrollTop={file.scrollTop}
-                            onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file.path, cursor, scrollTop)}
-                            onChange={(content) => editor()?.updateContent(file.path, content)}
-                            onSave={() => void editor()?.saveFile(file.path)}
+                            initialCursor={file().cursor}
+                            initialScrollTop={file().scrollTop}
+                            onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file().path, cursor, scrollTop)}
+                            onChange={(content) => editor()?.updateContent(file().path, content)}
+                            onSave={() => void editor()?.saveFile(file().path)}
                             class="min-h-0 flex-1"
                           />
                         </Match>

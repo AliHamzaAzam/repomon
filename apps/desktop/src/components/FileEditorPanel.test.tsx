@@ -230,6 +230,33 @@ describe("FileEditorPanel open/edit/save", () => {
     expect(writeCall?.params).toEqual({ lane_id: 7, path: "a.ts", content: "abcd", expected_mtime_ms: 1000 });
   });
 
+  it("keeps the same CodeEditor DOM node across edits and cursor moves (non-keyed Show)", async () => {
+    mockRpc({
+      "file.list": () => ({ entries: [entry({ name: "a.ts", path: "a.ts", is_dir: false, size: 5 })], truncated: false }),
+      "file.read": () => ({ content: "abc", mtime_ms: 1000, size: 3, truncated: false }),
+    });
+
+    const { container } = render(() => <FileEditorPanel fleet={fleetWith(lane())} />);
+    await openFileTab(container, "a.ts");
+
+    const contentNode = container.querySelector(".cm-content");
+    expect(contentNode).not.toBeNull();
+
+    const view = getView(container);
+    view.dispatch({ changes: { from: 3, insert: "d" } });
+    view.dispatch({ changes: { from: 4, insert: "e" } });
+    view.dispatch({ changes: { from: 5, insert: "f" } });
+    view.dispatch({ selection: { anchor: 1 } });
+
+    // A keyed Show on the active file would tear down and rebuild CodeEditor (and its
+    // EditorView) on every keystroke, since updateContent produces a new OpenFile object each
+    // time - that loses undo history and focus. The same DOM node surviving three edits and a
+    // cursor move proves the non-keyed accessor form is in use.
+    expect(container.querySelector(".cm-content")).toBe(contentNode);
+    expect(getView(container)).toBe(view);
+    expect(view.state.doc.toString()).toBe("abcdef");
+  });
+
   it("item 5b: gives the open-tab strip TerminalWorkspace's horizontal-scroll chain (scroll, not wrap)", async () => {
     mockRpc({
       "file.list": () => ({
