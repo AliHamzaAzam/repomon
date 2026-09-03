@@ -330,4 +330,90 @@ describe("EditorWorkspace component", () => {
     const stored = JSON.parse(localStorage.getItem(EDITOR_STORAGE_KEY) ?? "null");
     expect(stored?.treeColumnWidth).toBe(editor.treeColumnWidth());
   });
+
+  it("dismisses the tree context menu on Escape and returns focus to the row that opened it (brief E item 5)", async () => {
+    const currentLane = lane();
+    mockRpc({
+      "file.list": () => ({
+        entries: [entry({ name: "notes.txt", path: "notes.txt", is_dir: false })],
+        truncated: false,
+      }),
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await waitFor(() => expect(screen.getByText("notes.txt")).toBeInTheDocument());
+    const row = screen.getByTitle("notes.txt");
+    fireEvent.contextMenu(row);
+
+    await waitFor(() => expect(screen.getByText("New File")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByText("New File")).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(row);
+  });
+
+  it("issues exactly one file.create RPC when Enter is followed by blur during inline create (brief E item 7)", async () => {
+    const currentLane = lane();
+    mockRpc({
+      "file.list": () => ({ entries: [], truncated: false }),
+      "file.create": () => ({}),
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    fireEvent.click(screen.getByTitle("New file in root"));
+
+    const input = await screen.findByPlaceholderText("File name...");
+    fireEvent.input(input, { target: { value: "notes.txt" } });
+
+    // Enter starts the RPC; blur fires immediately after, before the RPC settles. The second
+    // trigger must be a no-op, not a second file.create call.
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText("File name...")).not.toBeInTheDocument();
+    });
+
+    expect(calls.list.filter((c) => c.method === "file.create")).toHaveLength(1);
+  });
+
+  it("issues exactly one file.rename RPC when Enter is followed by blur during inline rename (brief E item 7)", async () => {
+    const currentLane = lane();
+    mockRpc({
+      "file.list": () => ({
+        entries: [entry({ name: "old.txt", path: "old.txt", is_dir: false })],
+        truncated: false,
+      }),
+      "file.rename": () => ({}),
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await waitFor(() => expect(screen.getByText("old.txt")).toBeInTheDocument());
+    fireEvent.contextMenu(screen.getByTitle("old.txt"));
+
+    await waitFor(() => expect(screen.getByText("Rename")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Rename"));
+
+    const input = await screen.findByDisplayValue("old.txt");
+    fireEvent.input(input, { target: { value: "new.txt" } });
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue("new.txt")).not.toBeInTheDocument();
+    });
+
+    expect(calls.list.filter((c) => c.method === "file.rename")).toHaveLength(1);
+  });
 });

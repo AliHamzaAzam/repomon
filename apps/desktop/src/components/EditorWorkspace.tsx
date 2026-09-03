@@ -3,8 +3,10 @@ import {
   Match,
   Show,
   Switch,
+  createEffect,
   createMemo,
   createSignal,
+  onCleanup,
   type Component,
 } from "solid-js";
 import { Dynamic } from "solid-js/web";
@@ -237,6 +239,26 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     name: string;
     depth: number;
   } | null>(null);
+  let contextMenuOpener: HTMLElement | null = null;
+
+  createEffect(() => {
+    const menu = contextMenu();
+    if (!menu) return;
+
+    const handleWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu(null);
+        contextMenuOpener?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleWindowKeyDown, true);
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleWindowKeyDown, true);
+    });
+  });
 
   // Inline Create State
   const [inlineCreate, setInlineCreate] = createSignal<{
@@ -244,6 +266,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     isDir: boolean;
     depth: number;
   } | null>(null);
+  const [inlineCreateInFlight, setInlineCreateInFlight] = createSignal(false);
 
   // Inline Rename State
   const [inlineRename, setInlineRename] = createSignal<{
@@ -251,6 +274,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     isDir: boolean;
     name: string;
   } | null>(null);
+  const [inlineRenameInFlight, setInlineRenameInFlight] = createSignal(false);
 
   // Delete Target State
   const [deleteTarget, setDeleteTarget] = createSignal<{
@@ -290,6 +314,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   }
 
   async function commitInlineCreate(name: string) {
+    if (inlineCreateInFlight()) return;
     const create = inlineCreate();
     if (!create || !name.trim()) {
       setInlineCreate(null);
@@ -297,7 +322,12 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     }
     const fullPath = create.parentDir ? `${create.parentDir}/${name.trim()}` : name.trim();
     const laneId = props.editor.currentLaneId();
-    if (laneId == null) return;
+    if (laneId == null) {
+      setInlineCreate(null);
+      return;
+    }
+
+    setInlineCreateInFlight(true);
     try {
       await daemonCall("file.create", {
         lane_id: laneId,
@@ -312,10 +342,13 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     } catch (err) {
       console.error("file.create error:", err);
       setInlineCreate(null);
+    } finally {
+      setInlineCreateInFlight(false);
     }
   }
 
   async function commitInlineRename(newName: string) {
+    if (inlineRenameInFlight()) return;
     const rename = inlineRename();
     if (!rename || !newName.trim() || newName.trim() === rename.name) {
       setInlineRename(null);
@@ -324,7 +357,12 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     const parentDir = rename.path.split("/").slice(0, -1).join("/");
     const toPath = parentDir ? `${parentDir}/${newName.trim()}` : newName.trim();
     const laneId = props.editor.currentLaneId();
-    if (laneId == null) return;
+    if (laneId == null) {
+      setInlineRename(null);
+      return;
+    }
+
+    setInlineRenameInFlight(true);
     try {
       await daemonCall("file.rename", {
         lane_id: laneId,
@@ -332,11 +370,13 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         to: toPath,
       });
       setInlineRename(null);
-      props.editor.handleFileRenamed(rename.path, toPath);
+      props.editor.handleFileRenamed(rename.path, toPath, laneId);
       await props.editor.loadDir(laneId, parentDir);
     } catch (err) {
       console.error("file.rename error:", err);
       setInlineRename(null);
+    } finally {
+      setInlineRenameInFlight(false);
     }
   }
 
@@ -349,7 +389,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         path: target.path,
         recursive: true,
       });
-      props.editor.handleFileDeleted(target.path);
+      props.editor.handleFileDeleted(target.path, laneId);
       const parentDir = target.path.split("/").slice(0, -1).join("/");
       await props.editor.loadDir(laneId, parentDir);
     } catch (err) {
@@ -596,7 +636,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                 </span>
                 <input
                   type="text"
-                  class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                  disabled={inlineCreateInFlight()}
+                  class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground disabled:opacity-50"
                   placeholder={inlineCreate()?.isDir ? "Folder name..." : "File name..."}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -637,7 +678,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                           </span>
                           <input
                             type="text"
-                            class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                            disabled={inlineRenameInFlight()}
+                            class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground disabled:opacity-50"
                             value={item.name}
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
@@ -675,6 +717,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
+                          contextMenuOpener = e.currentTarget as HTMLElement;
                           setContextMenu({
                             x: e.clientX,
                             y: e.clientY,
@@ -715,6 +758,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         title="File actions"
                         onClick={(e) => {
                           e.stopPropagation();
+                          contextMenuOpener = e.currentTarget as HTMLElement;
                           const rect = e.currentTarget.getBoundingClientRect();
                           setContextMenu({
                             x: rect.right,
@@ -747,7 +791,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                 </span>
                 <input
                   type="text"
-                  class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                  disabled={inlineCreateInFlight()}
+                  class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground disabled:opacity-50"
                   placeholder={inlineCreate()?.isDir ? "Folder name..." : "File name..."}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
