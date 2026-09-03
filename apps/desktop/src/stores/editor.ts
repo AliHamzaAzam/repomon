@@ -627,6 +627,22 @@ export function createEditorStore(fleet: FleetStore) {
   const [finderOpen, setFinderOpen] = createSignal(false);
   function openFinder() { setFinderOpen(true); }
   function closeFinder() { setFinderOpen(false); }
+  const [openAtTarget, setOpenAtTarget] = createSignal<{
+    path: string;
+    line: number;
+    column: number;
+    token: number;
+  } | null>(null);
+  let openAtToken = 0;
+
+  async function openAt(path: string, line: number, column: number) {
+    const token = ++openAtToken;
+    const target = { path, line, column, token };
+    setOpenAtTarget(target);
+    await openFile(path);
+    // Refresh token after openFile ensures CodeEditor's effect fires even if doc was just created
+    setOpenAtTarget({ ...target, token: ++openAtToken });
+  }
 
   onMount(() => {
     let active = true;
@@ -692,6 +708,8 @@ export function createEditorStore(fleet: FleetStore) {
     revealFile,
     languageOverrides,
     setLanguageOverride,
+    openAt,
+    openAtTarget,
     finderOpen,
     openFinder,
     closeFinder,

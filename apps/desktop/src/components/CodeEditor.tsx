@@ -83,6 +83,15 @@ export interface EditorSelectionInfo {
   selectedChars: number;
 }
 
+export interface CodeEditorReplaceRequest {
+  query: string;
+  replacement: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  all?: boolean;
+  token: number;
+}
+
 export interface CodeEditorProps {
   value: string;
   path?: string;
@@ -95,6 +104,8 @@ export interface CodeEditorProps {
   onCursorActivity?: (cursor: number, scrollTop: number, selection: EditorSelectionInfo) => void;
   initialCursor?: number;
   initialScrollTop?: number;
+  openAtTarget?: { line: number; column: number; token: number } | null;
+  replaceRequest?: CodeEditorReplaceRequest | null;
   class?: string;
 }
 
@@ -804,6 +815,91 @@ export default function CodeEditor(props: CodeEditorProps) {
       if ((props.path ?? "") !== path) return;
       view.dispatch({ effects: languageCompartment.reconfigure(support ? [support] : []) });
     });
+  });
+
+  let lastOpenAtToken = 0;
+  createEffect(() => {
+    const target = props.openAtTarget;
+    if (!target || !view) return;
+    if (target.token === lastOpenAtToken) return;
+    lastOpenAtToken = target.token;
+
+    const doc = view.state.doc;
+    const lineNum = Math.max(1, Math.min(target.line, doc.lines));
+    const line = doc.line(lineNum);
+    const colOffset = Math.max(0, Math.min(target.column - 1, line.length));
+    const pos = line.from + colOffset;
+
+    view.dispatch({
+      selection: { anchor: pos },
+      scrollIntoView: true,
+    });
+    view.focus();
+  });
+
+  let lastReplaceToken = 0;
+  createEffect(() => {
+    const req = props.replaceRequest;
+    if (!req || !view) return;
+    if (req.token === lastReplaceToken) return;
+    lastReplaceToken = req.token;
+
+    const doc = view.state.doc;
+    const docText = doc.toString();
+    if (!req.query) return;
+
+    if (req.all) {
+      try {
+        const pattern = req.regex
+          ? new RegExp(req.query, req.caseSensitive ? "g" : "gi")
+          : new RegExp(req.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), req.caseSensitive ? "g" : "gi");
+
+        const changes: Array<{ from: number; to: number; insert: string }> = [];
+        let m: RegExpExecArray | null;
+        while ((m = pattern.exec(docText)) !== null) {
+          changes.push({ from: m.index, to: m.index + m[0].length, insert: req.replacement });
+        }
+        if (changes.length > 0) {
+          view.dispatch({ changes });
+          props.onChange?.(view.state.doc.toString());
+        }
+      } catch {}
+    } else {
+      const currentSel = view.state.selection.main;
+      const selectedText = docText.slice(currentSel.from, currentSel.to);
+      const isMatch = req.caseSensitive
+        ? selectedText === req.query
+        : selectedText.toLowerCase() === req.query.toLowerCase();
+
+      if (isMatch) {
+        view.dispatch({
+          changes: { from: currentSel.from, to: currentSel.to, insert: req.replacement },
+          selection: { anchor: currentSel.from + req.replacement.length },
+          scrollIntoView: true,
+        });
+        props.onChange?.(view.state.doc.toString());
+      } else {
+        try {
+          const pattern = req.regex
+            ? new RegExp(req.query, req.caseSensitive ? "g" : "gi")
+            : new RegExp(req.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), req.caseSensitive ? "g" : "gi");
+          pattern.lastIndex = currentSel.to;
+          let m = pattern.exec(docText);
+          if (!m) {
+            pattern.lastIndex = 0;
+            m = pattern.exec(docText);
+          }
+          if (m) {
+            view.dispatch({
+              changes: { from: m.index, to: m.index + m[0].length, insert: req.replacement },
+              selection: { anchor: m.index + req.replacement.length },
+              scrollIntoView: true,
+            });
+            props.onChange?.(view.state.doc.toString());
+          }
+        } catch {}
+      }
+    }
   });
 
   return (
