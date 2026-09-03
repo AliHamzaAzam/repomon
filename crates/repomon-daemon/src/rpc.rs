@@ -1164,6 +1164,43 @@ struct FileWrite {
     expected_mtime_ms: Option<u64>,
 }
 #[derive(Deserialize)]
+struct FileIndex {
+    lane_id: repomon_core::model::LaneId,
+}
+#[derive(Deserialize)]
+struct FileCreate {
+    lane_id: repomon_core::model::LaneId,
+    path: String,
+    #[serde(default)]
+    is_dir: bool,
+}
+#[derive(Deserialize)]
+struct FileRename {
+    lane_id: repomon_core::model::LaneId,
+    from: String,
+    to: String,
+}
+#[derive(Deserialize)]
+struct FileDelete {
+    lane_id: repomon_core::model::LaneId,
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+#[derive(Deserialize)]
+struct FileSearch {
+    lane_id: repomon_core::model::LaneId,
+    query: String,
+    #[serde(default)]
+    regex: bool,
+    #[serde(default)]
+    case_sensitive: bool,
+    #[serde(default)]
+    glob: Option<String>,
+    #[serde(default)]
+    max_results: Option<u32>,
+}
+#[derive(Deserialize)]
 struct Search {
     query: String,
     #[serde(default = "default_limit")]
@@ -2220,11 +2257,67 @@ pub async fn dispatch(
             .await
             .map_err(internal)?
             .map_err(file_write_error)?;
+            ctx.invalidate_file_index(p.lane_id).await;
             ctx.broadcast(
                 "event.file.changed",
-                json!({ "lane_id": p.lane_id, "path": p.path }),
+                json!({ "lane_id": p.lane_id, "path": p.path, "op": "modified" }),
             );
             to_value(result)
+        }
+        "file.index" => {
+            let p: FileIndex = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+
+            let (cached, generation) = {
+                let indices = ctx.file_indices.lock().await;
+                if let Some(entry) = indices.get(&p.lane_id) {
+                    if entry.valid {
+                        (
+                            Some(repomon_core::model::FileIndexResult {
+                                paths: entry.paths.clone(),
+                                truncated: entry.truncated,
+                                generation: entry.generation,
+                            }),
+                            entry.generation,
+                        )
+                    } else {
+                        (None, entry.generation)
+                    }
+                } else {
+                    (None, 0)
+                }
+            };
+
+            if let Some(res) = cached {
+                return to_value(res);
+            }
+
+            let (paths, truncated) =
+                tokio::task::spawn_blocking(move || crate::files::index_worktree(&root))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+
+            let mut indices = ctx.file_indices.lock().await;
+            let entry = indices.entry(p.lane_id).or_insert_with(|| crate::CachedIndex {
+                generation,
+                paths: Vec::new(),
+                truncated: false,
+                valid: false,
+            });
+
+            if entry.generation == generation {
+                entry.paths = paths.clone();
+                entry.truncated = truncated;
+                entry.valid = true;
+            }
+
+            to_value(repomon_core::model::FileIndexResult {
+                paths,
+                truncated,
+                generation: entry.generation,
+            })
         }
 
         // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----

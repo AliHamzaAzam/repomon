@@ -137,33 +137,117 @@ fn check_ignored(root: &Path, rel_paths: &[String]) -> HashSet<String> {
     if rel_paths.is_empty() {
         return HashSet::new();
     }
-    let mut child = match background_command("git")
-        .arg("-C")
-        .arg(root)
-        .args(["check-ignore", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return HashSet::new(),
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let payload = rel_paths.join("\n");
-        let _ = stdin.write_all(payload.as_bytes());
-        // `stdin` drops here, closing the pipe so `git check-ignore` sees EOF and exits.
+    let mut result = HashSet::new();
+    for chunk in rel_paths.chunks(1000) {
+        let mut child = match background_command("git")
+            .arg("-C")
+            .arg(root)
+            .args(["check-ignore", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let payload = chunk.join("\n");
+            let _ = stdin.write_all(payload.as_bytes());
+            // `stdin` drops here, closing the pipe so `git check-ignore` sees EOF and exits.
+        }
+        let Ok(out) = child.wait_with_output() else {
+            continue;
+        };
+        // Exit code 1 means "nothing matched" (not a failure, an empty result); a higher exit code
+        // is a real error, but any stdout it did produce is still safe to use, for the same
+        // fail-open reasoning as above.
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            result.insert(line.to_string());
+        }
     }
-    let Ok(out) = child.wait_with_output() else {
-        return HashSet::new();
-    };
-    // Exit code 1 means "nothing matched" (not a failure, an empty result); a higher exit code
-    // is a real error, but any stdout it did produce is still safe to use, for the same
-    // fail-open reasoning as above.
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
+    result
+}
+
+/// Cap on recursive file indexing for `file.index`. Past this the walk stops and sets truncated.
+pub const INDEX_CAP: usize = 50_000;
+
+/// Recursively index non-ignored files within `root` (relative paths with `/` separator).
+/// Skips `.git` and gitignored directories (e.g. `node_modules`, `target`) without descending into them.
+pub fn index_worktree(root: &Path) -> io::Result<(Vec<String>, bool)> {
+    let mut files: Vec<String> = Vec::new();
+    let mut current_dirs = vec![root.to_path_buf()];
+    let mut truncated = false;
+
+    while !current_dirs.is_empty() && !truncated {
+        let mut next_dirs = Vec::new();
+        let mut next_dir_rels = Vec::new();
+
+        for dir in current_dirs {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            for entry in entries.flatten() {
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                if name == ".git" {
+                    continue;
+                }
+                let path = entry.path();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let rel = match path.strip_prefix(root) {
+                    Ok(p) => p.to_string_lossy().replace('\\', "/"),
+                    Err(_) => continue,
+                };
+
+                if is_dir {
+                    let dir_rel = format!("{rel}/");
+                    next_dirs.push(path);
+                    next_dir_rels.push(dir_rel);
+                } else {
+                    files.push(rel);
+                    if files.len() >= INDEX_CAP {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+            if truncated {
+                break;
+            }
+        }
+
+        if truncated || next_dirs.is_empty() {
+            break;
+        }
+
+        // Batch-prune ignored directories so we never descend into them.
+        let ignored_dirs = check_ignored(root, &next_dir_rels);
+        current_dirs = next_dirs
+            .into_iter()
+            .zip(next_dir_rels.into_iter())
+            .filter_map(|(d, rel)| {
+                if ignored_dirs.contains(&rel) {
+                    None
+                } else {
+                    Some(d)
+                }
+            })
+            .collect();
+    }
+
+    // Filter collected files for gitignored files (e.g. *.log, secret files)
+    let ignored_files = check_ignored(root, &files);
+    let mut valid_paths: Vec<String> = files
+        .into_iter()
+        .filter(|rel| !ignored_files.contains(rel))
+        .collect();
+
+    valid_paths.sort();
+    Ok((valid_paths, truncated))
 }
 
 /// Why `read_file` refused to hand back a file's content.
@@ -497,5 +581,51 @@ mod tests {
             write_file(&path, "x", None),
             Err(WriteError::NoParentDir)
         ));
+    }
+
+    #[test]
+    fn index_worktree_skips_git_and_ignored_directories_and_files() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Initialize git repo so check_ignored works
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok);
+
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules/\n*.log\n").unwrap();
+        std::fs::write(root.join("README.md"), "# Repo\n").unwrap();
+
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join("src/nested/deep.txt"), "deep\n").unwrap();
+
+        // Ignored directories and files
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("target/debug/app"), "bin").unwrap();
+
+        std::fs::create_dir_all(root.join("node_modules/foo")).unwrap();
+        std::fs::write(root.join("node_modules/foo/index.js"), "console.log()").unwrap();
+
+        std::fs::write(root.join("debug.log"), "log").unwrap();
+
+        let (paths, truncated) = index_worktree(root).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            paths,
+            vec![
+                ".gitignore",
+                "README.md",
+                "src/main.rs",
+                "src/nested/deep.txt"
+            ]
+        );
     }
 }

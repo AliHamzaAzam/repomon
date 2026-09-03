@@ -863,6 +863,62 @@ pub struct FileWriteResult {
     pub size: u64,
 }
 
+/// `file.index`'s result: list of all non-ignored relative file paths in the worktree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileIndexResult {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub generation: u64,
+}
+
+/// `file.create`'s result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileCreateResult {
+    pub path: String,
+}
+
+/// `file.rename`'s result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileRenameResult {
+    pub from: String,
+    pub to: String,
+}
+
+/// `file.delete`'s result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileDeleteResult {
+    pub path: String,
+}
+
+/// A single hit in `file.search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileSearchHit {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub preview: String,
+}
+
+/// `file.search`'s result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileSearchResult {
+    pub hits: Vec<FileSearchHit>,
+    pub truncated: bool,
+}
+
 /// Where a plugin's enabled/disabled value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

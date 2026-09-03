@@ -570,3 +570,89 @@ async fn file_write_rejects_stale_mtime_and_broadcasts_event_on_success() {
 
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn file_index_reports_worktree_files_and_caches_per_lane() {
+    let mut h = setup("file-index").await;
+
+    // Create .gitignore
+    std::fs::write(h.root.join(".gitignore"), "target/\n*.log\n").unwrap();
+
+    // Create nested directory and files
+    std::fs::create_dir_all(h.root.join("src/deep")).unwrap();
+    std::fs::write(h.root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(h.root.join("src/deep/file.txt"), "content\n").unwrap();
+
+    // Create ignored files and directories
+    std::fs::create_dir_all(h.root.join("target")).unwrap();
+    std::fs::write(h.root.join("target/bin.exe"), "bin").unwrap();
+    std::fs::write(h.root.join("test.log"), "log\n").unwrap();
+
+    // Call file.index
+    let r1 = call(
+        &mut h.stream,
+        2,
+        "file.index",
+        Some(json!({ "lane_id": h.lane_id })),
+    )
+    .await;
+    assert!(r1.error.is_none(), "file.index failed: {:?}", r1.error);
+    let res1 = r1.result.unwrap();
+    let paths1: Vec<String> = res1["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let gen1 = res1["generation"].as_u64().unwrap();
+    assert!(!res1["truncated"].as_bool().unwrap());
+
+    assert!(paths1.contains(&".gitignore".to_string()));
+    assert!(paths1.contains(&"src/main.rs".to_string()));
+    assert!(paths1.contains(&"src/deep/file.txt".to_string()));
+    assert!(!paths1.iter().any(|p| p == ".git" || p.starts_with(".git/")));
+    assert!(!paths1.iter().any(|p| p.starts_with("target")));
+    assert!(!paths1.contains(&"test.log".to_string()));
+
+    // Call file.index again: verify cache hit with same generation
+    let r2 = call(
+        &mut h.stream,
+        3,
+        "file.index",
+        Some(json!({ "lane_id": h.lane_id })),
+    )
+    .await;
+    assert!(r2.error.is_none());
+    let res2 = r2.result.unwrap();
+    let gen2 = res2["generation"].as_u64().unwrap();
+    assert_eq!(gen1, gen2, "cache hit should retain generation");
+
+    // Write file via file.write: bumps generation
+    let write_res = call(
+        &mut h.stream,
+        4,
+        "file.write",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "path": "src/main.rs",
+            "content": "fn main() { println!(\"updated\"); }\n",
+        })),
+    )
+    .await;
+    assert!(write_res.error.is_none());
+
+    // Call file.index again: verify cache invalidation bumped generation
+    let r3 = call(
+        &mut h.stream,
+        5,
+        "file.index",
+        Some(json!({ "lane_id": h.lane_id })),
+    )
+    .await;
+    assert!(r3.error.is_none());
+    let res3 = r3.result.unwrap();
+    let gen3 = res3["generation"].as_u64().unwrap();
+    assert!(gen3 > gen1, "generation should increase after file.write");
+
+    h.shutdown().await;
+}

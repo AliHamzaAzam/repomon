@@ -357,7 +357,18 @@ pub struct Ctx {
     /// Managed windows last observed as injection-eligible. Overlay updates turn each observed
     /// pane's busy-to-idle edge into an event instead of waiting for the fallback sweep.
     pub mail_eligible_windows: Mutex<HashSet<String>>,
+    /// Cached file index per lane for `file.index`. Keyed by lane id.
+    pub file_indices: Mutex<HashMap<LaneId, CachedIndex>>,
     pub shutdown: Notify,
+}
+
+/// One cached file index entry for `file.index`.
+#[derive(Clone, Debug)]
+pub struct CachedIndex {
+    pub generation: u64,
+    pub paths: Vec<String>,
+    pub truncated: bool,
+    pub valid: bool,
 }
 
 impl Ctx {
@@ -479,8 +490,24 @@ impl Ctx {
             supervision: RwLock::new(supervision::PolicySnapshot::default()),
             mail_delivery: Notify::new(),
             mail_eligible_windows: Mutex::new(HashSet::new()),
+            file_indices: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
+    }
+
+    /// Invalidate a lane's cached file index, incrementing the generation counter.
+    pub async fn invalidate_file_index(&self, lane_id: LaneId) {
+        let mut indices = self.file_indices.lock().await;
+        let entry = indices.entry(lane_id).or_insert_with(|| CachedIndex {
+            generation: 0,
+            paths: Vec::new(),
+            truncated: false,
+            valid: false,
+        });
+        entry.generation = entry.generation.wrapping_add(1);
+        entry.valid = false;
+        entry.paths.clear();
+        entry.truncated = false;
     }
 
     /// Drop the cached `lane.list` overlay so the next read recomputes — call after a structural

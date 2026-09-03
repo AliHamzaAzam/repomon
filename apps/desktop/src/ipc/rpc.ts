@@ -10,9 +10,14 @@ import type {
   DialogClass,
   ExtSnapshot,
   FanoutSummary,
+  FileCreateResult,
+  FileDeleteResult,
+  FileIndexResult,
   FileListResult,
   FileReadRawResult,
   FileReadResult,
+  FileRenameResult,
+  FileSearchResult,
   FileWriteResult,
   JournalEntry,
   Lane,
@@ -227,6 +232,33 @@ interface RpcMap {
   "file.write": {
     params: { lane_id: number; path: string; content: string; expected_mtime_ms?: number };
     result: FileWriteResult;
+  };
+  "file.index": {
+    params: { lane_id: number };
+    result: FileIndexResult;
+  };
+  "file.create": {
+    params: { lane_id: number; path: string; is_dir?: boolean };
+    result: FileCreateResult;
+  };
+  "file.rename": {
+    params: { lane_id: number; from: string; to: string };
+    result: FileRenameResult;
+  };
+  "file.delete": {
+    params: { lane_id: number; path: string; recursive?: boolean };
+    result: FileDeleteResult;
+  };
+  "file.search": {
+    params: {
+      lane_id: number;
+      query: string;
+      regex?: boolean;
+      case_sensitive?: boolean;
+      glob?: string;
+      max_results?: number;
+    };
+    result: FileSearchResult;
   };
   // `to` also accepts a list of addresses, "lane-2/*", or "*" (A6 broadcast/multi-recipient
   // mail). A single plain address still returns a bare `FleetMessage`; anything else returns a
