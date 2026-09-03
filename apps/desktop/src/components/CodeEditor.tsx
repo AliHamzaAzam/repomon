@@ -1,4 +1,19 @@
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  completionKeymap,
+} from "@codemirror/autocomplete";
+import {
+  copyLineDown,
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+  moveLineDown,
+  moveLineUp,
+  toggleComment,
+} from "@codemirror/commands";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
 import { javascript } from "@codemirror/lang-javascript";
@@ -6,31 +21,42 @@ import { json } from "@codemirror/lang-json";
 import { markdown } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
 import { rust } from "@codemirror/lang-rust";
+import { languages } from "@codemirror/language-data";
 import {
   HighlightStyle,
+  LanguageDescription,
   bracketMatching,
+  foldGutter,
+  foldKeymap,
   indentOnInput,
+  indentUnit,
   syntaxHighlighting,
   type LanguageSupport,
 } from "@codemirror/language";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorState } from "@codemirror/state";
 import {
+  gotoLine,
+  highlightSelectionMatches,
+  searchKeymap,
+  selectNextOccurrence,
+} from "@codemirror/search";
+import { Compartment, EditorState, RangeSetBuilder } from "@codemirror/state";
+import {
+  Decoration,
   EditorView,
+  ViewPlugin,
   drawSelection,
   highlightActiveLine,
   highlightActiveLineGutter,
+  highlightWhitespace,
   keymap,
   lineNumbers,
+  type DecorationSet,
   type KeyBinding,
+  type ViewUpdate,
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import { createEffect, onCleanup, onMount } from "solid-js";
 
-/// The languages this wrapper can highlight - one per `@codemirror/lang-*` package pulled in for
-/// D3. Anything else (yaml, toml, shell scripts, ...) falls back to `"plain"`: no language
-/// package for those exists in this dependency set, and plain text is the honest fallback rather
-/// than mis-highlighting them under a similar-looking grammar.
 export type EditorLanguage =
   | "javascript"
   | "jsx"
@@ -42,12 +68,62 @@ export type EditorLanguage =
   | "python"
   | "css"
   | "html"
-  | "plain";
+  | "plain"
+  | string;
 
-/// Resolves a file path (or bare extension) to the language CodeMirror should highlight it as.
-/// Matched by the extension only - a path with no recognized extension, or no extension at all,
-/// resolves to `"plain"`.
-export function extensionToLanguage(path: string): EditorLanguage {
+export interface CodeEditorProps {
+  value: string;
+  path?: string;
+  readOnly?: boolean;
+  wrap?: boolean;
+  whitespace?: boolean;
+  languageOverride?: string;
+  onChange?: (value: string) => void;
+  onSave?: () => void;
+  onCursorActivity?: (cursor: number, scrollTop: number) => void;
+  initialCursor?: number;
+  initialScrollTop?: number;
+  class?: string;
+}
+
+const languageCache = new Map<string, LanguageSupport>();
+
+export function matchSpecialFilename(path: string): string | null {
+  const base = path.split("/").pop() || path;
+  if (/^Dockerfile(\..+)?$/i.test(base) || base === "Containerfile") return "Dockerfile";
+  if (base === "Makefile" || base === "Justfile" || base === "Brewfile" || base === "Procfile") return "Shell";
+  if (base === "Vagrantfile") return "Ruby";
+  if (base === "Cargo.lock") return "TOML";
+  if (base === "package-lock.json") return "JSON";
+  if (base === "pnpm-lock.yaml") return "YAML";
+  if (base === ".gitignore" || base === ".gitattributes" || base === ".gitmodules" || base.startsWith(".env")) return "Shell";
+  if (base === ".editorconfig") return "Properties files";
+  return null;
+}
+
+export function sniffShebang(content: string): string | null {
+  if (!content.startsWith("#!")) return null;
+  const firstLine = content.split("\n")[0].toLowerCase();
+  if (firstLine.includes("python")) return "Python";
+  if (firstLine.includes("bash") || firstLine.includes("sh") || firstLine.includes("zsh")) return "Shell";
+  if (firstLine.includes("node")) return "JavaScript";
+  if (firstLine.includes("ruby")) return "Ruby";
+  if (firstLine.includes("perl")) return "Perl";
+  if (firstLine.includes("php")) return "PHP";
+  return null;
+}
+
+export function extensionToLanguage(path: string, content?: string, override?: string): EditorLanguage {
+  if (override) return override;
+
+  const special = matchSpecialFilename(path);
+  if (special) return special.toLowerCase();
+
+  if (content) {
+    const shebang = sniffShebang(content);
+    if (shebang) return shebang.toLowerCase();
+  }
+
   const match = /\.([^./\\]+)$/.exec(path);
   const ext = (match?.[1] ?? "").toLowerCase();
   switch (ext) {
@@ -79,248 +155,524 @@ export function extensionToLanguage(path: string): EditorLanguage {
     case "html":
     case "htm":
       return "html";
-    // No language package covers these in the D3 dependency set (yaml, toml, shell, plaintext,
-    // and anything unrecognized) - render as plain text rather than guessing.
-    default:
+    default: {
+      const desc = LanguageDescription.matchFilename(languages, path);
+      if (desc) return desc.name.toLowerCase();
       return "plain";
+    }
   }
 }
 
-function languageSupport(language: EditorLanguage): LanguageSupport | null {
-  switch (language) {
+function getBundledSupport(name: string): LanguageSupport | null {
+  switch (name.toLowerCase()) {
     case "javascript":
+    case "js":
       return javascript();
     case "jsx":
       return javascript({ jsx: true });
     case "typescript":
+    case "ts":
       return javascript({ typescript: true });
     case "tsx":
       return javascript({ jsx: true, typescript: true });
     case "json":
       return json();
     case "rust":
+    case "rs":
       return rust();
     case "markdown":
+    case "md":
       return markdown();
     case "python":
+    case "py":
       return python();
     case "css":
       return css();
     case "html":
       return html();
-    case "plain":
+    default:
       return null;
   }
 }
 
-// The app's whole visual identity runs on four accent roles (--signal, --attention, --fault,
-// --muted) layered over --surface/--foreground - see src/index.css. Syntax highlighting reuses
-// exactly those roles instead of inventing a rainbow token palette: keywords/tags read as
-// "structure" (signal), literals read as "data" (attention), comments/punctuation recede (muted),
-// and only genuinely invalid syntax reaches for --fault. Every value below is a var(...) or
-// color-mix(...) reference, so all six themes in index.css repaint the editor automatically.
-const highlightStyle = HighlightStyle.define([
-  { tag: t.comment, color: "var(--muted)", fontStyle: "italic" },
-  { tag: t.lineComment, color: "var(--muted)", fontStyle: "italic" },
-  { tag: t.blockComment, color: "var(--muted)", fontStyle: "italic" },
-  { tag: t.docComment, color: "var(--muted)", fontStyle: "italic" },
+async function resolveLanguageSupport(
+  path: string,
+  content?: string,
+  override?: string,
+): Promise<LanguageSupport | null> {
+  const target = override || matchSpecialFilename(path) || (content ? sniffShebang(content) : null);
+  if (target) {
+    const bundled = getBundledSupport(target);
+    if (bundled) return bundled;
+    if (languageCache.has(target)) return languageCache.get(target)!;
+    const desc = LanguageDescription.matchLanguageName(languages, target, true);
+    if (desc) {
+      try {
+        const loaded = await desc.load();
+        languageCache.set(target, loaded);
+        return loaded;
+      } catch {
+        return null;
+      }
+    }
+  }
 
-  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "var(--signal)" },
-  { tag: [t.tagName, t.angleBracket], color: "var(--signal)" },
-  { tag: [t.definitionKeyword, t.definition(t.variableName)], color: "var(--signal)", fontWeight: 600 },
+  const match = /\.([^./\\]+)$/.exec(path);
+  const ext = (match?.[1] ?? "").toLowerCase();
+  const bundled = getBundledSupport(ext);
+  if (bundled) return bundled;
 
-  {
-    tag: [t.string, t.special(t.string), t.regexp, t.character],
-    color: "color-mix(in srgb, var(--attention) 88%, var(--foreground))",
-  },
-  { tag: [t.number, t.bool, t.atom, t.null], color: "var(--attention)" },
+  const desc = LanguageDescription.matchFilename(languages, path);
+  if (desc) {
+    if (languageCache.has(desc.name)) return languageCache.get(desc.name)!;
+    try {
+      const loaded = await desc.load();
+      languageCache.set(desc.name, loaded);
+      return loaded;
+    } catch {
+      return null;
+    }
+  }
 
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--foreground)", fontWeight: 600 },
-  { tag: [t.className, t.typeName, t.namespace], color: "var(--foreground)", fontWeight: 600 },
-  { tag: [t.propertyName, t.attributeName], color: "color-mix(in srgb, var(--foreground) 78%, var(--muted))" },
-  { tag: t.variableName, color: "var(--foreground)" },
-
-  { tag: [t.punctuation, t.bracket, t.separator], color: "var(--muted)" },
-  { tag: t.operator, color: "color-mix(in srgb, var(--foreground) 80%, var(--muted))" },
-  { tag: t.meta, color: "var(--muted)" },
-  { tag: t.heading, color: "var(--signal)", fontWeight: 700 },
-  { tag: t.link, color: "var(--signal)", textDecoration: "underline" },
-  { tag: t.strong, fontWeight: 700 },
-  { tag: t.emphasis, fontStyle: "italic" },
-  { tag: t.strikethrough, textDecoration: "line-through" },
-
-  { tag: t.invalid, color: "var(--fault)" },
-]);
-
-// EditorView.theme values reference the app's CSS custom properties (var(...) / color-mix(...))
-// instead of hardcoded colors, so the editor repaints for free under every theme class in
-// index.css - no CodeMirror theme package involved. Font size matches TerminalPane's default
-// terminal size (DEFAULT_TERMINAL_APPEARANCE.fontSize in theme.ts is 12) for a consistent feel
-// between the two monospace surfaces in the app.
-const appTheme = EditorView.theme({
-  "&": {
-    height: "100%",
-    color: "var(--foreground)",
-    backgroundColor: "var(--surface)",
-    fontFamily: "var(--font-mono)",
-    fontSize: "12px",
-  },
-  ".cm-scroller": {
-    fontFamily: "var(--font-mono)",
-    lineHeight: "1.45",
-  },
-  ".cm-content": {
-    caretColor: "var(--signal)",
-  },
-  ".cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "var(--signal)",
-  },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
-    backgroundColor: "color-mix(in srgb, var(--signal) 28%, transparent)",
-  },
-  ".cm-gutters": {
-    backgroundColor: "var(--surface)",
-    color: "var(--muted)",
-    border: "none",
-    borderRight: "1px solid var(--line)",
-  },
-  ".cm-lineNumbers .cm-gutterElement": {
-    color: "var(--muted)",
-  },
-  ".cm-activeLine": {
-    backgroundColor: "color-mix(in srgb, var(--signal) 6%, var(--surface))",
-  },
-  ".cm-activeLineGutter": {
-    backgroundColor: "color-mix(in srgb, var(--signal) 10%, var(--surface))",
-    color: "var(--foreground)",
-  },
-  ".cm-matchingBracket, .cm-nonmatchingBracket": {
-    backgroundColor: "color-mix(in srgb, var(--signal) 20%, transparent)",
-    outline: "1px solid color-mix(in srgb, var(--signal) 40%, transparent)",
-  },
-  ".cm-selectionMatch": {
-    backgroundColor: "color-mix(in srgb, var(--attention) 22%, transparent)",
-  },
-  ".cm-searchMatch": {
-    backgroundColor: "color-mix(in srgb, var(--attention) 25%, transparent)",
-    outline: "1px solid color-mix(in srgb, var(--attention) 45%, transparent)",
-  },
-  ".cm-searchMatch.cm-searchMatch-selected": {
-    backgroundColor: "color-mix(in srgb, var(--attention) 45%, transparent)",
-  },
-  ".cm-panels": {
-    backgroundColor: "var(--raised)",
-    color: "var(--foreground)",
-  },
-  "&.cm-focused": {
-    outline: "none",
-  },
-});
-
-export interface CodeEditorProps {
-  /// The document content. Changing this after mount replaces the editor's document - but only
-  /// when it actually differs from the live doc, so the app's own onChange echo (parent state
-  /// updated from our onChange, then handed straight back down as this prop) never bounces back
-  /// in as a second, redundant replace-the-whole-doc transaction.
-  value: string;
-  /// File path (or bare extension) used to resolve syntax highlighting via `extensionToLanguage`.
-  path: string;
-  onChange?: (content: string) => void;
-  /// Fired for Mod-s (Cmd-S / Ctrl-S) pressed while the editor has focus. Bound inside
-  /// CodeMirror's own keymap with `preventDefault: true` so the surrounding Tauri webview never
-  /// sees the keystroke and cannot intercept it as a native "save page" shortcut.
-  onSave?: () => void;
-  readOnly?: boolean;
-  class?: string;
+  return null;
 }
 
+function getSyncLanguageSupport(path: string, content?: string, override?: string): LanguageSupport | null {
+  const target = override || matchSpecialFilename(path) || (content ? sniffShebang(content) : null);
+  if (target) {
+    const bundled = getBundledSupport(target);
+    if (bundled) return bundled;
+    if (languageCache.has(target)) return languageCache.get(target)!;
+  }
+
+  const match = /\.([^./\\]+)$/.exec(path);
+  const ext = (match?.[1] ?? "").toLowerCase();
+  const bundled = getBundledSupport(ext);
+  if (bundled) return bundled;
+
+  const desc = LanguageDescription.matchFilename(languages, path);
+  if (desc && languageCache.has(desc.name)) {
+    return languageCache.get(desc.name)!;
+  }
+
+  return null;
+}
+
+export function detectIndentUnit(content: string, path: string): string {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  const base = path.split("/").pop() || path;
+  let defaultUnit = "  ";
+  if (["rs", "py", "c", "cpp", "h", "hpp", "cs", "java"].includes(ext)) {
+    defaultUnit = "    ";
+  } else if (["go"].includes(ext) || base === "Makefile" || base === "Justfile") {
+    defaultUnit = "\t";
+  }
+
+  if (!content) return defaultUnit;
+
+  const lines = content.split("\n").slice(0, 100);
+  let space2Count = 0;
+  let space4Count = 0;
+  let tabCount = 0;
+
+  for (const line of lines) {
+    if (line.startsWith("\t")) {
+      tabCount++;
+    } else if (line.startsWith("    ")) {
+      space4Count++;
+    } else if (line.startsWith("  ")) {
+      space2Count++;
+    }
+  }
+
+  if (tabCount > space2Count && tabCount > space4Count) return "\t";
+  if (space4Count > space2Count && space4Count > tabCount) return "    ";
+  if (space2Count > 0) return "  ";
+
+  return defaultUnit;
+}
+
+const indentGuideMark = Decoration.mark({ class: "cm-indent-guide" });
+
+function buildIndentGuides(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>();
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos < to) {
+      const line = view.state.doc.lineAt(pos);
+      const text = line.text;
+      const match = /^(\s+)/.exec(text);
+      if (match && match[1].length > 1) {
+        const leading = match[1];
+        let i = 0;
+        const step = line.text.startsWith("\t") ? 1 : 2;
+        while (i < leading.length) {
+          const start = line.from + i;
+          const end = Math.min(line.from + i + 1, line.to);
+          builder.add(start, end, indentGuideMark);
+          i += step;
+        }
+      }
+      pos = line.to + 1;
+    }
+  }
+  return builder.finish();
+}
+
+export const indentGuidePlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = buildIndentGuides(view);
+    }
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = buildIndentGuides(update.view);
+      }
+    }
+  },
+  {
+    decorations: (v) => v.decorations,
+  },
+);
+
+const appTheme = EditorView.theme(
+  {
+    "&": {
+      color: "var(--foreground)",
+      backgroundColor: "var(--surface)",
+      fontFamily: "var(--font-mono)",
+      fontSize: "12px",
+      lineHeight: "1.5",
+      height: "100%",
+    },
+    ".cm-scroller": {
+      fontFamily: "inherit",
+      lineHeight: "inherit",
+      overflow: "auto",
+    },
+    ".cm-content": {
+      padding: "8px 0",
+      caretColor: "var(--accent)",
+      tabSize: 4,
+    },
+    "&.cm-focused .cm-cursor": {
+      borderLeftColor: "var(--accent)",
+      borderLeftWidth: "2px",
+    },
+    "&.cm-focused .cm-selectionBackground, ::selection": {
+      backgroundColor: "color-mix(in srgb, var(--accent) 25%, transparent)",
+    },
+    ".cm-selectionMatch": {
+      backgroundColor: "color-mix(in srgb, var(--accent) 18%, transparent)",
+      borderRadius: "2px",
+    },
+    ".cm-gutters": {
+      backgroundColor: "var(--surface)",
+      color: "color-mix(in srgb, var(--muted) 60%, transparent)",
+      borderRight: "1px solid var(--line)",
+      paddingRight: "4px",
+    },
+    ".cm-gutterElement": {
+      paddingLeft: "8px",
+      paddingRight: "8px",
+      minWidth: "2.5em",
+      textAlign: "right",
+      userSelect: "none",
+    },
+    ".cm-activeLine": {
+      backgroundColor: "color-mix(in srgb, var(--raised) 50%, transparent)",
+    },
+    ".cm-activeLineGutter": {
+      color: "var(--foreground)",
+      backgroundColor: "color-mix(in srgb, var(--raised) 50%, transparent)",
+    },
+    ".cm-foldGutter .cm-gutterElement": {
+      cursor: "pointer",
+      color: "color-mix(in srgb, var(--muted) 50%, transparent)",
+    },
+    ".cm-foldGutter .cm-gutterElement:hover": {
+      color: "var(--foreground)",
+    },
+    ".cm-indent-guide": {
+      borderLeft: "1px solid color-mix(in srgb, var(--line) 40%, transparent)",
+      marginLeft: "-1px",
+    },
+    ".cm-panel.cm-search": {
+      backgroundColor: "var(--surface)",
+      borderBottom: "1px solid var(--line)",
+      padding: "6px 10px",
+      fontSize: "12px",
+      fontFamily: "var(--font-mono)",
+      display: "flex",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: "6px",
+    },
+    ".cm-panel.cm-search input, .cm-panel.cm-search button": {
+      fontSize: "11px",
+      fontFamily: "var(--font-mono)",
+    },
+    ".cm-panel.cm-search .cm-textfield": {
+      backgroundColor: "var(--raised)",
+      border: "1px solid var(--line)",
+      borderRadius: "4px",
+      padding: "2px 6px",
+      color: "var(--foreground)",
+      outline: "none",
+    },
+    ".cm-panel.cm-search .cm-textfield:focus": {
+      borderColor: "var(--accent)",
+    },
+    ".cm-panel.cm-search .cm-button": {
+      backgroundColor: "var(--surface)",
+      border: "1px solid var(--line)",
+      borderRadius: "4px",
+      padding: "2px 8px",
+      color: "var(--muted)",
+      cursor: "pointer",
+    },
+    ".cm-panel.cm-search .cm-button:hover": {
+      backgroundColor: "var(--raised)",
+      color: "var(--foreground)",
+    },
+    ".cm-panel.cm-search label": {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: "4px",
+      color: "var(--muted)",
+      fontSize: "11px",
+      cursor: "pointer",
+    },
+    ".cm-tooltip": {
+      backgroundColor: "var(--surface)",
+      border: "1px solid var(--line)",
+      borderRadius: "6px",
+      boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
+    },
+    ".cm-tooltip-autocomplete": {
+      "& > ul": {
+        fontFamily: "var(--font-mono)",
+        fontSize: "11px",
+      },
+      "& > ul > li": {
+        padding: "3px 8px",
+      },
+      "& > ul > li[aria-selected]": {
+        backgroundColor: "var(--raised)",
+        color: "var(--foreground)",
+      },
+    },
+  },
+  { dark: true },
+);
+
+const highlightStyle = HighlightStyle.define([
+  { tag: t.keyword, color: "#c678dd" },
+  { tag: [t.name, t.deleted, t.character, t.propertyName, t.macroName], color: "#e06c75" },
+  { tag: [t.function(t.variableName), t.labelName], color: "#61afef" },
+  { tag: [t.color, t.constant(t.name), t.standard(t.name)], color: "#d19a66" },
+  { tag: [t.definition(t.name), t.separator], color: "#abb2bf" },
+  {
+    tag: [
+      t.typeName,
+      t.className,
+      t.number,
+      t.changed,
+      t.annotation,
+      t.modifier,
+      t.self,
+      t.namespace,
+    ],
+    color: "#e5c07b",
+  },
+  {
+    tag: [t.operator, t.operatorKeyword, t.url, t.escape, t.regexp, t.link, t.special(t.string)],
+    color: "#56b6c2",
+  },
+  { tag: [t.meta, t.comment], color: "#7f848e", fontStyle: "italic" },
+  { tag: t.strong, fontWeight: "bold" },
+  { tag: t.emphasis, fontStyle: "italic" },
+  { tag: t.strikethrough, textDecoration: "line-through" },
+  { tag: t.link, color: "#61afef", textDecoration: "underline" },
+  { tag: t.heading, fontWeight: "bold", color: "#e06c75" },
+  { tag: [t.atom, t.bool, t.special(t.variableName)], color: "#d19a66" },
+  { tag: [t.processingInstruction, t.string, t.inserted], color: "#98c379" },
+  { tag: t.invalid, color: "#ffffff", backgroundColor: "#e05252" },
+]);
+
 export default function CodeEditor(props: CodeEditorProps) {
-  let container!: HTMLDivElement;
+  let containerRef!: HTMLDivElement;
   let view: EditorView | undefined;
+  let lastKnownDoc = props.value;
+  let applyingExternalValue = false;
+
   const readOnlyCompartment = new Compartment();
   const languageCompartment = new Compartment();
-  // Set for the span of a dispatch triggered by our own `value`-prop sync effect, so the
-  // updateListener below can tell "the parent handed us new content" apart from "the user typed"
-  // and skip re-firing onChange for changes that originated from the parent in the first place.
-  let applyingExternalValue = false;
-  // Mirrors the doc content the view was last synced to (by us or by the user typing), so the
-  // value-sync effect below can no-op on the very next tick after firing onChange - Solid re-runs
-  // the effect once `props.value` round-trips back down from the parent's state update.
-  let lastKnownDoc = props.value;
+  const wrapCompartment = new Compartment();
+  const whitespaceCompartment = new Compartment();
+  const indentUnitCompartment = new Compartment();
+
+  const saveBinding: KeyBinding = {
+    key: "Mod-s",
+    run: () => {
+      props.onSave?.();
+      return true;
+    },
+  };
+
+  const extraKeymaps: KeyBinding[] = [
+    saveBinding,
+    { key: "Mod-/", run: toggleComment },
+    { key: "Alt-ArrowUp", run: moveLineUp },
+    { key: "Alt-ArrowDown", run: moveLineDown },
+    { key: "Shift-Alt-ArrowDown", run: copyLineDown },
+    { key: "Mod-d", run: selectNextOccurrence },
+    { key: "Mod-g", run: gotoLine },
+  ];
 
   onMount(() => {
-    const saveBinding: KeyBinding = {
-      key: "Mod-s",
-      preventDefault: true,
-      run: () => {
-        props.onSave?.();
-        return true;
-      },
-    };
+    lastKnownDoc = props.value;
 
-    const support = languageSupport(extensionToLanguage(props.path));
+    const initialSupport = getSyncLanguageSupport(props.path ?? "", props.value, props.languageOverride);
+    const unit = detectIndentUnit(props.value, props.path ?? "");
 
     const state = EditorState.create({
       doc: props.value,
       extensions: [
         lineNumbers(),
+        foldGutter(),
         highlightActiveLineGutter(),
         highlightActiveLine(),
         highlightSelectionMatches(),
         drawSelection(),
         bracketMatching(),
+        closeBrackets(),
         indentOnInput(),
+        autocompletion(),
         history(),
+        indentGuidePlugin,
         readOnlyCompartment.of(EditorState.readOnly.of(props.readOnly ?? false)),
-        keymap.of([saveBinding, ...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
-        languageCompartment.of(support ? [support] : []),
+        wrapCompartment.of(props.wrap ? [EditorView.lineWrapping] : []),
+        whitespaceCompartment.of(props.whitespace ? [highlightWhitespace()] : []),
+        indentUnitCompartment.of(indentUnit.of(unit)),
+        keymap.of([
+          ...extraKeymaps,
+          ...closeBracketsKeymap,
+          ...completionKeymap,
+          ...foldKeymap,
+          ...defaultKeymap,
+          ...historyKeymap,
+          ...searchKeymap,
+          indentWithTab,
+        ]),
+        languageCompartment.of(initialSupport ? [initialSupport] : []),
         appTheme,
         syntaxHighlighting(highlightStyle),
         EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
-          lastKnownDoc = update.state.doc.toString();
-          if (applyingExternalValue) return;
-          props.onChange?.(lastKnownDoc);
+          if (update.docChanged) {
+            lastKnownDoc = update.state.doc.toString();
+            if (!applyingExternalValue) {
+              props.onChange?.(lastKnownDoc);
+            }
+          }
+          if (update.selectionSet || update.docChanged) {
+            const head = update.state.selection.main.head;
+            props.onCursorActivity?.(head, update.view.scrollDOM.scrollTop);
+          }
         }),
       ],
     });
 
-    view = new EditorView({ state, parent: container });
+    view = new EditorView({
+      state,
+      parent: containerRef,
+    });
+
+    if (props.initialCursor !== undefined && props.initialCursor > 0) {
+      const pos = Math.min(props.initialCursor, view.state.doc.length);
+      view.dispatch({ selection: { anchor: pos } });
+    }
+    if (props.initialScrollTop !== undefined && props.initialScrollTop > 0) {
+      view.scrollDOM.scrollTop = props.initialScrollTop;
+    }
+
+    if (!initialSupport) {
+      void resolveLanguageSupport(props.path ?? "", props.value, props.languageOverride).then((support) => {
+        if (support && view) {
+          view.dispatch({ effects: languageCompartment.reconfigure([support]) });
+        }
+      });
+    }
+
+    onCleanup(() => {
+      view?.destroy();
+      view = undefined;
+    });
   });
 
-  // Keep the live doc in sync with an externally-updated `value` prop (e.g. the file changing on
-  // disk, or a discard/reload action in D4) without re-creating the EditorView - a fresh view
-  // would drop cursor position, scroll offset, and undo history on every keystroke's re-render.
-  // Guarded on `lastKnownDoc` (not the view's live doc) so the parent handing our own onChange
-  // value straight back down as `props.value` is recognized as an echo and never re-dispatched.
   createEffect(() => {
-    const next = props.value;
-    if (!view || next === lastKnownDoc) return;
-    lastKnownDoc = next;
+    const nextVal = props.value;
+    if (!view) return;
+    if (nextVal === lastKnownDoc) return;
+
     applyingExternalValue = true;
     try {
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: next },
+        changes: { from: 0, to: view.state.doc.length, insert: nextVal },
       });
+      lastKnownDoc = nextVal;
     } finally {
       applyingExternalValue = false;
     }
   });
 
   createEffect(() => {
-    const readOnly = props.readOnly ?? false;
-    view?.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)) });
+    const ro = props.readOnly ?? false;
+    if (!view) return;
+    view.dispatch({
+      effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(ro)),
+    });
   });
 
   createEffect(() => {
-    const support = languageSupport(extensionToLanguage(props.path));
-    view?.dispatch({ effects: languageCompartment.reconfigure(support ? [support] : []) });
+    const w = Boolean(props.wrap);
+    if (!view) return;
+    view.dispatch({
+      effects: wrapCompartment.reconfigure(w ? [EditorView.lineWrapping] : []),
+    });
   });
 
-  onCleanup(() => {
-    view?.destroy();
-    view = undefined;
+  createEffect(() => {
+    const ws = Boolean(props.whitespace);
+    if (!view) return;
+    view.dispatch({
+      effects: whitespaceCompartment.reconfigure(ws ? [highlightWhitespace()] : []),
+    });
   });
 
-  return <div ref={container} class={props.class ?? "h-full w-full overflow-hidden"} />;
+  createEffect(() => {
+    const path = props.path ?? "";
+    const override = props.languageOverride;
+    const content = props.value;
+    if (!view) return;
+
+    const sync = getSyncLanguageSupport(path, content, override);
+    if (sync) {
+      view.dispatch({ effects: languageCompartment.reconfigure([sync]) });
+    } else {
+      void resolveLanguageSupport(path, content, override).then((support) => {
+        if (view) {
+          view.dispatch({ effects: languageCompartment.reconfigure(support ? [support] : []) });
+        }
+      });
+    }
+  });
+
+  return (
+    <div
+      ref={containerRef}
+      class={props.class ? `min-h-0 flex-1 overflow-hidden ${props.class}` : "min-h-0 flex-1 overflow-hidden"}
+    />
+  );
 }

@@ -434,6 +434,11 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                       <CodeEditor
                         value={file.content}
                         path={file.path}
+                        wrap={editor()?.wrap()}
+                        whitespace={editor()?.whitespace()}
+                        initialCursor={file.cursor}
+                        initialScrollTop={file.scrollTop}
+                        onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file.path, cursor, scrollTop)}
                         onChange={(content) => editor()?.updateContent(file.path, content)}
                         onSave={() => void editor()?.saveFile(file.path)}
                         class="min-h-0 flex-1"
