@@ -11,7 +11,9 @@ import { Dynamic } from "solid-js/web";
 
 import type { FleetStore } from "../stores/fleet";
 import type { EditorStore, FileConflict } from "../stores/editor";
-import CodeEditor from "./CodeEditor";
+import { daemonCall } from "../ipc/rpc";
+import CodeEditor, { type CodeEditorReplaceRequest } from "./CodeEditor";
+import ProjectSearchPanel from "./ProjectSearchPanel";
 import ImageViewer from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
 import ConfirmDialog from "./ConfirmDialog";
@@ -27,6 +29,7 @@ import {
   IconFolder,
   IconFolderOpen,
   IconLocate,
+  IconMoreVertical,
   IconRefresh,
   IconSearch,
   type IconProps,
@@ -36,6 +39,7 @@ export interface EditorWorkspaceProps {
   fleet: FleetStore;
   editor: EditorStore;
   actions?: unknown;
+  onOpenFinder?: () => void;
 }
 
 function basename(path: string): string {
@@ -222,6 +226,153 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     }
   }
 
+  const [treeMode, setTreeMode] = createSignal<"files" | "search">("files");
+
+  // Context Menu State
+  const [contextMenu, setContextMenu] = createSignal<{
+    x: number;
+    y: number;
+    path: string;
+    isDir: boolean;
+    name: string;
+    depth: number;
+  } | null>(null);
+
+  // Inline Create State
+  const [inlineCreate, setInlineCreate] = createSignal<{
+    parentDir: string;
+    isDir: boolean;
+    depth: number;
+  } | null>(null);
+
+  // Inline Rename State
+  const [inlineRename, setInlineRename] = createSignal<{
+    path: string;
+    isDir: boolean;
+    name: string;
+  } | null>(null);
+
+  // Delete Target State
+  const [deleteTarget, setDeleteTarget] = createSignal<{
+    path: string;
+    isDir: boolean;
+  } | null>(null);
+
+  // Replace in active file
+  const [replaceRequest, setReplaceRequest] = createSignal<CodeEditorReplaceRequest | null>(null);
+  let replaceToken = 0;
+
+  function handleReplaceInActiveFile(
+    query: string,
+    replacement: string,
+    regex: boolean,
+    caseSensitive: boolean,
+    all?: boolean
+  ) {
+    setReplaceRequest({
+      query,
+      replacement,
+      regex,
+      caseSensitive,
+      all,
+      token: ++replaceToken,
+    });
+  }
+
+  function startInlineCreate(targetPath: string, isDir: boolean, makeDir: boolean, depth: number) {
+    if (isDir) {
+      props.editor.expandDir(targetPath);
+      setInlineCreate({ parentDir: targetPath, isDir: makeDir, depth: depth + 1 });
+    } else {
+      const parentDir = targetPath.split("/").slice(0, -1).join("/");
+      setInlineCreate({ parentDir, isDir: makeDir, depth });
+    }
+  }
+
+  async function commitInlineCreate(name: string) {
+    const create = inlineCreate();
+    if (!create || !name.trim()) {
+      setInlineCreate(null);
+      return;
+    }
+    const fullPath = create.parentDir ? `${create.parentDir}/${name.trim()}` : name.trim();
+    const laneId = props.editor.currentLaneId();
+    if (laneId == null) return;
+    try {
+      await daemonCall("file.create", {
+        lane_id: laneId,
+        path: fullPath,
+        is_dir: create.isDir,
+      });
+      setInlineCreate(null);
+      await props.editor.loadDir(laneId, create.parentDir);
+      if (!create.isDir) {
+        await props.editor.openFile(fullPath);
+      }
+    } catch (err) {
+      console.error("file.create error:", err);
+      setInlineCreate(null);
+    }
+  }
+
+  async function commitInlineRename(newName: string) {
+    const rename = inlineRename();
+    if (!rename || !newName.trim() || newName.trim() === rename.name) {
+      setInlineRename(null);
+      return;
+    }
+    const parentDir = rename.path.split("/").slice(0, -1).join("/");
+    const toPath = parentDir ? `${parentDir}/${newName.trim()}` : newName.trim();
+    const laneId = props.editor.currentLaneId();
+    if (laneId == null) return;
+    try {
+      await daemonCall("file.rename", {
+        lane_id: laneId,
+        from: rename.path,
+        to: toPath,
+      });
+      setInlineRename(null);
+      props.editor.handleFileRenamed(rename.path, toPath);
+      await props.editor.loadDir(laneId, parentDir);
+    } catch (err) {
+      console.error("file.rename error:", err);
+      setInlineRename(null);
+    }
+  }
+
+  async function commitDelete(target: { path: string; isDir: boolean }) {
+    const laneId = props.editor.currentLaneId();
+    if (laneId == null) return;
+    try {
+      await daemonCall("file.delete", {
+        lane_id: laneId,
+        path: target.path,
+        recursive: true,
+      });
+      props.editor.handleFileDeleted(target.path);
+      const parentDir = target.path.split("/").slice(0, -1).join("/");
+      await props.editor.loadDir(laneId, parentDir);
+    } catch (err) {
+      console.error("file.delete error:", err);
+    }
+  }
+
+  async function revealInFinder(relPath: string) {
+    const l = lane();
+    if (!l) return;
+    const fullPath = `${l.worktree.path}/${relPath}`;
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(fullPath);
+    } catch (err) {
+      console.warn("revealItemInDir failed:", err);
+    }
+  }
+
+  function copyRelativePath(path: string) {
+    void navigator.clipboard.writeText(path);
+  }
+
   // Detect indent unit text
   const currentIndentUnit = createMemo(() => {
     const f = activeFile();
@@ -314,122 +465,306 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         style={{ width: `${props.editor.treeColumnWidth()}px`, "min-width": "180px" }}
       >
         {/* Tree Column Header */}
-        <div class="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
-          <div class="flex items-center gap-1.5 min-w-0">
-            <span class="font-mono text-xs font-semibold uppercase tracking-wider text-muted">
-              {lane()?.worktree.name ?? "Files"}
-            </span>
-            <Show when={lane()?.worktree.branch}>
-              <span class="truncate font-mono text-[10px] text-muted/60">
-                ({lane()?.worktree.branch})
-              </span>
-            </Show>
-          </div>
-          <div class="flex items-center gap-1">
+        <div class="flex h-9 shrink-0 items-center justify-between border-b border-line px-2">
+          {/* Mode Switcher: Files vs Search */}
+          <div class="flex items-center gap-0.5 rounded border border-line bg-background p-0.5">
             <button
               type="button"
-              class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
-              title="Reveal active file in tree"
-              onClick={() => {
-                const path = activePath();
-                if (path) props.editor.revealFile(path);
-              }}
+              class={`flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
+                treeMode() === "files"
+                  ? "bg-raised text-foreground font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
+              onClick={() => setTreeMode("files")}
+              title="Files explorer"
             >
-              <IconLocate size={13} />
+              <IconFolder size={12} />
+              <span>Files</span>
             </button>
             <button
               type="button"
-              class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
-              title="Refresh file tree"
-              onClick={() => props.editor.refreshTree()}
+              class={`flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
+                treeMode() === "search"
+                  ? "bg-raised text-foreground font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
+              onClick={() => setTreeMode("search")}
+              title="Search in project"
             >
-              <IconRefresh size={12} />
+              <IconSearch size={12} />
+              <span>Search</span>
             </button>
           </div>
-        </div>
 
-        {/* Filter input */}
-        <div class="border-b border-line p-2">
-          <div class="relative flex items-center">
-            <IconSearch size={12} class="pointer-events-none absolute left-2 text-muted" />
-            <input
-              type="text"
-              class="focus-ring w-full rounded border border-line bg-background py-1 pr-2 pl-7 font-mono text-xs text-foreground placeholder:text-muted/60"
-              placeholder="Filter files..."
-              value={filterQuery()}
-              onInput={(e) => setFilterQuery(e.currentTarget.value)}
-            />
-            <Show when={filterQuery().length > 0}>
+          <div class="flex items-center gap-0.5">
+            <Show when={treeMode() === "files"}>
               <button
                 type="button"
-                class="absolute right-1.5 text-muted hover:text-foreground"
-                onClick={() => setFilterQuery("")}
+                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                title="New file in root"
+                onClick={() => setInlineCreate({ parentDir: "", isDir: false, depth: 0 })}
               >
-                <IconClose size={10} />
+                <IconFileCode size={13} />
+              </button>
+              <button
+                type="button"
+                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                title="New folder in root"
+                onClick={() => setInlineCreate({ parentDir: "", isDir: true, depth: 0 })}
+              >
+                <IconFolder size={13} />
+              </button>
+              <button
+                type="button"
+                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                title="Find file"
+                onClick={() => props.onOpenFinder?.()}
+              >
+                <IconSearch size={13} />
+              </button>
+              <button
+                type="button"
+                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                title="Reveal active file in tree"
+                onClick={() => {
+                  const path = activePath();
+                  if (path) props.editor.revealFile(path);
+                }}
+              >
+                <IconLocate size={13} />
+              </button>
+              <button
+                type="button"
+                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                title="Refresh file tree"
+                onClick={() => props.editor.refreshTree()}
+              >
+                <IconRefresh size={12} />
               </button>
             </Show>
           </div>
         </div>
 
-        {/* Tree List View */}
-        <div
-          class="flex-1 overflow-y-auto p-1 outline-none"
-          tabIndex={0}
-          onKeyDown={handleTreeKeyDown}
+        <Show
+          when={treeMode() === "files"}
+          fallback={
+            <ProjectSearchPanel
+              editor={props.editor}
+              onReplace={handleReplaceInActiveFile}
+            />
+          }
         >
-          <For each={visibleTreeItems()}>
-            {(item, idx) => {
-              const isFocused = () => idx() === focusedTreeIndex();
-              const isActive = () => !item.isDir && item.path === activePath();
-              const isExpanded = () => item.isDir && expandedDirs().has(item.path);
-              const Icon = () => getFileIcon(item.path);
-
-              return (
+          {/* Filter input */}
+          <div class="border-b border-line p-2">
+            <div class="relative flex items-center">
+              <IconSearch size={12} class="pointer-events-none absolute left-2 text-muted" />
+              <input
+                type="text"
+                class="focus-ring w-full rounded border border-line bg-background py-1 pr-2 pl-7 font-mono text-xs text-foreground placeholder:text-muted/60"
+                placeholder="Filter files..."
+                value={filterQuery()}
+                onInput={(e) => setFilterQuery(e.currentTarget.value)}
+              />
+              <Show when={filterQuery().length > 0}>
                 <button
                   type="button"
-                  class={`focus-ring flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-xs transition-colors ${
-                    isActive()
-                      ? "bg-accent/15 font-medium text-accent"
-                      : isFocused()
-                      ? "bg-raised/70 text-foreground"
-                      : "text-foreground/80 hover:bg-raised/40 hover:text-foreground"
-                  }`}
-                  style={{ "padding-left": `${item.depth * 14 + 6}px` }}
-                  onClick={() => {
-                    setFocusedTreeIndex(idx());
-                    if (item.isDir) {
-                      props.editor.toggleDir(item.path);
-                    } else {
-                      void props.editor.openFile(item.path);
+                  class="absolute right-1.5 text-muted hover:text-foreground"
+                  onClick={() => setFilterQuery("")}
+                >
+                  <IconClose size={10} />
+                </button>
+              </Show>
+            </div>
+          </div>
+
+          {/* Tree List View */}
+          <div
+            class="flex-1 overflow-y-auto p-1 outline-none"
+            tabIndex={0}
+            onKeyDown={handleTreeKeyDown}
+          >
+            {/* Root level inline create */}
+            <Show when={inlineCreate()?.parentDir === ""}>
+              <div
+                class="flex w-full items-center gap-1.5 px-1.5 py-0.5"
+                style={{ "padding-left": "6px" }}
+              >
+                <span class="size-3.5 shrink-0 text-muted">
+                  <Show when={inlineCreate()?.isDir} fallback={<IconFile size={12} />}>
+                    <IconFolder size={12} />
+                  </Show>
+                </span>
+                <input
+                  type="text"
+                  class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                  placeholder={inlineCreate()?.isDir ? "Folder name..." : "File name..."}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitInlineCreate(e.currentTarget.value);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setInlineCreate(null);
                     }
                   }}
-                  title={item.path}
-                >
-                  <Show
-                    when={item.isDir}
-                    fallback={
-                      <span class="size-3.5 shrink-0 text-muted">
-                        <Dynamic component={Icon()} size={12} />
-                      </span>
-                    }
-                  >
-                    <span class="size-3 shrink-0 text-muted/60">
-                      <Show when={isExpanded()} fallback={<IconChevronRight size={10} />}>
-                        <IconChevronDown size={10} />
-                      </Show>
-                    </span>
-                    <span class="size-3.5 shrink-0 text-accent/70">
-                      <Show when={isExpanded()} fallback={<IconFolder size={12} />}>
-                        <IconFolderOpen size={12} />
-                      </Show>
-                    </span>
+                  onBlur={(e) => void commitInlineCreate(e.currentTarget.value)}
+                  ref={(el) => setTimeout(() => el?.focus(), 0)}
+                />
+              </div>
+            </Show>
+
+            <For each={visibleTreeItems()}>
+              {(item, idx) => {
+                const isFocused = () => idx() === focusedTreeIndex();
+                const isActive = () => !item.isDir && item.path === activePath();
+                const isExpanded = () => item.isDir && expandedDirs().has(item.path);
+                const Icon = () => getFileIcon(item.path);
+                const isRenaming = () => inlineRename()?.path === item.path;
+
+                return (
+                  <div class="group relative flex w-full items-center">
+                    <Show
+                      when={!isRenaming()}
+                      fallback={
+                        <div
+                          class="flex w-full items-center gap-1.5 px-1.5 py-0.5"
+                          style={{ "padding-left": `${item.depth * 14 + 6}px` }}
+                        >
+                          <span class="size-3.5 shrink-0 text-muted">
+                            <Show when={item.isDir} fallback={<IconFile size={12} />}>
+                              <IconFolder size={12} />
+                            </Show>
+                          </span>
+                          <input
+                            type="text"
+                            class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                            value={item.name}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void commitInlineRename(e.currentTarget.value);
+                              } else if (e.key === "Escape") {
+                                e.preventDefault();
+                                setInlineRename(null);
+                              }
+                            }}
+                            onBlur={(e) => void commitInlineRename(e.currentTarget.value)}
+                            ref={(el) => setTimeout(() => el?.select(), 0)}
+                          />
+                        </div>
+                      }
+                    >
+                      <button
+                        type="button"
+                        class={`focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-xs transition-colors ${
+                          isActive()
+                            ? "bg-accent/15 font-medium text-accent"
+                            : isFocused()
+                            ? "bg-raised/70 text-foreground"
+                            : "text-foreground/80 hover:bg-raised/40 hover:text-foreground"
+                        }`}
+                        style={{ "padding-left": `${item.depth * 14 + 6}px` }}
+                        onClick={() => {
+                          setFocusedTreeIndex(idx());
+                          if (item.isDir) {
+                            props.editor.toggleDir(item.path);
+                          } else {
+                            void props.editor.openFile(item.path);
+                          }
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            path: item.path,
+                            isDir: item.isDir,
+                            name: item.name,
+                            depth: item.depth,
+                          });
+                        }}
+                        title={item.path}
+                      >
+                        <Show
+                          when={item.isDir}
+                          fallback={
+                            <span class="size-3.5 shrink-0 text-muted">
+                              <Dynamic component={Icon()} size={12} />
+                            </span>
+                          }
+                        >
+                          <span class="size-3 shrink-0 text-muted/60">
+                            <Show when={isExpanded()} fallback={<IconChevronRight size={10} />}>
+                              <IconChevronDown size={10} />
+                            </Show>
+                          </span>
+                          <span class="size-3.5 shrink-0 text-accent/70">
+                            <Show when={isExpanded()} fallback={<IconFolder size={12} />}>
+                              <IconFolderOpen size={12} />
+                            </Show>
+                          </span>
+                        </Show>
+                        <span class="truncate font-mono text-[11px]">{item.name}</span>
+                      </button>
+
+                      {/* Row kebab menu trigger */}
+                      <button
+                        type="button"
+                        class="focus-ring mr-1 flex size-5 shrink-0 items-center justify-center rounded text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:bg-raised hover:text-foreground"
+                        title="File actions"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setContextMenu({
+                            x: rect.right,
+                            y: rect.bottom,
+                            path: item.path,
+                            isDir: item.isDir,
+                            name: item.name,
+                            depth: item.depth,
+                          });
+                        }}
+                      >
+                        <IconMoreVertical size={12} />
+                      </button>
+                    </Show>
+                  </div>
+                );
+              }}
+            </For>
+
+            {/* Nested inline create */}
+            <Show when={inlineCreate() && inlineCreate()?.parentDir !== ""}>
+              <div
+                class="flex w-full items-center gap-1.5 px-1.5 py-0.5"
+                style={{ "padding-left": `${(inlineCreate()?.depth ?? 0) * 14 + 6}px` }}
+              >
+                <span class="size-3.5 shrink-0 text-muted">
+                  <Show when={inlineCreate()?.isDir} fallback={<IconFile size={12} />}>
+                    <IconFolder size={12} />
                   </Show>
-                  <span class="truncate font-mono text-[11px]">{item.name}</span>
-                </button>
-              );
-            }}
-          </For>
-        </div>
+                </span>
+                <input
+                  type="text"
+                  class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                  placeholder={inlineCreate()?.isDir ? "Folder name..." : "File name..."}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitInlineCreate(e.currentTarget.value);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setInlineCreate(null);
+                    }
+                  }}
+                  onBlur={(e) => void commitInlineCreate(e.currentTarget.value)}
+                  ref={(el) => setTimeout(() => el?.focus(), 0)}
+                />
+              </div>
+            </Show>
+          </div>
+        </Show>
       </div>
 
       {/* Draggable Divider */}
@@ -555,6 +890,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         whitespace={props.editor.whitespace()}
                         initialCursor={file().cursor}
                         initialScrollTop={file().scrollTop}
+                        openAtTarget={props.editor.openAtTarget()?.path === file().path ? props.editor.openAtTarget() : null}
+                        replaceRequest={activePath() === file().path ? replaceRequest() : null}
                         onCursorActivity={(cursor, scrollTop, selection) => {
                           props.editor.updateCursor(file().path, cursor, scrollTop);
                           updateCursorPos(cursor);
@@ -691,6 +1028,112 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               },
             }}
             onClose={() => setCloseConfirmPath(null)}
+          />
+        )}
+      </Show>
+
+      {/* Context Menu floating popup */}
+      <Show when={contextMenu()} keyed>
+        {(menu) => (
+          <>
+            <div
+              class="fixed inset-0 z-40"
+              onClick={() => setContextMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu(null);
+              }}
+            />
+            <div
+              class="fixed z-50 min-w-[160px] rounded-lg border border-line bg-surface py-1 text-xs shadow-xl backdrop-blur"
+              style={{
+                left: `${Math.min(menu.x, window.innerWidth - 170)}px`,
+                top: `${Math.min(menu.y, window.innerHeight - 200)}px`,
+              }}
+            >
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  startInlineCreate(menu.path, menu.isDir, false, menu.depth);
+                }}
+              >
+                New File
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  startInlineCreate(menu.path, menu.isDir, true, menu.depth);
+                }}
+              >
+                New Folder
+              </button>
+              <div class="my-1 h-px bg-line/60" />
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  setInlineRename({ path: menu.path, isDir: menu.isDir, name: menu.name });
+                }}
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-fault hover:bg-fault/15 hover:text-fault"
+                onClick={() => {
+                  setContextMenu(null);
+                  setDeleteTarget({ path: menu.path, isDir: menu.isDir });
+                }}
+              >
+                Delete
+              </button>
+              <div class="my-1 h-px bg-line/60" />
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  void revealInFinder(menu.path);
+                }}
+              >
+                Reveal in Finder
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  copyRelativePath(menu.path);
+                }}
+              >
+                Copy Relative Path
+              </button>
+            </div>
+          </>
+        )}
+      </Show>
+
+      {/* Delete Confirmation Dialog */}
+      <Show when={deleteTarget()} keyed>
+        {(target) => (
+          <ConfirmDialog
+            options={{
+              title: `Delete ${target.isDir ? "folder" : "file"}`,
+              message: `Are you sure you want to delete "${target.path}"${target.isDir ? " and all its contents" : ""}? This cannot be undone.`,
+              confirmLabel: "Delete",
+              danger: true,
+              onConfirm: () => {
+                const t = target;
+                setDeleteTarget(null);
+                void commitDelete(t);
+              },
+            }}
+            onClose={() => setDeleteTarget(null)}
           />
         )}
       </Show>

@@ -644,6 +644,62 @@ export function createEditorStore(fleet: FleetStore) {
     setOpenAtTarget({ ...target, token: ++openAtToken });
   }
 
+  function handleFileRenamed(from: string, to: string) {
+    const normFrom = from.trim().replace(/\\/g, "/");
+    const normTo = to.trim().replace(/\\/g, "/");
+
+    setOpenFiles((files) =>
+      files.map((f) => {
+        if (f.path === normFrom) {
+          return { ...f, path: normTo };
+        }
+        if (f.path.startsWith(normFrom + "/")) {
+          return { ...f, path: normTo + f.path.slice(normFrom.length) };
+        }
+        return f;
+      })
+    );
+
+    const curActive = activePath();
+    if (curActive === normFrom) {
+      setActivePathSignal(normTo);
+    } else if (curActive && curActive.startsWith(normFrom + "/")) {
+      setActivePathSignal(normTo + curActive.slice(normFrom.length));
+    }
+
+    setExpandedDirs((prev) => {
+      const next = new Set<string>();
+      for (const dir of prev) {
+        if (dir === normFrom) {
+          next.add(normTo);
+        } else if (dir.startsWith(normFrom + "/")) {
+          next.add(normTo + dir.slice(normFrom.length));
+        } else {
+          next.add(dir);
+        }
+      }
+      return next;
+    });
+
+    persistCurrentLane();
+  }
+
+  function handleFileDeleted(path: string) {
+    const normPath = path.trim().replace(/\\/g, "/");
+    setOpenFiles((files) =>
+      files.map((f) => {
+        if (f.path === normPath || f.path.startsWith(normPath + "/")) {
+          return {
+            ...f,
+            conflict: { deleted: true, actualMtimeMs: null },
+          };
+        }
+        return f;
+      })
+    );
+    persistCurrentLane();
+  }
+
   onMount(() => {
     let active = true;
     let stop: (() => void) | undefined;
@@ -713,6 +769,8 @@ export function createEditorStore(fleet: FleetStore) {
     finderOpen,
     openFinder,
     closeFinder,
+    handleFileRenamed,
+    handleFileDeleted,
     getLaneState: (id: number) => laneStates.get(id),
   };
 }

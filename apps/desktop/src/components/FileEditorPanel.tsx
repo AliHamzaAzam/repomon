@@ -8,7 +8,8 @@ import {
 } from "solid-js";
 
 import type { FileEntry } from "../bindings";
-import CodeEditor from "./CodeEditor";
+import CodeEditor, { type CodeEditorReplaceRequest } from "./CodeEditor";
+import ProjectSearchPanel from "./ProjectSearchPanel";
 import ImageViewer from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
 import ConfirmDialog from "./ConfirmDialog";
@@ -20,11 +21,19 @@ import {
   type EditorStore,
   type FileConflict,
 } from "../stores/editor";
-import { IconChevronDown, IconChevronRight, IconClose, IconRefresh } from "./icons";
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconClose,
+  IconFolder,
+  IconRefresh,
+  IconSearch,
+} from "./icons";
 
 interface FileEditorPanelProps {
   fleet?: FleetStore;
   editor?: EditorStore;
+  onOpenFinder?: () => void;
 }
 
 function splitPath(path: string): { dir: string; base: string } {
@@ -223,6 +232,27 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
 
   const [panelTreeExpanded, setPanelTreeExpanded] = createSignal(true);
   const [closeConfirmPath, setCloseConfirmPath] = createSignal<string | null>(null);
+  const [treeMode, setTreeMode] = createSignal<"files" | "search">("files");
+
+  const [replaceRequest, setReplaceRequest] = createSignal<CodeEditorReplaceRequest | null>(null);
+  let replaceToken = 0;
+
+  function handleReplaceInActiveFile(
+    query: string,
+    replacement: string,
+    regex: boolean,
+    caseSensitive: boolean,
+    all?: boolean
+  ) {
+    setReplaceRequest({
+      query,
+      replacement,
+      regex,
+      caseSensitive,
+      all,
+      token: ++replaceToken,
+    });
+  }
 
   const effectiveTreeExpanded = createMemo(() => panelTreeExpanded() || openFiles().length === 0);
 
@@ -254,16 +284,54 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
             )}
           </Show>
         </div>
-        <button
-          type="button"
-          class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground disabled:opacity-40"
-          onClick={() => editor()?.refreshTree()}
-          disabled={!lane()}
-          title="Refresh file tree"
-          aria-label="Refresh file tree"
-        >
-          <IconRefresh size={12} />
-        </button>
+        <div class="flex items-center gap-1">
+          <div class="flex items-center gap-0.5 rounded border border-line bg-background p-0.5">
+            <button
+              type="button"
+              class={`flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors ${
+                treeMode() === "files"
+                  ? "bg-raised text-foreground font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
+              onClick={() => setTreeMode("files")}
+              title="Files explorer"
+            >
+              <IconFolder size={11} />
+            </button>
+            <button
+              type="button"
+              class={`flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors ${
+                treeMode() === "search"
+                  ? "bg-raised text-foreground font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
+              onClick={() => setTreeMode("search")}
+              title="Search in project"
+            >
+              <IconSearch size={11} />
+            </button>
+          </div>
+          <button
+            type="button"
+            class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground disabled:opacity-40"
+            onClick={() => props.onOpenFinder?.()}
+            disabled={!lane()}
+            title="Find file"
+            aria-label="Find file"
+          >
+            <IconSearch size={12} />
+          </button>
+          <button
+            type="button"
+            class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground disabled:opacity-40"
+            onClick={() => editor()?.refreshTree()}
+            disabled={!lane()}
+            title="Refresh file tree"
+            aria-label="Refresh file tree"
+          >
+            <IconRefresh size={12} />
+          </button>
+        </div>
       </div>
 
       <Show
@@ -304,27 +372,40 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
             </button>
           </Show>
 
-          <Show when={effectiveTreeExpanded()}>
-            <div
-              class={
-                openFiles().length > 0
-                  ? "max-h-56 shrink-0 overflow-y-auto border-b border-line p-1.5"
-                  : "min-h-0 flex-1 overflow-y-auto p-1.5"
-              }
-            >
-              <TreeLevel
-                dirPath=""
-                depth={0}
-                dirCache={dirCache}
-                expanded={expandedDirs}
-                activePath={activePath}
-                onToggleDir={(path) => editor()?.toggleDir(path)}
-                onOpenFile={(path) => {
-                  setPanelTreeExpanded(false);
-                  void editor()?.openFile(path);
-                }}
-              />
-            </div>
+          <Show
+            when={treeMode() === "files"}
+            fallback={
+              <div class="min-h-0 flex-1 overflow-hidden">
+                <ProjectSearchPanel
+                  editor={editor()!}
+                  compact={true}
+                  onReplace={handleReplaceInActiveFile}
+                />
+              </div>
+            }
+          >
+            <Show when={effectiveTreeExpanded()}>
+              <div
+                class={
+                  openFiles().length > 0
+                    ? "max-h-56 shrink-0 overflow-y-auto border-b border-line p-1.5"
+                    : "min-h-0 flex-1 overflow-y-auto p-1.5"
+                }
+              >
+                <TreeLevel
+                  dirPath=""
+                  depth={0}
+                  dirCache={dirCache}
+                  expanded={expandedDirs}
+                  activePath={activePath}
+                  onToggleDir={(path) => editor()?.toggleDir(path)}
+                  onOpenFile={(path) => {
+                    setPanelTreeExpanded(false);
+                    void editor()?.openFile(path);
+                  }}
+                />
+              </div>
+            </Show>
           </Show>
 
           <Show when={openFiles().length > 0}>
@@ -448,6 +529,8 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                             whitespace={editor()?.whitespace()}
                             initialCursor={file().cursor}
                             initialScrollTop={file().scrollTop}
+                            openAtTarget={editor()?.openAtTarget()?.path === file().path ? editor()?.openAtTarget() : null}
+                            replaceRequest={activePath() === file().path ? replaceRequest() : null}
                             onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file().path, cursor, scrollTop)}
                             onChange={(content) => editor()?.updateContent(file().path, content)}
                             onSave={() => void editor()?.saveFile(file().path)}
