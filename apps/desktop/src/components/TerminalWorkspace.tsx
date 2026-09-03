@@ -31,8 +31,50 @@ import {
 } from "./icons";
 
 const TerminalPane = lazy(() => import("./TerminalPane"));
-// Used only until a live xterm reports its authoritative rendered screen height.
+// Used only until a live xterm reports its authoritative minimum height.
 const MULTITASK_FALLBACK_ROW_HEIGHT_PX = 224;
+
+/// The shared Multitasking row minimum: the largest floor any currently visible pane has
+/// reported, or the fallback while nothing has reported yet. Pulled out as a pure function (used
+/// by the `multitaskRowMinimum` memo below) so it can be exercised directly with a plain heights
+/// map instead of a full render tree. A pane's floor is a fixed value now (see
+/// `terminalMetrics.ts`), so lowering it is just this recomputing over fresh input, and a pane
+/// that stops being visible is excluded simply by not appearing in `visibleWindows`.
+export function multitaskRowMinimumFromHeights(
+  fallback: number,
+  heights: Record<string, number>,
+  visibleWindows: readonly string[],
+): number {
+  return Math.max(
+    fallback,
+    ...visibleWindows.flatMap((window) => {
+      const height = heights[window];
+      return height ? [height] : [];
+    }),
+  );
+}
+
+/// Drop recorded minimums for windows no longer in view. `multitaskRowMinimumFromHeights` already
+/// ignores entries outside `visibleWindows`, so this doesn't change the current row minimum, but
+/// without it a pane that closes and is later replaced by a new window reusing bookkeeping would
+/// grow `paneMinimumHeights` forever, and a pane that leaves and re-enters the view briefly holds
+/// a stale minimum from before its layout even changed. Keeps the same object when nothing needs
+/// dropping so it doesn't trigger an extra reactive update.
+export function pruneInvisiblePaneMinimumHeights(
+  heights: Record<string, number>,
+  visibleWindows: ReadonlySet<string>,
+): Record<string, number> {
+  let changed = false;
+  const next: Record<string, number> = {};
+  for (const [window, value] of Object.entries(heights)) {
+    if (visibleWindows.has(window)) {
+      next[window] = value;
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? next : heights;
+}
 
 interface TerminalWorkspaceProps {
   fleet: FleetStore;
@@ -186,12 +228,10 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     return stableVisibleTargets(all, active.window, eff);
   });
 
-  const multitaskRowMinimum = createMemo(() => Math.max(
+  const multitaskRowMinimum = createMemo(() => multitaskRowMinimumFromHeights(
     MULTITASK_FALLBACK_ROW_HEIGHT_PX,
-    ...visibleTargets().flatMap((target) => {
-      const height = paneMinimumHeights()[target.window];
-      return height ? [height] : [];
-    }),
+    paneMinimumHeights(),
+    visibleTargets().map((target) => target.window),
   ));
 
   const recordPaneMinimumHeight = (window: string, pixels: number) => {
@@ -200,6 +240,11 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
       return { ...current, [window]: pixels };
     });
   };
+
+  createEffect(() => {
+    const visible = new Set(visibleTargets().map((target) => target.window));
+    setPaneMinimumHeights((current) => pruneInvisiblePaneMinimumHeights(current, visible));
+  });
 
   createEffect(() => {
     const available = targets();

@@ -236,10 +236,13 @@
      `position: absolute` with their own z-index) can never paint over a sibling pane, even under
      row-height edge cases or GPU layer-promotion quirks from the terminal canvas. */
   isolation: isolate;
-  /* TerminalPane replaces the 14rem fallback with the real rendered xterm screen height plus its
-     pane chrome. The same custom property drives both this item and the grid track above: setting
-     only the item's min-height lets a smaller fixed track remain in place and neighboring rows
-     overlap. Keeping both floors aligned makes all authoritative pty rows physically visible.
+  /* TerminalPane replaces the 14rem fallback with a fixed floor derived from cell metrics:
+     chrome plus MULTITASK_MIN_ROWS terminal rows at the renderer's actual cell height (see
+     terminalMetrics.ts), not the pane's currently rendered row count, so it cannot ratchet
+     upward the way measuring the live screen height once did. The same custom property drives
+     both this item and the grid track above: setting only the item's min-height lets a smaller
+     fixed track remain in place and neighboring rows overlap. Keeping both floors aligned makes
+     the guaranteed rows physically visible.
      No `overflow: hidden` here: TerminalPane's own root section already clips to its box
      (`h-full` + `overflow-hidden`), so a second clip on this wrapper was pure redundancy that
      bought nothing and only added another place row-height math could go wrong. */

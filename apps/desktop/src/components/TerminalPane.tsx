@@ -24,6 +24,7 @@ import { readTerminalAppearance, type TerminalAppearance } from "../theme";
 import { onLayoutChanged } from "../stores/uiSettings";
 import AgentHistory from "./AgentHistory";
 import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
+import { multitaskRowFloor } from "./terminalMetrics";
 
 interface TerminalPaneProps extends TerminalTarget {
   label: string;
@@ -32,8 +33,9 @@ interface TerminalPaneProps extends TerminalTarget {
   visible?: boolean;
   /// Keep dashboard panes pinned to their live prompt instead of preserving stale scrollback.
   followTail?: boolean;
-  /// Report the rendered height needed to show every authoritative terminal row. Multitasking
-  /// uses this to grow its grid item when the daemon's safety floor exceeds FitAddon's proposal.
+  /// Report this pane's fixed Multitasking row-height floor (chrome plus room for
+  /// `MULTITASK_MIN_ROWS` rows at the renderer's cell height, see `terminalMetrics.ts`).
+  /// Multitasking takes the max across all visible panes to size its grid rows.
   onMinimumHeight?: (pixels: number) => void;
   /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
   shell?: boolean;
@@ -196,7 +198,25 @@ export default function TerminalPane(props: TerminalPaneProps) {
     if (paneRect.height <= 0 || hostRect.height <= 0 || screenRect.height <= 0) return;
     const chromeHeight = Math.max(0, hostRect.top - paneRect.top)
       + Math.max(0, paneRect.bottom - hostRect.bottom);
-    props.onMinimumHeight?.(Math.ceil(chromeHeight + screenRect.height));
+
+    // The floor must come from the renderer's per-row cell height, never from how many rows the
+    // terminal happens to be showing right now: reporting `terminal.rows * cellHeight` is what
+    // fed Multitasking's row-height ratchet (a pane transiently rendered with a stale, tall grid
+    // reported a large minimum, which grew every row, which let every pane fit more rows, which
+    // raised the reported minimum again, see the brief this fix implements). `_core` reaches
+    // xterm's private render internals, not its public API, so this path is guarded with optional
+    // chaining and a typed cast and falls back to averaging the rendered screen height over the
+    // current row count when that private shape is unreachable.
+    const core = (terminal as unknown as {
+      _core?: { _renderService?: { dimensions?: { css?: { cell?: { height?: number } } } } };
+    })._core;
+    const rendererCellHeight = core?._renderService?.dimensions?.css?.cell?.height;
+    const cellHeight = typeof rendererCellHeight === "number" && Number.isFinite(rendererCellHeight) && rendererCellHeight > 0
+      ? rendererCellHeight
+      : terminal.rows > 0 ? screenRect.height / terminal.rows : Number.NaN;
+    if (!Number.isFinite(cellHeight) || cellHeight <= 0) return;
+
+    props.onMinimumHeight?.(multitaskRowFloor({ chromeHeight, cellHeight }));
   }
 
   function alignTerminalHostToDevicePixels() {
@@ -424,6 +444,14 @@ export default function TerminalPane(props: TerminalPaneProps) {
         }
       }
 
+      // Multitasking's row-height floor is now derived from cell metrics (see
+      // `reportMinimumHeight`), not from whatever grid gets applied here, so an oversized fit
+      // answer must never leak into the layout. When arbitration is won by another viewer (the
+      // TUI, a second desktop) and the daemon hands back a grid taller than this pane's cell
+      // actually has room for, that grid is still applied to xterm (a column/row mismatch would
+      // otherwise corrupt cursor-relative redraws), but the extra rows simply clip: the pane's
+      // `overflow-hidden` root already bounds the canvas to its box, and `followTailIfNeeded()`
+      // keeps the live prompt inside that visible clip instead of letting it scroll out of view.
       function applyGrid(cols?: number | null, rows?: number | null) {
         if (disposed || !terminal || !cols || !rows) return;
         alignTerminalHostToDevicePixels();

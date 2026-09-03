@@ -5,7 +5,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession, Lane, Repo } from "../bindings";
 import { createFleetStore, type FleetSource } from "../stores/fleet";
 import { createWorkspaceStore } from "../stores/workspace";
-import TerminalWorkspace from "./TerminalWorkspace";
+import TerminalWorkspace, {
+  multitaskRowMinimumFromHeights,
+  pruneInvisiblePaneMinimumHeights,
+} from "./TerminalWorkspace";
 
 const daemonCallMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 vi.mock("../ipc/rpc", async () => {
@@ -348,5 +351,46 @@ describe("terminal workspace tab strip ordering and rename", () => {
       "win:lane-10-2",
     ]);
     dispose();
+  });
+});
+
+describe("multitaskRowMinimumFromHeights", () => {
+  const FALLBACK = 224;
+
+  it("lowers the row minimum when a pane later reports a smaller minimum", () => {
+    const grown = multitaskRowMinimumFromHeights(FALLBACK, { "lane-10-1": 1000 }, ["lane-10-1"]);
+    expect(grown).toBe(1000);
+
+    // Same pane, same visible set: only the reported minimum shrinks. The row minimum must
+    // shrink with it: nothing about this computation can only grow.
+    const shrunk = multitaskRowMinimumFromHeights(FALLBACK, { "lane-10-1": 224 }, ["lane-10-1"]);
+    expect(shrunk).toBe(224);
+  });
+
+  it("drops a pane's contribution to the max once it leaves visibleTargets", () => {
+    const heights = { "lane-10-1": 1000, "lane-10-2": 300 };
+    // Both panes visible: the tall one wins.
+    expect(multitaskRowMinimumFromHeights(FALLBACK, heights, ["lane-10-1", "lane-10-2"])).toBe(1000);
+    // lane-10-1 leaves the visible set (still present in `heights`, stale); its 1000px minimum
+    // must no longer be able to elevate the row minimum.
+    expect(multitaskRowMinimumFromHeights(FALLBACK, heights, ["lane-10-2"])).toBe(300);
+  });
+
+  it("falls back to the fallback height when nothing has reported yet", () => {
+    expect(multitaskRowMinimumFromHeights(FALLBACK, {}, ["lane-10-1"])).toBe(FALLBACK);
+  });
+});
+
+describe("pruneInvisiblePaneMinimumHeights", () => {
+  it("removes entries for windows no longer visible", () => {
+    const heights = { "lane-10-1": 1000, "lane-10-2": 300 };
+    const pruned = pruneInvisiblePaneMinimumHeights(heights, new Set(["lane-10-2"]));
+    expect(pruned).toEqual({ "lane-10-2": 300 });
+  });
+
+  it("keeps the same object reference when nothing needs pruning", () => {
+    const heights = { "lane-10-1": 1000, "lane-10-2": 300 };
+    const pruned = pruneInvisiblePaneMinimumHeights(heights, new Set(["lane-10-1", "lane-10-2"]));
+    expect(pruned).toBe(heights);
   });
 });
