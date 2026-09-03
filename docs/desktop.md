@@ -77,14 +77,36 @@ macOS** and **Ctrl elsewhere**.
 | `mod+5` | Toggle repomind |
 | `mod+shift+5` | Repomind full screen |
 | `mod+6` | Cycle theme (system, dark, light) |
-| `mod+7` | Toggle the in-app editor panel |
+| `mod+7` | Toggle the compact in-app editor in the right rail |
 | `mod+k` | Open the control center |
 
-Git, repomind, and the editor share one right-rail panel host: a resizable pane (drag its left
-edge) with one header button per tab. Pressing a tab's chord (or clicking its header button) opens
-the rail on that tab if it is closed, switches to that tab if the rail is open on another one, and
-closes the rail if it is already open on that tab. Each header button's active state is scoped to
-its own tab, so opening on Git does not light up the Repomind button.
+Git, repomind, and the compact editor share one right-rail panel host: a resizable pane (drag its
+left edge) with one header button per tab. Pressing a tab's chord (or clicking its header button)
+opens the rail on that tab if it is closed, switches to that tab if the rail is open on another one,
+and closes the rail if it is already open on that tab. Each header button's active state is scoped
+to its own tab, so opening on Git does not light up the Repomind button.
+
+### Editor workspace
+
+The toolbar **Editor** button is a split button:
+- Clicking **Editor** opens the full center-pane Editor workspace, mutually exclusive with
+  Multitasking.
+- Clicking the split chevron (or pressing `mod+7`) toggles the compact side-rail editor.
+
+Both the center workspace and the rail editor share the same in-memory editor store. Open tabs,
+unsaved buffer edits, cursor positions, and scroll offsets remain intact when moving between
+the center workspace and the rail editor, or when switching between lanes.
+
+The center Editor workspace provides:
+- A resizable file tree on the left (persisted width, min 180px, default 240px) with real-time
+  filter search, SVG file-kind icons, keyboard navigation (arrow keys to navigate, Enter to open,
+  Left and Right to collapse or expand), and a locate button to reveal the active file.
+- A multi-tab editor in the center supporting syntax highlighting across every language,
+  bracket auto-closing, code folding, word completion, multi-cursor editing, and image/binary
+  viewers.
+- A status line at the bottom showing the syntax language (clickable to override), cursor position
+  (line and column), detected indentation unit, and one-click toggles for line wrapping and
+  rendering whitespace.
 
 ### Layout
 

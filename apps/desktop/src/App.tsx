@@ -29,12 +29,14 @@ import BrandMark from "./components/BrandMark";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
+import { createEditorStore } from "./stores/editor";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
-import { IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
+import EditorWorkspace from "./components/EditorWorkspace";
+import { IconChevronDown, IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -103,6 +105,7 @@ function App(props: AppProps) {
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
   const workspace = createWorkspaceStore(fleet);
+  const editor = createEditorStore(fleet);
   const actions = createActionsStore(fleet, workspace);
   const ext = createExtensionsStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
@@ -210,6 +213,7 @@ function App(props: AppProps) {
     // The right rail and fleet-wide grid use mutually exclusive mission-grid column models.
     // Entering multitasking already closes the rail above; make opening a rail tab symmetric.
     workspace.setMultitasking(false);
+    workspace.setEditorWorkspace(false);
     if (!repomindOpen()) {
       // Closed → open already on the requested tab. RightPanelHost consults `requestTab.id` on its
       // very first render, so bumping this in the same tick as opening is enough — no need to wait
@@ -225,6 +229,23 @@ function App(props: AppProps) {
     } else {
       // Open on some other tab: switch to the requested one without closing.
       setPanelTabRequest({ id, token: ++panelTabRequestToken });
+    }
+  };
+
+  const isEditorActive = () =>
+    workspace.editorWorkspace() || (repomindOpen() && rightPanelTab() === "editor");
+
+  const toggleEditor = () => {
+    if (workspace.editorWorkspace()) {
+      workspace.setEditorWorkspace(false);
+    } else if (repomindOpen() && rightPanelTab() === "editor") {
+      setRepomindOpen(false);
+      persistRepomindOpen(false);
+    } else {
+      workspace.setMultitasking(false);
+      setRepomindOpen(false);
+      persistRepomindOpen(false);
+      workspace.setEditorWorkspace(true);
     }
   };
 
@@ -425,20 +446,38 @@ function App(props: AppProps) {
             <span>Git</span>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
-          <button
-            type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
-              repomindOpen() && rightPanelTab() === "editor"
-                ? "text-signal font-semibold"
-                : "text-muted hover:text-foreground"
-            }`}
-            onClick={() => openPanelTab("editor")}
-            aria-pressed={repomindOpen() && rightPanelTab() === "editor"}
-            title="Editor (⌘7)"
-          >
-            <IconLayers size={13} />
-            <span>Editor</span>
-          </button>
+          <div class="flex items-center">
+            <button
+              type="button"
+              class={`focus-ring flex h-7 items-center gap-1.5 rounded-l px-2 text-xs font-medium transition-colors ${
+                isEditorActive()
+                  ? "text-signal font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
+              onClick={toggleEditor}
+              aria-pressed={isEditorActive()}
+              title="Editor workspace (center mode)"
+            >
+              <IconLayers size={13} />
+              <span>Editor</span>
+            </button>
+            <button
+              type="button"
+              class={`focus-ring flex h-7 items-center rounded-r px-1 text-xs transition-colors ${
+                repomindOpen() && rightPanelTab() === "editor"
+                  ? "text-signal font-semibold"
+                  : "text-muted hover:text-foreground"
+              }`}
+              onClick={(e) => {
+                e.stopPropagation();
+                openPanelTab("editor");
+              }}
+              aria-pressed={repomindOpen() && rightPanelTab() === "editor"}
+              title="Toggle compact editor in side rail (⌘7)"
+            >
+              <IconChevronDown size={10} />
+            </button>
+          </div>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
@@ -587,15 +626,20 @@ function App(props: AppProps) {
 
         <main aria-label="Terminal bay" class="terminal-bay relative min-h-0 overflow-hidden bg-background">
           <div
-            class={`absolute inset-0 ${extensionsOpen() ? "warm-terminal-hidden" : ""}`}
-            aria-hidden={extensionsOpen() ? "true" : undefined}
-            inert={extensionsOpen()}
+            class={`absolute inset-0 ${extensionsOpen() || workspace.editorWorkspace() ? "warm-terminal-hidden" : ""}`}
+            aria-hidden={extensionsOpen() || workspace.editorWorkspace() ? "true" : undefined}
+            inert={extensionsOpen() || workspace.editorWorkspace()}
           >
             <TerminalWorkspace fleet={fleet} actions={actions} workspace={workspace} />
           </div>
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">
               <ExtensionsView store={ext} fleet={fleet} />
+            </div>
+          </Show>
+          <Show when={workspace.editorWorkspace()}>
+            <div class="absolute inset-0 z-10 bg-background">
+              <EditorWorkspace fleet={fleet} editor={editor} actions={actions} />
             </div>
           </Show>
         </main>
@@ -628,6 +672,7 @@ function App(props: AppProps) {
                   fleet={fleet}
                   actions={actions}
                   messages={messages}
+                  editor={editor}
                   requestTab={panelTabRequest()}
                   onActiveTabChange={setRightPanelTab}
                 />

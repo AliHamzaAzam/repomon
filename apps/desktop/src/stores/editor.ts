@@ -271,6 +271,27 @@ export function createEditorStore(fleet: FleetStore) {
     for (const path of expandedDirs()) void loadDir(laneId, path);
   }
 
+  function revealFile(filePath: string) {
+    const laneId = currentLaneId();
+    if (laneId == null) return;
+    const parts = filePath.split("/").slice(0, -1);
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      expandDir(current);
+    }
+  }
+
+  const [languageOverrides, setLanguageOverrides] = createSignal<Record<string, string>>({});
+  function setLanguageOverride(path: string, lang: string | null) {
+    setLanguageOverrides((prev) => {
+      const next = { ...prev };
+      if (lang) next[path] = lang;
+      else delete next[path];
+      return next;
+    });
+  }
+
   function activateTab(path: string) {
     setActivePathSignal(path);
     setTreeExpandedSignal(false);
@@ -654,6 +675,9 @@ export function createEditorStore(fleet: FleetStore) {
     expandDir,
     collapseDir,
     refreshTree,
+    revealFile,
+    languageOverrides,
+    setLanguageOverride,
     getLaneState: (id: number) => laneStates.get(id),
   };
 }

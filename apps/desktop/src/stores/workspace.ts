@@ -73,7 +73,8 @@ export function createWorkspaceStore(fleet: FleetStore) {
   const [layout, setLayout] = createSignal<WorkspaceLayout>(readLayout());
   const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
   const [activeWindow, setActiveWindowSignal] = createSignal<string | null>(null);
-  const [multitasking, setMultitasking] = createSignal(false);
+  const [multitasking, setMultitaskingSignal] = createSignal(false);
+  const [editorWorkspace, setEditorWorkspaceSignal] = createSignal(false);
   const [lanePaneSelections, setLanePaneSelections] = createSignal<Record<string, string[]>>(
     readRecord<string[]>(LANE_PANES_KEY),
   );
@@ -221,8 +222,28 @@ export function createWorkspaceStore(fleet: FleetStore) {
     persist(MULTITASK_SPANS_KEY, next);
   }
 
+  function setMultitasking(value: boolean | ((prev: boolean) => boolean)) {
+    const next = typeof value === "function" ? value(multitasking()) : value;
+    if (next) {
+      setEditorWorkspaceSignal(false);
+    }
+    setMultitaskingSignal(next);
+  }
+
   function toggleMultitasking() {
     setMultitasking((value) => !value);
+  }
+
+  function setEditorWorkspace(value: boolean | ((prev: boolean) => boolean)) {
+    const next = typeof value === "function" ? value(editorWorkspace()) : value;
+    if (next) {
+      setMultitaskingSignal(false);
+    }
+    setEditorWorkspaceSignal(next);
+  }
+
+  function toggleEditorWorkspace() {
+    setEditorWorkspace((value) => !value);
   }
 
   function chooseLayout(next: WorkspaceLayout) {
@@ -313,6 +334,9 @@ export function createWorkspaceStore(fleet: FleetStore) {
     multitasking,
     setMultitasking,
     toggleMultitasking,
+    editorWorkspace,
+    setEditorWorkspace,
+    toggleEditorWorkspace,
     targets,
     laneTargets,
     selectedLaneTargets,

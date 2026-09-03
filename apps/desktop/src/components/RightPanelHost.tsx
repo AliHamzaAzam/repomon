@@ -1,4 +1,4 @@
-import { For, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { For, createEffect, createSignal, type JSX } from "solid-js";
 
 import FileEditorPanel from "./FileEditorPanel";
 import GitExplorerPanel from "./GitExplorerPanel";
@@ -8,6 +8,7 @@ import SupervisionPanel from "./SupervisionPanel";
 import { IconGitBranch, IconLayers, IconMail, IconShield, IconSparkles, type IconProps } from "./icons";
 import { readRightPanelActiveTab, saveRightPanelActiveTab } from "../stores/uiSettings";
 import type { ActionsStore } from "../stores/actions";
+import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
 import type { MessageStore } from "../stores/messages";
 
@@ -46,6 +47,8 @@ export interface RightPanelHostProps {
   actions?: ActionsStore;
   /** Shared durable-mail store used by the Repomail management panel. */
   messages?: MessageStore;
+  /** Shared editor store used by the inline FileEditorPanel. */
+  editor?: EditorStore;
   /**
    * One-shot activation command some external shortcut can push to select a tab even after the
    * host has already mounted — e.g. App.tsx's `panel.git` binding switching away from an
@@ -64,6 +67,7 @@ function buildDefaultPanels(
   fleet?: FleetStore,
   actions?: ActionsStore,
   messages?: MessageStore,
+  editor?: EditorStore,
 ): RightPanelTabDef[] {
   return [
     {
@@ -77,7 +81,7 @@ function buildDefaultPanels(
     { id: "git", label: "Git", icon: IconGitBranch, component: () => <GitExplorerPanel fleet={fleet} /> },
 
     // D4: file tree + multi-tab editor for the active lane's worktree.
-    { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} /> },
+    { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} editor={editor} /> },
 
     // Durable fleet mail across every lane, grouped by conversation thread.
     { id: "mail", label: "Repomail", icon: IconMail, component: () => <MailPanel fleet={fleet} messages={messages} actions={actions} /> },
@@ -100,9 +104,15 @@ export const RIGHT_PANEL_MAX_WIDTH_PX = 640; // 40rem
 export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 320; // 20rem — matches the pre-F2 fixed .repomind-panel width.
 
 export default function RightPanelHost(props: RightPanelHostProps) {
-  const panels = createMemo(() =>
-    props.panels ?? buildDefaultPanels(props.onToggleFullscreen, props.fleet, props.actions, props.messages),
-  );
+  const panels = () =>
+    props.panels ??
+    buildDefaultPanels(
+      props.onToggleFullscreen,
+      props.fleet,
+      props.actions,
+      props.messages,
+      props.editor,
+    );
 
   const [activeId, setActiveId] = createSignal((() => {
     const requested = props.requestTab?.id;
