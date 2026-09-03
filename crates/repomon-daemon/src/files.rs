@@ -181,7 +181,7 @@ impl From<io::Error> for ReadError {
     }
 }
 
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 
 pub fn is_image_path(path: &Path) -> bool {
     path.extension()
@@ -209,7 +209,7 @@ pub fn mime_for_path(path: &Path) -> &'static str {
 }
 
 /// Read a worktree file for the editor. Detects text, binary, and image files.
-/// Deliberately does NOT truncate on oversized file — oversized files are hard rejections.
+/// Deliberately does NOT truncate on oversized file: oversized files are hard rejections.
 pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
     let meta = std::fs::metadata(path)?;
     let size = meta.len();

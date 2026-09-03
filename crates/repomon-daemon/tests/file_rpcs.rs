@@ -338,6 +338,27 @@ async fn file_read_classifies_binary_content() {
 }
 
 #[tokio::test]
+async fn file_read_classifies_svg_as_text() {
+    let mut h = setup("file-svg").await;
+    let svg = "<svg><circle r=\"10\"/></svg>";
+    std::fs::write(h.root.join("icon.svg"), svg).unwrap();
+
+    let r = call(
+        &mut h.stream,
+        3,
+        "file.read",
+        Some(json!({ "lane_id": h.lane_id, "path": "icon.svg" })),
+    )
+    .await;
+    let res: repomon_core::model::FileReadResult =
+        serde_json::from_value(r.result.expect("file.read must succeed for svg")).unwrap();
+    assert_eq!(res.kind, "text");
+    assert_eq!(res.content, svg);
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn file_read_raw_returns_base64_for_image() {
     let mut h = setup("file-image").await;
     let png_bytes = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
