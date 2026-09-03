@@ -22,6 +22,7 @@ pub mod socket;
 pub mod standing;
 pub mod supervision;
 pub mod usage_watch;
+pub mod worktree_watch;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -358,7 +359,9 @@ pub struct Ctx {
     /// pane's busy-to-idle edge into an event instead of waiting for the fallback sweep.
     pub mail_eligible_windows: Mutex<HashSet<String>>,
     /// Cached file index per lane for `file.index`. Keyed by lane id.
-    pub file_indices: Mutex<HashMap<LaneId, CachedIndex>>,
+    pub file_indices: Arc<Mutex<HashMap<LaneId, CachedIndex>>>,
+    /// Active worktree filesystem watchers, keyed by lane id.
+    pub lane_watchers: Mutex<HashMap<LaneId, worktree_watch::WorktreeWatcher>>,
     pub shutdown: Notify,
 }
 
@@ -490,9 +493,44 @@ impl Ctx {
             supervision: RwLock::new(supervision::PolicySnapshot::default()),
             mail_delivery: Notify::new(),
             mail_eligible_windows: Mutex::new(HashSet::new()),
-            file_indices: Mutex::new(HashMap::new()),
+            file_indices: Arc::new(Mutex::new(HashMap::new())),
+            lane_watchers: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
+    }
+
+    /// Reconcile worktree watchers so exactly the lanes currently present in some connection's
+    /// viewport have a live watcher running.
+    pub async fn reconcile_lane_watchers(&self) {
+        let active_lanes: HashSet<LaneId> = {
+            let sessions = self.sessions.lock().await;
+            let mut set = HashSet::new();
+            for sess in sessions.values() {
+                for lane in sess.viewport.lock().await.iter() {
+                    set.insert(*lane);
+                }
+            }
+            set
+        };
+
+        let mut watchers = self.lane_watchers.lock().await;
+        watchers.retain(|lane_id, _| active_lanes.contains(lane_id));
+
+        for lane_id in active_lanes {
+            if !watchers.contains_key(&lane_id) {
+                if let Ok(lane) = self.lanes.get(lane_id).await {
+                    let root = lane.worktree.path.clone();
+                    if let Ok(w) = worktree_watch::start_lane_watcher(
+                        self.events.clone(),
+                        self.file_indices.clone(),
+                        lane_id,
+                        root,
+                    ) {
+                        watchers.insert(lane_id, w);
+                    }
+                }
+            }
+        }
     }
 
     /// Invalidate a lane's cached file index, incrementing the generation counter.
@@ -538,6 +576,7 @@ impl Ctx {
         // Keyed by connection id, so it cleans up whatever the session was watching without relying
         // on `watched_bytes` being in sync.
         crate::bytes_stream::unwatch_all(&self.backend, &self.bytes_watches, id).await;
+        self.reconcile_lane_watchers().await;
     }
 
     /// Union of every live session's stream targets, plus the set of windows any fresh-beat session

@@ -2111,6 +2111,8 @@ pub async fn dispatch(
                 crate::pubsub::topic::LANE_DELETED,
                 json!({ "lane_id": p.lane_id }),
             );
+            ctx.lane_watchers.lock().await.remove(&p.lane_id);
+            ctx.invalidate_file_index(p.lane_id).await;
             ctx.invalidate_overlay().await;
             Ok(Value::Null)
         }
@@ -4300,6 +4302,7 @@ pub async fn dispatch(
             // or closed client releases ownership when the beat stops.
             *sess.viewport_focus_at.lock().await = Some(std::time::Instant::now());
             *sess.viewport_windows.lock().await = p.windows;
+            ctx.reconcile_lane_watchers().await;
             Ok(Value::Null)
         }
 

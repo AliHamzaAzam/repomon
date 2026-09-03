@@ -34,6 +34,7 @@ sha2 = "0.10"
 notify = "8"
 notify-debouncer-full = "0.7"
 globset = "0.4"
+regex = "1"
 directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

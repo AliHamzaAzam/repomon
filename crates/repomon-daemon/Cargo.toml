@@ -32,6 +32,10 @@ clap = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
 tracing-subscriber = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+globset = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

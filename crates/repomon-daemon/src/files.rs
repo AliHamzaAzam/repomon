@@ -130,7 +130,7 @@ pub fn list_dir(root: &Path, dir: &Path) -> io::Result<FileListResult> {
 /// informational (dims an entry in the tree) rather than a security boundary — the containment
 /// check in [`worktree_path_allowed`] is the actual boundary — so failing open here can't expose
 /// anything that check wouldn't already gate.
-fn check_ignored(root: &Path, rel_paths: &[String]) -> HashSet<String> {
+pub(crate) fn check_ignored(root: &Path, rel_paths: &[String]) -> HashSet<String> {
     use std::io::Write;
     use std::process::Stdio;
 

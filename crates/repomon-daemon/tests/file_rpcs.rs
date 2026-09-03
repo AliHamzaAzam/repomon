@@ -656,3 +656,145 @@ async fn file_index_reports_worktree_files_and_caches_per_lane() {
 
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn worktree_watcher_lifecycle_and_events() {
+    let mut h = setup("worktree-watch").await;
+
+    let r_sub = call(&mut h.stream, 9, "subscribe", None).await;
+    assert!(r_sub.error.is_none());
+
+    // Initially, lane is not in any connection's viewport, so no watcher is running.
+    // Assert viewport.set to start watcher for h.lane_id.
+    let r = call(
+        &mut h.stream,
+        10,
+        "viewport.set",
+        Some(json!({ "lane_ids": [h.lane_id] })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 1. External file creation
+    std::fs::write(h.root.join("new_external.txt"), "created on disk\n").unwrap();
+
+    let mut saw_create = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+            if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
+                if note.method == "event.file.changed"
+                    && note.params["lane_id"] == json!(h.lane_id)
+                    && note.params["path"] == json!("new_external.txt")
+                    && note.params["op"] == json!("created")
+                {
+                    saw_create = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_create, "expected event.file.changed with op: created");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    // 2. External file modification (modify existing file README.md)
+    std::fs::write(h.root.join("README.md"), "modified readme\n").unwrap();
+
+    let mut saw_modify = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+            if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
+                if note.method == "event.file.changed"
+                    && note.params["lane_id"] == json!(h.lane_id)
+                    && note.params["path"] == json!("README.md")
+                    && note.params["op"] == json!("modified")
+                {
+                    saw_modify = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_modify, "expected event.file.changed with op: modified");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    // 3. Ignored file produces nothing
+    std::fs::write(h.root.join(".gitignore"), "*.ignored\n").unwrap();
+    // Wait for debounce on .gitignore
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    std::fs::write(h.root.join("test.ignored"), "should be ignored\n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    let mut saw_ignored_event = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+            if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
+                if note.method == "event.file.changed"
+                    && note.params["path"] == json!("test.ignored")
+                {
+                    saw_ignored_event = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(!saw_ignored_event, "ignored files must not broadcast events");
+
+    // 4. File removal
+    std::fs::remove_file(h.root.join("new_external.txt")).unwrap();
+
+    let mut saw_remove = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+            if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
+                if note.method == "event.file.changed"
+                    && note.params["lane_id"] == json!(h.lane_id)
+                    && note.params["path"] == json!("new_external.txt")
+                    && note.params["op"] == json!("removed")
+                {
+                    saw_remove = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_remove, "expected event.file.changed with op: removed");
+
+    // 5. Watcher stops when lane leaves viewport
+    let r = call(
+        &mut h.stream,
+        11,
+        "viewport.set",
+        Some(json!({ "lane_ids": [] })),
+    )
+    .await;
+    assert!(r.error.is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    std::fs::write(h.root.join("unwatched.txt"), "no watcher\n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    let mut saw_unwatched_event = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+            if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
+                if note.method == "event.file.changed"
+                    && note.params["path"] == json!("unwatched.txt")
+                {
+                    saw_unwatched_event = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(!saw_unwatched_event, "unwatched lane must not produce events");
+
+    h.shutdown().await;
+}
