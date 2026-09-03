@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
-import { beforeAll, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
@@ -19,6 +19,15 @@ describe("Repomon desktop shell", () => {
     // empty platform string, so pin it to macOS here: the fixtures below fire metaKey to mean
     // "mod", matching how the app actually runs on macOS.
     Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  });
+
+  // Without this, each test's <App> stays mounted (and its window keydown listener stays live)
+  // for the rest of the file. That was merely untidy until App.tsx's global shortcut handler
+  // started honoring `event.defaultPrevented`: an earlier, still-mounted instance's listener
+  // runs first, calls preventDefault() on its own matched binding, and the current test's
+  // instance then sees the same event as already handled and skips it.
+  afterEach(() => {
+    cleanup();
   });
 
 
@@ -178,6 +187,37 @@ describe("Repomon desktop shell", () => {
 
     fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
     await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "false"));
+  });
+
+  it("ignores a shortcut keydown whose default was already prevented by another handler (item 6)", async () => {
+    // Regression guard: mod+shift+f collided with the terminal's own find-bar chord because
+    // TerminalPane called preventDefault without stopPropagation, so App.tsx's global shortcut
+    // handler still fired the panel toggle underneath it. The fix makes the global handler
+    // return early once event.defaultPrevented is true, so any earlier, more specific handler
+    // wins. Simulate that earlier handler with a capture-phase listener that preventDefaults
+    // before App's own bubble-phase listener runs.
+    localStorage.setItem("repomon.repomind_open", "false");
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const button = within(container).getByRole("button", { name: "Repomail" });
+    expect(button).toHaveAttribute("aria-pressed", "false");
+
+    const preventer = (e: KeyboardEvent) => e.preventDefault();
+    window.addEventListener("keydown", preventer, true);
+    try {
+      fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
+    } finally {
+      window.removeEventListener("keydown", preventer, true);
+    }
+
+    // Give any (incorrect) handling a turn before asserting nothing changed.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(button).toHaveAttribute("aria-pressed", "false");
   });
 
   it("opens settings on the system tab when the footer connection pill is clicked", async () => {

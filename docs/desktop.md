@@ -79,7 +79,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+6` | Cycle theme (system, dark, light) |
 | `mod+7` | Toggle the compact in-app editor in the right rail |
 | `mod+p` | Find file in workspace |
-| `mod+shift+f` | Search project files in workspace |
+| `mod+shift+f` | Search project files in workspace (inside a focused terminal, this searches the terminal) |
 | `mod+k` | Open the control center |
 
 Git, repomind, and the compact editor share one right-rail panel host: a resizable pane (drag its

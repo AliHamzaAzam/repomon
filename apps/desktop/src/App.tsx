@@ -251,6 +251,7 @@ function App(props: AppProps) {
   };
 
   const onShortcut = (event: KeyboardEvent) => {
+    if (event.defaultPrevented) return;
     const binding = matchChord(event);
     if (!binding) return;
 
