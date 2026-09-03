@@ -12,4 +12,4 @@ export type FileReadResult = { content: string, mtime_ms: number, size: number,
  * Kept for shape symmetry with other file DTOs (and a possible future soft-cap mode); the
  * frontend should not expect this to ever be `true` today.
  */
-truncated: boolean, };
+truncated: boolean, kind: string, };

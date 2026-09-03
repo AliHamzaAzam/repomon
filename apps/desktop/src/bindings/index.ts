@@ -20,6 +20,7 @@ export type { ExtSnapshot } from "./ExtSnapshot";
 export type { FanoutSummary } from "./FanoutSummary";
 export type { FileEntry } from "./FileEntry";
 export type { FileListResult } from "./FileListResult";
+export type { FileReadRawResult } from "./FileReadRawResult";
 export type { FileReadResult } from "./FileReadResult";
 export type { FileWriteResult } from "./FileWriteResult";
 export type { FleetMessage } from "./FleetMessage";

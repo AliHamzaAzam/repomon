@@ -52,7 +52,7 @@ impl Drop for ConnGuard {
 /// daemon lifecycle (`daemon.shutdown`), host diagnostics (`system.doctor`, local machine health),
 /// config/secrets (`config.get` can carry the remote token, `config.set`), host terminal + filesystem
 /// access (`terminal.open/close/target`, `fs.browse`), and credential minting (`remote.*`, local-only).
-/// The worktree file-editor RPCs (`file.list`/`file.read`/`file.write`, D1/D2) join `fs.browse` in
+/// The worktree file-editor RPCs (`file.list`/`file.read`/`file.read_raw`/`file.write`, D1/D2) join `fs.browse` in
 /// that filesystem-access group for the same reason — deliberately absent below, not merely
 /// unlisted, and doubly so for `file.write` since it can overwrite files on the host.
 /// `commit.show` (item 6) is local-only too: unlike the already-allowed `lane.diff` (scoped to
@@ -694,6 +694,7 @@ mod tests {
             // as fs.browse just above, doubly so for file.write (it overwrites host files).
             "file.list",
             "file.read",
+            "file.read_raw",
             "file.write",
             // commit.show (item 6) shells out to `git show` for one caller-chosen oid at a time -
             // a much broader read surface than lane.diff (which is scoped to one lane's *current*

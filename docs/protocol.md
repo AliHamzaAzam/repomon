@@ -46,7 +46,7 @@ restart).
   Still blocked: daemon lifecycle (`daemon.shutdown`), machine diagnostics (`system.doctor`),
   config/secrets (`config.get`, `config.set`), host terminal + filesystem access
   (`terminal.open/close/target`, `fs.browse`), the worktree file-editor RPCs
-  (`file.list`/`file.read`/`file.write`, doubly so for `file.write` since it overwrites host
+  (`file.list`/`file.read`/`file.read_raw`/`file.write`, doubly so for `file.write` since it overwrites host
   files), `commit.show` (a caller-chosen oid can walk the entire repo history, unlike the
   already-allowed `lane.diff`), the blind `agent.resize` (only the arbitrated `agent.fit` is
   reachable remotely, since an unconditional remote resize is exactly what squeezed the TUI's
@@ -147,7 +147,8 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `terminal.target` | `{ id }` | `{ target, available, attach? }` (`attach` as in `agent.target`) |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
 | `file.list` | `{ lane_id, path? }` | `FileListResult`: `{ entries: [FileEntry], truncated }`, one directory level of the lane's worktree (`path` relative to the worktree root, omitted lists the root); `FileEntry` = `{ name, path, is_dir, size, ignored }` (`ignored` from a batched `git check-ignore`; `.git` itself is never listed). Backs the in-app editor's lazy file tree. Local socket only, like `fs.browse`. |
-| `file.read` | `{ lane_id, path }` | `FileReadResult`: `{ content, mtime_ms, size, truncated }`; rejects (does not truncate) a file over the read cap so the editor never silently saves back a partial copy. `mtime_ms` round-trips into `file.write`'s `expected_mtime_ms`. Local socket only. |
+| `file.read` | `{ lane_id, path }` | `FileReadResult`: `{ content, mtime_ms, size, truncated, kind }`; `kind` is "text", "binary", or "image"; rejects (does not truncate) a file over the read cap so the editor never silently saves back a partial copy. `mtime_ms` round-trips into `file.write`'s `expected_mtime_ms`. Local socket only. |
+| `file.read_raw` | `{ lane_id, path }` | `FileReadRawResult`: `{ base64, mime, size }`; returns base64-encoded file payload and MIME type under the same 2 MiB read cap. Used for image previews. Local socket only. |
 | `file.write` | `{ lane_id, path, content, expected_mtime_ms? }` | `FileWriteResult`: `{ mtime_ms, size }`; given `expected_mtime_ms`, rejected with a conflict error unless the on-disk mtime still matches (omitted = last-write-wins). Broadcasts `event.file.changed`. Local socket only, doubly so since it overwrites host files. |
 | `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored. Per-connection: each connection owns its own viewport and focus; the capture loop streams the union across every live connection, and `event.agent.output` is filtered to the connections whose viewport actually covers it) |
 | `subscribe` | `{ topics? }` | `null` |

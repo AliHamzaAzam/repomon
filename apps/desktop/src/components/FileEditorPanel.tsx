@@ -9,6 +9,8 @@ import {
 
 import type { FileEntry } from "../bindings";
 import CodeEditor from "./CodeEditor";
+import ImageViewer from "./ImageViewer";
+import BinaryViewer from "./BinaryViewer";
 import ConfirmDialog from "./ConfirmDialog";
 import type { TranslatedError } from "../ipc/errors";
 import type { FleetStore } from "../stores/fleet";
@@ -431,18 +433,28 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                         </div>
                       }
                     >
-                      <CodeEditor
-                        value={file.content}
-                        path={file.path}
-                        wrap={editor()?.wrap()}
-                        whitespace={editor()?.whitespace()}
-                        initialCursor={file.cursor}
-                        initialScrollTop={file.scrollTop}
-                        onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file.path, cursor, scrollTop)}
-                        onChange={(content) => editor()?.updateContent(file.path, content)}
-                        onSave={() => void editor()?.saveFile(file.path)}
-                        class="min-h-0 flex-1"
-                      />
+                      <Switch>
+                        <Match when={file.kind === "image"}>
+                          <ImageViewer laneId={lane()?.id ?? 0} path={file.path} size={file.size} />
+                        </Match>
+                        <Match when={file.kind === "binary"}>
+                          <BinaryViewer path={file.path} size={file.size} />
+                        </Match>
+                        <Match when={true}>
+                          <CodeEditor
+                            value={file.content}
+                            path={file.path}
+                            wrap={editor()?.wrap()}
+                            whitespace={editor()?.whitespace()}
+                            initialCursor={file.cursor}
+                            initialScrollTop={file.scrollTop}
+                            onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file.path, cursor, scrollTop)}
+                            onChange={(content) => editor()?.updateContent(file.path, content)}
+                            onSave={() => void editor()?.saveFile(file.path)}
+                            class="min-h-0 flex-1"
+                          />
+                        </Match>
+                      </Switch>
                     </Show>
                   </Show>
                 )}

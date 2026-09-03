@@ -837,6 +837,18 @@ pub struct FileReadResult {
     /// Kept for shape symmetry with other file DTOs (and a possible future soft-cap mode); the
     /// frontend should not expect this to ever be `true` today.
     pub truncated: bool,
+    pub kind: String,
+}
+
+/// `file.read_raw`'s result: base64-encoded file payload plus MIME type and size in bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileReadRawResult {
+    pub base64: String,
+    pub mime: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub size: u64,
 }
 
 /// `file.write`'s result: enough for the editor to adopt the new on-disk state as its baseline

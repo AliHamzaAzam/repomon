@@ -16,6 +16,8 @@ export interface OpenFile {
   content: string;
   savedContent: string;
   mtimeMs: number | null;
+  size?: number;
+  kind?: "text" | "binary" | "image" | string;
   cursor: number;
   scrollTop: number;
   loading: boolean;
@@ -320,6 +322,8 @@ export function createEditorStore(fleet: FleetStore) {
         content: result.content,
         savedContent: result.content,
         mtimeMs: result.mtime_ms,
+        size: result.size,
+        kind: result.kind || "text",
         loading: false,
       }));
     } catch (cause) {
@@ -411,6 +415,8 @@ export function createEditorStore(fleet: FleetStore) {
         content: result.content,
         savedContent: result.content,
         mtimeMs: result.mtime_ms,
+        size: result.size,
+        kind: result.kind || "text",
         loading: false,
         conflict: null,
         loadError: null,
@@ -471,6 +477,8 @@ export function createEditorStore(fleet: FleetStore) {
             content: result.content,
             savedContent: result.content,
             mtimeMs: result.mtime_ms,
+            size: result.size,
+            kind: result.kind || "text",
             conflict: null,
             loadError: null,
           }));

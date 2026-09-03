@@ -11,6 +11,7 @@ import type {
   ExtSnapshot,
   FanoutSummary,
   FileListResult,
+  FileReadRawResult,
   FileReadResult,
   FileWriteResult,
   JournalEntry,
@@ -219,6 +220,7 @@ interface RpcMap {
   // remote_method_allowed) — never reachable from a paired-device connection.
   "file.list": { params: { lane_id: number; path?: string }; result: FileListResult };
   "file.read": { params: { lane_id: number; path: string }; result: FileReadResult };
+  "file.read_raw": { params: { lane_id: number; path: string }; result: FileReadRawResult };
   // `expected_mtime_ms` omitted = last-write-wins; given and stale, the daemon rejects with
   // DaemonRpcError.code === -32011 ("conflict: file changed on disk") and
   // `data: { expected_mtime_ms, actual_mtime_ms }` (actual is null if the file was deleted).

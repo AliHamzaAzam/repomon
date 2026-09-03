@@ -2192,6 +2192,19 @@ pub async fn dispatch(
                 .map_err(file_read_error)
                 .and_then(to_value)
         }
+        "file.read_raw" => {
+            let p: FileRead = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let Some(target) = crate::files::worktree_path_allowed(&root, &p.path) else {
+                return Err(RpcError::invalid_params("path escapes the worktree root"));
+            };
+            tokio::task::spawn_blocking(move || crate::files::read_file_raw(&target))
+                .await
+                .map_err(internal)?
+                .map_err(file_read_error)
+                .and_then(to_value)
+        }
         "file.write" => {
             let p: FileWrite = parse(params)?;
             let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;

@@ -15,7 +15,10 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use repomon_core::model::{FileEntry, FileListResult, FileReadResult, FileWriteResult};
+use base64::Engine;
+use repomon_core::model::{
+    FileEntry, FileListResult, FileReadRawResult, FileReadResult, FileWriteResult,
+};
 use repomon_core::process::background_command;
 
 use crate::ext::canonical_prefix;
@@ -178,29 +181,97 @@ impl From<io::Error> for ReadError {
     }
 }
 
-/// Read a worktree file for the editor. Deliberately does NOT truncate on either binary content
-/// or an oversized file — both are hard rejections. This differs on purpose from display RPCs
-/// like `lane.diff`'s patch (cap + `_truncated` flag): a diff is read-only display, but a
-/// truncated `file.read` risks the editor round-tripping the truncated copy back over the real
-/// file on save, silently destroying the tail the user never saw.
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"];
+
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+pub fn mime_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Read a worktree file for the editor. Detects text, binary, and image files.
+/// Deliberately does NOT truncate on oversized file — oversized files are hard rejections.
 pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
     let meta = std::fs::metadata(path)?;
     let size = meta.len();
     if size > READ_CAP_BYTES {
         return Err(ReadError::TooLarge(size));
     }
+    let mtime_ms = mtime_ms_of(&meta)?;
+
+    if is_image_path(path) {
+        return Ok(FileReadResult {
+            content: String::new(),
+            mtime_ms,
+            size,
+            truncated: false,
+            kind: "image".to_string(),
+        });
+    }
+
     let bytes = std::fs::read(path)?;
     let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
     if bytes[..sniff_len].contains(&0u8) {
-        return Err(ReadError::Binary);
+        return Ok(FileReadResult {
+            content: String::new(),
+            mtime_ms,
+            size,
+            truncated: false,
+            kind: "binary".to_string(),
+        });
     }
-    let content = String::from_utf8(bytes).map_err(|_| ReadError::Binary)?;
-    let mtime_ms = mtime_ms_of(&meta)?;
-    Ok(FileReadResult {
-        content,
-        mtime_ms,
+
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(FileReadResult {
+            content,
+            mtime_ms,
+            size,
+            truncated: false,
+            kind: "text".to_string(),
+        }),
+        Err(_) => Ok(FileReadResult {
+            content: String::new(),
+            mtime_ms,
+            size,
+            truncated: false,
+            kind: "binary".to_string(),
+        }),
+    }
+}
+
+/// Read raw file bytes, returning base64 payload and MIME type under the same 2 MiB cap.
+pub fn read_file_raw(path: &Path) -> Result<FileReadRawResult, ReadError> {
+    let meta = std::fs::metadata(path)?;
+    let size = meta.len();
+    if size > READ_CAP_BYTES {
+        return Err(ReadError::TooLarge(size));
+    }
+    let data = std::fs::read(path)?;
+    let mime = mime_for_path(path).to_string();
+    let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(FileReadRawResult {
+        base64,
+        mime,
         size,
-        truncated: false,
     })
 }
 
@@ -334,11 +405,45 @@ mod tests {
     }
 
     #[test]
-    fn read_file_rejects_null_byte_content_as_binary() {
+    fn read_file_detects_binary_and_image_kinds() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blob.bin");
-        std::fs::write(&path, [b'a', b'b', 0u8, b'c']).unwrap();
-        assert!(matches!(read_file(&path), Err(ReadError::Binary)));
+
+        // Null byte sniffed as binary
+        let bin_path = dir.path().join("blob.bin");
+        std::fs::write(&bin_path, [b'a', b'b', 0u8, b'c']).unwrap();
+        let bin_res = read_file(&bin_path).unwrap();
+        assert_eq!(bin_res.kind, "binary");
+        assert_eq!(bin_res.content, "");
+
+        // Image extension detected as image
+        let img_path = dir.path().join("logo.png");
+        std::fs::write(&img_path, [0x89, b'P', b'N', b'G']).unwrap();
+        let img_res = read_file(&img_path).unwrap();
+        assert_eq!(img_res.kind, "image");
+        assert_eq!(img_res.content, "");
+
+        // Text file detected as text
+        let txt_path = dir.path().join("hello.txt");
+        std::fs::write(&txt_path, "hello text").unwrap();
+        let txt_res = read_file(&txt_path).unwrap();
+        assert_eq!(txt_res.kind, "text");
+        assert_eq!(txt_res.content, "hello text");
+    }
+
+    #[test]
+    fn read_file_raw_returns_base64_and_mime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pixel.png");
+        let png_bytes = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        std::fs::write(&path, png_bytes).unwrap();
+
+        let raw = read_file_raw(&path).unwrap();
+        assert_eq!(raw.mime, "image/png");
+        assert_eq!(raw.size, png_bytes.len() as u64);
+        assert_eq!(
+            raw.base64,
+            base64::engine::general_purpose::STANDARD.encode(png_bytes)
+        );
     }
 
     #[test]

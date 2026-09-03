@@ -318,7 +318,7 @@ async fn file_read_round_trips_content_and_mtime() {
 }
 
 #[tokio::test]
-async fn file_read_rejects_binary_content() {
+async fn file_read_classifies_binary_content() {
     let mut h = setup("file-binary").await;
     std::fs::write(h.root.join("blob.bin"), [b'a', b'b', 0u8, b'c']).unwrap();
 
@@ -329,12 +329,42 @@ async fn file_read_rejects_binary_content() {
         Some(json!({ "lane_id": h.lane_id, "path": "blob.bin" })),
     )
     .await;
-    let err = r.error.expect("binary file must be rejected");
-    assert!(
-        err.message.contains("binary"),
-        "message was: {}",
-        err.message
-    );
+    let res: repomon_core::model::FileReadResult =
+        serde_json::from_value(r.result.expect("file.read must succeed for binary")).unwrap();
+    assert_eq!(res.kind, "binary");
+    assert_eq!(res.content, "");
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_read_raw_returns_base64_for_image() {
+    let mut h = setup("file-image").await;
+    let png_bytes = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    std::fs::write(h.root.join("logo.png"), png_bytes).unwrap();
+
+    let r = call(
+        &mut h.stream,
+        3,
+        "file.read",
+        Some(json!({ "lane_id": h.lane_id, "path": "logo.png" })),
+    )
+    .await;
+    let res: repomon_core::model::FileReadResult =
+        serde_json::from_value(r.result.expect("file.read must succeed for image")).unwrap();
+    assert_eq!(res.kind, "image");
+
+    let raw = call(
+        &mut h.stream,
+        4,
+        "file.read_raw",
+        Some(json!({ "lane_id": h.lane_id, "path": "logo.png" })),
+    )
+    .await;
+    let raw_res: repomon_core::model::FileReadRawResult =
+        serde_json::from_value(raw.result.expect("file.read_raw must succeed")).unwrap();
+    assert_eq!(raw_res.mime, "image/png");
+    assert_eq!(raw_res.size, png_bytes.len() as u64);
 
     h.shutdown().await;
 }
