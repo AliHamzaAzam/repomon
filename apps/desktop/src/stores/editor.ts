@@ -700,14 +700,54 @@ export function createEditorStore(fleet: FleetStore) {
     persistCurrentLane();
   }
 
+  let pendingReloadDirs = new Set<string>();
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function queueDirReload(laneId: number, dir: string) {
+    pendingReloadDirs.add(dir);
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      const toReload = Array.from(pendingReloadDirs);
+      pendingReloadDirs.clear();
+      for (const d of toReload) {
+        void loadDir(laneId, d);
+      }
+    }, 300);
+  }
+
   onMount(() => {
     let active = true;
     let stop: (() => void) | undefined;
     void subscribeDaemon((event) => {
       if (!active || event.method !== "event.file.changed") return;
-      const params = event.params as { lane_id?: number; path?: string } | null;
+      const params = event.params as {
+        lane_id?: number;
+        path?: string;
+        op?: "created" | "modified" | "removed" | "renamed";
+        from?: string;
+      } | null;
       if (!params || typeof params.lane_id !== "number" || typeof params.path !== "string") return;
-      void syncExternalChange(params.path, params.lane_id);
+
+      const laneId = params.lane_id;
+      const path = params.path;
+      const op = params.op;
+      const from = params.from;
+
+      // Reload affected directory levels
+      const parentDir = path.split("/").slice(0, -1).join("/");
+      queueDirReload(laneId, parentDir);
+
+      if (op === "renamed" && from) {
+        const fromParentDir = from.split("/").slice(0, -1).join("/");
+        if (fromParentDir !== parentDir) {
+          queueDirReload(laneId, fromParentDir);
+        }
+        handleFileRenamed(from, path);
+      } else if (op === "removed") {
+        handleFileDeleted(path);
+      } else {
+        void syncExternalChange(path, laneId);
+      }
     })
       .then((unsub) => {
         if (active) stop = unsub;
@@ -717,6 +757,7 @@ export function createEditorStore(fleet: FleetStore) {
 
     onCleanup(() => {
       active = false;
+      if (debounceTimer) clearTimeout(debounceTimer);
       stop?.();
     });
   });
