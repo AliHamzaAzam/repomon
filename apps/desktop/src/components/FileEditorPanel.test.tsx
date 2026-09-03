@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { EditorView } from "@codemirror/view";
 import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,6 +52,7 @@ function emitFileChanged(laneId: number, path: string) {
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   calls.list = [];
   subscribers.list = [];
   daemonCallMock.mockReset();
@@ -443,7 +444,7 @@ describe("FileEditorPanel lane switching", () => {
     expect(screen.queryByText("a.ts")).not.toBeInTheDocument();
   });
 
-  it("reverts the lane switch and asks for confirmation when the previous lane has a dirty open file", async () => {
+  it("preserves open tabs and dirty edits in memory when switching lanes without prompting to discard", async () => {
     const laneA = lane({ id: 7 });
     const laneB = lane({ id: 8, worktree: { id: 4, repo_id: 2, path: "/code/repomon-wt/other", branch: "chore/other", head: "def", is_main: false, name: "other" } });
     mockRpc({
@@ -465,19 +466,15 @@ describe("FileEditorPanel lane switching", () => {
     view.dispatch({ changes: { from: 2, insert: "!" } });
     await screen.findByTitle("Unsaved changes");
 
+    // Switch to lane 8: no confirmation dialog appears
     setId(8);
-
-    // The confirm dialog appears, and the lane immediately reverts (fleet-visible state, not just
-    // this panel) rather than leaving the fleet sidebar pointed at lane 8 while this panel still
-    // shows lane 7's tree underneath the dialog.
-    const dialog = await screen.findByRole("dialog", { name: "Unsaved changes" });
-    expect(within(dialog).getByText(/a\.ts/)).toBeInTheDocument();
-    expect(screen.getByTitle("a.ts")).toBeInTheDocument(); // lane 7's tab is still open underneath
-
-    fireEvent.click(screen.getByRole("button", { name: "Discard and switch" }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(await screen.findByText("b.ts")).toBeInTheDocument();
     expect(screen.queryByTitle("a.ts")).not.toBeInTheDocument();
+
+    // Switch back to lane 7: tab and unsaved changes are restored
+    setId(7);
+    expect(await screen.findByTitle("a.ts")).toBeInTheDocument();
+    expect(screen.getByTitle("Unsaved changes")).toBeInTheDocument();
   });
 });

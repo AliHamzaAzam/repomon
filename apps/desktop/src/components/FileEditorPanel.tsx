@@ -3,70 +3,28 @@ import {
   Match,
   Show,
   Switch,
-  createEffect,
   createMemo,
   createSignal,
-  onCleanup,
-  onMount,
 } from "solid-js";
 
 import type { FileEntry } from "../bindings";
 import CodeEditor from "./CodeEditor";
 import ConfirmDialog from "./ConfirmDialog";
-import { translateError, type TranslatedError } from "../ipc/errors";
-import { DaemonRpcError, daemonCall, subscribeDaemon } from "../ipc/rpc";
+import type { TranslatedError } from "../ipc/errors";
 import type { FleetStore } from "../stores/fleet";
+import {
+  createEditorStore,
+  type DirCacheEntry,
+  type EditorStore,
+  type FileConflict,
+} from "../stores/editor";
 import { IconChevronDown, IconChevronRight, IconClose, IconRefresh } from "./icons";
 
-/// D4: a lane-scoped file tree + multi-tab editor for the right rail, built entirely on the D1/D2
-/// worktree file RPCs and the D3 `CodeEditor` wrapper. Layout choice (see the panel's top-level
-/// return below): the tree collapses to a one-line breadcrumb the moment a file is open, rather
-/// than staying pinned open beside the editor - this rail tops out at 40rem (`RIGHT_PANEL_MAX_WIDTH_PX`
-/// in RightPanelHost), and a persistent split at that width leaves either half too cramped to be
-/// useful. The brief this panel serves is "quick edit next to the agent terminal" (glance at a
-/// file, nudge a value, get back to watching the agent), not a standalone IDE, so the tree reads
-/// as a picker you summon rather than a sidebar you maintain.
-
 interface FileEditorPanelProps {
-  /// Mirrors GitExplorerPanel's `fleet` prop: the panel only reads `selectedLane()` off the
-  /// store, but that memo lives there, not as a standalone prop.
   fleet?: FleetStore;
+  editor?: EditorStore;
 }
 
-/// One open tab's state. `content`/`savedContent` diverging is this panel's only definition of
-/// "dirty" - no separate boolean to keep in sync.
-interface OpenFile {
-  path: string;
-  content: string;
-  savedContent: string;
-  /// `null` only while the initial `file.read` is still in flight (see `loading`) - every other
-  /// state (including the deleted-on-disk conflict) leaves the last-known real value in place so
-  /// "Keep mine" always has something to compare against.
-  mtimeMs: number | null;
-  loading: boolean;
-  loadError: TranslatedError | null;
-  saving: boolean;
-  saveError: TranslatedError | null;
-  conflict: FileConflict | null;
-}
-
-/// `deleted` mirrors `file.write`'s `actual_mtime_ms === null` - the one signal the daemon gives
-/// for "the file is gone", surfaced whether this conflict was discovered by an explicit save
-/// hitting -32011 or by `syncExternalChange` failing to re-read the file after an
-/// `event.file.changed` / tab-focus check.
-interface FileConflict {
-  deleted: boolean;
-  actualMtimeMs: number | null;
-}
-
-type DirCacheEntry =
-  | { status: "loading" }
-  | { status: "loaded"; entries: FileEntry[]; truncated: boolean }
-  | { status: "error"; error: TranslatedError };
-
-/// Splits a path into its muted directory prefix (trailing slash kept) and emphasized basename -
-/// same convention as GitExplorerPanel's and DiffView's own local copies; kept here too so this
-/// file stays a self-contained, independently testable unit.
 function splitPath(path: string): { dir: string; base: string } {
   const idx = path.lastIndexOf("/");
   return idx === -1 ? { dir: "", base: path } : { dir: path.slice(0, idx + 1), base: path.slice(idx + 1) };
@@ -120,10 +78,6 @@ function TreeEntryRow(props: {
   );
 }
 
-/// One directory level, recursing into itself for any expanded child directory. Lazy: a level's
-/// `file.list` call only happens the first time it's expanded (root is the exception - see the
-/// panel's lane-switch effect, which loads it eagerly the same way GitExplorerPanel eagerly loads
-/// its own data on mount).
 function TreeLevel(props: {
   dirPath: string;
   depth: number;
@@ -184,7 +138,7 @@ function TreeLevel(props: {
                   </For>
                   <Show when={loaded.truncated}>
                     <p class="px-1.5 py-1 text-[10px] text-muted/70" style={{ "padding-left": `${props.depth * 12 + 8}px` }}>
-                      Showing a partial listing - this folder has more entries than fit.
+                      Showing a partial listing (this folder has more entries than fit).
                     </p>
                   </Show>
                 </>
@@ -255,332 +209,37 @@ function ConflictBanner(props: {
 }
 
 export default function FileEditorPanel(props: FileEditorPanelProps) {
-  const lane = () => props.fleet?.selectedLane() ?? null;
+  const fallbackStore = !props.editor && props.fleet ? createEditorStore(props.fleet) : null;
+  const editor = () => props.editor ?? fallbackStore;
 
-  const [dirCache, setDirCache] = createSignal<Map<string, DirCacheEntry>>(new Map());
-  const [expandedDirs, setExpandedDirs] = createSignal<Set<string>>(new Set());
-  const [treeExpanded, setTreeExpanded] = createSignal(true);
-  const [openFiles, setOpenFiles] = createSignal<OpenFile[]>([]);
-  const [activePath, setActivePath] = createSignal<string | null>(null);
-  const [pendingLaneSwitch, setPendingLaneSwitch] = createSignal<
-    { fromLaneId: number; toLaneId: number; dirtyPaths: string[] } | null
-  >(null);
+  const lane = () => editor()?.selectedLane() ?? props.fleet?.selectedLane() ?? null;
+  const openFiles = () => editor()?.openFiles() ?? [];
+  const activePath = () => editor()?.activePath() ?? null;
+  const activeFile = () => editor()?.activeFile() ?? null;
+  const expandedDirs = () => editor()?.expandedDirs() ?? new Set<string>();
+  const dirCache = () => editor()?.dirCache() ?? new Map();
+
+  const [panelTreeExpanded, setPanelTreeExpanded] = createSignal(true);
   const [closeConfirmPath, setCloseConfirmPath] = createSignal<string | null>(null);
 
-  // Which lane's worktree `dirCache`/`openFiles` currently belong to - not a signal, since it's
-  // only ever read/written from the lane-switch effect and the async helpers it kicks off, never
-  // rendered directly.
-  let currentLaneId: number | null = null;
-  // Set just before re-dispatching `setSelectedLaneId` from the "discard and switch" confirm, so
-  // the lane-switch effect's dirty check is skipped exactly once instead of re-prompting forever.
-  let forceNextSwitch = false;
+  const effectiveTreeExpanded = createMemo(() => panelTreeExpanded() || openFiles().length === 0);
 
-  const effectiveTreeExpanded = createMemo(() => treeExpanded() || openFiles().length === 0);
-  const activeFile = createMemo(() => {
-    const p = activePath();
-    return p ? openFiles().find((f) => f.path === p) ?? null : null;
-  });
-
-  function findOpenFile(path: string): OpenFile | undefined {
-    return openFiles().find((f) => f.path === path);
-  }
-
-  function updateOpenFile(path: string, updater: (file: OpenFile) => OpenFile) {
-    setOpenFiles((files) => files.map((f) => (f.path === path ? updater(f) : f)));
-  }
-
-  async function loadDir(laneId: number, dirPath: string) {
-    setDirCache((cache) => {
-      const next = new Map(cache);
-      next.set(dirPath, { status: "loading" });
-      return next;
-    });
-    try {
-      const result = await daemonCall("file.list", { lane_id: laneId, path: dirPath });
-      if (currentLaneId !== laneId) return; // lane switched away while this was in flight
-      setDirCache((cache) => {
-        const next = new Map(cache);
-        next.set(dirPath, { status: "loaded", entries: result.entries, truncated: result.truncated });
-        return next;
-      });
-    } catch (cause) {
-      if (currentLaneId !== laneId) return;
-      setDirCache((cache) => {
-        const next = new Map(cache);
-        next.set(dirPath, { status: "error", error: translateError(cause) });
-        return next;
-      });
-    }
-  }
-
-  function toggleDir(path: string) {
-    const laneId = lane()?.id;
-    if (laneId == null) return;
-    setExpandedDirs((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-        if (!dirCache().has(path)) void loadDir(laneId, path);
-      }
-      return next;
-    });
-  }
-
-  function refreshTree() {
-    const laneId = lane()?.id;
-    if (laneId == null) return;
-    void loadDir(laneId, "");
-    for (const path of expandedDirs()) void loadDir(laneId, path);
-  }
-
-  function activateTab(path: string) {
-    setActivePath(path);
-    setTreeExpanded(false);
-    void syncExternalChange(path);
-  }
-
-  async function openFile(path: string) {
-    const existing = findOpenFile(path);
-    if (existing) {
-      activateTab(path);
-      return;
-    }
-    const laneId = lane()?.id;
-    if (laneId == null) return;
-    setTreeExpanded(false);
-    const placeholder: OpenFile = {
-      path,
-      content: "",
-      savedContent: "",
-      mtimeMs: null,
-      loading: true,
-      loadError: null,
-      saving: false,
-      saveError: null,
-      conflict: null,
-    };
-    setOpenFiles((files) => [...files, placeholder]);
-    setActivePath(path);
-    try {
-      const result = await daemonCall("file.read", { lane_id: laneId, path });
-      updateOpenFile(path, (f) => ({
-        ...f,
-        content: result.content,
-        savedContent: result.content,
-        mtimeMs: result.mtime_ms,
-        loading: false,
-      }));
-    } catch (cause) {
-      updateOpenFile(path, (f) => ({ ...f, loading: false, loadError: translateError(cause) }));
-    }
-  }
-
-  function closeFile(path: string) {
-    const current = openFiles();
-    const idx = current.findIndex((f) => f.path === path);
-    const next = current.filter((f) => f.path !== path);
-    setOpenFiles(next);
-    if (activePath() === path) {
-      const neighbor = next[idx] ?? next[idx - 1] ?? null;
-      setActivePath(neighbor ? neighbor.path : null);
-    }
-    setCloseConfirmPath(null);
-  }
-
-  function requestCloseFile(path: string) {
-    const f = findOpenFile(path);
+  function requestClose(path: string) {
+    const f = openFiles().find((item) => item.path === path);
     if (f && f.content !== f.savedContent) {
       setCloseConfirmPath(path);
     } else {
-      closeFile(path);
+      editor()?.closeFile(path);
     }
   }
 
-  async function saveFile(path: string) {
-    const laneId = lane()?.id;
-    const file = findOpenFile(path);
-    if (!file || laneId == null) return;
-    if (file.content === file.savedContent && !file.conflict) return;
-    updateOpenFile(path, (f) => ({ ...f, saving: true, saveError: null }));
-    try {
-      const result = await daemonCall("file.write", {
-        lane_id: laneId,
-        path,
-        content: file.content,
-        expected_mtime_ms: file.mtimeMs ?? undefined,
-      });
-      updateOpenFile(path, (f) => ({
-        ...f,
-        savedContent: f.content,
-        mtimeMs: result.mtime_ms,
-        saving: false,
-        saveError: null,
-        conflict: null,
-      }));
-    } catch (cause) {
-      if (cause instanceof DaemonRpcError && cause.code === -32011) {
-        const data = cause.data as { expected_mtime_ms?: number; actual_mtime_ms?: number | null } | null;
-        updateOpenFile(path, (f) => ({
-          ...f,
-          saving: false,
-          conflict: { deleted: data?.actual_mtime_ms == null, actualMtimeMs: data?.actual_mtime_ms ?? null },
-        }));
-      } else {
-        updateOpenFile(path, (f) => ({ ...f, saving: false, saveError: translateError(cause) }));
-      }
-    }
+  function handleCloseConfirmed(path: string) {
+    editor()?.closeFile(path);
+    setCloseConfirmPath(null);
   }
-
-  async function reloadFile(path: string) {
-    const laneId = lane()?.id;
-    if (laneId == null || !findOpenFile(path)) return;
-    try {
-      const result = await daemonCall("file.read", { lane_id: laneId, path });
-      updateOpenFile(path, (f) => ({
-        ...f,
-        content: result.content,
-        savedContent: result.content,
-        mtimeMs: result.mtime_ms,
-        conflict: null,
-        loadError: null,
-      }));
-    } catch (cause) {
-      updateOpenFile(path, (f) => ({ ...f, loadError: translateError(cause) }));
-    }
-  }
-
-  /// "Keep mine" per the D4 brief: don't touch the buffer (it stays dirty, still holding the
-  /// user's edits) - just re-read the file's current mtime so the *next* explicit save's
-  /// `expected_mtime_ms` matches what's actually on disk and succeeds deliberately, instead of
-  /// bouncing off -32011 a second time.
-  async function keepMine(path: string) {
-    const laneId = lane()?.id;
-    if (laneId == null || !findOpenFile(path)) return;
-    try {
-      const result = await daemonCall("file.read", { lane_id: laneId, path });
-      updateOpenFile(path, (f) => ({ ...f, mtimeMs: result.mtime_ms, conflict: null }));
-    } catch {
-      updateOpenFile(path, (f) => ({ ...f, conflict: { deleted: true, actualMtimeMs: null } }));
-    }
-  }
-
-  /// The deleted-on-disk conflict's affirmative action: write the buffer back out with no
-  /// `expected_mtime_ms` at all, i.e. plain create - there is nothing on disk to conflict with.
-  async function saveAsNew(path: string) {
-    const laneId = lane()?.id;
-    const file = findOpenFile(path);
-    if (!file || laneId == null) return;
-    updateOpenFile(path, (f) => ({ ...f, saving: true, saveError: null }));
-    try {
-      const result = await daemonCall("file.write", { lane_id: laneId, path, content: file.content });
-      updateOpenFile(path, (f) => ({
-        ...f,
-        savedContent: f.content,
-        mtimeMs: result.mtime_ms,
-        saving: false,
-        conflict: null,
-      }));
-    } catch (cause) {
-      updateOpenFile(path, (f) => ({ ...f, saving: false, saveError: translateError(cause) }));
-    }
-  }
-
-  /// Shared by the `event.file.changed` subscription and the tab-focus recheck: re-reads `path`
-  /// and reconciles it against the open tab's last-known state. A clean buffer adopts the new
-  /// content silently; a dirty one gets the non-blocking conflict banner instead, per the D4
-  /// brief - the buffer itself is never touched by anything other than the user or an explicit
-  /// Reload, so an in-progress edit can never be clobbered out from under the typist.
-  async function syncExternalChange(path: string) {
-    const laneId = lane()?.id;
-    const file = findOpenFile(path);
-    if (!file || laneId == null) return;
-    try {
-      const result = await daemonCall("file.read", { lane_id: laneId, path });
-      if (result.mtime_ms === file.mtimeMs) return; // nothing actually changed
-      const isDirty = file.content !== file.savedContent;
-      if (isDirty) {
-        updateOpenFile(path, (f) => ({ ...f, conflict: { deleted: false, actualMtimeMs: result.mtime_ms } }));
-      } else {
-        updateOpenFile(path, (f) => ({
-          ...f,
-          content: result.content,
-          savedContent: result.content,
-          mtimeMs: result.mtime_ms,
-          conflict: null,
-          loadError: null,
-        }));
-      }
-    } catch {
-      // Most likely deleted out from under us (could also be a read that now fails for some other
-      // reason, e.g. grew past the size cap) - either way there is nothing left to silently
-      // reconcile, so surface the same deleted-conflict banner `file.write`'s -32011 path uses.
-      updateOpenFile(path, (f) => ({ ...f, conflict: { deleted: true, actualMtimeMs: null } }));
-    }
-  }
-
-  function performLaneSwitch(newLaneId: number | null, rootPath: string) {
-    void rootPath; // not needed directly - file.list paths are lane-relative, not host-absolute
-    currentLaneId = newLaneId;
-    setDirCache(new Map<string, DirCacheEntry>());
-    setExpandedDirs(new Set<string>());
-    setTreeExpanded(true);
-    setOpenFiles([]);
-    setActivePath(null);
-    setPendingLaneSwitch(null);
-    if (newLaneId !== null) void loadDir(newLaneId, "");
-  }
-
-  // Resets the tree and open tabs whenever the selected lane changes. A lane with dirty open
-  // files first reverts the selection (via `fleet.setSelectedLaneId`) and asks for confirmation
-  // instead - see the `pendingLaneSwitch` ConfirmDialog below, whose "Discard and switch" sets
-  // `forceNextSwitch` and re-dispatches the same selection to let this effect through the second
-  // time. A lane with no dirty files (including the very first mount, when `openFiles` is
-  // necessarily empty) switches immediately, same as GitExplorerPanel's own lane-change effect.
-  createEffect(() => {
-    const l = lane();
-    const newLaneId = l?.id ?? null;
-    if (newLaneId === currentLaneId) return;
-    const dirty = openFiles().filter((f) => f.content !== f.savedContent);
-    if (dirty.length > 0 && currentLaneId !== null && !forceNextSwitch) {
-      setPendingLaneSwitch({ fromLaneId: currentLaneId, toLaneId: newLaneId ?? -1, dirtyPaths: dirty.map((f) => f.path) });
-      props.fleet?.setSelectedLaneId(currentLaneId);
-      return;
-    }
-    forceNextSwitch = false;
-    performLaneSwitch(newLaneId, l?.worktree.path ?? "");
-  });
-
-  onMount(() => {
-    let active = true;
-    let stop: (() => void) | undefined;
-    void subscribeDaemon((event) => {
-      if (!active || event.method !== "event.file.changed") return;
-      const params = event.params as { lane_id?: number; path?: string } | null;
-      const laneId = lane()?.id;
-      if (laneId == null || !params || params.lane_id !== laneId || typeof params.path !== "string") return;
-      if (!findOpenFile(params.path)) return;
-      void syncExternalChange(params.path);
-    })
-      .then((unsub) => {
-        if (active) stop = unsub;
-        else unsub();
-      })
-      .catch(() => undefined);
-    onCleanup(() => {
-      active = false;
-      stop?.();
-    });
-  });
 
   return (
     <div class="flex h-full flex-col bg-surface">
-      {/* h-10 / px-3.5 / border-b border-line / bg-surface/95 mirrors TerminalWorkspace.tsx's own
-          tab-strip header row (App.tsx mounts this panel in the right rail, directly beside the
-          terminal bay's column, at the same y-offset) - min-w-0 + backdrop-blur were the two
-          values that header row carries and this one didn't, so the two read as one continuous
-          band across the seam instead of the editor's row looking subtly heavier. */}
       <div class="flex h-10 min-w-0 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
         <div class="flex min-w-0 items-center gap-2">
           <span class="text-xs font-semibold text-foreground">Editor</span>
@@ -596,7 +255,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
         <button
           type="button"
           class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground disabled:opacity-40"
-          onClick={refreshTree}
+          onClick={() => editor()?.refreshTree()}
           disabled={!lane()}
           title="Refresh file tree"
           aria-label="Refresh file tree"
@@ -621,7 +280,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
             <button
               type="button"
               class="focus-ring flex h-7 w-full shrink-0 items-center gap-1.5 border-b border-line px-3 text-left hover:bg-raised/40"
-              onClick={() => setTreeExpanded((v) => !v)}
+              onClick={() => setPanelTreeExpanded((v) => !v)}
               aria-expanded={effectiveTreeExpanded()}
               aria-label="Toggle file tree"
             >
@@ -657,17 +316,17 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                 dirCache={dirCache}
                 expanded={expandedDirs}
                 activePath={activePath}
-                onToggleDir={toggleDir}
-                onOpenFile={openFile}
+                onToggleDir={(path) => editor()?.toggleDir(path)}
+                onOpenFile={(path) => {
+                  setPanelTreeExpanded(false);
+                  void editor()?.openFile(path);
+                }}
               />
             </div>
           </Show>
 
           <Show when={openFiles().length > 0}>
             <div class="flex h-8 shrink-0 items-center border-b border-line bg-surface/95">
-              {/* min-w-0 + overflow-x-auto + no-scrollbar/scroll-smooth: same horizontal-overflow
-                  pattern as TerminalWorkspace's tab strip, so a lot of open files scrolls (each
-                  tab keeps shrink-0) instead of wrapping or squeezing tabs unreadably thin. */}
               <div class="flex min-w-0 flex-1 items-center overflow-x-auto no-scrollbar scroll-smooth">
                 <For each={openFiles()}>
                   {(file) => {
@@ -681,7 +340,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                         onMouseDown={(event) => {
                           if (event.button === 1) {
                             event.preventDefault();
-                            requestCloseFile(file.path);
+                            requestClose(file.path);
                           }
                         }}
                       >
@@ -690,7 +349,10 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                           class={`focus-ring flex items-center gap-1.5 px-2 py-1 text-xs ${
                             isActive() ? "font-medium text-foreground" : "text-muted hover:text-foreground"
                           }`}
-                          onClick={() => activateTab(file.path)}
+                          onClick={() => {
+                            setPanelTreeExpanded(false);
+                            editor()?.activateTab(file.path);
+                          }}
                           title={file.path}
                         >
                           <span class="max-w-[8rem] truncate font-mono">{basename(file.path)}</span>
@@ -701,7 +363,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                         <button
                           type="button"
                           class="focus-ring mr-1 flex size-4 shrink-0 items-center justify-center rounded text-muted/60 opacity-0 hover:bg-line/60 hover:text-foreground group-hover:opacity-100"
-                          onClick={() => requestCloseFile(file.path)}
+                          onClick={() => requestClose(file.path)}
                           aria-label={`Close ${basename(file.path)}`}
                         >
                           <IconClose size={9} />
@@ -717,10 +379,10 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                 disabled={!activeFile() || activeFile()!.content === activeFile()!.savedContent || activeFile()!.saving}
                 onClick={() => {
                   const p = activePath();
-                  if (p) void saveFile(p);
+                  if (p) void editor()?.saveFile(p);
                 }}
               >
-                {activeFile()?.saving ? "Saving…" : "Save"}
+                {activeFile()?.saving ? "Saving..." : "Save"}
               </button>
             </div>
 
@@ -729,10 +391,10 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                 {(conflict) => (
                   <ConflictBanner
                     conflict={conflict}
-                    onReload={() => void reloadFile(activePath()!)}
-                    onKeepMine={() => void keepMine(activePath()!)}
-                    onSaveAsNew={() => void saveAsNew(activePath()!)}
-                    onCloseDeleted={() => closeFile(activePath()!)}
+                    onReload={() => void editor()?.reloadFile(activePath()!)}
+                    onKeepMine={() => void editor()?.keepMine(activePath()!)}
+                    onSaveAsNew={() => void editor()?.saveAsNew(activePath()!)}
+                    onCloseDeleted={() => editor()?.closeFile(activePath()!)}
                   />
                 )}
               </Show>
@@ -749,7 +411,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                     when={!file.loading}
                     fallback={
                       <div class="flex flex-1 items-center justify-center">
-                        <p class="text-xs text-muted">Loading file…</p>
+                        <p class="text-xs text-muted">Loading file...</p>
                       </div>
                     }
                   >
@@ -762,7 +424,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                           <button
                             type="button"
                             class="focus-ring rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-foreground hover:bg-raised"
-                            onClick={() => requestCloseFile(file.path)}
+                            onClick={() => requestClose(file.path)}
                           >
                             Close tab
                           </button>
@@ -772,8 +434,8 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                       <CodeEditor
                         value={file.content}
                         path={file.path}
-                        onChange={(content) => updateOpenFile(file.path, (f) => ({ ...f, content }))}
-                        onSave={() => void saveFile(file.path)}
+                        onChange={(content) => editor()?.updateContent(file.path, content)}
+                        onSave={() => void editor()?.saveFile(file.path)}
                         class="min-h-0 flex-1"
                       />
                     </Show>
@@ -785,26 +447,6 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
         </div>
       </Show>
 
-      <Show when={pendingLaneSwitch()} keyed>
-        {(pending) => (
-          <ConfirmDialog
-            options={{
-              title: "Unsaved changes",
-              message: `You have unsaved changes in ${pending.dirtyPaths.length} file${
-                pending.dirtyPaths.length === 1 ? "" : "s"
-              } (${pending.dirtyPaths.join(", ")}). Switching lanes will discard them.`,
-              confirmLabel: "Discard and switch",
-              danger: true,
-              onConfirm: () => {
-                forceNextSwitch = true;
-                props.fleet?.setSelectedLaneId(pending.toLaneId === -1 ? null : pending.toLaneId);
-              },
-            }}
-            onClose={() => setPendingLaneSwitch(null)}
-          />
-        )}
-      </Show>
-
       <Show when={closeConfirmPath()} keyed>
         {(path) => (
           <ConfirmDialog
@@ -813,7 +455,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
               message: `Close ${path} without saving your changes?`,
               confirmLabel: "Discard and close",
               danger: true,
-              onConfirm: () => closeFile(path),
+              onConfirm: () => handleCloseConfirmed(path),
             }}
             onClose={() => setCloseConfirmPath(null)}
           />
