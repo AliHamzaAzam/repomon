@@ -230,6 +230,15 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
   const [treeMode, setTreeMode] = createSignal<"files" | "search">("files");
 
+  // Below this tree column width, the header's mode-switcher labels ("Files" /
+  // "Search") collapse to icon-only so the switcher and the icon button group
+  // beside it both fit on one row without clipping. Reuses the resize signal
+  // the column already tracks rather than a container query.
+  const TREE_HEADER_LABEL_MIN_WIDTH_PX = 300;
+  const compactTreeHeader = createMemo(
+    () => props.editor.treeColumnWidth() < TREE_HEADER_LABEL_MIN_WIDTH_PX
+  );
+
   // Context Menu State
   const [contextMenu, setContextMenu] = createSignal<{
     x: number;
@@ -505,12 +514,14 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         style={{ width: `${props.editor.treeColumnWidth()}px`, "min-width": "180px" }}
       >
         {/* Tree Column Header */}
-        <div class="flex h-9 shrink-0 items-center justify-between border-b border-line px-2">
-          {/* Mode Switcher: Files vs Search */}
-          <div class="flex items-center gap-0.5 rounded border border-line bg-background p-0.5">
+        <div class="flex min-h-9 flex-wrap items-center justify-between gap-1 border-b border-line px-2 py-1">
+          {/* Mode Switcher: Files vs Search. Shrinks first, and drops its
+              labels to icon-only, so the icon button group never clips. */}
+          <div class="flex min-w-0 items-center gap-0.5 rounded border border-line bg-background p-0.5">
             <button
               type="button"
-              class={`flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
+              aria-label="Files explorer"
+              class={`flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
                 treeMode() === "files"
                   ? "bg-raised text-foreground font-semibold"
                   : "text-muted hover:text-foreground"
@@ -519,11 +530,14 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               title="Files explorer"
             >
               <IconFolder size={12} />
-              <span>Files</span>
+              <Show when={!compactTreeHeader()}>
+                <span>Files</span>
+              </Show>
             </button>
             <button
               type="button"
-              class={`flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
+              aria-label="Search in project"
+              class={`flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
                 treeMode() === "search"
                   ? "bg-raised text-foreground font-semibold"
                   : "text-muted hover:text-foreground"
@@ -532,15 +546,20 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               title="Search in project"
             >
               <IconSearch size={12} />
-              <span>Search</span>
+              <Show when={!compactTreeHeader()}>
+                <span>Search</span>
+              </Show>
             </button>
           </div>
 
-          <div class="flex items-center gap-0.5">
+          {/* Icon actions never shrink below their tap target; the row wraps
+              onto a second line rather than clipping this group. */}
+          <div class="flex shrink-0 items-center gap-0.5">
             <Show when={treeMode() === "files"}>
               <button
                 type="button"
-                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                aria-label="New file in root"
+                class="focus-ring flex size-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
                 title="New file in root"
                 onClick={() => setInlineCreate({ parentDir: "", isDir: false, depth: 0 })}
               >
@@ -548,7 +567,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               </button>
               <button
                 type="button"
-                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                aria-label="New folder in root"
+                class="focus-ring flex size-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
                 title="New folder in root"
                 onClick={() => setInlineCreate({ parentDir: "", isDir: true, depth: 0 })}
               >
@@ -556,7 +576,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               </button>
               <button
                 type="button"
-                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                aria-label="Find file"
+                class="focus-ring flex size-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
                 title="Find file"
                 onClick={() => props.onOpenFinder?.()}
               >
@@ -564,7 +585,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               </button>
               <button
                 type="button"
-                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                aria-label="Reveal active file in tree"
+                class="focus-ring flex size-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
                 title="Reveal active file in tree"
                 onClick={() => {
                   const path = activePath();
@@ -575,7 +597,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               </button>
               <button
                 type="button"
-                class="focus-ring flex size-6 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+                aria-label="Refresh file tree"
+                class="focus-ring flex size-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
                 title="Refresh file tree"
                 onClick={() => props.editor.refreshTree()}
               >
