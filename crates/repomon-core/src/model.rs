@@ -880,6 +880,7 @@ pub struct FileIndexResult {
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct FileCreateResult {
     pub path: String,
+    pub is_dir: bool,
 }
 
 /// `file.rename`'s result.
@@ -915,6 +916,7 @@ pub struct FileSearchHit {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct FileSearchResult {
+    pub query: String,
     pub hits: Vec<FileSearchHit>,
     pub truncated: bool,
 }

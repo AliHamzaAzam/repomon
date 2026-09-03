@@ -4,4 +4,4 @@ import type { FileSearchHit } from "./FileSearchHit";
 /**
  * `file.search`'s result.
  */
-export type FileSearchResult = { hits: Array<FileSearchHit>, truncated: boolean, };
+export type FileSearchResult = { query: string, hits: Array<FileSearchHit>, truncated: boolean, };

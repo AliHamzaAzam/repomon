@@ -17,7 +17,8 @@ use std::time::UNIX_EPOCH;
 
 use base64::Engine;
 use repomon_core::model::{
-    FileEntry, FileListResult, FileReadRawResult, FileReadResult, FileWriteResult,
+    FileCreateResult, FileDeleteResult, FileEntry, FileListResult, FileReadRawResult,
+    FileReadResult, FileRenameResult, FileSearchHit, FileSearchResult, FileWriteResult,
 };
 use repomon_core::process::background_command;
 
@@ -426,6 +427,302 @@ fn mtime_ms_of(meta: &std::fs::Metadata) -> io::Result<u64> {
     let modified = meta.modified()?;
     let dur = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
     Ok(dur.as_millis() as u64)
+}
+
+/// Check whether the given byte buffer appears to be binary by sniffing the first
+/// [`BINARY_SNIFF_BYTES`] bytes for null bytes.
+pub fn is_binary_buffer(bytes: &[u8]) -> bool {
+    let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
+    bytes[..sniff_len].contains(&0u8)
+}
+
+/// Error returned when creating a file or directory.
+#[derive(Debug)]
+pub enum CreateError {
+    AlreadyExists,
+    Escape,
+    Io(io::Error),
+}
+
+impl From<io::Error> for CreateError {
+    fn from(e: io::Error) -> Self {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            CreateError::AlreadyExists
+        } else {
+            CreateError::Io(e)
+        }
+    }
+}
+
+/// Create a new empty file or directory inside `root`.
+/// Parent directories are automatically created if they do not exist.
+pub fn create_file_or_dir(
+    root: &Path,
+    rel: &str,
+    is_dir: bool,
+) -> Result<FileCreateResult, CreateError> {
+    let clean_rel = rel.trim_matches('/').replace('\\', "/");
+    if clean_rel.is_empty() || clean_rel == "." {
+        return Err(CreateError::Escape);
+    }
+    let Some(path) = worktree_path_allowed(root, &clean_rel) else {
+        return Err(CreateError::Escape);
+    };
+    if path.exists() || std::fs::symlink_metadata(&path).is_ok() {
+        return Err(CreateError::AlreadyExists);
+    }
+    if is_dir {
+        std::fs::create_dir_all(&path)?;
+    } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+    }
+    Ok(FileCreateResult {
+        path: clean_rel,
+        is_dir,
+    })
+}
+
+/// Error returned when renaming a file or directory.
+#[derive(Debug)]
+pub enum RenameError {
+    NotFound,
+    AlreadyExists,
+    Escape,
+    Io(io::Error),
+}
+
+impl From<io::Error> for RenameError {
+    fn from(e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::NotFound => RenameError::NotFound,
+            io::ErrorKind::AlreadyExists => RenameError::AlreadyExists,
+            _ => RenameError::Io(e),
+        }
+    }
+}
+
+/// Rename or move a path within `root`.
+pub fn rename_path(
+    root: &Path,
+    from_rel: &str,
+    to_rel: &str,
+) -> Result<FileRenameResult, RenameError> {
+    let clean_from = from_rel.trim_matches('/').replace('\\', "/");
+    let clean_to = to_rel.trim_matches('/').replace('\\', "/");
+    if clean_from.is_empty() || clean_from == "." || clean_to.is_empty() || clean_to == "." {
+        return Err(RenameError::Escape);
+    }
+    let Some(from_path) = worktree_path_allowed(root, &clean_from) else {
+        return Err(RenameError::Escape);
+    };
+    let Some(to_path) = worktree_path_allowed(root, &clean_to) else {
+        return Err(RenameError::Escape);
+    };
+    if !from_path.exists() && std::fs::symlink_metadata(&from_path).is_err() {
+        return Err(RenameError::NotFound);
+    }
+    if to_path.exists() || std::fs::symlink_metadata(&to_path).is_ok() {
+        return Err(RenameError::AlreadyExists);
+    }
+    if let Some(parent) = to_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&from_path, &to_path)?;
+    Ok(FileRenameResult {
+        from: clean_from,
+        to: clean_to,
+    })
+}
+
+/// Error returned when deleting a file or directory.
+#[derive(Debug)]
+pub enum DeleteError {
+    NotFound,
+    Forbidden(String),
+    NotEmpty,
+    Escape,
+    Io(io::Error),
+}
+
+impl From<io::Error> for DeleteError {
+    fn from(e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::NotFound => DeleteError::NotFound,
+            io::ErrorKind::DirectoryNotEmpty => DeleteError::NotEmpty,
+            _ => DeleteError::Io(e),
+        }
+    }
+}
+
+/// Delete a file or directory within `root`.
+pub fn delete_path(
+    root: &Path,
+    rel: &str,
+    recursive: bool,
+) -> Result<FileDeleteResult, DeleteError> {
+    let clean_rel = rel.trim_matches('/').replace('\\', "/");
+    if clean_rel.is_empty() || clean_rel == "." {
+        return Err(DeleteError::Forbidden("cannot delete worktree root".into()));
+    }
+    if clean_rel == ".git" || clean_rel.starts_with(".git/") {
+        return Err(DeleteError::Forbidden("cannot delete .git".into()));
+    }
+    let Some(path) = worktree_path_allowed(root, &clean_rel) else {
+        return Err(DeleteError::Escape);
+    };
+    let root_canon = canonical_prefix(root).unwrap_or_else(|| root.to_path_buf());
+    let path_canon = canonical_prefix(&path).unwrap_or_else(|| path.clone());
+    if path_canon == root_canon {
+        return Err(DeleteError::Forbidden("cannot delete worktree root".into()));
+    }
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(DeleteError::NotFound),
+        Err(e) => return Err(DeleteError::Io(e)),
+    };
+    if meta.is_dir() {
+        if !recursive {
+            let mut entries = std::fs::read_dir(&path)?;
+            if entries.next().is_some() {
+                return Err(DeleteError::NotEmpty);
+            }
+            std::fs::remove_dir(&path)?;
+        } else {
+            std::fs::remove_dir_all(&path)?;
+        }
+    } else {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(FileDeleteResult {
+        path: clean_rel,
+    })
+}
+
+/// Options for searching files in a worktree.
+pub struct SearchOpts<'a> {
+    pub query: &'a str,
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub glob: Option<&'a str>,
+    pub max_results: usize,
+}
+
+/// Error returned when searching worktree content.
+#[derive(Debug)]
+pub enum SearchError {
+    InvalidQuery(String),
+    InvalidGlob(String),
+    Io(io::Error),
+}
+
+/// Search worktree files for a query string or regex pattern.
+pub fn search_worktree(
+    root: &Path,
+    opts: &SearchOpts<'_>,
+    file_list: Option<Vec<String>>,
+) -> Result<FileSearchResult, SearchError> {
+    if opts.query.is_empty() {
+        return Ok(FileSearchResult {
+            query: String::new(),
+            hits: Vec::new(),
+            truncated: false,
+        });
+    }
+
+    let re_pattern = if opts.regex {
+        opts.query.to_string()
+    } else {
+        regex::escape(opts.query)
+    };
+
+    let re = regex::RegexBuilder::new(&re_pattern)
+        .case_insensitive(!opts.case_sensitive)
+        .build()
+        .map_err(|e| SearchError::InvalidQuery(e.to_string()))?;
+
+    let glob_matcher = if let Some(g) = opts.glob {
+        if !g.trim().is_empty() {
+            Some(
+                globset::Glob::new(g.trim())
+                    .map_err(|e| SearchError::InvalidGlob(e.to_string()))?
+                    .compile_matcher(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let files = match file_list {
+        Some(f) => f,
+        None => index_worktree(root).map_err(SearchError::Io)?.0,
+    };
+
+    let cap = opts.max_results.clamp(1, 2000);
+    let mut hits = Vec::new();
+    let mut truncated = false;
+
+    'search: for rel_path in files {
+        if let Some(ref gm) = glob_matcher {
+            if !gm.is_match(&rel_path) {
+                continue;
+            }
+        }
+        let full_path = root.join(&rel_path);
+        let Ok(meta) = std::fs::metadata(&full_path) else {
+            continue;
+        };
+        if meta.is_dir() || meta.len() > READ_CAP_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&full_path) else {
+            continue;
+        };
+        if is_binary_buffer(&bytes) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+
+        for (line_idx, line) in text.lines().enumerate() {
+            let line_number = (line_idx + 1) as u32;
+            for mat in re.find_iter(line) {
+                let column = (line[..mat.start()].chars().count() + 1) as u32;
+                if hits.len() >= cap {
+                    truncated = true;
+                    break 'search;
+                }
+                hits.push(FileSearchHit {
+                    path: rel_path.clone(),
+                    line: line_number,
+                    column,
+                    preview: trim_preview(line, 240),
+                });
+            }
+        }
+    }
+
+    Ok(FileSearchResult {
+        query: opts.query.to_string(),
+        hits,
+        truncated,
+    })
+}
+
+fn trim_preview(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars {
+        line.to_string()
+    } else {
+        line.chars().take(max_chars).collect()
+    }
 }
 
 #[cfg(test)]

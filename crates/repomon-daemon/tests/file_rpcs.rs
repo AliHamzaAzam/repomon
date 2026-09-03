@@ -798,3 +798,318 @@ async fn worktree_watcher_lifecycle_and_events() {
 
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn file_create_operations_and_collisions() {
+    let mut h = setup("file-create").await;
+
+    // 1. Create directory with nested parents
+    let r1 = call(
+        &mut h.stream,
+        10,
+        "file.create",
+        Some(json!({ "lane_id": h.lane_id, "path": "deep/nested/dir", "is_dir": true })),
+    )
+    .await;
+    assert!(r1.error.is_none());
+    assert!(h.root.join("deep/nested/dir").is_dir());
+
+    // 2. Create file in existing directory
+    let r2 = call(
+        &mut h.stream,
+        11,
+        "file.create",
+        Some(json!({ "lane_id": h.lane_id, "path": "deep/nested/dir/file.txt", "is_dir": false })),
+    )
+    .await;
+    assert!(r2.error.is_none());
+    assert!(h.root.join("deep/nested/dir/file.txt").is_file());
+
+    // 3. Collision error (-32009) on already existing file
+    let r3 = call(
+        &mut h.stream,
+        12,
+        "file.create",
+        Some(json!({ "lane_id": h.lane_id, "path": "deep/nested/dir/file.txt" })),
+    )
+    .await;
+    assert_eq!(r3.error.as_ref().map(|e| e.code), Some(-32009));
+
+    // 4. Collision error (-32009) on already existing directory
+    let r4 = call(
+        &mut h.stream,
+        13,
+        "file.create",
+        Some(json!({ "lane_id": h.lane_id, "path": "deep/nested/dir", "is_dir": true })),
+    )
+    .await;
+    assert_eq!(r4.error.as_ref().map(|e| e.code), Some(-32009));
+
+    // 5. Parent directory auto-creation for new file
+    let r5 = call(
+        &mut h.stream,
+        14,
+        "file.create",
+        Some(json!({ "lane_id": h.lane_id, "path": "auto/parent/test.txt" })),
+    )
+    .await;
+    assert!(r5.error.is_none());
+    assert!(h.root.join("auto/parent/test.txt").is_file());
+
+    // 6. Traversal rejection
+    let r6 = call(
+        &mut h.stream,
+        15,
+        "file.create",
+        Some(json!({ "lane_id": h.lane_id, "path": "../outside.txt" })),
+    )
+    .await;
+    assert!(r6.error.is_some());
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_rename_operations_and_traversal() {
+    let mut h = setup("file-rename").await;
+
+    std::fs::write(h.root.join("source.txt"), "rename me\n").unwrap();
+    std::fs::create_dir_all(h.root.join("target_dir")).unwrap();
+    std::fs::write(h.root.join("target_dir/existing.txt"), "already here\n").unwrap();
+
+    // 1. Cross-directory rename
+    let r1 = call(
+        &mut h.stream,
+        10,
+        "file.rename",
+        Some(json!({ "lane_id": h.lane_id, "from": "source.txt", "to": "target_dir/moved.txt" })),
+    )
+    .await;
+    assert!(r1.error.is_none());
+    assert!(!h.root.join("source.txt").exists());
+    assert!(h.root.join("target_dir/moved.txt").is_file());
+
+    // 2. Collision error (-32009) when destination exists
+    let r2 = call(
+        &mut h.stream,
+        11,
+        "file.rename",
+        Some(json!({ "lane_id": h.lane_id, "from": "target_dir/moved.txt", "to": "target_dir/existing.txt" })),
+    )
+    .await;
+    assert_eq!(r2.error.as_ref().map(|e| e.code), Some(-32009));
+
+    // 3. Traversal rejection
+    let r3 = call(
+        &mut h.stream,
+        12,
+        "file.rename",
+        Some(json!({ "lane_id": h.lane_id, "from": "target_dir/moved.txt", "to": "../escaped.txt" })),
+    )
+    .await;
+    assert!(r3.error.is_some());
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_delete_operations_and_guards() {
+    let mut h = setup("file-delete").await;
+
+    std::fs::write(h.root.join("delete_me.txt"), "remove\n").unwrap();
+    std::fs::create_dir_all(h.root.join("empty_dir")).unwrap();
+    std::fs::create_dir_all(h.root.join("non_empty_dir/sub")).unwrap();
+    std::fs::write(h.root.join("non_empty_dir/sub/item.txt"), "nested\n").unwrap();
+
+    // 1. Delete plain file
+    let r1 = call(
+        &mut h.stream,
+        10,
+        "file.delete",
+        Some(json!({ "lane_id": h.lane_id, "path": "delete_me.txt" })),
+    )
+    .await;
+    assert!(r1.error.is_none());
+    assert!(!h.root.join("delete_me.txt").exists());
+
+    // 2. Delete empty directory without recursive flag
+    let r2 = call(
+        &mut h.stream,
+        11,
+        "file.delete",
+        Some(json!({ "lane_id": h.lane_id, "path": "empty_dir" })),
+    )
+    .await;
+    assert!(r2.error.is_none());
+    assert!(!h.root.join("empty_dir").exists());
+
+    // 3. Delete non-empty directory without recursive flag: rejected with -32008
+    let r3 = call(
+        &mut h.stream,
+        12,
+        "file.delete",
+        Some(json!({ "lane_id": h.lane_id, "path": "non_empty_dir", "recursive": false })),
+    )
+    .await;
+    assert_eq!(r3.error.as_ref().map(|e| e.code), Some(-32008));
+    assert!(h.root.join("non_empty_dir").exists());
+
+    // 4. Delete non-empty directory with recursive: true succeeds
+    let r4 = call(
+        &mut h.stream,
+        13,
+        "file.delete",
+        Some(json!({ "lane_id": h.lane_id, "path": "non_empty_dir", "recursive": true })),
+    )
+    .await;
+    assert!(r4.error.is_none());
+    assert!(!h.root.join("non_empty_dir").exists());
+
+    // 5. Delete .git is rejected
+    let r5 = call(
+        &mut h.stream,
+        14,
+        "file.delete",
+        Some(json!({ "lane_id": h.lane_id, "path": ".git", "recursive": true })),
+    )
+    .await;
+    assert!(r5.error.is_some());
+
+    // 6. Delete root is rejected
+    let r6 = call(
+        &mut h.stream,
+        15,
+        "file.delete",
+        Some(json!({ "lane_id": h.lane_id, "path": "", "recursive": true })),
+    )
+    .await;
+    assert!(r6.error.is_some());
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_search_features_and_truncation() {
+    let mut h = setup("file-search").await;
+
+    std::fs::create_dir_all(h.root.join("src")).unwrap();
+    std::fs::write(
+        h.root.join("src/lib.rs"),
+        "pub fn calculate_score() -> i32 {\n    let score = 42;\n    score\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        h.root.join("src/main.rs"),
+        "fn main() {\n    println!(\"Score: 100\");\n    calculate_score();\n}\n",
+    )
+    .unwrap();
+    // Binary file: should be skipped
+    std::fs::write(h.root.join("src/blob.bin"), [0u8, 1, 2, b's', b'c', b'o', b'r', b'e']).unwrap();
+    // Ignored file: should be skipped
+    std::fs::write(h.root.join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(h.root.join("audit.log"), "score in log\n").unwrap();
+
+    // 1. Plain substring search with 1-based line and column
+    let r1 = call(
+        &mut h.stream,
+        10,
+        "file.search",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "query": "calculate_score",
+        })),
+    )
+    .await;
+    assert!(r1.error.is_none());
+    let res1: repomon_core::model::FileSearchResult = serde_json::from_value(r1.result.unwrap()).unwrap();
+    assert_eq!(res1.hits.len(), 2);
+    let hit_lib = res1.hits.iter().find(|hit| hit.path == "src/lib.rs").unwrap();
+    assert_eq!(hit_lib.line, 1);
+    assert_eq!(hit_lib.column, 8); // "pub fn " is 7 chars, so column is 8!
+    assert!(hit_lib.preview.contains("calculate_score"));
+
+    // 2. Case sensitive search
+    let r2 = call(
+        &mut h.stream,
+        11,
+        "file.search",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "query": "score",
+            "case_sensitive": true,
+        })),
+    )
+    .await;
+    let res2: repomon_core::model::FileSearchResult = serde_json::from_value(r2.result.unwrap()).unwrap();
+    assert!(!res2.hits.iter().any(|hit| hit.preview.contains("println!(\"Score:")));
+
+    // Case insensitive search
+    let r2_ci = call(
+        &mut h.stream,
+        12,
+        "file.search",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "query": "score",
+            "case_sensitive": false,
+        })),
+    )
+    .await;
+    let res2_ci: repomon_core::model::FileSearchResult = serde_json::from_value(r2_ci.result.unwrap()).unwrap();
+    assert!(res2_ci.hits.iter().any(|hit| hit.preview.contains("println!(\"Score:")));
+
+    // 3. Regex mode
+    let r3 = call(
+        &mut h.stream,
+        13,
+        "file.search",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "query": r"score\s*=\s*\d+",
+            "regex": true,
+        })),
+    )
+    .await;
+    let res3: repomon_core::model::FileSearchResult = serde_json::from_value(r3.result.unwrap()).unwrap();
+    assert_eq!(res3.hits.len(), 1);
+    assert_eq!(res3.hits[0].path, "src/lib.rs");
+    assert_eq!(res3.hits[0].line, 2);
+
+    // 4. Glob filter restricts to matching paths
+    let r4 = call(
+        &mut h.stream,
+        14,
+        "file.search",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "query": "score",
+            "glob": "*main.rs",
+        })),
+    )
+    .await;
+    let res4: repomon_core::model::FileSearchResult = serde_json::from_value(r4.result.unwrap()).unwrap();
+    assert!(!res4.hits.is_empty());
+    assert!(res4.hits.iter().all(|hit| hit.path == "src/main.rs"));
+
+    // 5. Binary file and ignored file are excluded
+    assert!(!res2_ci.hits.iter().any(|hit| hit.path == "src/blob.bin"));
+    assert!(!res2_ci.hits.iter().any(|hit| hit.path == "audit.log"));
+
+    // 6. Cap truncation
+    let r6 = call(
+        &mut h.stream,
+        15,
+        "file.search",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "query": "score",
+            "max_results": 1,
+        })),
+    )
+    .await;
+    let res6: repomon_core::model::FileSearchResult = serde_json::from_value(r6.result.unwrap()).unwrap();
+    assert_eq!(res6.hits.len(), 1);
+    assert!(res6.truncated);
+
+    h.shutdown().await;
+}

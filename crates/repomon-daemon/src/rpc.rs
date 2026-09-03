@@ -118,6 +118,8 @@ const DIALOG_CHANGED: i64 = -32010;
 /// the conflict without a second RPC round-trip. Same "distinct code + structured data" shape as
 /// `DIALOG_CHANGED` above.
 const FILE_CONFLICT: i64 = -32011;
+const FILE_ALREADY_EXISTS: i64 = -32009;
+const FILE_DIR_NOT_EMPTY: i64 = -32008;
 
 /// Record that input reached a lane window: stamp `input_seen` (quiets the notification
 /// engine) and drop the window's sniff-cache entry, so an answered dialog can't be
@@ -802,6 +804,39 @@ fn file_write_error(e: crate::files::WriteError) -> RpcError {
             RpcError::invalid_params("parent directory does not exist (no mkdir -p in v1)")
         }
         crate::files::WriteError::Io(e) => internal(e),
+    }
+}
+
+fn file_create_error(e: crate::files::CreateError) -> RpcError {
+    match e {
+        crate::files::CreateError::AlreadyExists => {
+            RpcError::new(FILE_ALREADY_EXISTS, "already exists")
+        }
+        crate::files::CreateError::Escape => RpcError::invalid_params("path escapes worktree"),
+        crate::files::CreateError::Io(e) => internal(e),
+    }
+}
+
+fn file_rename_error(e: crate::files::RenameError) -> RpcError {
+    match e {
+        crate::files::RenameError::NotFound => RpcError::invalid_params("source path not found"),
+        crate::files::RenameError::AlreadyExists => {
+            RpcError::new(FILE_ALREADY_EXISTS, "already exists")
+        }
+        crate::files::RenameError::Escape => RpcError::invalid_params("path escapes worktree"),
+        crate::files::RenameError::Io(e) => internal(e),
+    }
+}
+
+fn file_delete_error(e: crate::files::DeleteError) -> RpcError {
+    match e {
+        crate::files::DeleteError::NotFound => RpcError::invalid_params("path not found"),
+        crate::files::DeleteError::Forbidden(msg) => RpcError::invalid_params(msg),
+        crate::files::DeleteError::NotEmpty => {
+            RpcError::new(FILE_DIR_NOT_EMPTY, "directory not empty")
+        }
+        crate::files::DeleteError::Escape => RpcError::invalid_params("path escapes worktree"),
+        crate::files::DeleteError::Io(e) => internal(e),
     }
 }
 #[derive(Deserialize)]
@@ -2320,6 +2355,118 @@ pub async fn dispatch(
                 truncated,
                 generation: entry.generation,
             })
+        }
+        "file.create" => {
+            let p: FileCreate = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                crate::files::create_file_or_dir(&root, &p.path, p.is_dir)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(file_create_error)?;
+
+            ctx.invalidate_file_index(p.lane_id).await;
+            ctx.broadcast(
+                "event.file.changed",
+                json!({
+                    "lane_id": p.lane_id,
+                    "path": res.path,
+                    "op": "created",
+                }),
+            );
+
+            to_value(res)
+        }
+        "file.rename" => {
+            let p: FileRename = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                crate::files::rename_path(&root, &p.from, &p.to)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(file_rename_error)?;
+
+            ctx.invalidate_file_index(p.lane_id).await;
+            ctx.broadcast(
+                "event.file.changed",
+                json!({
+                    "lane_id": p.lane_id,
+                    "path": res.to,
+                    "op": "renamed",
+                    "from": res.from,
+                }),
+            );
+
+            to_value(res)
+        }
+        "file.delete" => {
+            let p: FileDelete = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                crate::files::delete_path(&root, &p.path, p.recursive)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(file_delete_error)?;
+
+            ctx.invalidate_file_index(p.lane_id).await;
+            ctx.broadcast(
+                "event.file.changed",
+                json!({
+                    "lane_id": p.lane_id,
+                    "path": res.path,
+                    "op": "removed",
+                }),
+            );
+
+            to_value(res)
+        }
+        "file.search" => {
+            let p: FileSearch = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let max_results = p.max_results.unwrap_or(200) as usize;
+            let query = p.query;
+            let regex = p.regex;
+            let case_sensitive = p.case_sensitive;
+            let glob = p.glob;
+
+            let file_list = {
+                let indices = ctx.file_indices.lock().await;
+                indices
+                    .get(&p.lane_id)
+                    .filter(|e| e.valid)
+                    .map(|e| e.paths.clone())
+            };
+
+            let res = tokio::task::spawn_blocking(move || {
+                let opts = crate::files::SearchOpts {
+                    query: &query,
+                    regex,
+                    case_sensitive,
+                    glob: glob.as_deref(),
+                    max_results,
+                };
+                crate::files::search_worktree(&root, &opts, file_list)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|e| match e {
+                crate::files::SearchError::InvalidQuery(err) => {
+                    RpcError::invalid_params(format!("invalid query regex: {err}"))
+                }
+                crate::files::SearchError::InvalidGlob(err) => {
+                    RpcError::invalid_params(format!("invalid glob: {err}"))
+                }
+                crate::files::SearchError::Io(err) => internal(err),
+            })?;
+
+            to_value(res)
         }
 
         // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----

@@ -3,4 +3,4 @@
 /**
  * `file.create`'s result.
  */
-export type FileCreateResult = { path: string, };
+export type FileCreateResult = { path: string, is_dir: boolean, };
