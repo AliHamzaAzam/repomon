@@ -92,6 +92,7 @@ function buildDefaultPanels(
           repomind={repomind}
           actions={actions}
           editor={editor}
+          workspace={workspace}
           onEnsureEditorOpen={onEnsureEditorOpen}
         />
       ),
