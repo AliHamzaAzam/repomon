@@ -215,6 +215,69 @@ pub async fn ensure_home(ctx: &Ctx) -> repomon_core::Result<RepomindHome> {
     })
 }
 
+/// Resolve the controller lane's primary window: the store's recorded window when a live session
+/// still runs there, otherwise the lane's earliest live session (slot order), with the record
+/// corrected to match so the next read is cheap and stays true. `None` when the controller lane
+/// has no live session at all — `repomind.status` reports `window: null` and `repomind.instruct`
+/// refuses rather than typing into, or reporting, a window nobody is in.
+///
+/// "Live" means a tmux window presently exists for one of the lane's agent slots (`lane-{id}` /
+/// `lane-{id}-{slot}`) — the same liveness `agent.spawn`'s controller cap check already uses.
+/// This is what catches the staleness `agent.spawn` leaves behind: every spawn into the
+/// controller lane (`orchestrator.start`'s first spawn, then an operator's Spawn to add another
+/// controller, or the next `orchestrator.start` after a restart) unconditionally records its own
+/// window as "the" controller window, even when an earlier session in the same lane is still the
+/// one actually running. When that later window's session ends, the record is left pointing at a
+/// corpse while the earlier session lives on.
+pub async fn primary_window(ctx: &Ctx, lane_id: LaneId) -> repomon_core::Result<Option<String>> {
+    let backend = ctx.backend.clone();
+    let names = tokio::task::spawn_blocking(move || backend.list_windows())
+        .await
+        .map_err(|e| repomon_core::Error::Other(e.to_string()))??;
+    let live = repomon_core::TmuxRuntime::lane_windows_in(&names, lane_id);
+
+    let recorded = ctx.controller_lane_window().await;
+    if let Some(window) = recorded.as_deref() {
+        if live.iter().any(|w| w == window) {
+            return Ok(Some(window.to_string()));
+        }
+    }
+    let Some(earliest) = live.into_iter().next() else {
+        return Ok(None);
+    };
+    if recorded.as_deref() != Some(earliest.as_str()) {
+        ctx.store
+            .set_lane_tmux_window(lane_id, Some(earliest.clone()))
+            .await?;
+    }
+    Ok(Some(earliest))
+}
+
+/// [`primary_window`], for callers that need a window to act on unconditionally — the deprecated
+/// `orchestrator.*` aliases — rather than one that handles "no controller" itself.
+///
+/// The in-memory tracked session, when this process has one, takes priority over the lane
+/// resolution below: it is what `orchestrator.stop`'s kill and `reconcile_orchestrator` actually
+/// keep truthful, and it is the only record of a window the lane system doesn't recognize as its
+/// own — an adopted legacy `orchestrator` window surviving from a pre-R1 daemon, whose adoption
+/// deliberately does not write the lane's `tmux_window` (see `orchestrator.start`). Only when
+/// nothing is tracked (typically: this process hasn't adopted or spawned a controller since it
+/// started) does resolution fall to the controller lane's live session, then the legacy window
+/// name as a last resort.
+pub async fn primary_window_or_legacy(ctx: &Ctx) -> String {
+    if let Some(session) = ctx.orchestrator.lock().await.as_ref() {
+        return session.window.clone();
+    }
+    if let Ok(Some(lane_id)) = ctx.store.controller_lane().await {
+        if let Ok(Some(window)) = primary_window(ctx, lane_id).await {
+            return window;
+        }
+    }
+    ctx.controller_lane_window()
+        .await
+        .unwrap_or_else(|| crate::ORCHESTRATOR_WINDOW.to_string())
+}
+
 /// The dialog classes a controller may not answer for itself. A controller holds the fleet
 /// catalog, so a permission prompt in its lane is about the whole fleet rather than about one
 /// worktree; these classes wait for the operator instead of being auto-answered.
@@ -353,7 +416,8 @@ pub async fn migrate_records(ctx: &Ctx) -> repomon_core::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repomon_core::{Config, Store};
+    use repomon_core::agent::backend::SpawnSpec;
+    use repomon_core::{Config, Store, TmuxRuntime};
     use std::sync::Arc;
 
     #[test]
@@ -431,6 +495,33 @@ mod tests {
         let mut config = Config::default();
         config.repomind.home = home.to_string_lossy().into_owned();
         Ctx::new(store, config, None)
+    }
+
+    /// Like [`test_ctx`] but pinned to a throwaway tmux `-L` session, for tests that spawn real
+    /// windows: `Config::default()`'s `tmux_session` is `"repomon"`, the real daemon's session, so
+    /// any test that actually talks to tmux must never use it.
+    async fn test_ctx_with_tmux(home: &Path, tmux_session: String) -> Arc<Ctx> {
+        let store = Store::open_in_memory().unwrap();
+        let mut config = Config {
+            tmux_session,
+            ..Default::default()
+        };
+        config.repomind.home = home.to_string_lossy().into_owned();
+        Ctx::new(store, config, None)
+    }
+
+    /// A tmux `-L` session name unique to this test run, so parallel tests (and parallel CI
+    /// runs) never collide or touch the operator's real `repomon` session.
+    fn unique_tmux_session(tag: &str) -> String {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("repomon-primary-window-it-{tag}-{}-{seq}", std::process::id())
+    }
+
+    fn kill_tmux_session(session: &str) {
+        let _ = std::process::Command::new(repomon_core::agent::tmux_program())
+            .args(["-L", session, "kill-server"])
+            .output();
     }
 
     #[tokio::test]
@@ -648,5 +739,124 @@ mod tests {
             home_counts(&dir.path().join("nope")),
             repomon_core::model::RepomindCounts::default()
         );
+    }
+
+    /// The exact production scenario: Start recorded window one, a later Spawn (or a second
+    /// Start after a restart) recorded window two, and window two's session has since ended
+    /// while window one is still the live controller. `primary_window` must resolve to the live
+    /// window one, not the stale recorded window two, and must correct the record.
+    #[tokio::test]
+    async fn primary_window_resolves_a_stale_recorded_window_to_the_live_session() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping primary_window liveness test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let session = unique_tmux_session("stale");
+        let ctx = test_ctx_with_tmux(&home, session.clone()).await;
+        let lane_id = ensure_home(&ctx).await.unwrap().lane_id;
+        let tmp = std::env::temp_dir();
+
+        let w1 = ctx
+            .backend
+            .spawn(lane_id, &SpawnSpec::new("sleep 60", &tmp))
+            .expect("spawn window one");
+        let w2 = ctx
+            .backend
+            .spawn(lane_id, &SpawnSpec::new("sleep 60", &tmp))
+            .expect("spawn window two");
+        assert_ne!(w1, w2);
+        // Mirrors what `agent.spawn` does unconditionally: the newest window becomes "the"
+        // recorded controller window, even though window one is still running.
+        ctx.store
+            .set_lane_tmux_window(lane_id, Some(w2.clone()))
+            .await
+            .unwrap();
+        // Window two's session ends; window one is still live.
+        ctx.backend.kill_named(&w2).expect("kill window two");
+
+        let resolved = primary_window(&ctx, lane_id).await.unwrap();
+        assert_eq!(resolved, Some(w1.clone()), "must resolve to the live window");
+        assert_eq!(
+            ctx.controller_lane_window().await,
+            Some(w1),
+            "the record must be corrected to the live window"
+        );
+
+        kill_tmux_session(&session);
+    }
+
+    /// Two live controller sessions in the lane (the operator deliberately ran Spawn to add a
+    /// second controller, under the configured cap): the recorded window is kept as-is rather
+    /// than being switched to the earliest one just because both are live.
+    #[tokio::test]
+    async fn primary_window_keeps_the_recorded_window_when_two_sessions_are_live() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping primary_window liveness test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let session = unique_tmux_session("two-live");
+        let ctx = test_ctx_with_tmux(&home, session.clone()).await;
+        let lane_id = ensure_home(&ctx).await.unwrap().lane_id;
+        let tmp = std::env::temp_dir();
+
+        let w1 = ctx
+            .backend
+            .spawn(lane_id, &SpawnSpec::new("sleep 60", &tmp))
+            .expect("spawn window one");
+        let w2 = ctx
+            .backend
+            .spawn(lane_id, &SpawnSpec::new("sleep 60", &tmp))
+            .expect("spawn window two");
+        ctx.store
+            .set_lane_tmux_window(lane_id, Some(w2.clone()))
+            .await
+            .unwrap();
+
+        let resolved = primary_window(&ctx, lane_id).await.unwrap();
+        assert_eq!(
+            resolved,
+            Some(w2.clone()),
+            "both live: the recorded window must win over the earliest"
+        );
+        assert_eq!(ctx.controller_lane_window().await, Some(w2));
+
+        let _ = w1;
+        kill_tmux_session(&session);
+    }
+
+    /// No live session in the controller lane at all — the recorded window is stale and nothing
+    /// replaces it — resolves to `None`, which is what makes `repomind.status` report
+    /// `window: null` and `repomind.instruct` refuse.
+    #[tokio::test]
+    async fn primary_window_is_none_when_no_session_is_live() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping primary_window liveness test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let session = unique_tmux_session("none-live");
+        let ctx = test_ctx_with_tmux(&home, session.clone()).await;
+        let lane_id = ensure_home(&ctx).await.unwrap().lane_id;
+        let tmp = std::env::temp_dir();
+
+        let w1 = ctx
+            .backend
+            .spawn(lane_id, &SpawnSpec::new("sleep 60", &tmp))
+            .expect("spawn window one");
+        ctx.store
+            .set_lane_tmux_window(lane_id, Some(w1.clone()))
+            .await
+            .unwrap();
+        ctx.backend.kill_named(&w1).expect("kill window one");
+
+        let resolved = primary_window(&ctx, lane_id).await.unwrap();
+        assert_eq!(resolved, None, "no live session must resolve to None");
+
+        kill_tmux_session(&session);
     }
 }

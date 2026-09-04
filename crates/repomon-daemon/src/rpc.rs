@@ -1487,7 +1487,7 @@ async fn message_sender(
         None | Some("operator") => Ok(resolved_named("operator", None)),
         Some("repomind") => Ok(resolved_named(
             "repomind",
-            Some(ctx.controller_window().await),
+            Some(crate::repomind::primary_window_or_legacy(ctx).await),
         )),
         Some(_) => Err(RpcError::invalid_params("invalid message sender source")),
     }
@@ -4904,13 +4904,16 @@ pub async fn dispatch(
             // consulted everywhere a Claude-only capability would otherwise be assumed. Errors out
             // (guard drops, nothing recorded) on an agent that can't run the orchestrator at all.
             let backend = resolve_orchestrator_backend(&agent, &customs)?;
-            // A window may survive a daemon restart (tmux outlives us). Adopt it instead of
-            // spawning a duplicate. Two candidates, newest convention first: the controller lane's
-            // last recorded window, then the legacy daemon-owned `orchestrator` window a pre-R1
-            // daemon would have left behind.
-            let adopt_candidates: Vec<String> = ctx
-                .controller_lane_window()
+            // A window may survive a daemon restart (tmux outlives us), or simply still be
+            // running from an earlier Start/Spawn — adopt it instead of spawning a duplicate.
+            // Two candidates, newest convention first: the controller lane's actual live window
+            // (resolved, not the possibly-stale record — a later Spawn can have overwritten the
+            // record with a window whose session has since ended, while this one is still up),
+            // then the legacy daemon-owned `orchestrator` window a pre-R1 daemon would have left
+            // behind.
+            let adopt_candidates: Vec<String> = crate::repomind::primary_window(ctx, home.lane_id)
                 .await
+                .map_err(internal)?
                 .into_iter()
                 .chain(std::iter::once(ORCHESTRATOR_WINDOW.to_string()))
                 .collect();
@@ -5088,13 +5091,21 @@ pub async fn dispatch(
                 (cfg.repomind_home(), cfg.repomind.max_controllers)
             };
             let lane_id = ctx.store.controller_lane().await.map_err(internal)?;
-            // Read the repo and window off the controller lane's own metadata rather than by
-            // matching the configured path: `repo.add` canonicalizes what it stores, so the two
-            // spellings differ whenever the configured home goes through a symlink.
+            // Read the repo off the controller lane's own metadata rather than by matching the
+            // configured path: `repo.add` canonicalizes what it stores, so the two spellings
+            // differ whenever the configured home goes through a symlink.
             let meta = ctx.store.list_lane_meta().await.map_err(internal)?;
             let lane_meta = lane_id.and_then(|id| meta.into_iter().find(|m| m.id == id));
             let repo_id = lane_meta.as_ref().map(|m| m.repo_id);
-            let window = lane_meta.and_then(|m| m.tmux_window);
+            // The window is resolved against tmux, not read raw off the record: a spawn into the
+            // lane after this one ended (the operator's Spawn, or a later Start) can leave the
+            // record naming a dead window while an earlier session is still the live controller.
+            let window = match lane_id {
+                Some(id) => crate::repomind::primary_window(ctx, id)
+                    .await
+                    .map_err(internal)?,
+                None => None,
+            };
             let exists = {
                 let probe = home.clone();
                 tokio::task::spawn_blocking(move || probe.exists())
@@ -5156,12 +5167,23 @@ pub async fn dispatch(
                 .ok_or_else(|| {
                     RpcError::invalid_params("the repomind home has no controller lane yet")
                 })?;
-            let primary = ctx.controller_window().await;
-            let lanes = ctx.lanes.list().await.map_err(internal)?;
+            // Resolved for liveness first: a stale record (the earlier lane-window staleness —
+            // `agent.spawn` overwrote it, and that window's session has since ended) must not
+            // report a controller as running when nothing live answers to that name.
+            let primary = crate::repomind::primary_window(ctx, lane_id)
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    RpcError::invalid_params("no controller is running in the repomind home")
+                })?;
+            // `lanes_with_agents`, not the bare `ctx.lanes.list()`: only the overlay actually
+            // populates `agent_sessions` (live tmux/transcript scan) — the core `Lanes::list()`
+            // always returns it empty, which otherwise makes every session lookup below fail.
+            let lanes = lanes_with_agents(ctx).await?;
             let lane = lanes.iter().find(|l| l.id == lane_id);
-            // The primary controller is the session in the lane's recorded window; a lane whose
-            // window moved still gets the instruction through its first managed session rather
-            // than nothing.
+            // The primary controller is the session in the lane's resolved live window; a lane
+            // whose window moved still gets the instruction through its first managed session
+            // rather than nothing.
             let managed = |s: &&repomon_core::model::AgentSession| {
                 !s.external && !s.inferred && s.tmux_window.is_some()
             };
@@ -5282,7 +5304,10 @@ pub async fn dispatch(
             warn_deprecated_orchestrator_rpc("orchestrator.target", "agent.target");
             // Clear + broadcast stopped if the window died, so a stale "running" can't linger.
             reconcile_orchestrator(ctx).await;
-            let window = ctx.controller_window().await;
+            // Resolved for liveness, not read raw off the tracked/recorded window: a spawn since
+            // this one ended (the operator's Spawn, or a later Start) can leave that pointing at
+            // a corpse while an earlier controller session in the lane is still live.
+            let window = crate::repomind::primary_window_or_legacy(ctx).await;
             let tmux = ctx.backend.clone();
             // Restore client-follow sizing before the attaching terminal renders it (mirrors
             // `agent.target`).
@@ -5307,7 +5332,10 @@ pub async fn dispatch(
                     "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
                 ));
             }
-            let window = ctx.controller_window().await;
+            // Resolved for liveness, not read raw off the tracked/recorded window: a spawn since
+            // this one ended (the operator's Spawn, or a later Start) can leave that pointing at
+            // a corpse while an earlier controller session in the lane is still live.
+            let window = crate::repomind::primary_window_or_legacy(ctx).await;
             let tmux = ctx.backend.clone();
             let (text, enter) = (p.text, p.enter);
             tokio::task::spawn_blocking(move || {
@@ -5335,7 +5363,10 @@ pub async fn dispatch(
                     "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
                 ));
             }
-            let window = ctx.controller_window().await;
+            // Resolved for liveness, not read raw off the tracked/recorded window: a spawn since
+            // this one ended (the operator's Spawn, or a later Start) can leave that pointing at
+            // a corpse while an earlier controller session in the lane is still live.
+            let window = crate::repomind::primary_window_or_legacy(ctx).await;
             let tmux = ctx.backend.clone();
             let (key, literal) = (p.key, p.literal);
             tokio::task::spawn_blocking(move || {
@@ -5369,7 +5400,10 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             // Clamp to a sane floor so a momentary tiny layout can't shrink the window to nothing.
             let (cols, rows) = (p.cols.max(20), p.rows.max(4));
-            let window = ctx.controller_window().await;
+            // Resolved for liveness, not read raw off the tracked/recorded window: a spawn since
+            // this one ended (the operator's Spawn, or a later Start) can leave that pointing at
+            // a corpse while an earlier controller session in the lane is still live.
+            let window = crate::repomind::primary_window_or_legacy(ctx).await;
             tokio::task::spawn_blocking(move || tmux.resize_named(&window, cols, rows))
                 .await
                 .map_err(internal)?
