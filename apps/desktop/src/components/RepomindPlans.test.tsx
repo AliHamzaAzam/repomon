@@ -5,8 +5,12 @@ import RepomindPlans from "./RepomindPlans";
 
 const daemonCall = vi.fn();
 
+// The board pulls in `stores/repomind.ts` for its Add-goal write path, which also references
+// `subscribeDaemon` at module scope (for the status poller this component does not use) - the
+// mock must provide it too, or importing the module fails outright.
 vi.mock("../ipc/rpc", () => ({
   daemonCall: (...args: unknown[]) => daemonCall(...args),
+  subscribeDaemon: vi.fn(async () => () => {}),
 }));
 
 afterEach(() => {
@@ -61,6 +65,38 @@ describe("the plans board", () => {
     expect(screen.queryByText("README")).toBeNull();
   });
 
+  it("hides the Next line rather than showing 'Next: .', and shows unassigned only when the owner is genuinely unset", async () => {
+    const bare =
+      "---\ntitle: Bare goal\nnext step: .\ncreated: 2026-09-01T00:00:00Z\n---\n\n# Bare goal\n\nno owner line at all\n";
+    daemonCall.mockImplementation((method: string, params?: { path?: string }) => {
+      switch (method) {
+        case "file.list":
+          return Promise.resolve({
+            entries: [{ name: "bare.md", path: "plans/active/bare.md", is_dir: false, size: 10, ignored: false }],
+            truncated: false,
+          });
+        case "file.read":
+          return params?.path === "plans/active/bare.md"
+            ? Promise.resolve({
+                content: bare,
+                mtime_ms: 0,
+                size: bare.length,
+                truncated: false,
+                kind: "text",
+                large: false,
+              })
+            : Promise.reject(new Error("no such file"));
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("Bare goal")).toBeInTheDocument());
+    expect(screen.queryByText(/^Next:/)).toBeNull();
+    expect(screen.getByText(/^unassigned/)).toBeInTheDocument();
+  });
+
   it("explains the file shape when no goal is in flight", async () => {
     mockDaemon({ "file.list": { entries: [], truncated: false } });
     render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} />);
@@ -80,7 +116,7 @@ describe("the plans board", () => {
     expect(onOpen).toHaveBeenCalledWith("plans/active/ship-r6.md");
   });
 
-  it("writes a new goal file and tells the primary controller about it", async () => {
+  it("tells the primary controller first, then writes the goal file owned by repomind", async () => {
     mockDaemon();
     const onChanged = vi.fn();
     render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} onChanged={onChanged} />);
@@ -103,10 +139,30 @@ describe("the plans board", () => {
     expect(daemonCall).toHaveBeenCalledWith("repomind.instruct", {
       text: "New goal in plans/active/ship-the-control-room.md: Ship the control room. Pick it up.",
     });
+    const [, writeParams] = daemonCall.mock.calls.find(([method]) => method === "file.write") ?? [];
+    expect((writeParams as { content: string }).content).toContain("owner: repomind");
+    await waitFor(() => expect(screen.getByText(/told the controller/)).toBeInTheDocument());
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 
-  it("keeps the goal and says nobody was told when no controller is running", async () => {
+  it("defaults the next step to the title when the operator gives no intent", async () => {
+    mockDaemon();
+    render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("Ship R6")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Add goal"));
+    fireEvent.input(screen.getByLabelText("Goal title"), { target: { value: "Ship it" } });
+    fireEvent.submit(screen.getByLabelText("Add goal", { selector: "form" }));
+
+    await waitFor(() =>
+      expect(daemonCall).toHaveBeenCalledWith(
+        "file.write",
+        expect.objectContaining({ content: expect.stringContaining("Next step: Ship it") }),
+      ),
+    );
+  });
+
+  it("keeps the goal, owned unassigned, and says Repomind will pick it up at boot when no controller is running", async () => {
     mockDaemon({ "repomind.instruct": new Error("no controller is running in the repomind home") });
     render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} />);
 
@@ -117,9 +173,19 @@ describe("the plans board", () => {
     fireEvent.submit(screen.getByLabelText("Add goal", { selector: "form" }));
 
     await waitFor(() =>
-      expect(screen.getByText(/No controller is running, so nobody was told yet/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(
+          /No controller is running; start Repomind and it will pick this up at boot/,
+        ),
+      ).toBeInTheDocument(),
     );
-    expect(daemonCall).toHaveBeenCalledWith("file.write", expect.objectContaining({ lane_id: 90 }));
+    expect(daemonCall).toHaveBeenCalledWith(
+      "file.write",
+      expect.objectContaining({
+        lane_id: 90,
+        content: expect.stringContaining("owner: unassigned"),
+      }),
+    );
   });
 
   it("moves a finished goal into plans/done with its outcome appended", async () => {

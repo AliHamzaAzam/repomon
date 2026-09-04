@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 
 import type { RepomindStatus } from "../bindings";
+import { newPlanDocument, planSlugFor } from "../components/repomindDocs";
 import { daemonCall, subscribeDaemon, type DaemonEvent } from "../ipc/rpc";
 
 /// How often `repomind.status` is re-read. Matches the fleet heartbeat so the pinned Repomind row
@@ -24,6 +25,45 @@ export const daemonRepomindSource: RepomindSource = {
   },
   subscribe: subscribeDaemon,
 };
+
+const ACTIVE_PLANS_DIR = "plans/active";
+
+export interface AddGoalOutcome {
+  /// The home-relative path the goal was written to.
+  path: string;
+  /// Whether the primary controller was actually told about the goal.
+  told: boolean;
+}
+
+/// The Add-goal write path: write a new goal file into `plans/active`, and tell the primary
+/// controller about it.
+///
+/// The tell happens FIRST, not after: whether it lands decides the file's `owner` (`repomind`
+/// when told, `unassigned` otherwise), so the file is written once with the right shape instead
+/// of being written, then patched. The write itself never depends on the tell succeeding - a home
+/// with no controller running still gets its goal file, `told: false` says so, and the caller
+/// (`RepomindPlans`) is what turns that into "start Repomind and it will pick this up at boot".
+export async function addGoal(
+  laneId: number,
+  title: string,
+  intent: string,
+): Promise<AddGoalOutcome> {
+  const path = `${ACTIVE_PLANS_DIR}/${planSlugFor(title)}.md`;
+  let told = true;
+  try {
+    await daemonCall("repomind.instruct", {
+      text: `New goal in ${path}: ${title}. Pick it up.`,
+    });
+  } catch {
+    told = false;
+  }
+  await daemonCall("file.write", {
+    lane_id: laneId,
+    path,
+    content: newPlanDocument(title, intent, told ? "repomind" : "unassigned"),
+  });
+  return { path, told };
+}
 
 /// The `event.agent.status` payload the daemon broadcasts when a session changes state. Only the
 /// window matters here: it says whether the change happened inside the controller lane.

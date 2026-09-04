@@ -63,7 +63,7 @@ function nextStepFrom(text: string): string | null {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const inline = /^\s*(?:[-*]\s*)?(?:\*\*)?next\s*step[s]?(?:\*\*)?\s*:\s*(.+?)\s*$/i.exec(line);
-    if (inline) return inline[1];
+    if (inline) return inline[1].trim();
     if (!/^#{1,6}\s+next(\s+step[s]?)?\s*$/i.test(line.trim())) continue;
     for (let next = index + 1; next < lines.length; next += 1) {
       const candidate = lines[next].trim().replace(/^[-*]\s+/, "");
@@ -73,13 +73,23 @@ function nextStepFrom(text: string): string | null {
   return null;
 }
 
+/// `true` for a "next step" value that says nothing: empty, or the bare "." an operator once had
+/// to type as filler when the Add-goal form required non-empty text (it no longer does, but old
+/// files - and anything hand-written the same way - still carry it). Both read the same as "the
+/// plan does not say", so the card hides the line instead of printing a lone period.
+function isBlankNextStep(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed === "" || trimmed === ".";
+}
+
 /// Summarize one plan file for the panel's Active plans list.
 export function readActivePlan(path: string, content: string): ActivePlan {
   const block = frontmatter(content);
   const rest = body(content);
   const title =
     (block && frontmatterField(block, ["title"])) ?? firstHeading(rest) ?? planSlug(path);
-  const nextStep = (block && frontmatterField(block, ["next step"])) ?? nextStepFrom(rest);
+  const rawNextStep = (block && frontmatterField(block, ["next step"])) ?? nextStepFrom(rest);
+  const nextStep = rawNextStep && !isBlankNextStep(rawNextStep) ? rawNextStep.trim() : null;
   return { path, title, nextStep };
 }
 
@@ -114,8 +124,9 @@ export function journalTail(content: string, limit = 5): string[] {
 /// it last moved. `owner` and `updated` are frontmatter fields the daemon's boot assembly already
 /// reads, so the panel and the boot document describe a plan the same way.
 export interface PlanSummary extends ActivePlan {
-  /// Frontmatter `owner`, or null when the file does not say. The panel shows nothing rather
-  /// than inventing "unassigned", which would read as a decision somebody made.
+  /// Frontmatter `owner`, or null when the file does not say at all. Null is the only case the
+  /// panel labels "unassigned" - a goal Add-goal itself wrote with that owner carries the word
+  /// as real frontmatter, read back here the same way.
   owner: string | null;
   /// Frontmatter `updated`, else `created`, as written. Null when neither is there.
   updated: string | null;
@@ -178,23 +189,34 @@ function dayStamp(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+/// Who owns a goal just added from the panel: `"repomind"` when the controller was actually told
+/// about it, `"unassigned"` when Add goal found no controller running to tell.
+export type NewPlanOwner = "repomind" | "unassigned";
+
 /// A new goal file for `plans/active/<slug>.md`: the home's frontmatter conventions, the title as
-/// the document's heading, and the operator's one line of intent as the next step.
+/// the document's heading, and the operator's intent as the next step - falling back to the title
+/// itself when they gave none, so the file never carries an empty (or placeholder ".") next step.
 ///
 /// The shape is the one the daemon's boot assembly reads back (`title`, `status`, `owner`, and a
 /// "Next step:" line), so a goal added here appears in the very next boot document.
-export function newPlanDocument(title: string, intent: string, now = new Date()): string {
+export function newPlanDocument(
+  title: string,
+  intent: string,
+  owner: NewPlanOwner,
+  now = new Date(),
+): string {
   const slug = planSlugFor(title);
+  const nextStep = intent.trim() || title.trim();
   const fields: Array<[string, string]> = [
     ["title", title],
     ["type", "plan"],
     ["permalink", `repomind/plans/active/${slug}`],
     ["status", "active"],
-    ["owner", "unassigned"],
+    ["owner", owner],
     ["source", `repomon desktop ${dayStamp(now)}`],
     ["created", now.toISOString()],
   ];
-  return `${frontmatterBlock(fields)}# ${title}\n\nNext step: ${intent}\n`;
+  return `${frontmatterBlock(fields)}# ${title}\n\nNext step: ${nextStep}\n`;
 }
 
 /// The same plan closed out: `status: done`, a `closed` stamp, and the operator's one-line

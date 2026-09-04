@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
+import { addGoal as writeRepomindGoal } from "../stores/repomind";
 import { IconPlus } from "./icons";
 import {
   InlineField,
@@ -10,14 +11,7 @@ import {
   SectionNote,
   sinceLabel,
 } from "./RepomindSection";
-import {
-  donePlanDocument,
-  newPlanDocument,
-  planSlug,
-  planSlugFor,
-  readPlanSummary,
-  type PlanSummary,
-} from "./repomindDocs";
+import { donePlanDocument, planSlug, readPlanSummary, type PlanSummary } from "./repomindDocs";
 
 /// The plans board: one row per file in `plans/active`, and the two things an operator does with
 /// a goal that a file browser cannot do for them - start one, and close one out.
@@ -102,31 +96,27 @@ export default function RepomindPlans(props: RepomindPlansProps) {
     setOutcome("");
   }
 
-  /// Write the goal file, then tell the primary controller it exists. The write is the goal; the
-  /// instruction is the handoff. A home with no controller running still gets its file, and says
-  /// so rather than failing the whole action.
+  /// Tell the primary controller about the goal, then write the file with the owner that answer
+  /// decided - `repomind` when told, `unassigned` otherwise - so it is written once, already
+  /// correct. Only the title is required: an operator who has no next step yet still gets a goal
+  /// file, its "Next step" line the title itself rather than empty or a typed-in placeholder. A
+  /// home with no controller running still gets its file, and Add goal says so rather than
+  /// failing the whole action.
   async function addGoal() {
     const name = title().trim();
-    const line = intent().trim();
-    if (!name || !line) return;
-    const path = `${ACTIVE_DIR}/${planSlugFor(name)}.md`;
+    if (!name) return;
     setBusy("add");
     setError(null);
     setNote(null);
     try {
-      await daemonCall("file.write", {
-        lane_id: props.laneId,
-        path,
-        content: newPlanDocument(name, line),
-      });
+      const { path, told } = await writeRepomindGoal(props.laneId, name, intent().trim());
       reset();
-      try {
-        await daemonCall("repomind.instruct", {
-          text: `New goal in ${path}: ${name}. Pick it up.`,
-        });
-        if (live) setNote(`Added ${path} and told the controller.`);
-      } catch {
-        if (live) setNote(`Added ${path}. No controller is running, so nobody was told yet.`);
+      if (live) {
+        setNote(
+          told
+            ? `Added ${path} and told the controller.`
+            : `Added ${path}. No controller is running; start Repomind and it will pick this up at boot.`,
+        );
       }
       await load(props.laneId);
       props.onChanged?.();
@@ -190,7 +180,7 @@ export default function RepomindPlans(props: RepomindPlansProps) {
           label="Add goal"
           submitLabel="Add goal"
           busy={busy() === "add"}
-          canSubmit={Boolean(title().trim() && intent().trim())}
+          canSubmit={Boolean(title().trim())}
           onSubmit={() => void addGoal()}
           onCancel={reset}
         >
@@ -203,7 +193,7 @@ export default function RepomindPlans(props: RepomindPlansProps) {
           />
           <InlineField
             label="Next step"
-            placeholder="What happens next"
+            placeholder="What happens next (optional - defaults to the title)"
             value={intent()}
             onInput={setIntent}
           />
@@ -247,7 +237,7 @@ export default function RepomindPlans(props: RepomindPlansProps) {
                     </Show>
                     <Show when={plan.owner || plan.updated}>
                       <span class="mt-0.5 block truncate font-mono text-[10px] text-muted/70">
-                        {plan.owner ?? "unowned"}
+                        {plan.owner ?? "unassigned"}
                         <Show when={plan.updated}> · {sinceLabel(plan.updated)}</Show>
                       </span>
                     </Show>

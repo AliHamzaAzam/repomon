@@ -40,6 +40,24 @@ describe("readActivePlan", () => {
     expect(readActivePlan("plans/active/ship.md", "# Ship\n\nsome background\n").nextStep).toBeNull();
   });
 
+  it("reads a lone '.' next step as none - the placeholder an older required-intent form left", () => {
+    expect(
+      readActivePlan("plans/active/ship.md", "# Ship\n\nNext step: .\n").nextStep,
+    ).toBeNull();
+    expect(
+      readActivePlan(
+        "plans/active/ship.md",
+        "---\ntitle: Ship\nnext step: .\n---\n\nbody\n",
+      ).nextStep,
+    ).toBeNull();
+  });
+
+  it("reads a whitespace-only next step as none", () => {
+    expect(
+      readActivePlan("plans/active/ship.md", "# Ship\n\nNext step:   \n").nextStep,
+    ).toBeNull();
+  });
+
   it("does not read a heading or a next step out of the frontmatter block itself", () => {
     const plan = readActivePlan("plans/active/ship.md", "---\nstatus: paused\n---\n\n# Real title\n");
     expect(plan.title).toBe("Real title");
@@ -141,7 +159,7 @@ describe("newPlanDocument", () => {
   const now = new Date("2026-09-05T10:30:00.000Z");
 
   it("writes the home's frontmatter with the intent as the next step", () => {
-    const doc = newPlanDocument("Ship R6", "land the plans board", now);
+    const doc = newPlanDocument("Ship R6", "land the plans board", "unassigned", now);
     expect(doc).toBe(
       [
         "---",
@@ -163,18 +181,35 @@ describe("newPlanDocument", () => {
   });
 
   it("quotes a value that would otherwise read as YAML structure", () => {
-    const doc = newPlanDocument("Ship R6: the control room", "unblock the gate", now);
+    const doc = newPlanDocument("Ship R6: the control room", "unblock the gate", "unassigned", now);
     expect(doc).toContain('title: "Ship R6: the control room"');
     expect(doc).toContain("# Ship R6: the control room");
   });
 
   it("produces a plan the daemon's own reader understands", () => {
-    const doc = newPlanDocument("Ship R6", "land the plans board", now);
+    const doc = newPlanDocument("Ship R6", "land the plans board", "unassigned", now);
     expect(readPlanSummary("plans/active/ship-r6.md", doc)).toMatchObject({
       title: "Ship R6",
       nextStep: "land the plans board",
       owner: "unassigned",
     });
+  });
+
+  it("writes owner: repomind when the controller was told", () => {
+    const doc = newPlanDocument("Ship R6", "land the plans board", "repomind", now);
+    expect(doc).toContain("owner: repomind");
+    expect(readPlanSummary("plans/active/ship-r6.md", doc).owner).toBe("repomind");
+  });
+
+  it("falls back to the title as the next step when the operator gave no intent", () => {
+    const doc = newPlanDocument("Ship the control room", "", "unassigned", now);
+    expect(doc).toContain("Next step: Ship the control room");
+    expect(readPlanSummary("plans/active/x.md", doc).nextStep).toBe("Ship the control room");
+  });
+
+  it("falls back to the title when the intent is only whitespace", () => {
+    const doc = newPlanDocument("Ship the control room", "   ", "unassigned", now);
+    expect(doc).toContain("Next step: Ship the control room");
   });
 });
 
