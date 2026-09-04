@@ -80,6 +80,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+7` | Toggle the compact in-app editor in the right rail |
 | `mod+p` | Find file in workspace |
 | `mod+shift+f` | Search project files in workspace (inside a focused terminal, this searches the terminal) |
+| `mod+shift+v` | Toggle markdown preview |
 | `mod+k` | Open the control center |
 
 Git, repomind, and the compact editor share one right-rail panel host: a resizable pane (drag its
@@ -109,6 +110,10 @@ The center Editor workspace provides:
 - A status line at the bottom showing the syntax language (clickable to override), cursor position
   (line and column), detected indentation unit, and one-click toggles for line wrapping and
   rendering whitespace.
+- For Markdown buffers (`.md` and `.markdown`), a live preview toggle in the status line (or
+  `mod+shift+v`) opens a resizable side-by-side split. The editor and preview maintain scroll
+  synchronization aligned to the nearest heading, with support for task lists, GitHub tables,
+  fenced code highlighting, local image resolution, and external links.
 
 ### Layout
 

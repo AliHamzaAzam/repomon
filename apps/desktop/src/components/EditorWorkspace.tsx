@@ -20,6 +20,17 @@ import ImageViewer from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
 import ConfirmDialog from "./ConfirmDialog";
 import {
+  MarkdownPreview,
+  parseMarkdown,
+  findNearestHeading,
+} from "./markdown";
+
+export function isMarkdownFile(path: string | null | undefined): boolean {
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
@@ -310,6 +321,43 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
       all,
       token: ++replaceToken,
     });
+  }
+
+  let editorContainerRef: HTMLDivElement | undefined;
+  const [isSplitResizing, setIsSplitResizing] = createSignal(false);
+  const [visibleLine, setVisibleLine] = createSignal(1);
+
+  const nearestHeading = createMemo(() => {
+    const path = activePath();
+    if (!isMarkdownFile(path)) return null;
+    const file = activeFile();
+    if (!file) return null;
+    const { headings } = parseMarkdown(file.content);
+    return findNearestHeading(headings, visibleLine());
+  });
+
+  function handleSplitResizeStart(e: MouseEvent) {
+    e.preventDefault();
+    setIsSplitResizing(true);
+    const container = editorContainerRef;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+
+    function onMouseMove(moveEvent: MouseEvent) {
+      const offsetX = moveEvent.clientX - rect.left;
+      const ratio = offsetX / rect.width;
+      props.editor.setMarkdownSplitRatio(ratio);
+    }
+
+    function onMouseUp() {
+      setIsSplitResizing(false);
+      props.editor.persistMarkdownSplitRatio();
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
   }
 
   function startInlineCreate(targetPath: string, isDir: boolean, makeDir: boolean, depth: number) {
@@ -938,41 +986,75 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                     </div>
                   }
                 >
-                  <Switch>
-                    <Match when={file().kind === "image"}>
-                      <ImageViewer
-                        laneId={lane()?.id ?? 0}
-                        path={file().path}
-                        size={file().size}
-                      />
-                    </Match>
-                    <Match when={file().kind === "binary"}>
-                      <BinaryViewer path={file().path} size={file().size} />
-                    </Match>
-                    <Match when={true}>
-                      <CodeEditor
-                        value={file().content}
-                        path={file().path}
-                        laneId={lane()?.id}
-                        languageOverride={props.editor.languageOverrides()[file().path]}
-                        wrap={props.editor.wrap()}
-                        whitespace={props.editor.whitespace()}
-                        initialCursor={file().cursor}
-                        initialScrollTop={file().scrollTop}
-                        openAtTarget={props.editor.openAtTarget()?.path === file().path ? props.editor.openAtTarget() : null}
-                        replaceRequest={activePath() === file().path ? replaceRequest() : null}
-                        onCursorActivity={(cursor, scrollTop, selection) => {
-                          props.editor.updateCursor(file().path, cursor, scrollTop);
-                          updateCursorPos(cursor);
-                          setSelectionCount(selection.rangeCount);
-                          setSelectedChars(selection.selectedChars);
-                        }}
-                        onChange={(content) => props.editor.updateContent(file().path, content)}
-                        onSave={() => void props.editor.saveFile(file().path)}
-                        class="min-h-0 flex-1"
-                      />
-                    </Match>
-                  </Switch>
+                  <div
+                    ref={editorContainerRef}
+                    class="relative flex min-h-0 flex-1 overflow-hidden"
+                  >
+                    <Switch>
+                      <Match when={file().kind === "image"}>
+                        <ImageViewer
+                          laneId={lane()?.id ?? 0}
+                          path={file().path}
+                          size={file().size}
+                        />
+                      </Match>
+                      <Match when={file().kind === "binary"}>
+                        <BinaryViewer path={file().path} size={file().size} />
+                      </Match>
+                      <Match when={true}>
+                        <div
+                          class="flex h-full min-w-0 flex-col overflow-hidden"
+                          style={{
+                            width:
+                              isMarkdownFile(file().path) && props.editor.markdownPreview()
+                                ? `${props.editor.markdownSplitRatio() * 100}%`
+                                : "100%",
+                          }}
+                        >
+                          <CodeEditor
+                            value={file().content}
+                            path={file().path}
+                            laneId={lane()?.id}
+                            languageOverride={props.editor.languageOverrides()[file().path]}
+                            wrap={props.editor.wrap()}
+                            whitespace={props.editor.whitespace()}
+                            initialCursor={file().cursor}
+                            initialScrollTop={file().scrollTop}
+                            openAtTarget={props.editor.openAtTarget()?.path === file().path ? props.editor.openAtTarget() : null}
+                            replaceRequest={activePath() === file().path ? replaceRequest() : null}
+                            onCursorActivity={(cursor, scrollTop, selection) => {
+                              props.editor.updateCursor(file().path, cursor, scrollTop);
+                              updateCursorPos(cursor);
+                              setSelectionCount(selection.rangeCount);
+                              setSelectedChars(selection.selectedChars);
+                            }}
+                            onVisibleLineChange={setVisibleLine}
+                            onChange={(content) => props.editor.updateContent(file().path, content)}
+                            onSave={() => void props.editor.saveFile(file().path)}
+                            class="min-h-0 flex-1"
+                          />
+                        </div>
+
+                        <Show when={isMarkdownFile(file().path) && props.editor.markdownPreview()}>
+                          <div
+                            class={`relative flex w-1 cursor-col-resize items-center justify-center border-l border-r border-line bg-surface hover:bg-accent/40 ${
+                              isSplitResizing() ? "bg-accent" : ""
+                            }`}
+                            onMouseDown={handleSplitResizeStart}
+                            aria-hidden="true"
+                          />
+                          <div class="flex min-w-0 flex-1 flex-col overflow-hidden border-l border-line bg-surface/30">
+                            <MarkdownPreview
+                              content={file().content}
+                              filePath={file().path}
+                              laneId={lane()?.id}
+                              nearestHeading={nearestHeading()}
+                            />
+                          </div>
+                        </Show>
+                      </Match>
+                    </Switch>
+                  </div>
                 </Show>
               </div>
             )}
@@ -1078,6 +1160,22 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
             >
               Whitespace: {props.editor.whitespace() ? "On" : "Off"}
             </button>
+
+            <Show when={isMarkdownFile(activePath())}>
+              <span class="text-line">|</span>
+              <button
+                type="button"
+                class={`focus-ring rounded px-1.5 py-0.5 transition-colors ${
+                  props.editor.markdownPreview()
+                    ? "bg-accent/15 font-medium text-accent"
+                    : "text-muted hover:text-foreground"
+                }`}
+                onClick={props.editor.toggleMarkdownPreview}
+                title="Toggle markdown preview (Mod+Shift+V)"
+              >
+                Preview: {props.editor.markdownPreview() ? "On" : "Off"}
+              </button>
+            </Show>
           </div>
         </div>
       </div>

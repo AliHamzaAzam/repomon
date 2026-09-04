@@ -57,11 +57,14 @@ interface PersistedEditorStorage {
   treeColumnWidth?: number;
   wrap?: boolean;
   whitespace?: boolean;
+  markdownPreview?: boolean;
+  markdownSplitRatio?: number;
 }
 
 export const EDITOR_STORAGE_KEY = "repomon.editor.v1";
 export const DEFAULT_TREE_WIDTH_PX = 240;
 export const MIN_TREE_WIDTH_PX = 180;
+export const DEFAULT_MARKDOWN_SPLIT_RATIO = 0.5;
 
 function readPersistedStorage(): PersistedEditorStorage {
   try {
@@ -92,6 +95,16 @@ export function createEditorStore(fleet: FleetStore) {
   );
   const [wrap, setWrapSignal] = createSignal<boolean>(Boolean(persisted.wrap));
   const [whitespace, setWhitespaceSignal] = createSignal<boolean>(Boolean(persisted.whitespace));
+  const [markdownPreview, setMarkdownPreviewSignal] = createSignal<boolean>(
+    Boolean(persisted.markdownPreview),
+  );
+  const [markdownSplitRatio, setMarkdownSplitRatioSignal] = createSignal<number>(
+    typeof persisted.markdownSplitRatio === "number" &&
+      persisted.markdownSplitRatio >= 0.1 &&
+      persisted.markdownSplitRatio <= 0.9
+      ? persisted.markdownSplitRatio
+      : DEFAULT_MARKDOWN_SPLIT_RATIO,
+  );
 
   const [treeExpanded, setTreeExpandedSignal] = createSignal<boolean>(true);
 
@@ -195,6 +208,29 @@ export function createEditorStore(fleet: FleetStore) {
 
   function toggleWhitespace() {
     setWhitespace((v) => !v);
+  }
+
+  function setMarkdownPreview(value: boolean | ((prev: boolean) => boolean)) {
+    const next = typeof value === "function" ? value(markdownPreview()) : value;
+    setMarkdownPreviewSignal(next);
+    const current = readPersistedStorage();
+    current.markdownPreview = next;
+    writePersistedStorage(current);
+  }
+
+  function toggleMarkdownPreview() {
+    setMarkdownPreview((v) => !v);
+  }
+
+  function setMarkdownSplitRatio(ratio: number) {
+    const clamped = Math.max(0.15, Math.min(0.85, ratio));
+    setMarkdownSplitRatioSignal(clamped);
+  }
+
+  function persistMarkdownSplitRatio() {
+    const current = readPersistedStorage();
+    current.markdownSplitRatio = markdownSplitRatio();
+    writePersistedStorage(current);
   }
 
   function setTreeExpanded(value: boolean | ((prev: boolean) => boolean)) {
@@ -907,6 +943,12 @@ export function createEditorStore(fleet: FleetStore) {
     whitespace,
     setWhitespace,
     toggleWhitespace,
+    markdownPreview,
+    setMarkdownPreview,
+    toggleMarkdownPreview,
+    markdownSplitRatio,
+    setMarkdownSplitRatio,
+    persistMarkdownSplitRatio,
     treeExpanded,
     setTreeExpanded,
     openFile,

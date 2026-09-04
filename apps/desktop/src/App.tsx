@@ -289,6 +289,9 @@ function App(props: AppProps) {
           }
         }
         break;
+      case "editor.markdownPreview":
+        if (lane) editor.toggleMarkdownPreview();
+        break;
       case "panel.repomind":
         openPanelTab("repomind");
         break;

@@ -122,6 +122,7 @@ export interface CodeEditorProps {
   onChange?: (value: string) => void;
   onSave?: () => void;
   onCursorActivity?: (cursor: number, scrollTop: number, selection: EditorSelectionInfo) => void;
+  onVisibleLineChange?: (line: number) => void;
   initialCursor?: number;
   initialScrollTop?: number;
   openAtTarget?: { line: number; column: number; token: number } | null;
@@ -241,7 +242,7 @@ function getBundledSupport(name: string): LanguageSupport | null {
 /// `shebangLanguage` is a language name already sniffed from the file's first line (or `null`/
 /// `undefined`), not raw content - callers sniff it once, outside any reactive tracking, so this
 /// resolver never needs the full document to decide a language.
-async function resolveLanguageSupport(
+export async function resolveLanguageSupport(
   path: string,
   shebangLanguage?: string | null,
   override?: string,
@@ -464,7 +465,7 @@ const gitGutterField = StateField.define<RangeSet<GutterMarker>>({
   },
 });
 
-const appTheme = EditorView.theme(
+export const appTheme = EditorView.theme(
   {
     "&": {
       color: "var(--foreground)",
@@ -641,7 +642,7 @@ const appTheme = EditorView.theme(
 // color-mix(...) reference, so all six themes in index.css repaint the editor automatically.
 // Extended past main's base set with the tags the wider @codemirror/language-data catalog (yaml,
 // toml, shell, go, sql, dockerfile, ...) actually emits, mapped onto the same four roles.
-const highlightStyle = HighlightStyle.define([
+export const highlightStyle = HighlightStyle.define([
   { tag: t.comment, color: "var(--muted)", fontStyle: "italic" },
   { tag: t.lineComment, color: "var(--muted)", fontStyle: "italic" },
   { tag: t.blockComment, color: "var(--muted)", fontStyle: "italic" },
@@ -910,6 +911,8 @@ export default function CodeEditor(props: CodeEditorProps) {
             for (const range of selection.ranges) {
               selectedChars += range.to - range.from;
             }
+            const line = update.state.doc.lineAt(head).number;
+            props.onVisibleLineChange?.(line);
             props.onCursorActivity?.(head, update.view.scrollDOM.scrollTop, {
               rangeCount: selection.ranges.length,
               selectedChars,
@@ -924,6 +927,16 @@ export default function CodeEditor(props: CodeEditorProps) {
       parent: containerRef,
     });
 
+    const onScroll = () => {
+      if (!view) return;
+      try {
+        const block = view.lineBlockAtHeight(view.scrollDOM.scrollTop);
+        const line = view.state.doc.lineAt(block.from).number;
+        props.onVisibleLineChange?.(line);
+      } catch {}
+    };
+    view.scrollDOM.addEventListener("scroll", onScroll, { passive: true });
+
     if (props.initialCursor !== undefined && props.initialCursor > 0) {
       const pos = Math.min(props.initialCursor, view.state.doc.length);
       view.dispatch({ selection: { anchor: pos } });
@@ -935,6 +948,7 @@ export default function CodeEditor(props: CodeEditorProps) {
     void refreshDiffBase();
 
     onCleanup(() => {
+      view?.scrollDOM.removeEventListener("scroll", onScroll);
       if (diffDebounceTimer !== null) {
         clearTimeout(diffDebounceTimer);
       }
