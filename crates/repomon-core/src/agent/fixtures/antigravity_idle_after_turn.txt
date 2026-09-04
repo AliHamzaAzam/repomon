@@ -1,0 +1,45 @@
+  Determining the current workspace
+
+● Bash(pwd; git rev-parse --show-toplevel 2>/dev/null || true)
+● Read(~/.gemini/antigravity-cli/mcp/repomon/fleet_status.json)
+● repomon/fleet_status(Orient agent with fleet_status)
+● repomon/supervision_status(Check repomon supervision status)
+● Read(~/.gemini/antigravity-cli/mcp/repomon/message_inbox.json)
+● repomon/message_inbox(Check repomon message inbox)
+● Bash(ps -ef | grep -i antigravity)
+● Bash(tmux -L repomon list-panes -a -F "#{session_name}:#{window_name} #{pane_current_path}")
+● Bash(ls -la /private/tmp/repomon-fix-antigravity-status)
+● Read(/private/tmp/repomon-fix-antigravity-status/README.md)
+● Bash(git status) (ctrl+o to expand)
+
+  ### Top-Level Files
+
+  • .briefs
+  • .claude
+  • .github
+  • .gitignore
+  • apps
+  • Cargo.lock
+  • Cargo.toml
+  • crates
+  • design
+  • docs
+  • install.ps1
+  • install.sh
+  • LICENSE
+  • NOTICE
+  • qa
+  • README.md
+  • rust-toolchain.toml
+  • scripts
+  • STATUS.md
+  ──────
+  ### README.md Summary
+
+  repomon is a mission-control desktop app and TUI for managing and steering fleets of AI coding agents across multiple repositories and worktrees simultaneously.
+  Powered by a Rust background daemon (repomond), it offers durable sessions via tmux/ConPTY, integrated Git explorer and editor tooling, and cross-agent fleet communication.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                                                                                                                      Gemini 3.8 Flash · high

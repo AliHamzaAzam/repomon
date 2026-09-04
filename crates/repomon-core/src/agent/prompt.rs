@@ -91,11 +91,24 @@ impl PendingDialog {
 
 /// Detect a pending interactive dialog and return it fully parsed: header, question, body,
 /// options, and cursor position. Same detection rules as [`detect_pending_prompt`].
+///
+/// Two recognizers run in order. The box-drawing scan below reads Claude Code, Codex, Hermes and
+/// OpenCode, all of which draw a contiguous run of numbered rows under a question. Antigravity
+/// 1.1.x draws its menus without a box, follows them with key-hint footers the scan reads as
+/// "content below the menu", and lets a long option wrap at the pane width, which splits the
+/// contiguous run outright. Its layout gets its own recognizer rather than a weaker generic rule.
 pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
-    // Claude draws dialogs inside a box; strip ANSI and the `│` borders so option/question
-    // lines parse the same whether boxed or bare.
     let stripped: Vec<String> = pane.lines().map(strip_ansi).collect();
     let cleaned: Vec<String> = stripped.iter().map(|l| content(l).to_string()).collect();
+    detect_boxed_dialog(&stripped, &cleaned)
+        .or_else(|| detect_antigravity_dialog(&stripped, &cleaned))
+}
+
+/// The box-drawing recognizer: a contiguous run of option rows under a question, as Claude Code
+/// and its lookalikes draw it.
+fn detect_boxed_dialog(stripped: &[String], cleaned: &[String]) -> Option<PendingDialog> {
+    // Claude draws dialogs inside a box; ANSI and the `│` borders are already stripped, so
+    // option/question lines parse the same whether boxed or bare.
     let options: Vec<Option<(bool, Option<u32>, String)>> =
         cleaned.iter().map(|l| parse_option_line(l)).collect();
 
@@ -115,7 +128,7 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
         if numbered >= 2 && has_cursor {
             // If there is subsequent content below this option block (e.g. the dialog was answered
             // and the agent proceeded or finished), this dialog is dead scrollback, not an active prompt.
-            if has_trailing_content(&cleaned, block_end) {
+            if has_trailing_content(cleaned, block_end) {
                 return None;
             }
 
@@ -134,7 +147,7 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
                 })
                 .collect();
             let selected = block.iter().position(|(c, _, _)| *c);
-            if let Some((title, question, body, context)) = describe(&stripped, &cleaned, start) {
+            if let Some((title, question, body, context)) = describe(stripped, cleaned, start) {
                 return Some(PendingDialog {
                     title,
                     question,
@@ -148,7 +161,7 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
             // but deliberately no question sentence. Recognize that exact branded layout instead
             // of weakening the generic question requirement for arbitrary numbered menus.
             if let Some((title, question, body, context)) =
-                describe_hermes_approval(&stripped, &cleaned, start)
+                describe_hermes_approval(stripped, cleaned, start)
             {
                 return Some(PendingDialog {
                     title,
@@ -165,7 +178,7 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
             // above finds no question and comes back empty. Recognize the dialog by its
             // distinctive first option plus its confirmation footer instead — see the live
             // fixture in the tests below.
-            if is_trust_dialog(&block) && has_confirm_footer(&cleaned, block_end) {
+            if is_trust_dialog(&block) && has_confirm_footer(cleaned, block_end) {
                 return Some(PendingDialog {
                     title: None,
                     question: "Do you trust this folder?".to_string(),
@@ -180,6 +193,247 @@ pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
         end = start; // not a menu — keep scanning the lines above
     }
     None
+}
+
+/// The footers Antigravity 1.1.x prints under a live dialog: its in-flight status line
+/// ("esc to cancel") and the key hints below the menu ("↑/↓ Navigate · tab Amend · ctrl+g
+/// edit/expand command", "↑/↓ Navigate · enter Confirm"). Once a dialog is answered the status
+/// line flips to "? for shortcuts", so the presence of one of these separates a pending prompt
+/// from answered scrollback.
+fn is_antigravity_live_footer(line: &str) -> bool {
+    let t = line.trim();
+    let lower = t.to_lowercase();
+    if lower.starts_with("esc to cancel") {
+        return true;
+    }
+    // A key-hint row: the word "Navigate" alongside the arrow keys or a hint separator. Requiring
+    // both keeps an agent's own sentence about navigating out of the footer set.
+    lower.contains("navigate")
+        && (t.contains('\u{2191}') || t.contains('\u{2193}') || t.contains('\u{b7}'))
+}
+
+/// Lines that may sit between an Antigravity menu's last option and the bottom of the pane
+/// without meaning the dialog is dead scrollback: its own footers, the empty composer, rules,
+/// and the right-aligned model status bar.
+fn is_antigravity_tail_furniture(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || t == ">" || t == "\u{276f}" {
+        return true;
+    }
+    if is_antigravity_live_footer(t) {
+        return true;
+    }
+    if t.chars().all(|c| "\u{2570}\u{256f}\u{2500}\u{2501}\u{2502}\u{250c}\u{2510}\u{2514}\u{2518}\u{251c}\u{2524}\u{253c}_\u{256d}\u{256e}\u{b7}| ".contains(c)) {
+        return true;
+    }
+    // The status bar Antigravity right-aligns on its own line ("Gemini 3.8 Flash · high",
+    // "accept-edits · Gemini 3.8 Flash · high"): dot-separated fragments, no sentence.
+    t.contains('\u{b7}') && !t.ends_with('?') && t.split_whitespace().count() <= 10
+}
+
+/// How far above the pane's bottom an Antigravity question may sit and still be the live one.
+const ANTIGRAVITY_TAIL_REACH: usize = 40;
+/// How many lines of the dialog's own explanation may sit between its question and its first
+/// option row (the folder-trust dialog prints one).
+const PREAMBLE_MAX_LINES: usize = 3;
+/// The longest an unnumbered, uncursored row may be and still read as a menu choice rather than
+/// as prose that landed under the menu.
+const OPTION_MAX_CHARS: usize = 120;
+
+/// Antigravity 1.1.x's boxless dialog: a question line, then option rows, then key-hint footers.
+///
+/// Three things defeat [`detect_boxed_dialog`] here. The hint rows below the menu ("↑/↓ Navigate
+/// · tab Amend …") read as content below the block, so a live prompt is discarded as scrollback.
+/// The folder-trust dialog offers two rows with no numbers at all, below the "two numbered rows"
+/// gate. And at the 80 columns the production tmux server usually runs, the long "(Persist to
+/// settings.json)" option wraps, which breaks the contiguous run the scan walks. This recognizer
+/// anchors on the question instead, absorbs wrapped remainders into the option above them, and
+/// requires one of Antigravity's live footers below the menu so an answered dialog still in
+/// scrollback does not resurrect.
+fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<PendingDialog> {
+    // Measure the tail from the last line with content, not from the bottom of the capture: tmux
+    // pads a short pane with blank rows, and counting those pushed the dialog out of reach.
+    let last_content = cleaned.iter().rposition(|l| !l.trim().is_empty())?;
+    let first = (last_content + 1).saturating_sub(ANTIGRAVITY_TAIL_REACH);
+    // The bottom-most question in the tail is the live one.
+    let question_at = cleaned[first..]
+        .iter()
+        .rposition(|l| {
+            let t = l.trim();
+            t.ends_with('?') && t.split_whitespace().count() >= 3 && !t.starts_with('#')
+        })
+        .map(|i| i + first);
+    // The folder-trust dialog opens the session, so on a 45-line capture of a 50-line pane its
+    // question ("Do you trust the contents of this project?") has already scrolled out of view --
+    // the same blind spot the Claude trust branch above covers. Anchor on the option wording and
+    // stand in the question, as that branch does.
+    let (q, synthetic) = match question_at {
+        Some(q) => (q, None),
+        None => {
+            let row = cleaned[first..]
+                .iter()
+                .position(|l| {
+                    parse_option_line(l).is_some_and(|(_, _, text)| is_trust_option(text.trim()))
+                })
+                .map(|i| i + first)?;
+            (
+                row.saturating_sub(1),
+                Some("Do you trust this folder?".to_string()),
+            )
+        }
+    };
+
+    let mut options: Vec<DialogOption> = Vec::new();
+    let mut selected: Option<usize> = None;
+    let mut saw_footer = false;
+    let mut preamble = 0usize;
+    let synthetic_question = synthetic.is_some();
+    let scan_from = if synthetic_question { q } else { q + 1 };
+    for (line, raw) in cleaned[scan_from..].iter().zip(&stripped[scan_from..]) {
+        if let Some((cursor, number, text)) = parse_option_line(line) {
+            if cursor && number.is_none() && text.is_empty() {
+                continue;
+            }
+            if cursor {
+                selected = Some(options.len());
+            }
+            options.push(DialogOption {
+                number,
+                text: text.trim().to_string(),
+            });
+            continue;
+        }
+        if is_antigravity_live_footer(line) {
+            saw_footer = true;
+            continue;
+        }
+        if is_antigravity_tail_furniture(line) {
+            continue;
+        }
+        if options.is_empty() {
+            // Above the first option this is the dialog's own body -- the trust dialog explains
+            // itself between its question and its choices. Allow a short preamble, no more.
+            if preamble < PREAMBLE_MAX_LINES {
+                preamble += 1;
+                continue;
+            }
+            return None;
+        }
+        if saw_footer {
+            // Content under the key hints means the dialog was answered and the agent moved on.
+            return None;
+        }
+        // A row that carries neither the cursor nor a number (the trust dialog's "No, exit") is
+        // still an option when the terminal indented it to align under its siblings. A hard wrap
+        // resumes at column zero instead, so column zero is the remainder of the option above.
+        if raw.starts_with(char::is_whitespace) && line.chars().count() <= OPTION_MAX_CHARS {
+            options.push(DialogOption {
+                number: None,
+                text: line.trim().to_string(),
+            });
+            continue;
+        }
+        let last = options.last_mut()?;
+        last.text.push(' ');
+        last.text.push_str(line.trim());
+    }
+    if options.len() < 2 || !saw_footer {
+        return None;
+    }
+    // The usage-limit menu is the auto-continue watcher's, not a permission ask.
+    if options
+        .iter()
+        .any(|o| is_limit_option(&o.text.to_lowercase()))
+    {
+        return None;
+    }
+    let question = match synthetic {
+        Some(q) => q,
+        None => cleaned[q].trim().to_string(),
+    };
+    let context: Vec<String> = cleaned[first..q]
+        .iter()
+        .rev()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(CONTEXT_MAX_LINES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let body: Vec<String> = context
+        .iter()
+        .rev()
+        .take(BODY_MAX_LINES)
+        .rev()
+        .cloned()
+        .collect();
+    Some(PendingDialog {
+        title: None,
+        question,
+        body,
+        options,
+        selected,
+        context,
+    })
+}
+
+/// An Antigravity quota wall: the model refused the turn because the account's per-model quota is
+/// spent, and the pane drops straight back to an idle composer. The status is honestly Idle, but
+/// "no output for 4m" hides the cause, so report the wall (and its reset window when printed).
+///
+/// Claude's own usage limit is [`super::limit`]'s job (it has a menu and an auto-continue path),
+/// so its wording is deliberately not matched here.
+pub fn detect_quota_exhausted(pane: &str) -> Option<String> {
+    let lines: Vec<String> = pane.lines().map(strip_ansi).collect();
+    let hit = lines.iter().rposition(|l| {
+        let t = l.trim();
+        let lower = t.to_lowercase();
+        // A wall is stated, not introduced: a trailing colon is the agent talking about quotas.
+        !t.ends_with(':')
+            && (lower.contains("quota reached")
+                || lower.contains("quota exceeded")
+                || lower.contains("out of quota"))
+    })?;
+    let mut reason = "quota exhausted".to_string();
+    // The reset window is printed on the wall line or just below it.
+    let window = lines[hit..(hit + 3).min(lines.len())]
+        .iter()
+        .find_map(|l| parse_reset_window(l));
+    if let Some(w) = window {
+        reason = format!("quota exhausted, resets in {w}");
+    }
+    Some(reason)
+}
+
+/// Pull "2h 15m" out of a "Resets in 2h 15m." line.
+fn parse_reset_window(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    let at = lower
+        .find("resets in ")
+        .or_else(|| lower.find("reset in "))?;
+    let rest = line[at..].split_once(" in ").map(|(_, r)| r)?;
+    let window: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || c.is_ascii_alphabetic() || *c == ' ')
+        .collect();
+    let window = window.trim();
+    if window.is_empty() {
+        return None;
+    }
+    // Keep only the duration tokens ("2h", "15m"); stop at the first word that is not one.
+    let tokens: Vec<&str> = window
+        .split_whitespace()
+        .take_while(|w| {
+            let mut cs = w.chars();
+            cs.next().is_some_and(|c| c.is_ascii_digit())
+                && w.chars().all(|c| c.is_ascii_digit() || "hms".contains(c))
+        })
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(tokens.join(" "))
 }
 
 /// The keystrokes (tmux `send-keys` names) that select `target` (0-based option index):
@@ -321,7 +575,12 @@ fn is_limit_option(lower_text: &str) -> bool {
 fn is_trust_dialog(block: &[&(bool, Option<u32>, String)]) -> bool {
     block
         .first()
-        .is_some_and(|(_, _, text)| text.trim().eq_ignore_ascii_case("Yes, I trust this folder"))
+        .is_some_and(|(_, _, text)| is_trust_option(text.trim()))
+}
+
+/// The affirmative row every folder-trust dialog offers, Claude's and Antigravity's alike.
+fn is_trust_option(text: &str) -> bool {
+    text.eq_ignore_ascii_case("Yes, I trust this folder")
 }
 
 /// Whether the trust dialog's confirmation footer appears within [`FOOTER_REACH`] lines below
@@ -432,11 +691,20 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Glyphs a coding CLI cycles through while a turn is streaming. Claude Code 2.1.x rotates the
-/// asterisk family; Codex and Antigravity use the braille dots.
-const SPINNER_GLYPHS: [char; 14] = [
-    '\u{273b}', '\u{273d}', '\u{2733}', '\u{2736}', '\u{2722}', '\u{2217}', '\u{2807}', '\u{280b}',
-    '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}', '\u{280f}',
+/// asterisk family.
+const SPINNER_GLYPHS: [char; 6] = [
+    '\u{273b}', '\u{273d}', '\u{2733}', '\u{2736}', '\u{2722}', '\u{2217}',
 ];
+
+/// Whether `c` opens a spinner frame. Codex rotates the four-dot braille cycle
+/// (U+2807, U+280B, U+2819 …) while Antigravity 1.1.x rotates the eight-dot one
+/// (U+28FE, U+28FD, U+28FB, U+28BF, U+287F, U+28DF, U+28EF, U+28F7); enumerating either cycle
+/// glyph by glyph is how the eight-dot family came to be missed entirely, so accept the whole
+/// Braille Patterns block instead. U+2800 (the blank pattern) is excluded: TUIs use it as an
+/// invisible spacer, and a blank cannot be a visible spinner frame.
+fn is_spinner_glyph(c: char) -> bool {
+    SPINNER_GLYPHS.contains(&c) || ('\u{2801}'..='\u{28ff}').contains(&c)
+}
 
 /// The "N background agents are still working" status line, when this pane line really IS that
 /// status line rather than an agent's own prose *about* background agents.
@@ -497,28 +765,39 @@ fn subagent_wait_count(line: &str) -> Option<usize> {
 pub fn detect_active_spinner(pane: &str) -> Option<String> {
     // Bottom-up: a capture carries scrollback, and only the last frame describes what the pane is
     // doing now. Scanning top-down reported a stale frame's phrase.
+    let mut in_flight_footer = false;
     for line in pane.lines().rev().map(strip_ansi) {
         let t = line.trim();
         if t.is_empty() {
             continue;
         }
         let lower = t.to_lowercase();
+        // Antigravity's in-flight footer. It prints "esc to cancel" at the head of its status line
+        // for exactly as long as a turn is running and swaps it for "? for shortcuts" the moment
+        // the turn ends, so it survives a capture that lands between spinner redraws. Claude
+        // carries the same words inside a key hint ("Enter to confirm / Esc to cancel"), never at
+        // the head of a line, so anchoring on the start keeps the two apart. It is the weaker
+        // witness of the two: keep looking for a glyph line, whose phrase is what to report.
+        if lower.starts_with("esc to cancel") {
+            in_flight_footer = true;
+            continue;
+        }
         // A turn that has ended still shows its glyph plus a "done" stamp.
         if lower.contains("done ") || lower.ends_with("done") {
             continue;
         }
-        let spinning = t.starts_with(SPINNER_GLYPHS) || lower.contains("esc to interrupt");
+        let spinning = t.starts_with(is_spinner_glyph) || lower.contains("esc to interrupt");
         if !spinning {
             continue;
         }
         // The glyph alone (a bare redraw frame) says nothing worth reporting.
-        let phrase = t.trim_start_matches(SPINNER_GLYPHS).trim();
+        let phrase = t.trim_start_matches(is_spinner_glyph).trim();
         if phrase.is_empty() {
             continue;
         }
         return Some(truncate(phrase, 60));
     }
-    None
+    in_flight_footer.then(|| "turn in flight".to_string())
 }
 
 /// Detect running background subagents from pane text.
@@ -1238,6 +1517,143 @@ Do you want to proceed?
             detect_active_spinner("\u{273b} Thinking\u{2026} (12s \u{00b7} esc to interrupt)")
                 .as_deref(),
             Some("Thinking\u{2026} (12s \u{00b7} esc to interrupt)")
+        );
+    }
+
+    /// Live capture, 2026-09-04, of an Antigravity 1.1.12 window mid turn: the spinner is the
+    /// eight-dot braille cycle (U+28FE family), not the four-dot one Claude and Codex use, and the
+    /// live footer reads "esc to cancel" rather than "esc to interrupt". Neither matched, so a
+    /// visibly working pane reported idle for the whole turn.
+    #[test]
+    fn antigravity_working_pane_reads_running() {
+        let pane = include_str!("fixtures/antigravity_working_spinner.txt");
+        assert_eq!(
+            detect_active_spinner(pane).as_deref(),
+            Some("Reading file...")
+        );
+        assert_eq!(detect_dialog(pane), None);
+    }
+
+    /// The eight-dot cycle Antigravity rotates through, each glyph on its own.
+    #[test]
+    fn every_braille_spinner_glyph_reads_as_working() {
+        for glyph in [
+            '\u{28fe}', '\u{28fd}', '\u{28fb}', '\u{28bf}', '\u{287f}', '\u{28df}', '\u{28ef}',
+            '\u{28f7}',
+        ] {
+            let pane = format!("{glyph}  Understanding Task Parallelization...");
+            assert_eq!(
+                detect_active_spinner(&pane).as_deref(),
+                Some("Understanding Task Parallelization..."),
+                "glyph {glyph} did not read as a spinner"
+            );
+        }
+    }
+
+    /// A capture that lands between redraws loses the glyph but keeps the footer, which
+    /// Antigravity prints only while a turn is in flight.
+    #[test]
+    fn antigravity_cancel_footer_alone_reads_as_working() {
+        let pane = "\u{25cf} Bash(cargo test -p repomon-core)\nesc to cancel";
+        assert_eq!(
+            detect_active_spinner(pane).as_deref(),
+            Some("turn in flight")
+        );
+    }
+
+    /// Claude's folder-trust dialog carries "Enter to confirm \u{b7} Esc to cancel" as a key hint,
+    /// which must not read as Antigravity's live footer.
+    #[test]
+    fn claude_confirm_hint_is_not_a_live_footer() {
+        let pane = include_str!("fixtures/trust_prompt.txt");
+        assert_eq!(detect_active_spinner(pane), None);
+    }
+
+    /// Live capture, 2026-09-04: Antigravity blocked on a Bash permission ask. The generic scan
+    /// threw it away because the "\u{2191}/\u{2193} Navigate \u{b7} tab Amend" hint below the menu counted as
+    /// trailing content, so the daemon reported idle while the pane waited on a human.
+    #[test]
+    fn antigravity_permission_dialog_is_a_pending_prompt() {
+        let pane = include_str!("fixtures/antigravity_permission_dialog.txt");
+        let dialog = detect_dialog(pane).expect("permission dialog");
+        assert_eq!(dialog.question, "Do you want to proceed?");
+        assert_eq!(dialog.options.len(), 4);
+        assert_eq!(dialog.options[0].text, "Yes");
+        assert_eq!(dialog.options[3].text, "No");
+        assert_eq!(dialog.selected, Some(0));
+    }
+
+    /// The same capture re-wrapped at 80 columns, the width the production tmux server usually
+    /// runs. The long "(Persist to settings.json)" option wraps, which splits the contiguous
+    /// option run the generic scan needs.
+    #[test]
+    fn antigravity_permission_dialog_survives_an_80_column_wrap() {
+        let pane = include_str!("fixtures/antigravity_permission_dialog_80col.txt");
+        let dialog = detect_dialog(pane).expect("permission dialog at 80 columns");
+        assert_eq!(dialog.question, "Do you want to proceed?");
+        assert_eq!(dialog.options.len(), 4);
+        assert_eq!(dialog.options[3].text, "No");
+    }
+
+    /// Live capture, 2026-09-04: Antigravity's folder-trust dialog offers two rows and no numbers
+    /// at all, so the "two numbered rows" gate never let it through.
+    #[test]
+    fn antigravity_trust_dialog_is_a_pending_prompt() {
+        let pane = include_str!("fixtures/antigravity_trust_dialog.txt");
+        let dialog = detect_dialog(pane).expect("trust dialog");
+        assert!(
+            dialog.question.to_lowercase().contains("trust"),
+            "unexpected question: {}",
+            dialog.question
+        );
+        assert_eq!(dialog.options.len(), 2);
+        assert_eq!(dialog.options[0].text, "Yes, I trust this folder");
+    }
+
+    /// Live capture, 2026-09-04: an Antigravity window parked at its composer while a background
+    /// shell task keeps ticking in the footer. The task line is not the agent working.
+    #[test]
+    fn antigravity_background_task_ticking_is_still_idle() {
+        let pane = include_str!("fixtures/antigravity_idle_background_task.txt");
+        assert_eq!(detect_active_spinner(pane), None);
+        assert_eq!(detect_subagent_running(pane), None);
+        assert_eq!(detect_dialog(pane), None);
+        assert_eq!(detect_quota_exhausted(pane), None);
+    }
+
+    /// Live capture, 2026-09-04: the same window one second after the turn ended. The footer flips
+    /// from "esc to cancel" to "? for shortcuts" and the composer is bare.
+    #[test]
+    fn antigravity_finished_turn_reads_idle() {
+        let pane = include_str!("fixtures/antigravity_idle_after_turn.txt");
+        assert_eq!(detect_active_spinner(pane), None);
+        assert_eq!(detect_dialog(pane), None);
+    }
+
+    /// A quota-exhausted Antigravity pane is idle, but "no output for 4m" hides why. Report the
+    /// reset window so the sidebar can say what actually stopped the agent.
+    #[test]
+    fn antigravity_quota_error_is_reported_as_exhausted() {
+        let pane = include_str!("fixtures/antigravity_quota_exhausted.txt");
+        assert_eq!(
+            detect_quota_exhausted(pane).as_deref(),
+            Some("quota exhausted, resets in 2h 15m")
+        );
+        assert_eq!(detect_active_spinner(pane), None);
+        assert_eq!(detect_dialog(pane), None);
+    }
+
+    /// Prose about quotas is not a quota wall, and neither is Claude's own usage-limit copy
+    /// (which [`super::limit`] owns and auto-continues).
+    #[test]
+    fn quota_prose_and_claude_limits_are_not_antigravity_quota_walls() {
+        assert_eq!(
+            detect_quota_exhausted("I checked whether the individual quota reached its cap:"),
+            None
+        );
+        assert_eq!(
+            detect_quota_exhausted("Claude usage limit reached. Your limit will reset at 3:00 PM."),
+            None
         );
     }
 

@@ -1,0 +1,12 @@
+> Refactor the status classifier and run the suite.
+▸ Thought for 11s, 1.9k tokens
+● Read(crates/repomon-core/src/agent/prompt.rs)
+● Edit(crates/repomon-core/src/agent/prompt.rs)
+
+  Individual quota reached for Gemini 3.8 Flash.
+  Resets in 2h 15m. Switch model with /model or wait for the reset.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                          accept-edits · Gemini 3.8 Flash · high

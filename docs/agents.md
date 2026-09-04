@@ -321,6 +321,18 @@ databases contain protobuf payloads without a stable status contract, so managed
 dialog detection supply live state. Antigravity's `>` selection cursor is recognized for trust and
 permission attention.
 
+Because the pane is the only live signal, its layout is read on Antigravity's own terms. It streams
+the eight-dot braille spinner cycle (U+28FE, U+28FD, U+28FB, U+28BF, U+287F, U+28DF, U+28EF,
+U+28F7) rather than the four-dot one, and prints `esc to cancel` at the head of its status line for
+exactly as long as a turn is in flight, swapping it for `? for shortcuts` when the turn ends; both
+read as "working", and the footer covers a capture that lands between spinner redraws. Its menus
+are boxless, sit above key hints (`Navigate`, `Amend`) that the box-drawing scan reads as content
+below the menu, and wrap at the pane width, which splits the contiguous option run at the 80
+columns the tmux server usually runs; `detect_dialog` therefore falls back to a dedicated
+Antigravity recognizer anchored on the question and one of those live footers. A background shell
+task ticking in the footer is not the agent working, and a quota wall (`Individual quota reached`)
+reports itself as `quota exhausted` so an idle row says what stopped it.
+
 The live `/usage` panel was not stable enough to fixture-test percentage and reset fields, so usage
 is degraded. Antigravity and OpenCode are both valid repomind orchestrator backends alongside
 Claude and Codex (`orchestrator.start` with `agent: "antigravity"`/`"agy"` or
