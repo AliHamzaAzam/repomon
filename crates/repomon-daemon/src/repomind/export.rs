@@ -120,6 +120,27 @@ impl Pending {
     }
 }
 
+/// What [`commit`] did. Distinguishing "too soon" from "nothing to do" matters: a deferred batch
+/// has to be queued again, or the files it exported stay uncommitted forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The batch landed. Carries the commit's short hash.
+    Committed(String),
+    /// Nothing to commit: an empty batch, or paths git already had.
+    Nothing,
+    /// The home is not a git repo, so there is no history to write.
+    NotAGitRepo,
+    /// Inside [`COMMIT_INTERVAL`] since the last commit. The caller queues the batch again.
+    TooSoon,
+}
+
+/// One export run: what it wrote, and what happened to the commit.
+#[derive(Debug, Clone)]
+pub struct ExportRun {
+    pub batch: ExportBatch,
+    pub commit: CommitOutcome,
+}
+
 /// `<home>/.repomind/export.json`.
 pub fn state_path(home: &Path) -> PathBuf {
     home.join(".repomind").join("export.json")
@@ -434,13 +455,16 @@ pub fn commit(
     batch: &ExportBatch,
     now: DateTime<Utc>,
     state: &mut ExportState,
-) -> std::io::Result<Option<String>> {
-    if batch.is_empty() || !home.join(".git").exists() {
-        return Ok(None);
+) -> std::io::Result<CommitOutcome> {
+    if batch.is_empty() {
+        return Ok(CommitOutcome::Nothing);
+    }
+    if !home.join(".git").exists() {
+        return Ok(CommitOutcome::NotAGitRepo);
     }
     if let Some(last) = state.last_commit_at {
         if now.signed_duration_since(last).to_std().unwrap_or_default() < COMMIT_INTERVAL {
-            return Ok(None);
+            return Ok(CommitOutcome::TooSoon);
         }
     }
 
@@ -459,7 +483,7 @@ pub fn commit(
 
     let staged = git(home, &["diff", "--cached", "--name-only"])?;
     if String::from_utf8_lossy(&staged.stdout).trim().is_empty() {
-        return Ok(None);
+        return Ok(CommitOutcome::Nothing);
     }
 
     let subject = format!("chore(repomind): export {}", batch.kinds.join(", "));
@@ -494,7 +518,7 @@ pub fn commit(
 
     state.last_commit_at = Some(now);
     let hash = git(home, &["rev-parse", "--short", "HEAD"])?;
-    Ok(Some(
+    Ok(CommitOutcome::Committed(
         String::from_utf8_lossy(&hash.stdout).trim().to_string(),
     ))
 }
@@ -534,16 +558,27 @@ pub async fn pending(ctx: &crate::Ctx) -> bool {
 pub async fn export_watch(ctx: std::sync::Arc<crate::Ctx>) {
     loop {
         ctx.repomind_export_wake.notified().await;
-        tokio::time::sleep(DEBOUNCE).await;
-        if let Err(e) = run_now(&ctx).await {
-            tracing::warn!("repomind export failed: {e}");
+        loop {
+            tokio::time::sleep(DEBOUNCE).await;
+            match run_now(&ctx).await {
+                // The batch was exported but its commit is inside the once-a-minute floor.
+                // `run_now` queued it again; wait the floor out rather than spinning on it.
+                Ok(run) if run.commit == CommitOutcome::TooSoon => {
+                    tokio::time::sleep(COMMIT_INTERVAL).await;
+                }
+                Ok(_) => break,
+                Err(e) => {
+                    tracing::warn!("repomind export failed: {e}");
+                    break;
+                }
+            }
         }
     }
 }
 
 /// Run one export now: read the records, render the files, commit the batch. Skips silently
 /// when the home does not exist yet (ensure-home has not run, or the operator moved it).
-pub async fn run_now(ctx: &crate::Ctx) -> repomon_core::Result<ExportBatch> {
+pub async fn run_now(ctx: &crate::Ctx) -> repomon_core::Result<ExportRun> {
     let _guard = ctx.repomind_export_lock.lock().await;
     let home = ctx.config.read().await.repomind_home();
 
@@ -557,7 +592,10 @@ pub async fn run_now(ctx: &crate::Ctx) -> repomon_core::Result<ExportBatch> {
             .await
             .map_err(|e| repomon_core::Error::Other(e.to_string()))?;
         if !exists {
-            return Ok(ExportBatch::default());
+            return Ok(ExportRun {
+                batch: ExportBatch::default(),
+                commit: CommitOutcome::Nothing,
+            });
         }
     }
 
@@ -580,7 +618,7 @@ pub async fn run_now(ctx: &crate::Ctx) -> repomon_core::Result<ExportBatch> {
     };
 
     let now = chrono::Utc::now();
-    let outcome = tokio::task::spawn_blocking(move || -> std::io::Result<(ExportBatch, ExportState)> {
+    let outcome = tokio::task::spawn_blocking(move || -> std::io::Result<ExportRun> {
         let mut state = state;
         let mut batch = export_all(&home, &inputs, &mut state)?;
         for (kind, paths) in drained.files {
@@ -590,21 +628,37 @@ pub async fn run_now(ctx: &crate::Ctx) -> repomon_core::Result<ExportBatch> {
         state.last_run = Some(now);
         state.last_error = result.as_ref().err().map(ToString::to_string);
         save_state(&home, &state)?;
-        result?;
-        Ok((batch, state))
+        Ok(ExportRun {
+            batch,
+            commit: result?,
+        })
     })
     .await
     .map_err(|e| repomon_core::Error::Other(e.to_string()))?;
 
-    let (batch, _state) = outcome.map_err(repomon_core::Error::Io)?;
-    if !batch.is_empty() {
+    let run = outcome.map_err(repomon_core::Error::Io)?;
+    if !run.batch.is_empty() {
         tracing::info!(
-            files = batch.touched.len(),
-            kinds = %batch.kinds.join(", "),
+            files = run.batch.touched.len(),
+            kinds = %run.batch.kinds.join(", "),
+            committed = matches!(run.commit, CommitOutcome::Committed(_)),
             "repomind export"
         );
     }
-    Ok(batch)
+    // A commit held back by the once-a-minute floor would otherwise strand its files: the batch
+    // has already been drained, and re-exporting finds nothing to do because the content is
+    // written. Queue the same paths again so the next run stages and commits them.
+    if run.commit == CommitOutcome::TooSoon {
+        let mut queued = ctx.repomind_export.lock().await;
+        for kind in &run.batch.kinds {
+            queued
+                .files
+                .entry(kind.clone())
+                .or_default()
+                .extend(run.batch.touched.iter().cloned());
+        }
+    }
+    Ok(run)
 }
 
 #[cfg(test)]
@@ -910,9 +964,12 @@ mod tests {
         )
         .unwrap();
 
-        let hash = commit(&home, &batch, Utc::now(), &mut state).unwrap();
+        let outcome = commit(&home, &batch, Utc::now(), &mut state).unwrap();
 
-        assert!(hash.is_some(), "the batch should have produced a commit");
+        assert!(
+            matches!(outcome, CommitOutcome::Committed(_)),
+            "the batch should have produced a commit, got {outcome:?}"
+        );
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
         assert_eq!(
             git(&home, &["log", "-1", "--format=%an <%ae>"]),
@@ -955,12 +1012,16 @@ mod tests {
         .unwrap();
         let too_soon = commit(&home, &second, now + chrono::Duration::seconds(5), &mut state)
             .unwrap();
-        assert_eq!(too_soon, None, "a second commit within a minute must wait");
+        assert_eq!(
+            too_soon,
+            CommitOutcome::TooSoon,
+            "a second commit within a minute must wait"
+        );
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
 
         let later = commit(&home, &second, now + chrono::Duration::seconds(90), &mut state)
             .unwrap();
-        assert!(later.is_some());
+        assert!(matches!(later, CommitOutcome::Committed(_)), "{later:?}");
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "2");
     }
 
@@ -1006,7 +1067,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(commit(&home, &batch, Utc::now(), &mut state).unwrap(), None);
+        assert_eq!(
+            commit(&home, &batch, Utc::now(), &mut state).unwrap(),
+            CommitOutcome::NotAGitRepo
+        );
     }
 
     #[test]
@@ -1015,7 +1079,7 @@ mod tests {
         let mut state = ExportState::default();
         assert_eq!(
             commit(&home, &ExportBatch::default(), Utc::now(), &mut state).unwrap(),
-            None
+            CommitOutcome::Nothing
         );
         assert!(state.last_commit_at.is_none());
     }
@@ -1038,9 +1102,9 @@ mod tests {
             .await
             .unwrap();
 
-        let batch = run_now(&ctx).await.unwrap();
+        let run = run_now(&ctx).await.unwrap();
 
-        assert_eq!(batch.kinds, vec!["journal"]);
+        assert_eq!(run.batch.kinds, vec!["journal"]);
         let day = Local::now().format("%Y-%m-%d").to_string();
         assert!(home.join(format!("journal/{day}.md")).is_file());
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
@@ -1067,7 +1131,7 @@ mod tests {
 
         let again = run_now(&ctx).await.unwrap();
 
-        assert!(again.is_empty(), "got {again:?}");
+        assert!(again.batch.is_empty(), "got {again:?}");
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
     }
 
@@ -1077,9 +1141,9 @@ mod tests {
         let home = dir.path().join("never-created");
         let ctx = test_ctx(&home).await;
 
-        let batch = run_now(&ctx).await.unwrap();
+        let run = run_now(&ctx).await.unwrap();
 
-        assert!(batch.is_empty());
+        assert!(run.batch.is_empty());
         assert!(!home.exists(), "run_now must not create the home itself");
     }
 
@@ -1093,9 +1157,9 @@ mod tests {
         request_files(&ctx, "notes", vec!["fleet/repomon/notes.md".to_string()]).await;
         assert!(pending(&ctx).await);
 
-        let batch = run_now(&ctx).await.unwrap();
+        let run = run_now(&ctx).await.unwrap();
 
-        assert_eq!(batch.kinds, vec!["notes"]);
+        assert_eq!(run.batch.kinds, vec!["notes"]);
         assert_eq!(
             git(&home, &["log", "-1", "--format=%s"]),
             "chore(repomind): export notes"
@@ -1113,6 +1177,49 @@ mod tests {
 
         assert!(pending(&ctx).await);
         run_now(&ctx).await.unwrap();
+        assert!(!pending(&ctx).await);
+    }
+
+    /// A batch whose commit is inside the once-a-minute floor must not be lost: it is queued
+    /// again so the next run commits it. Before this, a file exported 30 s after a commit stayed
+    /// uncommitted forever, because the batch that carried it had already been drained.
+    #[tokio::test]
+    async fn a_rate_limited_batch_is_requeued_and_commits_on_the_next_run() {
+        let (_d, home) = git_home();
+        let ctx = test_ctx(&home).await;
+        ctx.store
+            .append_journal(row(0, Utc::now(), "spawn_agent"))
+            .await
+            .unwrap();
+        run_now(&ctx).await.unwrap();
+        assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
+
+        ctx.store
+            .append_journal(row(0, Utc::now(), "merge_lane"))
+            .await
+            .unwrap();
+        let run = run_now(&ctx).await.unwrap();
+
+        assert!(matches!(run.commit, CommitOutcome::TooSoon), "{:?}", run.commit);
+        assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
+        assert!(
+            pending(&ctx).await,
+            "a deferred commit must leave its batch queued"
+        );
+
+        // Age the commit stamp past the floor, the way a minute of wall clock would.
+        let mut state = load_state(&home);
+        state.last_commit_at = Some(Utc::now() - chrono::Duration::minutes(2));
+        save_state(&home, &state).unwrap();
+
+        let run = run_now(&ctx).await.unwrap();
+
+        assert!(matches!(run.commit, CommitOutcome::Committed(_)), "{:?}", run.commit);
+        assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "2");
+        assert!(
+            git(&home, &["log", "-1", "--name-only", "--format="]).contains("journal/"),
+            "the deferred day file must be in the new commit"
+        );
         assert!(!pending(&ctx).await);
     }
 }

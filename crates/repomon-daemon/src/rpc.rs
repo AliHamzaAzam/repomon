@@ -5035,10 +5035,10 @@ pub async fn dispatch(
         // Runs the export immediately rather than waiting out the debounce, so a caller that
         // just wrote a row can read the file back.
         "repomind.export" => {
-            let batch = crate::repomind::export::run_now(ctx).await.map_err(internal)?;
+            let run = crate::repomind::export::run_now(ctx).await.map_err(internal)?;
             to_value(json!({
-                "files": batch.touched,
-                "kinds": batch.kinds,
+                "files": run.batch.touched,
+                "kinds": run.batch.kinds,
             }))
         }
         "orchestrator.stop" => {
