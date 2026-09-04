@@ -18,6 +18,7 @@ import CodeEditor, { type CodeEditorReplaceRequest } from "./CodeEditor";
 import ProjectSearchPanel from "./ProjectSearchPanel";
 import ImageViewer from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
+import PdfViewer from "./PdfViewer";
 import ConfirmDialog from "./ConfirmDialog";
 import {
   MarkdownPreview,
@@ -38,6 +39,7 @@ import {
   IconFileBinary,
   IconFileCode,
   IconFileImage,
+  IconFilePdf,
   IconFileText,
   IconFolder,
   IconFolderOpen,
@@ -62,6 +64,7 @@ function basename(path: string): string {
 function getFileIcon(path: string, kind?: string): Component<IconProps> {
   if (kind === "image") return IconFileImage;
   if (kind === "binary") return IconFileBinary;
+  if (kind === "pdf") return IconFilePdf;
   const ext = path.split(".").pop()?.toLowerCase();
   switch (ext) {
     case "rs":
@@ -93,6 +96,8 @@ function getFileIcon(path: string, kind?: string): Component<IconProps> {
     case "bmp":
     case "ico":
       return IconFileImage;
+    case "pdf":
+      return IconFilePdf;
     default:
       return IconFile;
   }
@@ -1000,6 +1005,13 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                       </Match>
                       <Match when={file().kind === "binary"}>
                         <BinaryViewer path={file().path} size={file().size} />
+                      </Match>
+                      <Match when={file().kind === "pdf"}>
+                        <PdfViewer
+                          worktreeRoot={lane()?.worktree.path ?? ""}
+                          path={file().path}
+                          size={file().size}
+                        />
                       </Match>
                       <Match when={true}>
                         <div

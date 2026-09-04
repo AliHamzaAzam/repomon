@@ -105,7 +105,7 @@ The center Editor workspace provides:
   filter search, SVG file-kind icons, keyboard navigation (arrow keys to navigate, Enter to open,
   Left and Right to collapse or expand), and a locate button to reveal the active file.
 - A multi-tab editor in the center supporting syntax highlighting across every language,
-  bracket auto-closing, code folding, word completion, multi-cursor editing, and image/binary
+  bracket auto-closing, code folding, word completion, multi-cursor editing, and image/binary/PDF
   viewers.
 - A status line at the bottom showing the syntax language (clickable to override), cursor position
   (line and column), detected indentation unit, and one-click toggles for line wrapping and
@@ -338,6 +338,16 @@ file on disk since it was opened, the save is rejected and a banner offers **rel
 your edits and take the on-disk version) or **keep mine** (leave your buffer as-is, still marked
 dirty, and try again) instead of silently overwriting either side. A file deleted on disk while
 you had it open shows the same banner, offering to write your buffer back out as a fresh file.
+
+Opening a `.pdf` shows the document itself rather than the "not a text file" notice: a slim
+toolbar (file name, size, and an **Open in system viewer** button) over the webview's own PDF
+renderer, which handles paging and zoom natively on macOS and Windows. The file is streamed
+straight off disk through the Tauri asset protocol - scoped, on first open, to that lane's
+worktree root - rather than round-tripped through an RPC's base64 payload, so there is no size cap
+tied to the editor's normal read limit. Linux's WebKitGTK webview has no built-in PDF renderer, so
+there the toolbar's button is the only way to view the file; the same fallback appears on macOS
+and Windows if the preview fails or never finishes loading. A PDF tab is always read-only: it is
+never marked dirty, never saved, and closes without a confirmation prompt.
 
 ## Extensions
 

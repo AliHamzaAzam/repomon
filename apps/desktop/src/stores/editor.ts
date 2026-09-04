@@ -17,7 +17,7 @@ export interface OpenFile {
   savedContent: string;
   mtimeMs: number | null;
   size?: number;
-  kind?: "text" | "binary" | "image" | string;
+  kind?: "text" | "binary" | "image" | "pdf" | string;
   large?: boolean;
   cursor: number;
   scrollTop: number;
@@ -459,7 +459,9 @@ export function createEditorStore(fleet: FleetStore) {
 
   function updateContent(path: string, content: string) {
     const file = findOpenFile(path);
-    if (file?.large) return;
+    // A pdf tab has no editable buffer - the viewer streams it via the asset protocol and never
+    // calls this, but the guard keeps the invariant true even if something else ever does.
+    if (file?.large || file?.kind === "pdf") return;
     updateOpenFile(path, (f) => ({ ...f, content }));
   }
 
@@ -481,7 +483,7 @@ export function createEditorStore(fleet: FleetStore) {
   async function saveFile(path: string) {
     const laneId = currentLaneId();
     const file = findOpenFile(path);
-    if (!file || laneId == null || file.large) return;
+    if (!file || laneId == null || file.large || file.kind === "pdf") return;
     if (file.content === file.savedContent && !file.conflict) return;
     const saveKey = `${laneId}:${path}`;
     savingPaths.set(saveKey, false);
@@ -568,7 +570,7 @@ export function createEditorStore(fleet: FleetStore) {
   async function saveAsNew(path: string) {
     const laneId = currentLaneId();
     const file = findOpenFile(path);
-    if (!file || laneId == null) return;
+    if (!file || laneId == null || file.kind === "pdf") return;
     updateOpenFile(path, (f) => ({ ...f, saving: true, saveError: null }));
     try {
       const result = await daemonCall("file.write", { lane_id: laneId, path, content: file.content });

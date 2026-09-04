@@ -390,5 +390,44 @@ describe("editor store", () => {
       });
     });
   });
+
+  it("keeps a pdf tab read-only: never dirty, never saved, activates on openAt", async () => {
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "file.read") {
+        return { content: "", mtime_ms: 1000, size: 40000, truncated: false, kind: "pdf" };
+      }
+      return { entries: [], truncated: false };
+    });
+
+    await new Promise<void>((resolve) => {
+      createRoot(async (dispose) => {
+        const [selectedId] = createSignal<number | null>(7);
+        const store = createEditorStore(fleetStub(selectedId, [lane(7)]));
+
+        await store.openFile("report.pdf");
+        expect(store.activeFile()?.kind).toBe("pdf");
+        expect(store.activeFile()?.content).toBe("");
+
+        store.updateContent("report.pdf", "should not stick");
+        expect(store.activeFile()?.content).toBe("");
+        expect(store.activeFile()?.content).toBe(store.activeFile()?.savedContent);
+
+        await store.saveFile("report.pdf");
+        expect(daemonCallMock).not.toHaveBeenCalledWith("file.write", expect.anything());
+
+        // requestCloseFile only blocks on a dirty buffer - a pdf tab is never dirty, so it
+        // closes immediately with no confirm.
+        expect(store.requestCloseFile("report.pdf")).toBe(true);
+        expect(store.openFiles().length).toBe(0);
+
+        await store.openAt("report.pdf", 1, 0);
+        expect(store.activeFile()?.path).toBe("report.pdf");
+        expect(store.activeFile()?.kind).toBe("pdf");
+
+        dispose();
+        resolve();
+      });
+    });
+  });
 });
 

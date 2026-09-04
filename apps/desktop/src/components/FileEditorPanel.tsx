@@ -12,6 +12,7 @@ import CodeEditor, { type CodeEditorReplaceRequest } from "./CodeEditor";
 import ProjectSearchPanel from "./ProjectSearchPanel";
 import ImageViewer from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
+import PdfViewer from "./PdfViewer";
 import ConfirmDialog from "./ConfirmDialog";
 import type { TranslatedError } from "../ipc/errors";
 import type { FleetStore } from "../stores/fleet";
@@ -520,6 +521,13 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                         </Match>
                         <Match when={file().kind === "binary"}>
                           <BinaryViewer path={file().path} size={file().size} />
+                        </Match>
+                        <Match when={file().kind === "pdf"}>
+                          <PdfViewer
+                            worktreeRoot={lane()?.worktree.path ?? ""}
+                            path={file().path}
+                            size={file().size}
+                          />
                         </Match>
                         <Match when={true}>
                           <CodeEditor
