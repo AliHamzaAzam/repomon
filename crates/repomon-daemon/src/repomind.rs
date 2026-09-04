@@ -13,6 +13,9 @@
 //! - **Idempotent.** It runs on every daemon start and on every `orchestrator.start`, and a
 //!   second run does nothing and logs nothing.
 
+pub mod export;
+pub mod md;
+
 use std::path::{Path, PathBuf};
 
 use repomon_core::model::{LaneId, RepoId};

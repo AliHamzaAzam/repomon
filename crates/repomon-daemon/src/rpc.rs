@@ -1755,6 +1755,7 @@ pub async fn dispatch(
                 })
                 .await
                 .map_err(internal)?;
+            crate::repomind::export::request(ctx).await;
             to_value(json!({ "id": id }))
         }
         "journal.query" => {
@@ -1822,6 +1823,7 @@ pub async fn dispatch(
                 .await
                 .map_err(internal)?;
             tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule confirmed");
+            crate::repomind::export::request(ctx).await;
             Ok(Value::Null)
         }
         "approval.remove" => {
@@ -1831,6 +1833,7 @@ pub async fn dispatch(
                 .await
                 .map_err(|e| RpcError::invalid_params(e.to_string()))?;
             tracing::info!(repo = %p.repo, pattern = %p.pattern, "approval rule removed");
+            crate::repomind::export::request(ctx).await;
             Ok(Value::Null)
         }
         "approval.list" => {
@@ -1869,6 +1872,7 @@ pub async fn dispatch(
                 .await
                 .map_err(internal)?;
             tracing::info!(id = sched.id, spec = %sched.spec, "schedule added");
+            crate::repomind::export::request(ctx).await;
             let mut v = serde_json::to_value(&sched).map_err(internal)?;
             v["next_run"] = json!(spec.next_after(chrono::Local::now()).to_rfc3339());
             Ok(v)
@@ -1895,6 +1899,7 @@ pub async fn dispatch(
                 .await
                 .map_err(|e| RpcError::invalid_params(e.to_string()))?;
             tracing::info!(id = p.id, "schedule removed");
+            crate::repomind::export::request(ctx).await;
             Ok(Value::Null)
         }
 
@@ -4937,6 +4942,16 @@ pub async fn dispatch(
                 "lane_id": lane_id,
                 "window": window,
                 "max_controllers": max_controllers,
+            }))
+        }
+        // Local-only (see `remote::remote_method_allowed`): it rewrites files in the home.
+        // Runs the export immediately rather than waiting out the debounce, so a caller that
+        // just wrote a row can read the file back.
+        "repomind.export" => {
+            let batch = crate::repomind::export::run_now(ctx).await.map_err(internal)?;
+            to_value(json!({
+                "files": batch.touched,
+                "kinds": batch.kinds,
             }))
         }
         "orchestrator.stop" => {

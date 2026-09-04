@@ -56,6 +56,9 @@ pub async fn scheduler_tick(ctx: &Arc<Ctx>, now: DateTime<Local>) {
             .mark_schedule_run(s.id, now.with_timezone(&Utc))
             .await;
         tracing::info!(id = s.id, spec = %s.spec, "standing run firing");
+        // The mirror in `plans/standing/` carries last-run and next-run lines, so a firing is a
+        // reason to re-export even though the schedule row itself did not change.
+        crate::repomind::export::request(ctx).await;
         run_standing(
             ctx,
             "standing_run",

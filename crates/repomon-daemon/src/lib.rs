@@ -213,6 +213,17 @@ pub struct Ctx {
     /// racing `repomon orchestrate`) - without this they race on `git init` in the same folder
     /// and one of them fails.
     pub repomind_lock: Mutex<()>,
+    /// Work waiting for the next repomind export run, plus the wake that starts its debounce.
+    /// Store writes (journal, schedules, approval rules) set `records`; the file-first writers
+    /// (repo notes, playbooks) add their own home-relative paths so those land in the same
+    /// export commit. See [`crate::repomind::export`].
+    pub repomind_export: Mutex<crate::repomind::export::Pending>,
+    /// Wakes [`crate::repomind::export::export_watch`] so a burst of store writes costs one
+    /// export instead of one per write.
+    pub repomind_export_wake: Notify,
+    /// Serializes export runs: the debounced watcher and an explicit `repomind.export` can
+    /// otherwise render the same files at once.
+    pub repomind_export_lock: Mutex<()>,
     /// Where per-repo notes files live: `data_dir()/repo-notes` in prod, a tempdir in tests
     /// (injected, not env-based: in-process daemon tests can't share process-global env safely).
     pub notes_dir: PathBuf,
@@ -464,6 +475,9 @@ impl Ctx {
             backend,
             spawn_lock: Mutex::new(()),
             repomind_lock: Mutex::new(()),
+            repomind_export: Mutex::new(Default::default()),
+            repomind_export_wake: Notify::new(),
+            repomind_export_lock: Mutex::new(()),
             notes_dir,
             started: Instant::now(),
             db_path,

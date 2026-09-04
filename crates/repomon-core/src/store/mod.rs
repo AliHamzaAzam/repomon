@@ -1267,6 +1267,20 @@ impl Store {
         .await
     }
 
+    /// Journal rows with an id above `after`, oldest first: the repomind export's cursor read.
+    /// Ascending because the export appends them to a day file in the order they happened.
+    pub async fn journal_after(&self, after: i64, limit: usize) -> Result<Vec<JournalEntry>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {JOURNAL_COLS} FROM orchestration_log WHERE id > ?1
+                 ORDER BY id ASC LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(params![after, limit as i64], journal_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
     /// The cold-start recap: every entry after the previous session's `session_start` (i.e. the
     /// second-newest one), ascending — the previous session's actions plus anything since,
     /// including the current session's own `session_start` marker. Empty until two sessions
@@ -2503,6 +2517,28 @@ mod tests {
         assert_eq!(recent[0].params.as_deref(), Some("{\"lane_id\":1}"));
         assert_eq!(recent[1].action, "session_start");
         assert!(recent[0].id > recent[1].id);
+    }
+
+    #[tokio::test]
+    async fn journal_after_returns_only_newer_rows_oldest_first() {
+        let s = store().await;
+        let first = s
+            .append_journal(journal("a", "session_start", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("a", "spawn_agent", None))
+            .await
+            .unwrap();
+        s.append_journal(journal("a", "merge_lane", None))
+            .await
+            .unwrap();
+
+        let rows = s.journal_after(first, 10).await.unwrap();
+
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["spawn_agent", "merge_lane"]);
+        assert!(rows.iter().all(|r| r.id > first));
+        assert_eq!(s.journal_after(0, 2).await.unwrap().len(), 2, "limit applies");
     }
 
     #[tokio::test]
