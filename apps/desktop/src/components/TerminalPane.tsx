@@ -20,7 +20,13 @@ import {
   type TerminalRenderer,
   type TerminalTarget,
 } from "../ipc/term";
-import { readTerminalAppearance, type TerminalAppearance } from "../theme";
+import {
+  readTerminalAppearance,
+  terminalFontFamily,
+  terminalSurfaceStyle,
+  type TerminalAppearance,
+  type TerminalThemeTokens,
+} from "../theme";
 import { onLayoutChanged } from "../stores/uiSettings";
 import type { FleetStore } from "../stores/fleet";
 import type { EditorStore } from "../stores/editor";
@@ -98,20 +104,23 @@ function terminalTheme(element: HTMLElement, appearance?: TerminalAppearance) {
   };
   const style = getComputedStyle(element);
   const varColor = (name: string) => resolve(style.getPropertyValue(name).trim());
-  const signal = varColor("--signal");
-  const [r, g, b] = signal.match(/\d+(?:\.\d+)?/g) ?? ["100", "196", "187"];
+  const tokens: TerminalThemeTokens = {
+    background: varColor("--background"),
+    foreground: varColor("--foreground"),
+    signal: varColor("--signal"),
+  };
+  const [r, g, b] = tokens.signal.match(/\d+(?:\.\d+)?/g) ?? ["100", "196", "187"];
   const app = appearance ?? readTerminalAppearance();
-
-  let bg = varColor("--background");
-  if (app.tintEnabled) {
-    const pct = Math.round(app.tintOpacity * 100);
-    bg = resolve(`color-mix(in srgb, var(--signal) ${pct}%, var(--background))`);
-  }
+  const surface = terminalSurfaceStyle(app, tokens);
+  // surface.background is a color-mix() expression when tinted, built from the already-resolved
+  // rgb() tokens above. xterm's own color parser can't handle color-mix() (see the comment at
+  // the top of this function), so resolve it through the browser once more into a plain rgb().
+  const bg = surface.background === tokens.background ? surface.background : resolve(surface.background);
 
   return {
     background: bg,
-    foreground: varColor("--foreground"),
-    cursor: signal,
+    foreground: surface.foreground,
+    cursor: tokens.signal,
     selectionBackground: `rgba(${r}, ${g}, ${b}, 0.24)`,
     black: "#101418",
     red: "#e66b61",
@@ -391,7 +400,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
             void openUrl(uri).catch((error: unknown) => setTransportError(errorMessage(error)));
           },
         },
-        fontFamily: `"${initialApp.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`,
+        fontFamily: terminalFontFamily(initialApp.fontFamily),
         fontSize: initialApp.fontSize,
         lineHeight: 1.18,
         scrollback: 10_000,
@@ -795,7 +804,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         if (fontChanged) {
           currentFontFamily = conf.fontFamily;
           currentFontSize = conf.fontSize;
-          terminal.options.fontFamily = `"${conf.fontFamily}", "SFMono-Regular", "Cascadia Code", monospace`;
+          terminal.options.fontFamily = terminalFontFamily(conf.fontFamily);
           terminal.options.fontSize = conf.fontSize;
           requestSyncSize();
         }

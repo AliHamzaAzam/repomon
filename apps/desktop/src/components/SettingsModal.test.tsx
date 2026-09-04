@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SystemDoctorResult } from "../bindings";
 import type { ConfigView } from "../ipc/rpc";
+import { TERMINAL_CSS_VAR_TOKENS, terminalSurfaceStyle, type TerminalAppearance } from "../theme";
 import SettingsModal from "./SettingsModal";
 
 const calls = vi.hoisted(() => ({
@@ -234,6 +235,61 @@ describe("Settings auto-save persistence", () => {
 
     await waitFor(() => expect(calls.saved.length).toBeGreaterThan(0));
     expect(calls.saved[calls.saved.length - 1].accent).toBe("green");
+  });
+
+  it("renders the terminal appearance preview with the exact styles a real pane would compute", async () => {
+    const appearance: TerminalAppearance = {
+      tintEnabled: true,
+      tintOpacity: 0.02,
+      fontFamily: "Berkeley Mono",
+      fontSize: 14,
+    };
+    localStorage.setItem("repomon-terminal-appearance", JSON.stringify(appearance));
+
+    state.config = { ...config, accent: "cyan" };
+    render(() => (
+      <SettingsModal
+        initialTab="appearance"
+        onClose={() => undefined}
+      />
+    ));
+
+    const preview = await screen.findByLabelText("Terminal appearance preview");
+    const expected = terminalSurfaceStyle(appearance, TERMINAL_CSS_VAR_TOKENS);
+
+    expect(preview.style.backgroundColor).toBe(expected.background);
+    expect(preview.style.fontFamily).toBe(expected.fontFamily);
+    expect(preview.style.fontSize).toBe(`${expected.fontSize}px`);
+    // The font stack must carry the same fallback chain a real pane uses, so an uninstalled
+    // family degrades to a monospace font instead of the browser/OS default serif face.
+    expect(preview.style.fontFamily.endsWith('"SFMono-Regular", "Cascadia Code", monospace')).toBe(true);
+
+    localStorage.removeItem("repomon-terminal-appearance");
+  });
+
+  it("keeps the preview background in sync as the tint switch and intensity slider change", async () => {
+    localStorage.removeItem("repomon-terminal-appearance");
+    state.config = { ...config, accent: "cyan" };
+    render(() => (
+      <SettingsModal
+        initialTab="appearance"
+        onClose={() => undefined}
+      />
+    ));
+
+    const preview = await screen.findByLabelText("Terminal appearance preview");
+    expect(preview.style.backgroundColor).toBe("var(--background)");
+
+    fireEvent.click(screen.getByRole("switch", { name: "Tint with theme accent" }));
+    await waitFor(() =>
+      expect(preview.style.backgroundColor).toBe("color-mix(in srgb, var(--signal) 8%, var(--background))"),
+    );
+
+    const slider = screen.getByRole("slider", { name: /tint intensity/i });
+    fireEvent.input(slider, { target: { value: "0.02" } });
+    await waitFor(() =>
+      expect(preview.style.backgroundColor).toBe("color-mix(in srgb, var(--signal) 2%, var(--background))"),
+    );
   });
 
   it("renders and toggles auto-collapse empty lanes switch in general tab", async () => {

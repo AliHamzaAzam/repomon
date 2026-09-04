@@ -241,3 +241,58 @@ export function saveTerminalAppearance(appearance: TerminalAppearance): void {
   window.localStorage.setItem(terminalAppearanceStorageKey, JSON.stringify(appearance));
   window.dispatchEvent(new CustomEvent("repomon:terminal-appearance-changed", { detail: appearance }));
 }
+
+// The color inputs `terminalSurfaceStyle` blends. TerminalPane resolves these to concrete
+// rgb() strings (xterm's own color parser cannot handle var() or color-mix()), while the
+// Settings preview renders as plain CSS and can hand the raw `var(--x)` references straight
+// through -- the browser evaluates color-mix() itself either way.
+export interface TerminalThemeTokens {
+  background: string;
+  foreground: string;
+  signal: string;
+}
+
+// Tokens for the CSS-rendered preview: the browser resolves these var() references and the
+// color-mix() they feed into on its own, so no DOM probing is needed there.
+export const TERMINAL_CSS_VAR_TOKENS: TerminalThemeTokens = {
+  background: "var(--background)",
+  foreground: "var(--foreground)",
+  signal: "var(--signal)",
+};
+
+// Appended after the user's chosen family so an uninstalled font degrades to a monospace
+// fallback instead of the browser/OS default (often a serif face).
+export const TERMINAL_FONT_FALLBACK_STACK = '"SFMono-Regular", "Cascadia Code", monospace';
+
+export function terminalFontFamily(fontFamily: string): string {
+  return `"${fontFamily}", ${TERMINAL_FONT_FALLBACK_STACK}`;
+}
+
+export interface TerminalSurfaceStyle {
+  background: string;
+  foreground: string;
+  accent: string;
+  fontFamily: string;
+  fontSize: number;
+}
+
+// Single source of truth for turning appearance settings into a rendered terminal surface.
+// Used by both TerminalPane (building the xterm theme + pane container background) and the
+// Settings preview (as inline CSS), so the two can never drift apart the way the preview's
+// font stack previously did.
+export function terminalSurfaceStyle(
+  appearance: TerminalAppearance,
+  tokens: TerminalThemeTokens,
+): TerminalSurfaceStyle {
+  const background = appearance.tintEnabled
+    ? `color-mix(in srgb, ${tokens.signal} ${Math.round(appearance.tintOpacity * 100)}%, ${tokens.background})`
+    : tokens.background;
+
+  return {
+    background,
+    foreground: tokens.foreground,
+    accent: tokens.signal,
+    fontFamily: terminalFontFamily(appearance.fontFamily),
+    fontSize: appearance.fontSize,
+  };
+}

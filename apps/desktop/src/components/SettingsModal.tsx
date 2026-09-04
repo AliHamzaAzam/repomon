@@ -16,7 +16,9 @@ import {
   readTheme,
   readTerminalAppearance,
   saveTerminalAppearance,
+  terminalSurfaceStyle,
   ACCENT_SWATCHES,
+  TERMINAL_CSS_VAR_TOKENS,
   TERMINAL_FONT_FAMILIES,
   THEME_PRESETS,
   type Theme,
@@ -380,6 +382,9 @@ export default function SettingsModal(props: SettingsModalProps) {
   const [currentTheme, setCurrentTheme] = createSignal<Theme>(readTheme());
   const [activeSoundProfile, setActiveSoundProfile] = createSignal<SoundProfile>(readSoundProfile());
   const [terminalApp, setTerminalApp] = createSignal<TerminalAppearance>(readTerminalAppearance());
+  // Same formula TerminalPane uses to build a real pane's xterm theme, so this preview can
+  // never drift from what a lane actually looks like -- see terminalSurfaceStyle in theme.ts.
+  const terminalPreviewStyle = createMemo(() => terminalSurfaceStyle(terminalApp(), TERMINAL_CSS_VAR_TOKENS));
   const [autoCollapseEmpty, setAutoCollapseEmpty] = createSignal<boolean>(readAutoCollapseEmptyLanes());
 
   function selectTheme(themeId: Theme) {
@@ -1410,11 +1415,9 @@ export default function SettingsModal(props: SettingsModalProps) {
                   <div
                     class="rounded-xl border border-line p-3 font-mono text-xs leading-relaxed"
                     style={{
-                      "background-color": terminalApp().tintEnabled
-                        ? `color-mix(in srgb, var(--signal) ${Math.round(terminalApp().tintOpacity * 100)}%, var(--background))`
-                        : "var(--background)",
-                      "font-family": terminalApp().fontFamily,
-                      "font-size": `${terminalApp().fontSize}px`,
+                      "background-color": terminalPreviewStyle().background,
+                      "font-family": terminalPreviewStyle().fontFamily,
+                      "font-size": `${terminalPreviewStyle().fontSize}px`,
                     }}
                     aria-label="Terminal appearance preview"
                   >
