@@ -7,6 +7,8 @@ run_root="$(mktemp -d "${TMPDIR:-/tmp}/repomon-desktop-e2e.XXXXXX")"
 config_home="$run_root/config"
 data_dir="$run_root/data"
 fixture_repo="$run_root/fixture-repo"
+repomind_home="$run_root/repomind"
+basic_memory_dir="$run_root/basic-memory"
 socket_path="$run_root/repomon.sock"
 tmux_server="desktop-e2e-$$"
 driver_pid=""
@@ -24,8 +26,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$config_home/repomon" "$data_dir" "$fixture_repo"
-printf 'tmux_session = "%s"\ndefault_agent = "fake"\nspawn_prompt = false\n' "$tmux_server" > "$config_home/repomon/config.toml"
+mkdir -p "$config_home/repomon" "$data_dir" "$fixture_repo" "$repomind_home" "$basic_memory_dir"
+# The repomind home and the basic-memory config are per-run throwaways. Without both, a daemon
+# start would create and commit inside the operator's real ~/repomind and register a project in
+# their real ~/.basic-memory/config.json.
+printf 'tmux_session = "%s"\ndefault_agent = "fake"\nspawn_prompt = false\n\n[repomind]\nhome = "%s"\nbasic_memory_config = "%s/config.json"\n' \
+  "$tmux_server" "$repomind_home" "$basic_memory_dir" > "$config_home/repomon/config.toml"
 
 git -C "$fixture_repo" init -b main >/dev/null
 git -C "$fixture_repo" config user.name "Repomon E2E"
@@ -35,6 +41,7 @@ git -C "$fixture_repo" add README.md
 git -C "$fixture_repo" commit -m "initial fixture" >/dev/null
 
 export XDG_CONFIG_HOME="$config_home"
+export BASIC_MEMORY_CONFIG_DIR="$basic_memory_dir"
 export REPOMON_DATA_DIR="$data_dir"
 export REPOMON_SOCKET="$socket_path"
 export REPOMON_DESKTOP_BIN="$desktop_bin"

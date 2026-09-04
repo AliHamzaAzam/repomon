@@ -263,6 +263,12 @@ pub struct RepomindConfig {
     pub primary_agent: Option<String>,
     /// How many controller agents may run in the controller lane at once.
     pub max_controllers: usize,
+    /// Where basic-memory keeps its project list, `~/`-expandable. Unset means the CLI's own
+    /// default (`~/.basic-memory/config.json`). An isolated daemon points this at a throwaway
+    /// file so registering the home can never touch the operator's real vault config; the
+    /// `BASIC_MEMORY_CONFIG_DIR` environment variable, basic-memory's own documented override,
+    /// still wins over it. See `repomon_daemon::repomind::basic_memory`.
+    pub basic_memory_config: Option<String>,
 }
 
 impl Default for RepomindConfig {
@@ -271,6 +277,7 @@ impl Default for RepomindConfig {
             home: DEFAULT_REPOMIND_HOME.to_string(),
             primary_agent: None,
             max_controllers: DEFAULT_MAX_CONTROLLERS,
+            basic_memory_config: None,
         }
     }
 }
@@ -451,6 +458,16 @@ impl Config {
     /// The repomind home as an absolute path (a leading `~/` expanded).
     pub fn repomind_home(&self) -> PathBuf {
         expand_tilde(&self.repomind.home)
+    }
+
+    /// The configured basic-memory config file as an absolute path, or `None` for the CLI's own
+    /// default. Only the `[repomind]` setting: the environment override is read by the caller.
+    pub fn repomind_basic_memory_config(&self) -> Option<PathBuf> {
+        self.repomind
+            .basic_memory_config
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(expand_tilde)
     }
 
     /// The agent that runs as repomind's primary controller: the `[repomind]` setting if given,
@@ -1014,5 +1031,32 @@ mod tests {
         assert_eq!(loaded.repomind.home, "~/elsewhere");
         assert_eq!(loaded.repomind.primary_agent, Some("codex".to_string()));
         assert_eq!(loaded.repomind.max_controllers, 5);
+    }
+
+    /// An isolated daemon must be able to point basic-memory somewhere other than the operator's
+    /// real `~/.basic-memory/config.json`. Unset means "the default", which the caller resolves.
+    #[test]
+    fn repomind_basic_memory_config_is_none_by_default_and_expands_a_tilde() {
+        let mut c = Config::default();
+        assert_eq!(c.repomind_basic_memory_config(), None);
+
+        c.repomind.basic_memory_config = Some("~/isolated/config.json".into());
+        assert_eq!(
+            c.repomind_basic_memory_config(),
+            Some(home().join("isolated").join("config.json"))
+        );
+    }
+
+    #[test]
+    fn repomind_basic_memory_config_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.repomind.basic_memory_config = Some("/srv/bm/config.json".into());
+        c.save_to(&path).unwrap();
+        assert_eq!(
+            Config::load_from(&path).unwrap().repomind.basic_memory_config,
+            Some("/srv/bm/config.json".to_string())
+        );
     }
 }

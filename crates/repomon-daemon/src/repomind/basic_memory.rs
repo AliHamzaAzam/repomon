@@ -13,6 +13,15 @@ use std::path::{Path, PathBuf};
 /// The basic-memory project name the home is registered under.
 pub const PROJECT: &str = "repomind";
 
+/// basic-memory's own name for its config file inside the data directory.
+pub const CONFIG_FILE_NAME: &str = "config.json";
+
+/// basic-memory's documented environment override for where its config and database live
+/// (`resolve_data_dir` in `basic_memory/config_models.py`: `BASIC_MEMORY_CONFIG_DIR`, then
+/// `XDG_CONFIG_HOME`, then `~/.basic-memory`). Exporting it is what makes an isolated daemon
+/// airtight: the daemon and the CLI it shells out to then read and write the same throwaway file.
+pub const CONFIG_DIR_ENV: &str = "BASIC_MEMORY_CONFIG_DIR";
+
 /// What one registration pass decided. Returned so the caller logs a single line and a test can
 /// assert the decision without a basic-memory install.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,11 +35,37 @@ pub enum Registration {
     Added,
 }
 
-/// `~/.basic-memory/config.json`, the file the CLI keeps its project list in.
-pub fn config_path() -> PathBuf {
+/// The file the CLI keeps its project list in, honoring both overrides in basic-memory's own
+/// order: [`CONFIG_DIR_ENV`] first, then the `[repomind] basic_memory_config` path the caller
+/// passes in, then `~/.basic-memory/config.json`.
+pub fn resolve_config_path(env_dir: Option<PathBuf>, configured: Option<&Path>) -> PathBuf {
+    if let Some(dir) = env_dir {
+        return dir.join(CONFIG_FILE_NAME);
+    }
+    if let Some(path) = configured {
+        return path.to_path_buf();
+    }
     repomon_core::config::home()
         .join(".basic-memory")
-        .join("config.json")
+        .join(CONFIG_FILE_NAME)
+}
+
+/// [`resolve_config_path`] reading [`CONFIG_DIR_ENV`] from the daemon's own environment.
+pub fn config_path(configured: Option<&Path>) -> PathBuf {
+    let env_dir = std::env::var_os(CONFIG_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    resolve_config_path(env_dir, configured)
+}
+
+/// The environment entry that points a child `basic-memory` at the same config file the daemon
+/// resolved. basic-memory takes a *directory*, so a configured path's parent is what it gets.
+pub fn cli_config_dir_env(config_path: &Path) -> (String, String) {
+    let dir = config_path.parent().unwrap_or(Path::new("."));
+    (
+        CONFIG_DIR_ENV.to_string(),
+        dir.to_string_lossy().into_owned(),
+    )
 }
 
 /// Whether `config_path` already lists `PROJECT`. A missing or unparseable config counts as not
@@ -94,10 +129,18 @@ pub fn ensure_project_with(
 /// The daemon's pass: probe PATH, read the real config, and shell out to the CLI when the home
 /// is not registered yet. Logs one line and never fails the caller's startup.
 pub async fn ensure_project(ctx: &crate::Ctx) -> repomon_core::Result<Registration> {
-    let home = ctx.config.read().await.repomind_home();
+    let (home, configured) = {
+        let cfg = ctx.config.read().await;
+        (cfg.repomind_home(), cfg.repomind_basic_memory_config())
+    };
     let decision = tokio::task::spawn_blocking(move || {
-        ensure_project_with(&config_path(), &home, cli_present(), |argv| {
-            let out = std::process::Command::new("basic-memory").args(argv).output()?;
+        let path = config_path(configured.as_deref());
+        let (env_key, env_dir) = cli_config_dir_env(&path);
+        ensure_project_with(&path, &home, cli_present(), |argv| {
+            let out = std::process::Command::new("basic-memory")
+                .args(argv)
+                .env(&env_key, &env_dir)
+                .output()?;
             if !out.status.success() {
                 tracing::warn!(
                     "basic-memory {}: {}",
@@ -133,6 +176,46 @@ mod tests {
         let path = dir.join("config.json");
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    /// basic-memory's own documented override (`BASIC_MEMORY_CONFIG_DIR`, `resolve_data_dir`)
+    /// wins over everything: an isolated daemon that exports it gets the same config file the
+    /// CLI it shells out to will use.
+    #[test]
+    fn the_basic_memory_config_dir_environment_override_wins() {
+        assert_eq!(
+            resolve_config_path(Some(PathBuf::from("/tmp/iso/bm")), Some(Path::new("/cfg.json"))),
+            PathBuf::from("/tmp/iso/bm").join(CONFIG_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn the_configured_path_is_used_when_the_environment_is_unset() {
+        assert_eq!(
+            resolve_config_path(None, Some(Path::new("/tmp/iso/bm/config.json"))),
+            PathBuf::from("/tmp/iso/bm/config.json")
+        );
+    }
+
+    #[test]
+    fn without_an_override_the_operators_own_config_file_is_used() {
+        assert_eq!(
+            resolve_config_path(None, None),
+            repomon_core::config::home()
+                .join(".basic-memory")
+                .join(CONFIG_FILE_NAME)
+        );
+    }
+
+    /// The CLI reads its own config through `BASIC_MEMORY_CONFIG_DIR`, so an override that came
+    /// from the daemon's config file has to be handed to the child as that variable, or
+    /// `project add` would write the operator's real config while we read the isolated one.
+    #[test]
+    fn the_child_cli_is_pointed_at_the_same_config_directory() {
+        assert_eq!(
+            cli_config_dir_env(Path::new("/tmp/iso/bm/config.json")),
+            ("BASIC_MEMORY_CONFIG_DIR".to_string(), "/tmp/iso/bm".to_string())
+        );
     }
 
     #[test]
