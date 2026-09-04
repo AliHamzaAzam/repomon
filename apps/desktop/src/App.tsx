@@ -26,7 +26,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { matchChord } from "./keymap";
+import { isMac, matchChord, matchSidebarKey } from "./keymap";
 import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
@@ -41,6 +41,7 @@ import { readOnboardingStep } from "./stores/onboarding";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
 import EditorWorkspace from "./components/EditorWorkspace";
 import FileFinder from "./components/FileFinder";
+import ShortcutsOverlay from "./components/ShortcutsOverlay";
 import { IconChevronDown, IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
@@ -352,15 +353,37 @@ function App(props: AppProps) {
       case "lane.stop": if (lane) actions.stopAgent(lane, agent); break;
       case "agents.prev": workspace.cycleTab(-1, workspace.laneTargets()); break;
       case "agents.next": workspace.cycleTab(1, workspace.laneTargets()); break;
-      case "help.open": actions.openSettingsTab("keyboard"); break;
+      case "help.open": actions.openShortcutsGuide(); break;
       default:
         console.warn(`No handler for keyboard binding: ${binding.id}`);
         break;
     }
   };
 
+  // The bare "?" alternative to mod+? for opening the shortcuts guide (help.open above already
+  // covers mod+?). Unlike every chord in keymap.ts this carries no modifier at all, so it needs
+  // its own guard against stealing input: it only fires outside a text input, and only when no
+  // other modal already owns the keyboard.
+  const onBareHelpKey = (event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.key !== "?" || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement
+      || (target instanceof HTMLElement && target.isContentEditable)
+    ) {
+      return;
+    }
+    if (actions.settingsOpen() || actions.spawnLane() || actions.newLaneOpen()
+      || actions.renameTarget() || actions.confirmOptions()) return;
+    event.preventDefault();
+    actions.openShortcutsGuide();
+  };
+
   onMount(() => {
     window.addEventListener("keydown", onShortcut);
+    window.addEventListener("keydown", onBareHelpKey);
     void getVersion().then(setAppVersion).catch(() => undefined);
 
     void checkForUpdate()
@@ -398,6 +421,7 @@ function App(props: AppProps) {
   onCleanup(() => {
     active = false;
     window.removeEventListener("keydown", onShortcut);
+    window.removeEventListener("keydown", onBareHelpKey);
     stopListening?.();
     fleet.stop();
     notifications.stop();
@@ -436,6 +460,9 @@ function App(props: AppProps) {
     onCleanup(() => clearTimeout(timer));
   });
 
+  // The bare-key match itself lives in keymap.ts's matchSidebarKey, described there as "sidebar"
+  // scope bindings, so the shortcuts guide and this dispatch can never disagree about what "j"
+  // does here.
   const navigateFleet = (event: KeyboardEvent) => {
     const target = event.target;
     if (
@@ -447,18 +474,14 @@ function App(props: AppProps) {
       if (event.key === "Escape") event.currentTarget instanceof HTMLElement && event.currentTarget.focus();
       return;
     }
-    if (event.key === "/") {
-      event.preventDefault();
-      searchInput?.focus();
-    } else if (event.key === "j" || event.key === "ArrowDown") {
-      event.preventDefault();
-      fleet.moveSelection(1);
-    } else if (event.key === "k" || event.key === "ArrowUp") {
-      event.preventDefault();
-      fleet.moveSelection(-1);
-    } else if (event.key === "n") {
-      event.preventDefault();
-      fleet.moveSelection(1, true);
+    const action = matchSidebarKey(event);
+    if (!action) return;
+    event.preventDefault();
+    switch (action) {
+      case "sidebar.filter": searchInput?.focus(); break;
+      case "sidebar.next": fleet.moveSelection(1); break;
+      case "sidebar.prev": fleet.moveSelection(-1); break;
+      case "sidebar.jumpUrgent": fleet.moveSelection(1, true); break;
     }
   };
 
@@ -842,6 +865,7 @@ function App(props: AppProps) {
           void editor.openFile(path);
         }}
       />
+      <ShortcutsOverlay actions={actions} />
       <Show when={actions.error() ?? fleet.error()}>
         {(message) => (
           <div role="alert" class="fixed right-4 top-14 z-[70] flex max-w-md items-start gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-[0_14px_40px_var(--shadow)]">

@@ -204,3 +204,20 @@ describe("settings modal tab", () => {
     });
   });
 });
+
+describe("shortcuts guide", () => {
+  it("opens and closes independently of the settings modal", () => {
+    createRoot((dispose) => {
+      const actions = createActionsStore(fleetStub());
+      expect(actions.shortcutsGuideOpen()).toBe(false);
+
+      actions.openShortcutsGuide();
+      expect(actions.shortcutsGuideOpen()).toBe(true);
+      expect(actions.settingsOpen()).toBe(false);
+
+      actions.closeShortcutsGuide();
+      expect(actions.shortcutsGuideOpen()).toBe(false);
+      dispose();
+    });
+  });
+});

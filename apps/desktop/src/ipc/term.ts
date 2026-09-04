@@ -63,6 +63,15 @@ export function isTerminalReleaseChord(event: KeyboardEvent): boolean {
   return event.key === "Escape" && event.shiftKey;
 }
 
+/// True when a key event should open the terminal's own find bar. Deliberately accepts either
+/// Cmd or Ctrl plus Shift+F on every platform, unlike the app's other chords: a focused terminal
+/// already claims both modifiers, so there is no reason to also require the platform's usual
+/// "mod". This is documented in keymap.ts's "terminal.find" entry (scope "terminal"), which
+/// term.test.ts checks against this predicate directly.
+export function isTerminalFindChord(event: KeyboardEvent): boolean {
+  return (event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f";
+}
+
 /// Convert one wheel event's delta into a SIGNED, fractional number of terminal lines (positive =
 /// scroll down). The caller accumulates this across events and only emits whole lines, so a
 /// trackpad gesture (many tiny pixel deltas) scrolls proportionally instead of one line per event

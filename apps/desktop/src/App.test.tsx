@@ -385,4 +385,52 @@ describe("Repomon desktop shell", () => {
     expect(pane).toHaveClass("min-w-0");
     expect(pane).toHaveClass("flex-1");
   });
+
+  it("opens the shortcuts overlay on mod+? (help.open)", async () => {
+    render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "?", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("opens the shortcuts overlay on a bare \"?\" outside a text input", async () => {
+    render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    fireEvent.keyDown(window, { key: "?" });
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    });
+  });
+
+  it("does not steal a bare \"?\" typed into a text input", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const filterInput = within(container).getByPlaceholderText(/Filter/i);
+    fireEvent.keyDown(filterInput, { key: "?" });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+  });
 });

@@ -142,6 +142,49 @@ describe("FileFinder component", () => {
     expect(onOpenPath).toHaveBeenCalledWith("file_b.txt");
   });
 
+  it("navigates with the emacs-style Ctrl-N/Ctrl-P aliases, as keymap.ts documents", async () => {
+    // finder.next/finder.prev in keymap.ts's BINDINGS document these two chords; this proves
+    // they still do what the guide says instead of trusting the description on faith.
+    const { BINDINGS } = await import("../keymap");
+    const next = BINDINGS.find((binding) => binding.id === "finder.next");
+    const prev = BINDINGS.find((binding) => binding.id === "finder.prev");
+    expect(next?.chord).toBe("ctrl+n");
+    expect(prev?.chord).toBe("ctrl+p");
+
+    mockRpc({
+      "file.index": () => ({
+        paths: ["file_a.txt", "file_b.txt", "file_c.txt"],
+        truncated: false,
+        generation: 1,
+      }),
+    });
+
+    const editor = makeMockEditorStore(1);
+    const onClose = vi.fn();
+    const onOpenPath = vi.fn();
+
+    render(() => (
+      <FileFinder
+        editor={editor}
+        isOpen={true}
+        onClose={onClose}
+        onOpenPath={onOpenPath}
+      />
+    ));
+
+    await waitFor(() => {
+      expect(screen.getByText("file_a.txt")).toBeDefined();
+    });
+
+    const input = screen.getByPlaceholderText("Search files by name...");
+    fireEvent.keyDown(input, { key: "n", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "n", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "p", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onOpenPath).toHaveBeenCalledWith("file_b.txt");
+  });
+
   it("closes when escape is pressed", async () => {
     mockRpc({
       "file.index": () => ({

@@ -715,6 +715,22 @@ const wordCompletionData = EditorState.languageData.of(() => [
   { autocomplete: documentWordCompletionSource },
 ]);
 
+/// The local (non-global) CodeMirror bindings this editor adds beyond @codemirror's own defaults.
+/// This is the actual list the `keymap.of` extension below dispatches from - the component builds
+/// `extraKeymaps` by mapping over this exact array, so the two can never drift - and it is also
+/// the table keymap.test.ts imports (via fromCodeMirrorKey) to check against the "editor" scope
+/// entries in keymap.ts's BINDINGS, so the shortcuts guide can never omit or misdescribe one of
+/// these either.
+export const EDITOR_LOCAL_KEYMAP: Array<{ key: string; label: string }> = [
+  { key: "Mod-s", label: "Save file" },
+  { key: "Mod-/", label: "Toggle line comment" },
+  { key: "Alt-ArrowUp", label: "Move line up" },
+  { key: "Alt-ArrowDown", label: "Move line down" },
+  { key: "Shift-Alt-ArrowDown", label: "Copy line down" },
+  { key: "Mod-d", label: "Select next occurrence" },
+  { key: "Mod-g", label: "Go to line" },
+];
+
 export default function CodeEditor(props: CodeEditorProps) {
   let containerRef!: HTMLDivElement;
   let view: EditorView | undefined;
@@ -834,9 +850,10 @@ export default function CodeEditor(props: CodeEditorProps) {
     }
   };
 
-  const saveBinding: KeyBinding = {
-    key: "Mod-s",
-    run: () => {
+  // Handler per key in EDITOR_LOCAL_KEYMAP above, so that exported table is the single source
+  // for both what fires (this map) and what the shortcuts guide describes.
+  const localHandlers: Record<string, KeyBinding["run"]> = {
+    "Mod-s": () => {
       if (props.large || props.readOnly) return true;
       // Does not call refreshDiffBase itself - the store's saveFile bumps `saveVersion` on
       // completion, and the effect below reacts to that. This way every save path (this keymap
@@ -845,17 +862,18 @@ export default function CodeEditor(props: CodeEditorProps) {
       props.onSave?.();
       return true;
     },
+    "Mod-/": toggleComment,
+    "Alt-ArrowUp": moveLineUp,
+    "Alt-ArrowDown": moveLineDown,
+    "Shift-Alt-ArrowDown": copyLineDown,
+    "Mod-d": selectNextOccurrence,
+    "Mod-g": gotoLine,
   };
 
-  const extraKeymaps: KeyBinding[] = [
-    saveBinding,
-    { key: "Mod-/", run: toggleComment },
-    { key: "Alt-ArrowUp", run: moveLineUp },
-    { key: "Alt-ArrowDown", run: moveLineDown },
-    { key: "Shift-Alt-ArrowDown", run: copyLineDown },
-    { key: "Mod-d", run: selectNextOccurrence },
-    { key: "Mod-g", run: gotoLine },
-  ];
+  const extraKeymaps: KeyBinding[] = EDITOR_LOCAL_KEYMAP.map(({ key: bindingKey }) => ({
+    key: bindingKey,
+    run: localHandlers[bindingKey],
+  }));
 
   onMount(() => {
     lastKnownDoc = props.value;

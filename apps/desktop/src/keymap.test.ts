@@ -1,15 +1,35 @@
 import { describe, expect, it } from "vitest";
 
-import { BINDINGS, formatChord, matchChord } from "./keymap";
+import {
+  BINDINGS,
+  detectActiveScope,
+  findConflicts,
+  formatChord,
+  fromCodeMirrorKey,
+  keyCapParts,
+  matchChord,
+  matchSidebarKey,
+} from "./keymap";
 
 function key(init: Partial<KeyboardEvent> & { key: string }): KeyboardEvent {
   return new KeyboardEvent("keydown", { bubbles: true, ...init });
 }
 
 describe("keymap table", () => {
-  it("has no duplicate chords", () => {
-    const chords = BINDINGS.map((binding) => binding.chord);
-    expect(new Set(chords).size).toBe(chords.length);
+  it("has no chord collisions within a scope", () => {
+    // A chord may legitimately repeat across *different* scopes (mod+shift+f is both the global
+    // "search project files" and the terminal-only "find in terminal"; focus decides which one
+    // fires), but two entries in the same scope sharing a chord is a real bug.
+    expect(findConflicts()).toEqual([]);
+  });
+
+  it("every global binding has a chord unique in the dispatch map", () => {
+    // matchChord's BY_CHORD index is keyed by chord alone within scope "global", so this is the
+    // one place a cross-scope duplicate would actually be dangerous.
+    const globalChords = BINDINGS.filter((binding) => (binding.scope ?? "global") === "global").map(
+      (binding) => binding.chord,
+    );
+    expect(new Set(globalChords).size).toBe(globalChords.length);
   });
 
   it("every binding has an id, a label, and a section", () => {
@@ -18,6 +38,89 @@ describe("keymap table", () => {
       expect(binding.label.length).toBeGreaterThan(0);
       expect(binding.section.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("findConflicts", () => {
+  it("flags two entries that share a chord and a scope", () => {
+    const conflicts = findConflicts([
+      { id: "a", chord: "mod+x", label: "A", section: "Panels" },
+      { id: "b", chord: "mod+x", label: "B", section: "Panels" },
+    ]);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].bindings.map((binding) => binding.id)).toEqual(["a", "b"]);
+  });
+
+  it("does not flag the same chord in two different scopes", () => {
+    const conflicts = findConflicts([
+      { id: "a", chord: "mod+shift+f", label: "A", section: "Panels", scope: "global" },
+      { id: "b", chord: "mod+shift+f", label: "B", section: "Terminal", scope: "terminal" },
+    ]);
+    expect(conflicts).toEqual([]);
+  });
+});
+
+describe("fromCodeMirrorKey", () => {
+  it("normalizes CodeMirror key strings into this file's chord vocabulary", () => {
+    expect(fromCodeMirrorKey("Mod-s")).toBe("mod+s");
+    expect(fromCodeMirrorKey("Mod-/")).toBe("mod+/");
+    expect(fromCodeMirrorKey("Alt-ArrowUp")).toBe("alt+up");
+    expect(fromCodeMirrorKey("Shift-Alt-ArrowDown")).toBe("shift+alt+down");
+  });
+});
+
+describe("matchSidebarKey", () => {
+  it("matches the bare keys App.tsx's navigateFleet dispatches", () => {
+    expect(matchSidebarKey(key({ key: "/" }))).toBe("sidebar.filter");
+    expect(matchSidebarKey(key({ key: "j" }))).toBe("sidebar.next");
+    expect(matchSidebarKey(key({ key: "ArrowDown" }))).toBe("sidebar.next");
+    expect(matchSidebarKey(key({ key: "k" }))).toBe("sidebar.prev");
+    expect(matchSidebarKey(key({ key: "ArrowUp" }))).toBe("sidebar.prev");
+    expect(matchSidebarKey(key({ key: "n" }))).toBe("sidebar.jumpUrgent");
+  });
+
+  it("ignores keys with no sidebar meaning", () => {
+    expect(matchSidebarKey(key({ key: "x" }))).toBeNull();
+  });
+});
+
+describe("detectActiveScope", () => {
+  it("reports editor when focus is inside .cm-editor", () => {
+    const root = document.createElement("div");
+    root.className = "cm-editor";
+    const input = document.createElement("div");
+    root.appendChild(input);
+    expect(detectActiveScope(input)).toBe("editor");
+  });
+
+  it("reports terminal when focus is inside .xterm", () => {
+    const root = document.createElement("div");
+    root.className = "xterm";
+    const textarea = document.createElement("textarea");
+    root.appendChild(textarea);
+    expect(detectActiveScope(textarea)).toBe("terminal");
+  });
+
+  it("falls back to global otherwise", () => {
+    expect(detectActiveScope(document.createElement("div"))).toBe("global");
+    expect(detectActiveScope(null)).toBe("global");
+  });
+});
+
+describe("keyCapParts", () => {
+  it("splits a modified chord into individual caps", () => {
+    expect(keyCapParts("mod+shift+m", "mac")).toEqual(["⌘", "⇧", "M"]);
+    expect(keyCapParts("mod+shift+m", "other")).toEqual(["Ctrl", "Shift", "M"]);
+  });
+
+  it("renders a bare local chord with no modifier cap", () => {
+    expect(keyCapParts("/", "mac")).toEqual(["/"]);
+    expect(keyCapParts("j", "mac")).toEqual(["J"]);
+  });
+
+  it("renders alt and arrow keys", () => {
+    expect(keyCapParts("alt+up", "mac")).toEqual(["⌥", "↑"]);
+    expect(keyCapParts("alt+up", "other")).toEqual(["Alt", "↑"]);
   });
 });
 

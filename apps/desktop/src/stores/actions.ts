@@ -19,6 +19,7 @@ export interface RenameTarget {
 /// header) can open one without threading callbacks. The matching <ActionModals> renders them.
 export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore) {
   const [controlOpen, setControlOpen] = createSignal(false);
+  const [shortcutsGuideOpen, setShortcutsGuideOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general");
   // Which sub-tab of Settings > Automation to land on, for callers that mean one of them
@@ -260,6 +261,13 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     openControl: () => setControlOpen(true),
     closeControl: () => setControlOpen(false),
     toggleControl: () => setControlOpen((open) => !open),
+    // The shortcuts cheat sheet overlay (mod+? or a bare "?" outside a text input). Exported here
+    // as `openShortcutsGuide` rather than as a bare module function so any surface holding an
+    // ActionsStore reference - the header, the control palette, or onboarding's Done step - can
+    // open it the same way it opens every other panel.
+    shortcutsGuideOpen,
+    openShortcutsGuide: () => setShortcutsGuideOpen(true),
+    closeShortcutsGuide: () => setShortcutsGuideOpen(false),
     settingsOpen,
     settingsTab,
     automationSection,

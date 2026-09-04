@@ -10,6 +10,7 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { daemonCall } from "../ipc/rpc";
 import {
   createInputCoalescer,
+  isTerminalFindChord,
   isTerminalReleaseChord,
   recordTrace,
   takeWheelBatch,
@@ -494,7 +495,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       terminal.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
-        if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f") {
+        if (isTerminalFindChord(event)) {
           event.preventDefault();
           openFind();
           return false;

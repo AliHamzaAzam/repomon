@@ -66,9 +66,10 @@ the OS-level icon is the glass artwork.
 
 ## Keyboard control
 
-Everything the app does can be driven from the keyboard. Press `⌘?` (Ctrl+? elsewhere) to open the
-reference inside the app: it is generated from the same table that dispatches the shortcuts, so it
-cannot drift from what actually works.
+Everything the app does can be driven from the keyboard. Press `⌘?` (Ctrl+? elsewhere) or a bare
+`?` outside a text field to open a searchable cheat sheet overlay; **Settings > Keyboard** holds
+the same reference plus a conflict check and a printable page. Both are generated from the same
+table that dispatches the shortcuts, so neither can drift from what actually works.
 
 Shortcuts use a modifier on purpose. A focused terminal forwards every bare keystroke to the agent
 running in it, so an unmodified shortcut would steal the agent's input. `mod` below is **Cmd on
@@ -78,17 +79,28 @@ macOS** and **Ctrl elsewhere**.
 
 | Chord | Action |
 |---|---|
+| `mod+k` | Open the control center |
 | `mod+,` | Open settings |
+| `mod+9` | Toggle multitasking |
+| `mod+2` | Toggle the repomail panel |
 | `mod+3` | Toggle the git explorer panel |
 | `mod+4` | Toggle extensions |
 | `mod+5` | Toggle repomind |
 | `mod+shift+5` | Repomind full screen |
 | `mod+6` | Cycle theme (system, dark, light) |
 | `mod+7` | Toggle the compact in-app editor in the right rail |
+| `mod+8` | Toggle the supervision panel |
 | `mod+p` | Find file in workspace |
 | `mod+shift+f` | Search project files in workspace (inside a focused terminal, this searches the terminal) |
 | `mod+shift+v` | Toggle preview (Markdown or SVG tab, whichever is active) |
-| `mod+k` | Open the control center |
+
+#### File finder
+
+| Chord | Action |
+|---|---|
+| `ctrl+n` | Next result (also Down arrow) |
+| `ctrl+p` | Previous result (also Up arrow) |
+| `escape` | Close the finder |
 
 Git, repomind, and the compact editor share one right-rail panel host: a resizable pane (drag its
 left edge) with one header button per tab. Pressing a tab's chord (or clicking its header button)
@@ -129,6 +141,22 @@ The center Editor workspace provides:
 - The image viewer (PNG, JPEG, GIF, WebP, BMP, ICO) streams bytes through the asset protocol,
   fills the tab, and supports fit/actual-size/free zoom (10-800%), `Mod` plus scroll-wheel zoom
   around the cursor, drag-to-pan, and double-click to toggle fit and actual size.
+
+### Editor
+
+CodeMirror's own bindings, live only while the editor has focus - these are not in the global
+dispatcher above, so they cannot be remapped from Settings and do not appear if you search the
+overlay without the editor focused.
+
+| Chord | Action |
+|---|---|
+| `mod+s` | Save file |
+| `mod+/` | Toggle line comment |
+| `mod+d` | Select next occurrence |
+| `mod+g` | Go to line |
+| `alt+up` | Move line up |
+| `alt+down` | Move line down |
+| `shift+alt+down` | Copy line down |
 
 ### Layout
 
@@ -254,8 +282,8 @@ These need a selected lane. With nothing selected they do nothing.
 
 | Chord | Action |
 |---|---|
-| `shift+escape` | Leave the terminal, back to the fleet list |
 | `mod+shift+f` | Find in the terminal |
+| `shift+escape` | Leave the terminal, back to the fleet list |
 
 `shift+escape` rather than plain Escape is deliberate: Claude Code uses Escape to interrupt its own
 work, so the terminal keeps it. Once focus is on the fleet list, `j`/`k` and the arrow keys move the
@@ -302,7 +330,10 @@ bubble around on every line an agent prints.
 Schedules, Approvals) as its own sub-tabs. The control center's `⌘K` search can jump straight here
 via "Open Automation & Standing Rules".
 
-**Keyboard** is the shortcut reference, with search.
+**Keyboard** is the shortcut reference, with search, a conflict check (flags any two shortcuts that
+share both a chord and a scope), a warning on Windows and Linux about the Ctrl-reaches-the-terminal
+caveat (see Known gaps), and a **Print cheat sheet** button that opens a plain, printable page
+listing every shortcut.
 
 Settings are stored by the daemon and shared with the TUI, so a change here shows up there too.
 Nothing saves until you press **Save**.

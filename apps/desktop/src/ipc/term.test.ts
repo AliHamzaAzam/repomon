@@ -7,6 +7,7 @@ import {
   createInputCoalescer,
   createTerminalFrameGate,
   decodeTerminalChannelFrame,
+  isTerminalFindChord,
   isTerminalReleaseChord,
   takeWheelBatch,
   terminalPointerCell,
@@ -123,6 +124,28 @@ describe("isTerminalReleaseChord", () => {
 
   it("ignores other shifted keys", () => {
     expect(isTerminalReleaseChord(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true }))).toBe(false);
+  });
+});
+
+describe("isTerminalFindChord", () => {
+  it("opens find on Cmd+Shift+F", () => {
+    expect(
+      isTerminalFindChord(new KeyboardEvent("keydown", { key: "f", metaKey: true, shiftKey: true })),
+    ).toBe(true);
+  });
+
+  it("also opens find on Ctrl+Shift+F, even on a platform where mod is Cmd", () => {
+    expect(
+      isTerminalFindChord(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, shiftKey: true })),
+    ).toBe(true);
+  });
+
+  it("requires shift", () => {
+    expect(isTerminalFindChord(new KeyboardEvent("keydown", { key: "f", metaKey: true }))).toBe(false);
+  });
+
+  it("ignores plain f", () => {
+    expect(isTerminalFindChord(new KeyboardEvent("keydown", { key: "f" }))).toBe(false);
   });
 });
 

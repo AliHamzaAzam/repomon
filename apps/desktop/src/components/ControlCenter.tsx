@@ -3,6 +3,7 @@ import { Portal } from "solid-js/web";
 
 import type { ActionsStore } from "../stores/actions";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
+import { BINDINGS, formatChord } from "../keymap";
 import type { MessageStore } from "../stores/messages";
 import type { NotificationStore } from "../stores/notifications";
 import {
@@ -57,6 +58,15 @@ interface PaletteItem {
   run: () => void | Promise<void>;
 }
 
+/// Look up a chord by binding id in keymap.ts's BINDINGS and format it for display, so a palette
+/// row's shortcut hint can never drift out of sync with what the chord actually does (this is
+/// exactly the bug that let this file show "⌘/" for Keyboard Shortcuts when the real chord had
+/// long since become mod+?). Returns undefined for an id with no chord, or none registered.
+function chordFor(id: string): string | undefined {
+  const binding = BINDINGS.find((entry) => entry.id === id);
+  return binding ? formatChord(binding.chord) : undefined;
+}
+
 export default function ControlCenter(props: ControlCenterProps) {
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
@@ -103,7 +113,9 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Spawn New Agent Session",
       subtitle: "Launch a new assistant session in a lane",
       icon: "plus",
-      shortcut: "⌘N",
+      // Two different chords depending on whether a lane is selected - lane.spawn when there is
+      // one to spawn into, fleet.newLane when there is not - exactly like this row's own run().
+      shortcut: props.fleet.selectedLane() ? chordFor("lane.spawn") : chordFor("fleet.newLane"),
       run: () => {
         const lane = props.fleet.selectedLane();
         if (lane) props.actions.spawn(lane);
@@ -117,7 +129,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Add Repository",
       subtitle: "Track a new git repository in repomon",
       icon: "layers",
-      shortcut: "⌘O",
+      shortcut: chordFor("fleet.addRepo"),
       run: () => {
         void props.actions.addRepo();
       },
@@ -129,7 +141,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Toggle Repomind Panel",
       subtitle: "Fleet intelligence and autonomous agent assistance",
       icon: "sparkles",
-      shortcut: "⌘5",
+      shortcut: chordFor("panel.repomind"),
       run: () => {
         if (props.onToggleRepomind) props.onToggleRepomind();
       },
@@ -152,7 +164,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Open Settings",
       subtitle: "Configure agent defaults, notifications, and appearance",
       icon: "settings",
-      shortcut: "⌘,",
+      shortcut: chordFor("panel.settings"),
       run: () => {
         props.actions.openSettingsTab("general");
       },
@@ -175,9 +187,9 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Keyboard Shortcuts",
       subtitle: "View all fleet navigation and terminal keybindings",
       icon: "terminal",
-      shortcut: "⌘/",
+      shortcut: chordFor("help.open"),
       run: () => {
-        props.actions.openSettingsTab("keyboard");
+        props.actions.openShortcutsGuide();
       },
     });
 
@@ -187,7 +199,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       title: "Refresh Fleet State",
       subtitle: "Sync git status, agent turns, and daemon monitors",
       icon: "refresh",
-      shortcut: "⌘R",
+      shortcut: chordFor("fleet.refresh"),
       run: () => {
         void props.fleet.refresh();
       },

@@ -1820,3 +1820,47 @@ export function IconActualSize(props: IconProps): JSX.Element {
     </svg>
   );
 }
+
+export function IconPrinter(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M6 9V3h12v6" />
+      <rect x="3" y="9" width="18" height="8" rx="1.5" />
+      <path d="M6 15h12v6H6z" />
+    </svg>
+  );
+}
+
+export function IconAlertTriangle(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}

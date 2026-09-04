@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRule, Lane, Playbook, Repo } from "../bindings";
 import { DaemonRpcError } from "../ipc/rpc";
+import { formatChord } from "../keymap";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import { createMessageStore } from "../stores/messages";
@@ -207,6 +208,7 @@ describe("ControlCenter component UI", () => {
       addRepo: vi.fn(),
       openSettings: vi.fn(),
       openSettingsTab: vi.fn(),
+      openShortcutsGuide: vi.fn(),
     } as unknown as ActionsStore;
     const notifications = createNotificationStore(() => undefined);
     const messages = createMessageStore(() => undefined, {
@@ -271,6 +273,31 @@ describe("ControlCenter component UI", () => {
 
     expect(screen.getByText("feature-branch")).toBeInTheDocument();
     expect(screen.queryByText("Add Repository")).not.toBeInTheDocument();
+  });
+
+  it("shows the real keymap.ts chord for Keyboard Shortcuts and opens the overlay, not Settings", async () => {
+    // Regression check for the drift this file used to have: the row hard-coded "⌘/" while the
+    // actual chord (help.open in keymap.ts) was mod+?. The label is now derived from BINDINGS, so
+    // it cannot go stale again.
+    const { fleet, actions, notifications, messages } = setup();
+    render(() => (
+      <ControlCenter
+        fleet={fleet}
+        actions={actions}
+        notifications={notifications}
+        messages={messages}
+      />
+    ));
+
+    actions.openControl();
+    await screen.findByRole("dialog", { name: "Command Palette" });
+
+    const row = screen.getByText("Keyboard Shortcuts").closest('[role="option"]');
+    expect(row).not.toBeNull();
+    expect(row).toHaveTextContent(formatChord("mod+?"));
+
+    fireEvent.click(screen.getByText("Keyboard Shortcuts"));
+    expect(actions.openShortcutsGuide).toHaveBeenCalled();
   });
 
   it("closes palette on Escape key press", async () => {
