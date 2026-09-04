@@ -299,11 +299,6 @@ describe("fleet presentation", () => {
     expect(fleet.counts().running).toBe(1);
     fleet.setRunningOnly(false);
 
-    fleet.setIdleOnly(true);
-    expect(fleet.visibleLanes().map((l) => l.id)).toEqual([21]);
-    expect(fleet.counts().idle).toBe(1);
-    fleet.setIdleOnly(false);
-
     fleet.setUrgentOnly(true);
     expect(fleet.visibleLanes().map((l) => l.id)).toEqual([22]);
     expect(fleet.counts().urgent).toBe(1);

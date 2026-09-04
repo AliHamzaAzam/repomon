@@ -4,7 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
-import FleetSidebar, { repoDisplayName } from "./FleetSidebar";
+import FleetSidebar, {
+  FILTER_ROW_COMPACT_THRESHOLD_PX,
+  isFilterRowCompact,
+  repoDisplayName,
+} from "./FleetSidebar";
 import { reorderAround } from "./ordering";
 
 vi.mock("../ipc/rpc", () => ({
@@ -83,8 +87,6 @@ function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
     setUrgentOnly: vi.fn(),
     runningOnly: () => false,
     setRunningOnly: vi.fn(),
-    idleOnly: () => false,
-    setIdleOnly: vi.fn(),
     loading: () => false,
     counts: () => ({ urgent: 0, running: 0, idle: 0 }),
     focusedUsage: () => null,
@@ -232,17 +234,43 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("Pin lane to top")).toBeInTheDocument();
   });
 
-  it("offers all three fleet filters as pressable toggles", () => {
+  it("offers both fleet filters as pressable toggles", () => {
     const alpha = repo(1, "alpha");
     const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
-    for (const label of ["Needs attention", "Running", "Idle"]) {
+    for (const label of ["Needs you", "Running"]) {
       const chip = screen.getByRole("button", { name: new RegExp(label) });
       expect(chip.getAttribute("aria-pressed")).toBe("false");
     }
-    fireEvent.click(screen.getByRole("button", { name: /Idle/ }));
-    expect(fleet.setIdleOnly).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: /Running/ }));
+    expect(fleet.setRunningOnly).toHaveBeenCalledWith(true);
+  });
+
+  it("never truncates a filter chip label, at any width", () => {
+    // jsdom cannot lay out, so the width-driven compact switch is exercised directly on the pure
+    // decision function (below), and this render only guards the other half of the same bug: the
+    // label span must never carry a `truncate` class, since a short label plus that class was
+    // exactly how "Needs attention" turned into "Need... 0".
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    const needsYou = screen.getByText("Needs you");
+    const running = screen.getByText("Running");
+    expect(needsYou.className).not.toMatch(/\btruncate\b/);
+    expect(running.className).not.toMatch(/\btruncate\b/);
+  });
+
+  it("switches the filter chips to icon-only below the measured compact threshold", () => {
+    // Unmeasured (0, jsdom never fires the row's ResizeObserver) reads as spacious so the chips
+    // never flash icon-only before layout settles.
+    expect(isFilterRowCompact(0)).toBe(false);
+    // Comfortably below the threshold, matching the narrow-window sidebar column (13.5rem).
+    expect(isFilterRowCompact(FILTER_ROW_COMPACT_THRESHOLD_PX - 1)).toBe(true);
+    // At and above the threshold, matching the default sidebar column (18rem), labels stay put.
+    expect(isFilterRowCompact(FILTER_ROW_COMPACT_THRESHOLD_PX)).toBe(false);
+    expect(isFilterRowCompact(420)).toBe(false);
   });
 
   it("renders structured usage rate limits card with clear labels", () => {

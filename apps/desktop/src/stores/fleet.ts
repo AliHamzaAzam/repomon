@@ -110,7 +110,7 @@ export function agentState(agent: AgentSession): AgentState {
   return "idle";
 }
 
-/// States that put a lane in the "Needs attention" filter, and so in its count.
+/// States that put a lane in the "Needs you" filter, and so in its count.
 const URGENT_STATES: ReadonlySet<AgentState> = new Set<AgentState>([
   "decision",
   "stalled",
@@ -354,7 +354,6 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [query, setQuery] = createSignal("");
   const [urgentOnly, setUrgentOnly] = createSignal(false);
   const [runningOnly, setRunningOnly] = createSignal(false);
-  const [idleOnly, setIdleOnly] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
   const [synced, setSynced] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -388,9 +387,6 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       .filter(
         (lane) =>
           !runningOnly() || lane.agent_sessions.some((agent) => agentState(agent) === "running"),
-      )
-      .filter(
-        (lane) => !idleOnly() || lane.agent_sessions.some((agent) => agentState(agent) === "idle"),
       )
       .sort(byPriority),
   );
@@ -504,8 +500,6 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     setUrgentOnly,
     runningOnly,
     setRunningOnly,
-    idleOnly,
-    setIdleOnly,
     loading,
     synced,
     error,

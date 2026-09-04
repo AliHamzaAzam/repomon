@@ -158,8 +158,10 @@ A worktree lane whose branch is already contained in the repository's default br
 "Pin lane to top" and, for a worktree lane, "Remove worktree", which raises the usual confirm and
 keeps the branch.
 
-The three filter chips ("Needs attention", "Running", "Idle") are toggles over the same
-per-agent state the rows show, so a chip's number always matches the rows it selects.
+The two filter chips ("Needs you", "Running") are toggles over the same per-agent state the rows
+show, so a chip's number always matches the rows it selects. Below a measured width they drop
+their labels for an icon plus the count, with the full label moved to the tooltip, rather than
+truncating the text mid-word.
 
 #### Agent status
 
@@ -183,12 +185,12 @@ landed, so it decays to idle through a long tool call and reads "needs you" thro
 background agents are still working; both of those are panes the operator can see are busy. A
 dialog outranks everything: a pane asking a question is not working, whatever else is on screen.
 
-Counts are agent counts, never lane counts. "Needs attention" counts agents in needs you,
-decision, stalled or limited; "Running" counts agents in running; "Idle" counts agents in idle. A
-lane pill shows the most urgent state among its agents plus, for running, how many of them are in
-it. Hovering a pill shows the daemon's `status_reason` for the agents behind it ("spinner on
-screen: Thinking (2m 14s)", "dialog pending: Bash", "no output for 41m"), so a status you do not
-believe can be reported rather than merely doubted.
+Counts are agent counts, never lane counts. "Needs you" counts agents in needs you, decision,
+stalled or limited; "Running" counts agents in running. A lane pill shows the most urgent state
+among its agents plus, for running, how many of them are in it. Hovering a pill shows the daemon's
+`status_reason` for the agents behind it ("spinner on screen: Thinking (2m 14s)", "dialog pending:
+Bash", "no output for 41m"), so a status you do not believe can be reported rather than merely
+doubted.
 
 ### Lane
 

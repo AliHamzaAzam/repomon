@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
 import { fleetCounts, laneIndicator, laneIndicatorTitle, type FleetStore } from "../stores/fleet";
@@ -21,6 +21,7 @@ import {
   AgentIcon,
   IconArrowDown,
   IconArrowUp,
+  IconBolt,
   IconChevronDown,
   IconChevronRight,
   IconClose,
@@ -28,10 +29,12 @@ import {
   IconHide,
   IconLayers,
   IconPin,
+  IconPlay,
   IconPlus,
   IconRefresh,
   IconSearch,
   IconShow,
+  type IconProps,
 } from "./icons";
 import { LaneAgentRosterPopover } from "./LaneAgentRosterPopover";
 
@@ -379,15 +382,32 @@ function LaneRow(props: {
   );
 }
 
-/// One of the three fleet filters. They are toggles, so they look like toggles: pressed state is
+/// The filter row switches to icon-only chips once it measures narrower than this. Picked with
+/// headroom under the two real sidebar widths (18rem default, 13.5rem under the narrow-window
+/// breakpoint) so "Needs you" and "Running" always render as full words above it.
+export const FILTER_ROW_COMPACT_THRESHOLD_PX = 220;
+
+/// Unmeasured (0, before the filter row's ResizeObserver has fired) reads as spacious rather than
+/// compact, so the row never flashes icon-only before layout settles.
+export function isFilterRowCompact(width: number): boolean {
+  return width > 0 && width < FILTER_ROW_COMPACT_THRESHOLD_PX;
+}
+
+/// One of the two fleet filters. They are toggles, so they look like toggles: pressed state is
 /// carried by the whole chip, not by the number alone, and a chip with nothing to show recedes
 /// rather than disappearing (the count itself is the answer to "is anything running?").
+///
+/// The label and count never share truncation: the label is short enough to always fit once the
+/// row is wide enough to show it at all, and below that width the chip drops to an icon plus the
+/// count, with the full label moved to `title`/`aria-label` instead of being cut mid-word.
 function FilterChip(props: {
   label: string;
+  icon: (iconProps: IconProps) => JSX.Element;
   count: number;
-  tone: "attention" | "signal" | "muted";
+  tone: "attention" | "signal";
   pressed: boolean;
   title: string;
+  compact: boolean;
   onToggle: () => void;
 }) {
   // Written out per tone rather than interpolated: Tailwind only emits classes it can read as
@@ -395,17 +415,14 @@ function FilterChip(props: {
   const pressedShell = {
     attention: "border-attention/60 bg-attention/20 text-attention font-semibold ring-1 ring-attention/25",
     signal: "border-signal/60 bg-signal/20 text-signal font-semibold ring-1 ring-signal/25",
-    muted: "border-line bg-raised text-foreground font-semibold ring-1 ring-line",
   } as const;
   const liveShell = {
     attention: "border-attention/30 bg-attention/6 text-foreground/85 hover:border-attention/50 hover:bg-attention/12",
     signal: "border-signal/30 bg-signal/6 text-foreground/85 hover:border-signal/50 hover:bg-signal/12",
-    muted: "border-line bg-raised/60 text-muted hover:bg-raised hover:text-foreground",
   } as const;
   const countTone = {
     attention: "text-attention font-semibold",
     signal: "text-signal font-semibold",
-    muted: "text-muted font-medium",
   } as const;
   const shell = () =>
     props.pressed
@@ -413,17 +430,21 @@ function FilterChip(props: {
       : props.count > 0
         ? liveShell[props.tone]
         : "border-line bg-raised/60 text-muted hover:bg-raised hover:text-foreground";
+  const accessibleLabel = () => `${props.label}: ${props.count}`;
   return (
     <button
       type="button"
       class={`focus-ring flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2 text-[11px] font-medium transition-colors ${shell()}`}
       onClick={props.onToggle}
       aria-pressed={props.pressed}
+      aria-label={props.compact ? accessibleLabel() : undefined}
       title={props.title}
     >
-      <span class="truncate">{props.label}</span>
+      <Show when={!props.compact} fallback={<props.icon size={12} class="shrink-0" />}>
+        <span class="min-w-0 flex-1 whitespace-nowrap text-left">{props.label}</span>
+      </Show>
       <span
-        class={`font-mono text-[11px] ${
+        class={`shrink-0 font-mono text-[11px] tabular-nums ${
           props.pressed ? "font-bold" : props.count > 0 ? countTone[props.tone] : "text-muted/70 font-medium"
         }`}
       >
@@ -541,6 +562,21 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   // `fleet.loading()`, which also flips on every 1.2s poll tick and would make the icon flicker
   // continuously instead of spinning only for the click the user actually made.
   const [usageRefreshing, setUsageRefreshing] = createSignal(false);
+  // How wide the filter row actually renders at, so the chips can drop their labels for icons
+  // before the row runs out of room, rather than letting the text truncate mid-word.
+  let filterRowRef: HTMLDivElement | undefined;
+  const [filterRowWidth, setFilterRowWidth] = createSignal(0);
+  const chipsCompact = () => isFilterRowCompact(filterRowWidth());
+
+  onMount(() => {
+    if (!filterRowRef || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setFilterRowWidth(entry.contentRect.width);
+    });
+    observer.observe(filterRowRef);
+    onCleanup(() => observer.disconnect());
+  });
 
   const refreshUsage = async () => {
     if (usageRefreshing()) return;
@@ -700,11 +736,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             /
           </kbd>
         </label>
-        <div class="flex items-center gap-1.5">
+        <div ref={filterRowRef} class="flex items-center gap-1.5">
           <FilterChip
-            label="Needs attention"
+            label="Needs you"
+            icon={IconBolt}
             count={props.fleet.counts().urgent}
             tone="attention"
+            compact={chipsCompact()}
             pressed={props.fleet.urgentOnly()}
             onToggle={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
             title={
@@ -715,19 +753,13 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           />
           <FilterChip
             label="Running"
+            icon={IconPlay}
             count={props.fleet.counts().running}
             tone="signal"
+            compact={chipsCompact()}
             pressed={props.fleet.runningOnly()}
             onToggle={() => props.fleet.setRunningOnly(!props.fleet.runningOnly())}
             title={props.fleet.runningOnly() ? "Show all lanes" : "Show only lanes with a running agent"}
-          />
-          <FilterChip
-            label="Idle"
-            count={props.fleet.counts().idle}
-            tone="muted"
-            pressed={props.fleet.idleOnly()}
-            onToggle={() => props.fleet.setIdleOnly(!props.fleet.idleOnly())}
-            title={props.fleet.idleOnly() ? "Show all lanes" : "Show only lanes with an idle agent"}
           />
           <button
             type="button"
