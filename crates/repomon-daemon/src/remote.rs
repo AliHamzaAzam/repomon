@@ -106,6 +106,10 @@ fn remote_method_allowed(method: &str) -> bool {
         // stream. orchestrator.resize stays blocked: an unmediated remote resize is exactly
         // what squeezed the TUI's view before agent.fit.
         | "orchestrator.watch"
+        // repomind home: read-only metadata about the home repo and its controller lane (where it
+        // lives, which lane and window carry it, the controller cap). No file content and no
+        // writes; every repomind RPC that touches the home's files stays local-only.
+        | "repomind.status"
         // benign metadata
         | "agent.pin" | "session.rename"
         // companion self-registration for push
@@ -626,6 +630,7 @@ mod tests {
             "orchestrator.send_input",
             "orchestrator.key",
             "orchestrator.watch",
+            "repomind.status",
         ] {
             assert!(remote_method_allowed(m), "{m} should be allowed");
         }
@@ -715,6 +720,11 @@ mod tests {
             "orchestrator.resize",
             "orchestrator.start",
             "orchestrator.stop",
+            // Every repomind RPC that writes stays local-only: the home repo is the fleet's
+            // memory, and the export/boot side of it (R2, R3) rewrites files on disk. Only the
+            // read-only `repomind.status` above is on the bridge.
+            "repomind.export",
+            "repomind.boot",
             // supervision.set grants standing auto-approval authority — strictly local-only.
             "supervision.set",
             // upcoming local-only credential-minting RPCs (task A2) — must never be reachable

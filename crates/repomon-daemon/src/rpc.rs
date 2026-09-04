@@ -4902,6 +4902,37 @@ pub async fn dispatch(
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
             Ok(status)
         }
+        // ---- repomind home ----
+        // Read-only: where the home repo lives, which lane and window carry the controller, and
+        // the controller cap. Deliberately does NOT ensure the home (that is a write); a home
+        // that has not been created yet reports `exists: false`.
+        "repomind.status" => {
+            let (home, max_controllers) = {
+                let cfg = ctx.config.read().await;
+                (cfg.repomind_home(), cfg.repomind.max_controllers)
+            };
+            let lane_id = ctx.store.controller_lane().await.map_err(internal)?;
+            let repo = ctx
+                .store
+                .find_repo_by_path(home.clone())
+                .await
+                .map_err(internal)?;
+            let window = ctx.controller_lane_window().await;
+            let exists = {
+                let probe = home.clone();
+                tokio::task::spawn_blocking(move || probe.exists())
+                    .await
+                    .map_err(internal)?
+            };
+            Ok(json!({
+                "home": home.to_string_lossy(),
+                "exists": exists,
+                "repo_id": repo.map(|r| r.id),
+                "lane_id": lane_id,
+                "window": window,
+                "max_controllers": max_controllers,
+            }))
+        }
         "orchestrator.stop" => {
             // Take the session lock BEFORE the kill so a stop can't interleave with a concurrent
             // `orchestrator.start` (which holds this lock across its spawn): stop either runs
