@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clap::Subcommand;
 use repomon_core::model::{
-    AgentChoice, FleetMessage, Lane, LaneId, MessagePage, Repo, TranscriptItem,
+    AgentChoice, FleetMessage, Lane, LaneId, MessagePage, Repo, RepomindStatus, TranscriptItem,
 };
 use repomon_core::{Config, config, service};
 use repomon_mcp::fleet::{self, Attention};
@@ -60,7 +60,9 @@ pub enum Command {
     },
     /// Talk to repomind — an orchestrator agent that manages the fleet for you. Launches an
     /// agent session (`claude` by default, `--agent codex` for Codex) wired to the repomon MCP
-    /// server (and your mnemind memory, if present).
+    /// server (and your mnemind memory, if present). Repomind now runs in the controller lane
+    /// at its home repo (`~/repomind` by default; see `repomon repomind status`) rather than a
+    /// separate daemon-owned window.
     Orchestrate {
         /// Which agent powers repomind: a Claude account (e.g. claude-work), a custom agent
         /// name, or codex. Defaults to the `orchestrator_agent` config, then bare claude.
@@ -102,6 +104,11 @@ pub enum Command {
     Playbooks {
         #[command(subcommand)]
         cmd: PlaybooksCmd,
+    },
+    /// The repomind home: status, boot context, export, and opening the folder.
+    Repomind {
+        #[command(subcommand)]
+        cmd: RepomindCmd,
     },
     /// Print a shell completion script to stdout (for eval or install).
     Completions {
@@ -363,6 +370,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
         Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
+        Command::Repomind { cmd } => handle_repomind(cmd, config, socket).await?,
         Command::Schedules { cmd } => handle_schedules(cmd, config, socket).await?,
         Command::Approvals { cmd } => handle_approvals(cmd, config, socket).await?,
         Command::Orchestrate {
@@ -962,6 +970,157 @@ async fn handle_playbooks(
     Ok(())
 }
 
+#[derive(Subcommand)]
+pub enum RepomindCmd {
+    /// Where the home lives, its lane and window, the controller cap, the export state, what
+    /// the home holds, and the boot context.
+    Status,
+    /// Regenerate the daemon-owned boot context and print what it produced.
+    Boot,
+    /// Run the one-way export into the home now instead of waiting out its debounce.
+    Export,
+    /// Print the repomind home path.
+    Open {
+        /// Open the home in `$EDITOR` instead of just printing its path.
+        #[arg(long)]
+        editor: bool,
+    },
+}
+
+/// `repomon repomind ...` — the CLI surface over the repomind home: `repomind.status`,
+/// `repomind.boot`, `repomind.export`, and (locally, no RPC) opening the home folder.
+async fn handle_repomind(cmd: RepomindCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
+    match cmd {
+        RepomindCmd::Status => {
+            let client = connect(socket, config).await?;
+            let status: RepomindStatus = client.call_typed("repomind.status", None).await?;
+            print!("{}", format_repomind_status(&status));
+        }
+        RepomindCmd::Boot => {
+            let client = connect(socket, config).await?;
+            let res = client.call("repomind.boot", None).await?;
+            print!("{}", format_repomind_boot(&res));
+        }
+        RepomindCmd::Export => {
+            let client = connect(socket, config).await?;
+            let res = client.call("repomind.export", None).await?;
+            print!("{}", format_repomind_export(&res));
+        }
+        RepomindCmd::Open { editor } => {
+            let home = config.repomind_home();
+            println!("{}", home.display());
+            if editor {
+                let program = std::env::var("EDITOR")
+                    .map_err(|_| anyhow!("repomind open --editor needs $EDITOR set"))?;
+                let status = std::process::Command::new(&program)
+                    .arg(&home)
+                    .status()
+                    .map_err(|e| anyhow!("failed to launch $EDITOR ({program}): {e}"))?;
+                if !status.success() {
+                    anyhow::bail!("$EDITOR ({program}) exited with {status}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `repomon repomind status` — a short label/value table over `RepomindStatus`. Pure so it can
+/// be unit tested without a daemon.
+fn format_repomind_status(status: &RepomindStatus) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "home         {}  ({})\n",
+        status.home,
+        if status.exists { "exists" } else { "missing" }
+    ));
+    out.push_str(&format!(
+        "lane         {}\n",
+        status
+            .lane_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    ));
+    out.push_str(&format!(
+        "window       {}\n",
+        status.window.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!("controllers  max {}\n", status.max_controllers));
+    out.push_str(&format!(
+        "counts       plans={} standing={} playbooks={} drafts={}\n",
+        status.counts.active_plans,
+        status.counts.standing,
+        status.counts.playbooks,
+        status.counts.drafts
+    ));
+    out.push_str(&format!(
+        "export       last_run={} pending={}{}\n",
+        status
+            .export
+            .last_run
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string()),
+        status.export.pending,
+        status
+            .export
+            .last_error
+            .as_deref()
+            .map(|e| format!("  error={e}"))
+            .unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "boot         generated={} tokens={} trimmed={}\n",
+        status
+            .boot
+            .generated_at
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string()),
+        status.boot.tokens_estimate,
+        status.boot.trimmed.len()
+    ));
+    out
+}
+
+/// `repomon repomind boot` — path, tokens, trimmed. Pure over the raw `repomind.boot` result.
+fn format_repomind_boot(v: &Value) -> String {
+    format!(
+        "path     {}\ntokens   {}\ntrimmed  {}\n",
+        v["path"].as_str().unwrap_or("?"),
+        v["tokens_estimate"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        v["trimmed"]
+            .as_array()
+            .map(|a| a.len().to_string())
+            .unwrap_or_else(|| "0".to_string()),
+    )
+}
+
+/// `repomon repomind export` — files touched and the record kinds they belong to. Pure over the
+/// raw `repomind.export` result.
+fn format_repomind_export(v: &Value) -> String {
+    let files = v["files"].as_array().cloned().unwrap_or_default();
+    let kinds: Vec<&str> = v["kinds"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+    if files.is_empty() {
+        return "no changes to export\n".to_string();
+    }
+    let mut out = format!(
+        "exported {} file(s)  ({})\n",
+        files.len(),
+        kinds.join(", ")
+    );
+    for f in &files {
+        if let Some(s) = f.as_str() {
+            out.push_str(&format!("  {s}\n"));
+        }
+    }
+    out
+}
+
 async fn handle_msg(cmd: MsgCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
     let client = connect(socket, config).await?;
     match cmd {
@@ -1490,6 +1649,35 @@ mod tests {
         );
     }
 
+    /// Both the man page and the shell completions are generated straight from the `Command`
+    /// enum, so the new `repomind` subcommand (and its `status`/`boot`/`export`/`open` verbs)
+    /// need no hand-written entry anywhere — this just guards that clap actually picked it up.
+    #[test]
+    fn man_and_completions_include_the_repomind_subcommand() {
+        use clap::CommandFactory;
+
+        let man = clap_mangen::Man::new(crate::Cli::command());
+        let mut buf = Vec::new();
+        man.render(&mut buf).unwrap();
+        let man_out = String::from_utf8(buf).unwrap();
+        assert!(man_out.contains("repomind"), "man page missing repomind:\n{man_out}");
+
+        let mut cmd = crate::Cli::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "repomon", &mut buf);
+        let comp_out = String::from_utf8(buf).unwrap();
+        assert!(
+            comp_out.contains("repomind"),
+            "zsh completions missing repomind:\n{comp_out}"
+        );
+        for verb in ["status", "boot", "export", "open"] {
+            assert!(
+                comp_out.contains(verb),
+                "zsh completions missing repomind verb {verb:?}:\n{comp_out}"
+            );
+        }
+    }
+
     #[test]
     fn shell_init_posix_defines_wrapper() {
         let out = super::shell_init(clap_complete::Shell::Zsh).unwrap();
@@ -1887,5 +2075,154 @@ mod tests {
             }
             _ => panic!("expected `msg list`"),
         }
+    }
+
+    #[test]
+    fn repomind_status_boot_export_open_bind_the_public_cli() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["repomon", "repomind", "status"])
+            .expect("repomind status should parse");
+        assert!(matches!(
+            cli.command,
+            Some(super::Command::Repomind {
+                cmd: super::RepomindCmd::Status
+            })
+        ));
+
+        let cli = crate::Cli::try_parse_from(["repomon", "repomind", "boot"])
+            .expect("repomind boot should parse");
+        assert!(matches!(
+            cli.command,
+            Some(super::Command::Repomind {
+                cmd: super::RepomindCmd::Boot
+            })
+        ));
+
+        let cli = crate::Cli::try_parse_from(["repomon", "repomind", "export"])
+            .expect("repomind export should parse");
+        assert!(matches!(
+            cli.command,
+            Some(super::Command::Repomind {
+                cmd: super::RepomindCmd::Export
+            })
+        ));
+
+        let cli = crate::Cli::try_parse_from(["repomon", "repomind", "open"])
+            .expect("repomind open should parse");
+        match cli.command {
+            Some(super::Command::Repomind {
+                cmd: super::RepomindCmd::Open { editor },
+            }) => assert!(!editor),
+            _ => panic!("expected `repomind open`"),
+        }
+
+        let cli = crate::Cli::try_parse_from(["repomon", "repomind", "open", "--editor"])
+            .expect("repomind open --editor should parse");
+        match cli.command {
+            Some(super::Command::Repomind {
+                cmd: super::RepomindCmd::Open { editor },
+            }) => assert!(editor),
+            _ => panic!("expected `repomind open --editor`"),
+        }
+    }
+
+    fn sample_status(exists: bool) -> repomon_core::model::RepomindStatus {
+        use repomon_core::model::{
+            RepomindBootStatus, RepomindCounts, RepomindExportStatus, RepomindStatus,
+        };
+        RepomindStatus {
+            home: "/home/op/repomind".to_string(),
+            exists,
+            repo_id: exists.then_some(3),
+            lane_id: exists.then_some(7),
+            window: exists.then(|| "lane-7-1".to_string()),
+            max_controllers: 2,
+            export: RepomindExportStatus {
+                last_run: None,
+                pending: false,
+                last_error: None,
+            },
+            counts: RepomindCounts {
+                active_plans: 1,
+                standing: 2,
+                playbooks: 3,
+                drafts: 1,
+            },
+            boot: RepomindBootStatus {
+                generated_at: None,
+                tokens_estimate: 0,
+                trimmed: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn format_repomind_status_reports_a_missing_home() {
+        let out = super::format_repomind_status(&sample_status(false));
+        assert!(out.contains("missing"), "{out}");
+        assert!(out.contains("lane         -"), "{out}");
+        assert!(out.contains("window       -"), "{out}");
+        assert!(out.contains("controllers  max 2"), "{out}");
+    }
+
+    #[test]
+    fn format_repomind_status_reports_an_existing_home_and_its_lane() {
+        let out = super::format_repomind_status(&sample_status(true));
+        assert!(out.contains("exists"), "{out}");
+        assert!(out.contains("lane         7"), "{out}");
+        assert!(out.contains("window       lane-7-1"), "{out}");
+        assert!(
+            out.contains("counts       plans=1 standing=2 playbooks=3 drafts=1"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn format_repomind_status_surfaces_export_and_boot_errors_and_trims() {
+        use repomon_core::model::RepomindBootStatus;
+        let mut status = sample_status(true);
+        status.export.last_error = Some("git commit failed".to_string());
+        status.boot.trimmed = vec!["journal/2026-01-01.md".to_string()];
+        status.boot = RepomindBootStatus {
+            generated_at: None,
+            tokens_estimate: 4096,
+            trimmed: status.boot.trimmed,
+        };
+        let out = super::format_repomind_status(&status);
+        assert!(out.contains("error=git commit failed"), "{out}");
+        assert!(out.contains("tokens=4096"), "{out}");
+        assert!(out.contains("trimmed=1"), "{out}");
+    }
+
+    #[test]
+    fn format_repomind_boot_reads_path_tokens_trimmed() {
+        let v = serde_json::json!({
+            "path": "/home/op/repomind/.repomind/boot.md",
+            "bytes": 512,
+            "tokens_estimate": 128,
+            "trimmed": ["journal/2026-01-01.md"],
+        });
+        let out = super::format_repomind_boot(&v);
+        assert!(out.contains("path     /home/op/repomind/.repomind/boot.md"), "{out}");
+        assert!(out.contains("tokens   128"), "{out}");
+        assert!(out.contains("trimmed  1"), "{out}");
+    }
+
+    #[test]
+    fn format_repomind_export_reports_no_changes() {
+        let v = serde_json::json!({ "files": [], "kinds": [] });
+        assert_eq!(super::format_repomind_export(&v), "no changes to export\n");
+    }
+
+    #[test]
+    fn format_repomind_export_lists_files_and_kinds() {
+        let v = serde_json::json!({
+            "files": ["journal/2026-01-01.md", "profile/approvals.md"],
+            "kinds": ["journal", "approvals"],
+        });
+        let out = super::format_repomind_export(&v);
+        assert!(out.starts_with("exported 2 file(s)  (journal, approvals)\n"), "{out}");
+        assert!(out.contains("  journal/2026-01-01.md\n"), "{out}");
+        assert!(out.contains("  profile/approvals.md\n"), "{out}");
     }
 }
