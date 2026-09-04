@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
-import { laneIndicator, laneIndicatorTitle, type FleetStore } from "../stores/fleet";
+import { fleetCounts, laneIndicator, laneIndicatorTitle, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
 import type { WorkspaceStore } from "../stores/workspace";
 import {
@@ -15,6 +15,7 @@ import { agentSessionTargetId } from "./agentIdentity";
 import { formatResetAt } from "./resetTime";
 import Modal from "./Modal";
 import { reorderAround } from "./ordering";
+import LaneRowMenu from "./LaneRowMenu";
 import RepoExtMenu from "./RepoExtMenu";
 import {
   AgentIcon,
@@ -24,13 +25,13 @@ import {
   IconChevronRight,
   IconClose,
   IconCpu,
-  IconGitBranch,
   IconHide,
   IconLayers,
   IconPin,
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconShow,
 } from "./icons";
 import { LaneAgentRosterPopover } from "./LaneAgentRosterPopover";
 
@@ -88,6 +89,7 @@ function LaneRow(props: {
   tabsReorderable?: boolean;
   onReorderTabs?: (laneId: number, orderedSessionIds: string[]) => void;
   onRenameAgent?: (session: AgentSession) => void;
+  onContextMenu?: (lane: Lane, x: number, y: number) => void;
 }) {
   let rowRef: HTMLButtonElement | undefined;
   const [isHovered, setIsHovered] = createSignal(false);
@@ -114,6 +116,28 @@ function LaneRow(props: {
   const branchName = () => props.lane.worktree.branch ?? "detached";
   const dirty = () => dirtyCount(props.lane);
   const sessionCount = () => props.lane.agent_sessions.length;
+
+  /// One change cell per row, so the numbers line up down a single column instead of moving
+  /// with each row's content. Uncommitted work outranks divergence for the glyph; the tooltip
+  /// still carries both, because that is where the detail belongs.
+  const changeSummary = () => {
+    const { ahead, behind } = props.lane.state;
+    const d = props.lane.state.dirty;
+    const parts: string[] = [];
+    if (dirty() > 0) {
+      parts.push(
+        `${dirty()} uncommitted file${dirty() === 1 ? "" : "s"} (${d.staged} staged, ${d.unstaged} unstaged, ${d.untracked} untracked)`,
+      );
+    }
+    if (ahead || behind) parts.push(`${ahead} ahead, ${behind} behind upstream`);
+    if (!parts.length) return null;
+    if (dirty() > 0) return { count: dirty(), icon: null, title: parts.join(" · ") };
+    return {
+      count: ahead || behind,
+      icon: ahead ? <IconArrowUp size={9} /> : <IconArrowDown size={9} />,
+      title: parts.join(" · "),
+    };
+  };
 
   const onRowMouseEnter = () => {
     clearTimers();
@@ -173,54 +197,36 @@ function LaneRow(props: {
             onClick={onClick}
             onMouseEnter={onRowMouseEnter}
             onMouseLeave={onRowMouseLeave}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              clearTimers();
+              setIsHovered(false);
+              props.onContextMenu?.(props.lane, event.clientX, event.clientY);
+            }}
             aria-current={props.selected ? "true" : undefined}
           >
-            {/* 1. Leading Icon Slot (Fixed Width with Corner Status Pulse or Left-Aligned Minimize Button when Empty) */}
-            <div class="relative flex size-6 shrink-0 items-center justify-center rounded-md bg-raised/60">
+            {/* Column 1: one health dot per row, so the left edge reads as a single strip. */}
+            <span class="relative flex size-3 shrink-0 items-center justify-center">
               <Show
                 when={sessionCount() === 0}
                 fallback={
-                  <>
-                    <Show
-                      when={primary()}
-                      fallback={<AgentIcon shell size={13} class="text-muted/60" />}
-                    >
-                      {(agentSession) => (
-                        <AgentIcon
-                          agent={agentSession().agent}
-                          size={13}
-                          class={
-                            indicator().tone === "signal"
-                              ? "text-signal"
-                              : indicator().tone === "attention"
-                              ? "text-attention"
-                              : indicator().tone === "fault"
-                              ? "text-fault"
-                              : props.selected
-                              ? "text-foreground"
-                              : "text-muted"
-                          }
-                        />
-                      )}
-                    </Show>
-                    <span
-                      class={`absolute -top-0.5 -right-0.5 size-2 rounded-full border-2 border-surface ${
-                        indicator().tone === "signal"
-                          ? "bg-signal ring-1 ring-signal/30"
-                          : indicator().tone === "attention"
-                          ? "bg-attention ring-1 ring-attention/30 animate-pulse"
+                  <span
+                    class={`size-1.5 rounded-full ${
+                      indicator().tone === "signal"
+                        ? "bg-signal"
+                        : indicator().tone === "attention"
+                          ? "bg-attention"
                           : indicator().tone === "fault"
-                          ? "bg-fault ring-1 ring-fault/30"
-                          : "bg-muted/40"
-                      }`}
-                      aria-hidden="true"
-                    />
-                  </>
+                            ? "bg-fault"
+                            : "bg-muted/50"
+                    }`}
+                    aria-hidden="true"
+                  />
                 }
               >
                 <button
                   type="button"
-                  class="focus-ring flex size-6 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-foreground transition-colors"
+                  class="focus-ring flex size-3 items-center justify-center rounded text-muted/40 opacity-60 transition-opacity hover:text-foreground group-hover/lane-row:opacity-100"
                   onClick={(e) => {
                     e.stopPropagation();
                     props.toggleCollapse?.();
@@ -228,82 +234,87 @@ function LaneRow(props: {
                   title="Minimize inactive lane"
                   aria-label={`Minimize inactive lane ${title()}`}
                 >
-                  <IconChevronDown size={11} />
+                  <IconChevronDown size={10} />
                 </button>
               </Show>
-            </div>
+            </span>
 
-            {/* 2. Middle Content Area (Title & Branch Name) */}
-            <div class="min-w-0 flex-1 text-left">
-              <div class="flex items-center gap-1">
+            {/* Column 2: identity. The branch is the part that gives way when space runs out. */}
+            <span class="flex min-w-0 flex-1 items-baseline gap-1.5 text-left">
+              <span
+                class={`shrink-0 truncate text-xs ${
+                  props.selected ? "font-semibold text-foreground" : "font-medium text-foreground/90"
+                }`}
+                style={{ "max-width": "60%" }}
+              >
+                {title()}
+              </span>
+              <Show when={props.lane.pinned}>
                 <span
-                  class={`truncate text-xs font-medium ${
-                    props.selected ? "text-foreground font-semibold" : "text-foreground/90"
-                  }`}
+                  class="flex shrink-0 self-center text-signal"
+                  title="Pinned lane"
+                  aria-label="Pinned"
                 >
-                  {title()}
+                  <IconPin size={9} />
                 </span>
-                <Show when={props.lane.pinned}>
-                  <span class="shrink-0 text-signal" title="Pinned lane" aria-label="Pinned">
-                    <IconPin size={10} />
-                  </span>
-                </Show>
-              </div>
-
-              <div class="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted">
-                <IconGitBranch size={10} class="shrink-0 text-muted/60" />
-                <span class="truncate">
-                  {branchName()}
+              </Show>
+              <span class="min-w-0 truncate font-mono text-[10px] text-muted/80" title={branchName()}>
+                {branchName()}
+              </span>
+              <Show when={props.lane.state.merged && !props.lane.worktree.is_main}>
+                <span
+                  class="shrink-0 font-mono text-[9px] uppercase tracking-normal text-muted/60"
+                  title="Every commit on this branch is already in the default branch. The worktree can be removed."
+                >
+                  merged
                 </span>
-              </div>
-            </div>
+              </Show>
+            </span>
 
-            {/* 3. Trailing Metadata & Badges Column (Fixed Right Alignment) */}
-            <div class="shrink-0 flex flex-col items-end justify-center gap-0.5 text-right font-mono">
-              {/* Top slot: Multi-session badge + Status indicator */}
-              <div class="flex items-center gap-1">
-                <Show when={sessionCount() > 1}>
-                  <span
-                    class="inline-flex items-center gap-1 rounded border border-line bg-raised/80 px-1.5 py-0.5 text-[9px] font-medium leading-none text-muted transition-colors hover:bg-raised hover:text-foreground"
-                    aria-label={`${sessionCount()} active agent sessions open`}
-                  >
-                    <IconLayers size={10} class="text-muted/80 shrink-0" />
-                    <span>{sessionCount()} agents</span>
-                  </span>
-                </Show>
-                <Show when={indicator().label}>
-                  <span class={`lane-badge is-${indicator().tone}`} title={indicatorTitle()}>
-                    {indicator().label}
-                  </span>
-                </Show>
-              </div>
+            {/* Column 3: how many agents, and what the most urgent one is doing. */}
+            <span class="flex shrink-0 items-center gap-1">
+              <Show when={sessionCount() > 1}>
+                <span
+                  class="inline-flex items-center gap-0.5 font-mono text-[10px] leading-none text-muted"
+                  aria-label={`${sessionCount()} agents in this lane`}
+                  title={`${sessionCount()} agents in this lane`}
+                >
+                  <IconLayers size={9} class="shrink-0 text-muted/70" />
+                  {sessionCount()}
+                </span>
+              </Show>
+              <Show when={sessionCount() === 1 ? primary() : null}>
+                {(agentSession) => (
+                  <AgentIcon
+                    agent={agentSession().agent}
+                    size={10}
+                    class="shrink-0 text-muted/70"
+                  />
+                )}
+              </Show>
+              <Show when={indicator().label}>
+                <span class={`lane-status is-${indicator().tone}`} title={indicatorTitle()}>
+                  {indicator().label}
+                </span>
+              </Show>
+            </span>
 
-              {/* Bottom slot: Telemetry in fixed order: Divergence (ahead/behind), Dirty count */}
-              <div class="flex items-center gap-1.5 text-[10px] text-muted min-h-[14px]">
-                <Show when={props.lane.state.ahead || props.lane.state.behind}>
+            {/* Column 4: one fixed-width change cell, so every row's numbers stack in a column. */}
+            <span class="flex w-9 shrink-0 justify-end font-mono text-[10px] leading-none text-muted">
+              <Show when={changeSummary()}>
+                {(summary) => (
                   <span
-                    class="inline-flex items-center gap-0.5 leading-none"
-                    title={`Git tracking: ${props.lane.state.ahead} ahead, ${props.lane.state.behind} behind upstream`}
+                    class={`inline-flex items-center gap-0.5 ${dirty() > 0 ? "font-semibold text-attention" : ""}`}
+                    title={summary().title}
                   >
-                    <Show when={props.lane.state.ahead}>
-                      <span class="text-signal inline-flex items-center"><IconArrowUp size={9} />{props.lane.state.ahead}</span>
+                    <Show when={dirty() > 0} fallback={summary().icon}>
+                      <span class="size-1.5 rounded-full bg-attention" />
                     </Show>
-                    <Show when={props.lane.state.behind}>
-                      <span class="text-muted inline-flex items-center"><IconArrowDown size={9} />{props.lane.state.behind}</span>
-                    </Show>
+                    {summary().count}
                   </span>
-                </Show>
-                <Show when={dirty() > 0}>
-                  <span
-                    class="inline-flex items-center gap-0.5 leading-none text-attention font-semibold"
-                    title={`${dirty()} uncommitted file${dirty() === 1 ? "" : "s"} (${props.lane.state.dirty.staged} staged, ${props.lane.state.dirty.unstaged} unstaged, ${props.lane.state.dirty.untracked} untracked)`}
-                  >
-                    <span class="size-1.5 rounded-full bg-attention" />
-                    <span>{dirty()}</span>
-                  </span>
-                </Show>
-              </div>
-            </div>
+                )}
+              </Show>
+            </span>
           </button>
           <LaneAgentRosterPopover
             lane={props.lane}
@@ -320,19 +331,19 @@ function LaneRow(props: {
       }
     >
       <div
-        class={`group/collapsed-row fleet-row focus-ring h-7 min-h-0 py-0.5 px-2 flex items-center justify-between text-muted hover:text-foreground cursor-pointer transition-colors ${
+        class={`group/collapsed-row fleet-row focus-ring flex cursor-pointer items-center justify-between text-muted transition-colors hover:text-foreground ${
           props.selected ? "is-selected" : ""
         }`}
         onClick={props.select}
         role="button"
         tabIndex={0}
         aria-current={props.selected ? "true" : undefined}
-        title={`${title()} (${branchName()}) - Inactive (minimized)`}
+        title={`${title()} (${branchName()}). Minimized: this lane has no agent.`}
       >
-        <div class="flex items-center gap-1.5 min-w-0">
+        <div class="flex min-w-0 items-center gap-1.5">
           <button
             type="button"
-            class="focus-ring flex size-4 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+            class="focus-ring flex size-3 shrink-0 items-center justify-center rounded text-muted/50 hover:text-foreground"
             onClick={(e) => {
               e.stopPropagation();
               props.toggleCollapse?.();
@@ -342,10 +353,15 @@ function LaneRow(props: {
           >
             <IconChevronRight size={10} />
           </button>
-          <IconGitBranch size={10} class="shrink-0 text-muted/60" />
-          <span class="truncate text-xs font-medium text-muted hover:text-foreground">
-            {title()}
-          </span>
+          <span class="truncate text-xs font-medium text-muted/80">{title()}</span>
+          <Show when={props.lane.state.merged && !props.lane.worktree.is_main}>
+            <span
+              class="shrink-0 font-mono text-[9px] uppercase text-muted/60"
+              title="Every commit on this branch is already in the default branch. The worktree can be removed."
+            >
+              merged
+            </span>
+          </Show>
         </div>
         <div class="flex items-center gap-1 shrink-0 font-mono text-[10px] text-muted">
           <Show when={dirty() > 0}>
@@ -360,6 +376,60 @@ function LaneRow(props: {
         </div>
       </div>
     </Show>
+  );
+}
+
+/// One of the three fleet filters. They are toggles, so they look like toggles: pressed state is
+/// carried by the whole chip, not by the number alone, and a chip with nothing to show recedes
+/// rather than disappearing (the count itself is the answer to "is anything running?").
+function FilterChip(props: {
+  label: string;
+  count: number;
+  tone: "attention" | "signal" | "muted";
+  pressed: boolean;
+  title: string;
+  onToggle: () => void;
+}) {
+  // Written out per tone rather than interpolated: Tailwind only emits classes it can read as
+  // whole strings in the source.
+  const pressedShell = {
+    attention: "border-attention/60 bg-attention/20 text-attention font-semibold ring-1 ring-attention/25",
+    signal: "border-signal/60 bg-signal/20 text-signal font-semibold ring-1 ring-signal/25",
+    muted: "border-line bg-raised text-foreground font-semibold ring-1 ring-line",
+  } as const;
+  const liveShell = {
+    attention: "border-attention/30 bg-attention/6 text-foreground/85 hover:border-attention/50 hover:bg-attention/12",
+    signal: "border-signal/30 bg-signal/6 text-foreground/85 hover:border-signal/50 hover:bg-signal/12",
+    muted: "border-line bg-raised/60 text-muted hover:bg-raised hover:text-foreground",
+  } as const;
+  const countTone = {
+    attention: "text-attention font-semibold",
+    signal: "text-signal font-semibold",
+    muted: "text-muted font-medium",
+  } as const;
+  const shell = () =>
+    props.pressed
+      ? pressedShell[props.tone]
+      : props.count > 0
+        ? liveShell[props.tone]
+        : "border-line bg-raised/60 text-muted hover:bg-raised hover:text-foreground";
+  return (
+    <button
+      type="button"
+      class={`focus-ring flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2 text-[11px] font-medium transition-colors ${shell()}`}
+      onClick={props.onToggle}
+      aria-pressed={props.pressed}
+      title={props.title}
+    >
+      <span class="truncate">{props.label}</span>
+      <span
+        class={`font-mono text-[11px] ${
+          props.pressed ? "font-bold" : props.count > 0 ? countTone[props.tone] : "text-muted/70 font-medium"
+        }`}
+      >
+        {props.count}
+      </span>
+    </button>
   );
 }
 
@@ -387,7 +457,7 @@ export function repoDisplayName(repo: Pick<Repo, "name" | "label">): string {
   return label || repo.name;
 }
 
-/// Rename a repo's sidebar display. The folder name on disk never changes — this sets a label
+/// Rename a repo's sidebar display. The folder name on disk never changes: this sets a label
 /// override; clearing the field falls back to it.
 function RepoRenameModal(props: {
   repo: Repo;
@@ -457,6 +527,7 @@ function RepoRenameModal(props: {
 
 export default function FleetSidebar(props: FleetSidebarProps) {
   const [extMenu, setExtMenu] = createSignal<{ repoId: number; x: number; y: number } | null>(null);
+  const [laneMenu, setLaneMenu] = createSignal<{ lane: Lane; x: number; y: number } | null>(null);
   const [renameRepoId, setRenameRepoId] = createSignal<number | null>(null);
   // Manual-mode drag state: which repo is being dragged, and which header is the current
   // insertion target (drives the drop indicator line).
@@ -630,78 +701,34 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </kbd>
         </label>
         <div class="flex items-center gap-1.5">
-          <button
-            type="button"
-            class={`focus-ring flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+          <FilterChip
+            label="Needs attention"
+            count={props.fleet.counts().urgent}
+            tone="attention"
+            pressed={props.fleet.urgentOnly()}
+            onToggle={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
+            title={
               props.fleet.urgentOnly()
-                ? "border-attention/60 bg-attention/20 text-attention font-semibold shadow-xs ring-1 ring-attention/25"
-                : props.fleet.counts().urgent > 0
-                  ? "border-attention/30 bg-attention/6 hover:border-attention/50 hover:bg-attention/12"
-                  : "border-line bg-raised/60 text-muted hover:border-line hover:bg-raised hover:text-foreground"
-            }`}
-            onClick={() => props.fleet.setUrgentOnly(!props.fleet.urgentOnly())}
-            aria-pressed={props.fleet.urgentOnly()}
-            title={props.fleet.urgentOnly() ? "Show all lanes" : "Filter to lanes needing attention"}
-          >
-            <span
-              class={`truncate ${
-                props.fleet.urgentOnly()
-                  ? "text-attention font-semibold"
-                  : props.fleet.counts().urgent > 0
-                    ? "text-foreground/85"
-                    : "text-muted"
-              }`}
-            >
-              Needs attention
-            </span>
-            <span
-              class={`font-mono text-[11px] ${
-                props.fleet.urgentOnly()
-                  ? "text-attention font-bold"
-                  : props.fleet.counts().urgent > 0
-                    ? "text-attention font-semibold"
-                    : "text-muted/70 font-medium"
-              }`}
-            >
-              {props.fleet.counts().urgent}
-            </span>
-          </button>
-          <button
-            type="button"
-            class={`focus-ring flex h-7 shrink-0 items-center justify-between gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
-              props.fleet.runningOnly()
-                ? "border-signal/60 bg-signal/20 text-signal font-semibold shadow-xs ring-1 ring-signal/25"
-                : props.fleet.counts().running > 0
-                  ? "border-signal/30 bg-signal/6 hover:border-signal/50 hover:bg-signal/12"
-                  : "border-line bg-raised/60 text-muted hover:border-line hover:bg-raised hover:text-foreground"
-            }`}
-            onClick={() => props.fleet.setRunningOnly(!props.fleet.runningOnly())}
-            aria-pressed={props.fleet.runningOnly()}
-            title={props.fleet.runningOnly() ? "Show all lanes" : "Filter to lanes with a running agent"}
-          >
-            <span
-              class={`truncate ${
-                props.fleet.runningOnly()
-                  ? "text-signal font-semibold"
-                  : props.fleet.counts().running > 0
-                    ? "text-foreground/85"
-                    : "text-muted"
-              }`}
-            >
-              Running
-            </span>
-            <span
-              class={`font-mono text-[11px] ${
-                props.fleet.runningOnly()
-                  ? "text-signal font-bold"
-                  : props.fleet.counts().running > 0
-                    ? "text-signal font-semibold"
-                    : "text-muted/70 font-medium"
-              }`}
-            >
-              {props.fleet.counts().running}
-            </span>
-          </button>
+                ? "Show all lanes"
+                : "Show only lanes with an agent that needs you"
+            }
+          />
+          <FilterChip
+            label="Running"
+            count={props.fleet.counts().running}
+            tone="signal"
+            pressed={props.fleet.runningOnly()}
+            onToggle={() => props.fleet.setRunningOnly(!props.fleet.runningOnly())}
+            title={props.fleet.runningOnly() ? "Show all lanes" : "Show only lanes with a running agent"}
+          />
+          <FilterChip
+            label="Idle"
+            count={props.fleet.counts().idle}
+            tone="muted"
+            pressed={props.fleet.idleOnly()}
+            onToggle={() => props.fleet.setIdleOnly(!props.fleet.idleOnly())}
+            title={props.fleet.idleOnly() ? "Show all lanes" : "Show only lanes with an idle agent"}
+          />
           <button
             type="button"
             class="focus-ring flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-raised/60 text-muted transition-colors hover:border-line hover:bg-raised hover:text-foreground"
@@ -721,6 +748,8 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               const laneList = createMemo(() =>
                 props.fleet.visibleLanes().filter((lane) => lane.repo.id === repo.id),
               );
+              // The header answers "does anything in here want me?" without expanding the list.
+              const repoUrgent = createMemo(() => fleetCounts(laneList()).urgent);
               return (
                 <Show when={laneList().length > 0 || !props.fleet.query()}>
                   <section class="mb-2.5" aria-label={repoDisplayName(repo)}>
@@ -739,15 +768,26 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                         setExtMenu({ repoId: repo.id, x: event.clientX, y: event.clientY });
                       }}
                     >
-                      <span
-                        class="truncate font-mono text-[11px] font-semibold uppercase tracking-wider text-muted hover:text-foreground transition-colors cursor-default"
-                        title={
-                          repo.label
-                            ? `${repoDisplayName(repo)} — repository: ${repo.name} (${repo.path})`
-                            : `Repository: ${repo.name} (${repo.path})`
-                        }
-                      >
-                        {repoDisplayName(repo)}
+                      <span class="flex min-w-0 items-center gap-1.5">
+                        <span
+                          class="truncate font-mono text-[11px] font-semibold uppercase tracking-[0.02em] text-muted transition-colors hover:text-foreground cursor-default"
+                          title={
+                            repo.label
+                              ? `${repoDisplayName(repo)}. Repository: ${repo.name} (${repo.path})`
+                              : `Repository: ${repo.name} (${repo.path})`
+                          }
+                        >
+                          {repoDisplayName(repo)}
+                        </span>
+                        <Show when={repoUrgent()}>
+                          <span
+                            class="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] font-semibold leading-none text-attention"
+                            title={`${repoUrgent()} agent${repoUrgent() === 1 ? "" : "s"} in this project need you`}
+                          >
+                            <span class="size-1.5 rounded-full bg-attention" />
+                            {repoUrgent()}
+                          </span>
+                        </Show>
                       </span>
                       <span class="flex items-center gap-1 shrink-0">
                         <div class="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/repo-header:opacity-100 focus-within:opacity-100">
@@ -780,10 +820,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                           </button>
                         </div>
                         <span
-                          class="ml-0.5 rounded bg-raised px-1 font-mono text-[10px] text-muted"
-                          title={`${laneList().length} active lane${laneList().length === 1 ? "" : "s"}`}
+                          class="ml-0.5 rounded bg-raised px-1.5 font-mono text-[10px] text-muted"
+                          title={`${laneList().length} lane${laneList().length === 1 ? "" : "s"} in ${repoDisplayName(repo)}`}
                         >
-                          {laneList().length}
+                          {laneList().length} lanes
                         </span>
                       </span>
                     </div>
@@ -800,6 +840,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                             tabsReorderable={tabsReorderable()}
                             onReorderTabs={handleReorderTabs}
                             onRenameAgent={handleRenameAgent}
+                            onContextMenu={(target, x, y) => setLaneMenu({ lane: target, x, y })}
                           />
                         )}
                       </For>
@@ -819,32 +860,40 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                 aria-label={hiddenCollapsed() ? `Expand Hidden (${props.fleet.hiddenRepos().length})` : `Collapse Hidden (${props.fleet.hiddenRepos().length})`}
                 title={hiddenCollapsed() ? `Expand Hidden (${props.fleet.hiddenRepos().length})` : `Collapse Hidden (${props.fleet.hiddenRepos().length})`}
               >
-                <div class="flex items-center gap-1.5 min-w-0">
-                  <span class="flex size-4 shrink-0 items-center justify-center rounded text-muted group-hover/hidden-header:text-foreground">
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="flex size-3 shrink-0 items-center justify-center rounded text-muted group-hover/hidden-header:text-foreground">
                     <Show when={hiddenCollapsed()} fallback={<IconChevronDown size={10} strokeWidth={2} />}>
                       <IconChevronRight size={10} strokeWidth={2} />
                     </Show>
                   </span>
-                  <span class="truncate font-mono text-[10px] font-semibold uppercase tracking-wider text-muted group-hover/hidden-header:text-foreground">
+                  <span class="truncate font-mono text-[10px] font-semibold uppercase tracking-[0.02em] text-muted group-hover/hidden-header:text-foreground">
                     Hidden ({props.fleet.hiddenRepos().length})
                   </span>
                 </div>
               </button>
+              {/* Expanded, these are still one line each: a hidden project is a parking space, not
+                  a row that deserves the width of a live lane. */}
               <Show when={!hiddenCollapsed()}>
-                <div class="mt-1 space-y-0.5">
+                <div class="mt-0.5">
                   <For each={props.fleet.hiddenRepos()}>
                     {(repo) => (
-                      <button
-                        type="button"
-                        class="focus-ring flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-raised"
-                        onClick={() => void props.actions.setRepoHidden(repo, false)}
-                        title={`Show ${repo.name} again`}
-                      >
-                        <span class="truncate font-mono text-[11px] uppercase tracking-wider text-muted">
-                          {repo.name}
+                      <div class="group/hidden-row flex items-center gap-1 rounded px-2 py-0.5 transition-colors hover:bg-raised/50">
+                        <span
+                          class="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-[0.02em] text-muted"
+                          title={repo.path}
+                        >
+                          {repoDisplayName(repo)}
                         </span>
-                        <span class="ml-2 shrink-0 text-xs text-signal font-medium">Unhide</span>
-                      </button>
+                        <button
+                          type="button"
+                          class="focus-ring flex size-4 shrink-0 items-center justify-center rounded text-muted/50 opacity-0 transition-opacity hover:text-signal group-hover/hidden-row:opacity-100 focus-visible:opacity-100"
+                          onClick={() => void props.actions.setRepoHidden(repo, false)}
+                          title={`Show ${repo.name} again`}
+                          aria-label={`Show ${repo.name} again`}
+                        >
+                          <IconShow size={11} />
+                        </button>
+                      </div>
                     )}
                   </For>
                 </div>
@@ -881,6 +930,19 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </Show>
         </Show>
       </div>
+
+      <Show keyed when={laneMenu()}>
+        {(menu) => (
+          <LaneRowMenu
+            lane={menu.lane}
+            x={menu.x}
+            y={menu.y}
+            onPin={() => void props.actions.pinLane(menu.lane)}
+            onRemoveWorktree={() => props.actions.deleteLane(menu.lane)}
+            onClose={() => setLaneMenu(null)}
+          />
+        )}
+      </Show>
 
       <Show keyed when={extMenu()}>
         {(menu) => (

@@ -11,4 +11,11 @@ export type WorktreeState = { worktree_id: number, head: string, branch: string 
  * leaves no transcript or process of its own (e.g. a Claude Code worktree-isolated subagent).
  * `None` when the worktree is clean. Computed live; not persisted.
  */
-last_change_at: string | null, };
+last_change_at: string | null, 
+/**
+ * True when every commit on this branch is already contained in the repository's default
+ * branch, so the worktree is finished work waiting to be cleaned up. `false` for the default
+ * branch itself, for a detached head, and when no default branch can be resolved. Computed
+ * live; not persisted, and omitted from the wire when false.
+ */
+merged?: boolean, };

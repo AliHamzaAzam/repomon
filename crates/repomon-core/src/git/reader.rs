@@ -154,6 +154,71 @@ pub fn ahead_behind(repo: &gix::Repository) -> Result<(u32, u32, Option<String>)
     Ok((ahead, behind, Some(upstream_name)))
 }
 
+/// Branch names tried, in order, as the repository's default branch when `origin/HEAD` does not
+/// name one. Local first: a worktree checked out from a repo with no remote still has one.
+const DEFAULT_BRANCH_CANDIDATES: [&str; 4] = [
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+    "refs/heads/main",
+    "refs/heads/master",
+];
+
+/// Is every commit on this worktree's branch already contained in the repository's default
+/// branch? That is what makes a lane's worktree stale: the work landed, and the row is now
+/// bookkeeping.
+///
+/// Answered the same way as ahead/behind: walk from HEAD with the default branch hidden. An empty
+/// walk means HEAD adds nothing the default branch does not already have.
+pub fn merged_into_default(repo: &gix::Repository) -> Result<bool> {
+    let head_id = match repo.head_id() {
+        Ok(id) => id.detach(),
+        Err(_) => return Ok(false),
+    };
+    // A detached head has no branch to call merged, and the default branch is never merged into
+    // itself: resolving it against itself would mark every main lane stale.
+    let head_ref = match repo.head_name().map_err(gix_err)? {
+        Some(n) => n.as_bstr().to_string(),
+        None => return Ok(false),
+    };
+    let default_ref = DEFAULT_BRANCH_CANDIDATES
+        .iter()
+        .find(|candidate| {
+            repo.try_find_reference(**candidate)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .copied();
+    let Some(default_ref) = default_ref else {
+        return Ok(false);
+    };
+    // Comparing short names, so a local `main` is not reported as merged into `origin/main`.
+    let short = |r: &str| {
+        r.trim_start_matches("refs/remotes/origin/")
+            .trim_start_matches("refs/heads/")
+            .to_string()
+    };
+    if short(default_ref) == short(&head_ref) {
+        return Ok(false);
+    }
+    let Some(default_id) = repo
+        .try_find_reference(default_ref)
+        .ok()
+        .flatten()
+        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+    else {
+        return Ok(false);
+    };
+    let unmerged = repo
+        .rev_walk([head_id])
+        .with_hidden([default_id])
+        .all()
+        .map_err(gix_err)?
+        .filter_map(|r| r.ok())
+        .count();
+    Ok(unmerged == 0)
+}
+
 /// The committer time of HEAD, if any.
 pub fn head_commit_time(repo: &gix::Repository) -> Result<Option<DateTime<Utc>>> {
     match repo.head_id() {
@@ -188,6 +253,7 @@ pub fn read_state(path: &Path, worktree_id: WorktreeId) -> Result<WorktreeState>
         locked: false,
         prunable: false,
         last_change_at,
+        merged: merged_into_default(&repo).unwrap_or(false),
     })
 }
 
@@ -308,4 +374,50 @@ pub fn recent_commits(
 pub fn read_recent_commits(path: &Path, repo_id: RepoId, limit: usize) -> Result<Vec<Commit>> {
     let repo = open(path)?;
     recent_commits(&repo, repo_id, limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A worktree branch is "merged" only once the default branch already contains every one of
+    /// its commits. Stale `repomon-feat-*` worktrees pile up in the sidebar precisely because
+    /// nothing says so.
+    #[test]
+    fn merged_reports_only_branches_the_default_branch_already_contains() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "first"]);
+
+        // The default branch itself is never "merged": that would mark every main lane stale.
+        let main_repo = open(root).unwrap();
+        assert!(!merged_into_default(&main_repo).unwrap());
+
+        // A branch whose work is already in main.
+        git(&["checkout", "-q", "-b", "landed"]);
+        let landed = open(root).unwrap();
+        assert!(merged_into_default(&landed).unwrap());
+
+        // The same branch once it carries a commit of its own.
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "second"]);
+        let ahead = open(root).unwrap();
+        assert!(!merged_into_default(&ahead).unwrap());
+    }
 }

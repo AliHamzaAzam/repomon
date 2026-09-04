@@ -325,6 +325,7 @@ impl Lanes {
                     locked: entry.locked.is_some(),
                     prunable: true,
                     last_change_at: None,
+                    merged: false,
                 },
             };
             state.locked = entry.locked.is_some();
@@ -845,6 +846,7 @@ mod tests {
                 locked: false,
                 prunable: false,
                 last_change_at: None,
+                merged: false,
             },
         };
         {

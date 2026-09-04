@@ -83,13 +83,17 @@ function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
     setUrgentOnly: vi.fn(),
     runningOnly: () => false,
     setRunningOnly: vi.fn(),
+    idleOnly: () => false,
+    setIdleOnly: vi.fn(),
     loading: () => false,
-    counts: () => ({ urgent: 0, running: 0 }),
+    counts: () => ({ urgent: 0, running: 0, idle: 0 }),
     focusedUsage: () => null,
     sortMode: () => sortMode,
     refresh: vi.fn().mockResolvedValue(undefined),
     refreshUsage: vi.fn().mockResolvedValue(undefined),
   } as unknown as FleetStore;
+  const deleteLane = vi.fn();
+  const pinLane = vi.fn().mockResolvedValue(undefined);
   const actions = {
     setRepoHidden,
     renameRepo,
@@ -98,8 +102,10 @@ function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
     newLane: vi.fn(),
     addRepo: vi.fn(),
     openRepoNotes: vi.fn(),
+    deleteLane,
+    pinLane,
   } as unknown as ActionsStore;
-  return { fleet, actions, setRepoHidden, renameRepo, reorderRepos };
+  return { fleet, actions, setRepoHidden, renameRepo, reorderRepos, deleteLane, pinLane };
 }
 
 describe("fleet sidebar hiding", () => {
@@ -169,6 +175,74 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("main")).toBeInTheDocument();
     expect(screen.getByTitle(/3 uncommitted files/)).toBeInTheDocument();
     expect(screen.getByTitle(/2 ahead, 1 behind upstream/)).toBeInTheDocument();
+  });
+
+  it("names what the repo header count is counting", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha), lane(11, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    // "REPOMON 9" said nothing about what nine was.
+    expect(screen.getByText("2 lanes")).toBeInTheDocument();
+    expect(screen.getByTitle("2 lanes in alpha")).toBeInTheDocument();
+  });
+
+  it("rolls a project's needs-you agents up to its header", () => {
+    const alpha = repo(1, "alpha");
+    const waiting = lane(10, alpha, [session({ status: "waiting", worktree_id: 10 })]);
+    const { fleet, actions } = stubs([alpha], [waiting, lane(11, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByTitle("1 agent in this project need you")).toBeInTheDocument();
+  });
+
+  it("marks a lane whose branch is already in the default branch", () => {
+    const alpha = repo(1, "alpha");
+    const landed = lane(10, alpha, [session({ worktree_id: 10 })]);
+    landed.worktree = { ...landed.worktree, is_main: false, name: "feat-x", branch: "feat/x" };
+    landed.state = { ...landed.state, branch: "feat/x", merged: true };
+    const { fleet, actions } = stubs([alpha], [landed]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText("merged")).toBeInTheDocument();
+    // The default branch is never marked: it is not merged into itself.
+    expect(screen.getByTitle(/already in the default branch/)).toBeInTheDocument();
+  });
+
+  it("offers Remove worktree from a lane row, and only for a worktree lane", () => {
+    const alpha = repo(1, "alpha");
+    const wt = lane(10, alpha, [session({ worktree_id: 10 })]);
+    wt.worktree = { ...wt.worktree, is_main: false, name: "feat-x" };
+    const { fleet, actions, deleteLane } = stubs([alpha], [wt]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    fireEvent.contextMenu(screen.getByText("feat-x"));
+    fireEvent.click(screen.getByText("Remove worktree"));
+    // The action itself raises the shared confirm; the row never deletes on one click.
+    expect(deleteLane).toHaveBeenCalledWith(wt);
+  });
+
+  it("keeps the main lane out of the destructive menu item", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha, [session({ worktree_id: 10 })])]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    fireEvent.contextMenu(screen.getAllByText("main")[0]);
+    expect(screen.queryByText("Remove worktree")).not.toBeInTheDocument();
+    expect(screen.getByText("Pin lane to top")).toBeInTheDocument();
+  });
+
+  it("offers all three fleet filters as pressable toggles", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    for (const label of ["Needs attention", "Running", "Idle"]) {
+      const chip = screen.getByRole("button", { name: new RegExp(label) });
+      expect(chip.getAttribute("aria-pressed")).toBe("false");
+    }
+    fireEvent.click(screen.getByRole("button", { name: /Idle/ }));
+    expect(fleet.setIdleOnly).toHaveBeenCalledWith(true);
   });
 
   it("renders structured usage rate limits card with clear labels", () => {

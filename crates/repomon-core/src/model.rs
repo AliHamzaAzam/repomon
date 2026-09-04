@@ -246,6 +246,12 @@ pub struct WorktreeState {
     /// `None` when the worktree is clean. Computed live; not persisted.
     #[serde(default)]
     pub last_change_at: Option<DateTime<Utc>>,
+    /// True when every commit on this branch is already contained in the repository's default
+    /// branch, so the worktree is finished work waiting to be cleaned up. `false` for the default
+    /// branch itself, for a detached head, and when no default branch can be resolved. Computed
+    /// live; not persisted, and omitted from the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merged: bool,
 }
 
 /// A single commit, summarized for timelines and the Today view.

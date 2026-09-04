@@ -234,6 +234,7 @@ mod tests {
                 locked: false,
                 prunable: false,
                 last_change_at: None,
+                merged: false,
             },
             agent_sessions: vec![],
             last_activity_at: Utc::now(),

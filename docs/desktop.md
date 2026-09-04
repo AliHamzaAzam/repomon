@@ -142,6 +142,25 @@ The center Editor workspace provides:
 | `mod+shift+h` | Hide the selected lane's project |
 | `mod+shift+b` | Edit the selected lane's project notes |
 
+#### The sidebar
+
+One line per lane, with the same anatomy on every row so the columns can be read down rather than
+across: a health dot, the lane name and its branch, the agent count or agent icon, the most urgent
+status, and one change cell holding either uncommitted files or divergence from upstream (the
+tooltip carries both). Twelve lanes fit the default sidebar without scrolling.
+
+A project header names its own count ("12 lanes") and carries an amber pip with the number of its
+agents that need you, so a collapsed project still reports. Hidden projects sit behind one
+disclosure at the bottom; expanding gives one dense line each, with an unhide button on hover.
+
+A worktree lane whose branch is already contained in the repository's default branch is marked
+"merged": the work landed, and the worktree is bookkeeping. Right-clicking a lane row offers
+"Pin lane to top" and, for a worktree lane, "Remove worktree", which raises the usual confirm and
+keeps the branch.
+
+The three filter chips ("Needs attention", "Running", "Idle") are toggles over the same
+per-agent state the rows show, so a chip's number always matches the rows it selects.
+
 #### Agent status
 
 Every pill, chip, count and filter in the sidebar is derived from one per-agent state, so a lane

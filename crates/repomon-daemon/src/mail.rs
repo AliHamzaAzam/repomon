@@ -465,6 +465,7 @@ mod tests {
                 last_commit_at: None,
                 locked: false,
                 prunable: false,
+                merged: false,
                 last_change_at: None,
             },
             agent_sessions: vec![session],

@@ -90,6 +90,28 @@ export function IconHide(props: IconProps): JSX.Element {
   );
 }
 
+/// The counterpart to IconHide: the same circle, uncrossed, with the subject showing through.
+export function IconShow(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="3.25" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function IconTrash(props: IconProps): JSX.Element {
   const s = () => props.size ?? 14;
   return (
