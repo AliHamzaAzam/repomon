@@ -5,6 +5,7 @@ import FleetSidebar from "./components/FleetSidebar";
 import ControlCenter from "./components/ControlCenter";
 import ExtensionsView from "./components/ExtensionsView";
 import Onboarding from "./components/Onboarding";
+import WindowChromeHeader from "./components/WindowChrome";
 import RepomindPanel from "./components/RepomindPanel";
 import { RepomindStateDot } from "./components/RepomindRow";
 import RightPanelHost, {
@@ -25,7 +26,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { isMac, matchChord } from "./keymap";
+import { matchChord } from "./keymap";
 import BrandMark from "./components/BrandMark";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
@@ -460,12 +461,7 @@ function App(props: AppProps) {
 
   return (
     <div class="grid h-screen min-h-[36rem] grid-rows-[35px_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
-      <header
-        data-tauri-drag-region
-        class={`flex h-[35px] items-center justify-between border-b border-line bg-surface/95 pr-1.5 backdrop-blur select-none ${
-          isMac() ? "pl-[78px]" : "px-3.5"
-        }`}
-      >
+      <WindowChromeHeader>
         <div class="flex items-center gap-2" data-tauri-drag-region>
           <BrandMark size={24} class="mt-[2px] pointer-events-none" />
           <h1 class="text-xs font-semibold tracking-tight text-foreground pointer-events-none select-none">Repomon</h1>
@@ -614,7 +610,7 @@ function App(props: AppProps) {
             <IconSettings size={14} />
           </button>
         </div>
-      </header>
+      </WindowChromeHeader>
 
       {/* E5: Sustained-disconnect banner — only after ≥5 s of continuous disconnection.
           Rendered as a fixed overlay (non-blocking) so the main layout never shifts.
