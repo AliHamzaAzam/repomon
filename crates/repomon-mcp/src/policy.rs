@@ -9,6 +9,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// The `Lane::role` value marking the repomind home lane. Mirrors the daemon's
+/// `repomon_daemon::repomind::CONTROLLER_ROLE`; the two are joined by the wire, not by a shared
+/// type, so they are asserted equal in the daemon's tests.
+pub const CONTROLLER_ROLE: &str = "controller";
+
 /// How much the orchestrator may do without a human in the loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Autonomy {
@@ -119,6 +124,21 @@ impl Policy {
         }
         *a += 1;
         Ok(*a)
+    }
+
+    /// Refuse a destructive action on the controller lane. The controller lane is repomind's own
+    /// home repo - the fleet's memory and the lane repomind itself runs in - so deleting or
+    /// merging it is never allowed, whatever the autonomy level and before any confirmation token
+    /// is minted. `verb` names the action in the message ("deleting", "merging").
+    pub fn refuse_controller_lane(&self, role: Option<&str>, verb: &str) -> Result<(), String> {
+        if role == Some(CONTROLLER_ROLE) {
+            return Err(format!(
+                "that is the controller lane (repomind's own home repo): {verb} it is never \
+                 allowed. It holds the fleet's memory and the lane you are running in. If the \
+                 human wants it gone, they remove it themselves outside the fleet tools."
+            ));
+        }
+        Ok(())
     }
 
     /// Suppress an identical `send_to_agent` to the same lane within a short window — the
@@ -277,6 +297,30 @@ mod tests {
         assert!(!Autonomy::ReadOnly.allows_structural());
         assert!(!Autonomy::Supervised.allows_structural());
         assert!(Autonomy::Autonomous.allows_structural());
+    }
+
+    /// The controller lane is repomind's own home. Deleting or merging it would destroy the
+    /// fleet's memory, so both are refused outright - before the two-phase confirm, and at every
+    /// autonomy level.
+    #[test]
+    fn controller_lane_refuses_destructive_actions_outright() {
+        let p = policy(Autonomy::Autonomous, 100);
+        let err = p
+            .refuse_controller_lane(Some("controller"), "deleting")
+            .unwrap_err();
+        assert!(err.contains("controller lane"), "unexpected message: {err}");
+        assert!(err.contains("deleting"), "unexpected message: {err}");
+        assert!(
+            p.refuse_controller_lane(Some("controller"), "merging")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_ordinary_lane_is_not_refused() {
+        let p = policy(Autonomy::Autonomous, 100);
+        assert!(p.refuse_controller_lane(None, "deleting").is_ok());
+        assert!(p.refuse_controller_lane(Some("worker"), "merging").is_ok());
     }
 
     #[test]

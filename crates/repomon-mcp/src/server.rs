@@ -613,6 +613,15 @@ impl Server {
     /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
     async fn delete_lane(&self, args: Value) -> Result<Value, String> {
         let a: DeleteLaneArgs = parse(args)?;
+        // Read the lane up front (both phases need it) so the controller-lane refusal below lands
+        // before a confirmation token is ever minted.
+        let lane: Lane = self
+            .client
+            .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+            .map_err(rpc_err)?;
+        self.policy
+            .refuse_controller_lane(lane.role.as_deref(), "deleting")?;
         // Unattended runs never destroy work, regardless of autonomy (locked design decision:
         // an unattended orchestrator must be MORE conservative than an attended one).
         if self.policy.unattended {
@@ -639,11 +648,6 @@ impl Server {
 
         match a.confirm {
             None => {
-                let lane: Lane = self
-                    .client
-                    .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
-                    .await
-                    .map_err(rpc_err)?;
                 let primary = fleet::primary_agent(&lane);
                 let impact = json!({
                     "lane_id": a.lane_id,
@@ -692,6 +696,13 @@ impl Server {
 
     async fn merge_lane(&self, args: Value) -> Result<Value, String> {
         let a: MergeLaneArgs = parse(args)?;
+        let lane: Lane = self
+            .client
+            .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
+            .await
+            .map_err(rpc_err)?;
+        self.policy
+            .refuse_controller_lane(lane.role.as_deref(), "merging")?;
         // Unattended runs never land work, regardless of autonomy (locked design decision).
         if self.policy.unattended {
             return Err(
@@ -709,11 +720,6 @@ impl Server {
                     .into(),
             );
         }
-        let lane: Lane = self
-            .client
-            .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
-            .await
-            .map_err(rpc_err)?;
         if !lane.state.dirty.is_clean() {
             return Err(
                 "the worker has uncommitted changes that would NOT be merged — have it commit \

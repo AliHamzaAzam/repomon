@@ -527,6 +527,10 @@ struct AgentSpawn {
     /// Model override forwarded to the agent (e.g. `opus`). Additive.
     #[serde(default)]
     model: Option<String>,
+    /// The caller's MCP identity, when the caller is itself a managed agent. Used only to refuse
+    /// a worker spawning into the controller lane; absent means the local operator.
+    #[serde(default)]
+    identity_token: Option<String>,
 }
 #[derive(Deserialize)]
 struct AgentInput {
@@ -3365,6 +3369,45 @@ pub async fn dispatch(
         }
         "agent.spawn" => {
             let p: AgentSpawn = parse(params)?;
+            // Spawning into the controller lane makes a controller: the full fleet catalog, a cap
+            // of its own, and only the operator or another controller may ask for one.
+            let is_controller = ctx.store.controller_lane().await.map_err(internal)?
+                == Some(p.lane_id);
+            if is_controller {
+                let caller_lane = match &p.identity_token {
+                    Some(token) => Some(
+                        ctx.store
+                            .resolve_mcp_identity(token.clone())
+                            .await
+                            .map_err(internal)?
+                            .ok_or_else(|| {
+                                RpcError::invalid_params("invalid or revoked MCP identity")
+                            })?
+                            .lane_id
+                            .unwrap_or(p.lane_id),
+                    ),
+                    None => None,
+                };
+                if let Some(refusal) = controller_spawn_identity_refusal(caller_lane, p.lane_id) {
+                    return Err(RpcError::invalid_params(refusal));
+                }
+                let max = ctx.config.read().await.repomind.max_controllers;
+                let backend = ctx.backend.clone();
+                let lane = p.lane_id;
+                let running = tokio::task::spawn_blocking(move || {
+                    backend
+                        .list_windows()
+                        .map(|windows| {
+                            repomon_core::TmuxRuntime::lane_windows_in(&windows, lane).len()
+                        })
+                        .unwrap_or(0)
+                })
+                .await
+                .map_err(internal)?;
+                if let Some(refusal) = controller_cap_refusal(running, max) {
+                    return Err(RpcError::invalid_params(refusal));
+                }
+            }
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             // Resolve the chosen name to a command AND the kind whose flag dialect we translate
             // launch options for: a config custom wins (kind inferred from the command it runs, so
@@ -3445,12 +3488,18 @@ pub async fn dispatch(
                 plan.command
             };
             let mut spec = agent_spawn_spec(command, path, &kind);
+            // A controller gets the full catalog; every other lane gets the restricted worker one.
+            let mcp_mode = if is_controller {
+                repomon_mcp::MCP_MODE_ORCHESTRATOR
+            } else {
+                repomon_mcp::MCP_MODE_AGENT
+            };
             spec.env.extend([
                 (
                     "REPOMON_MCP_SOCKET".into(),
                     socket.to_string_lossy().into_owned(),
                 ),
-                ("REPOMON_MCP_MODE".into(), "agent".into()),
+                ("REPOMON_MCP_MODE".into(), mcp_mode.into()),
                 ("REPOMON_MCP_IDENTITY_TOKEN".into(), identity_token),
             ]);
             configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
@@ -3546,7 +3595,12 @@ pub async fn dispatch(
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
             ctx.invalidate_overlay().await;
-            Ok(json!({ "lane_id": p.lane_id, "window": window, "agent": p.agent }))
+            Ok(json!({
+                "lane_id": p.lane_id,
+                "window": window,
+                "agent": p.agent,
+                "role": is_controller.then(|| crate::repomind::CONTROLLER_ROLE),
+            }))
         }
         "agent.adopt" => {
             // Take over an agent running in another terminal and resume its exact backend session.
@@ -7849,6 +7903,37 @@ fn program_basename(prog: &str) -> &str {
     prog.rsplit('/').next().unwrap_or(prog)
 }
 
+/// Refuse an `agent.spawn` into the controller lane based on who is asking. `caller_lane` is the
+/// lane of the caller's MCP identity, or `None` when no identity was presented - the local
+/// operator through the TUI or Mission Control. A managed worker holds an identity bound to its
+/// own lane; only an identity already inside the controller lane may put another agent there.
+pub(crate) fn controller_spawn_identity_refusal(
+    caller_lane: Option<repomon_core::model::LaneId>,
+    controller_lane: repomon_core::model::LaneId,
+) -> Option<String> {
+    match caller_lane {
+        None => None,
+        Some(lane) if lane == controller_lane => None,
+        Some(_) => Some(
+            "the controller lane is repomind's own; a worker agent cannot spawn into it. \
+             Ask the human, or use create_lane for a lane of your own."
+                .to_string(),
+        ),
+    }
+}
+
+/// Refuse an `agent.spawn` into the controller lane once `[repomind] max_controllers` are already
+/// running there. The cap is a hard promise: controllers hold the full fleet catalog.
+pub(crate) fn controller_cap_refusal(running: usize, max: usize) -> Option<String> {
+    if running < max {
+        return None;
+    }
+    Some(format!(
+        "the controller lane is at its cap ({max} controller(s) running, {running} live). \
+         Stop one before starting another, or raise [repomind] max_controllers."
+    ))
+}
+
 fn next_agent_window(
     backend: &dyn repomon_core::agent::backend::SessionBackend,
     lane: i64,
@@ -8931,6 +9016,41 @@ mod tests {
             json!(["lane-81/3"])
         );
         assert!(!snapshot.to_string().contains("secret-token-1234"));
+    }
+
+    /// Only the operator (no MCP identity) or another controller may put an agent in the
+    /// controller lane. A worker holding a restricted identity in some other lane is refused.
+    #[test]
+    fn a_worker_identity_cannot_spawn_into_the_controller_lane() {
+        assert!(controller_spawn_identity_refusal(None, 7).is_none());
+        assert!(controller_spawn_identity_refusal(Some(7), 7).is_none());
+        let refusal = controller_spawn_identity_refusal(Some(3), 7)
+            .expect("a worker in lane 3 must be refused");
+        assert!(
+            refusal.contains("controller lane"),
+            "unexpected message: {refusal}"
+        );
+    }
+
+    #[test]
+    fn the_controller_cap_refuses_once_max_controllers_are_running() {
+        assert!(controller_cap_refusal(0, 2).is_none());
+        assert!(controller_cap_refusal(1, 2).is_none());
+        let refusal = controller_cap_refusal(2, 2).expect("at the cap");
+        assert!(refusal.contains("2"), "unexpected message: {refusal}");
+        assert!(controller_cap_refusal(3, 2).is_some());
+        // A cap of zero closes the lane entirely.
+        assert!(controller_cap_refusal(0, 0).is_some());
+    }
+
+    /// The daemon writes the role and `repomon-mcp`'s policy layer reads it off the wire, so the
+    /// two spellings must not drift.
+    #[test]
+    fn the_controller_role_string_matches_the_mcp_policy_layer() {
+        assert_eq!(
+            crate::repomind::CONTROLLER_ROLE,
+            repomon_mcp::policy::CONTROLLER_ROLE
+        );
     }
 
     /// `config.get` carries the `[repomind]` table so the desktop can show the home path and the
