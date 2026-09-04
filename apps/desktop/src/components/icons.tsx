@@ -1719,3 +1719,58 @@ export function IconExternalLink(props: IconProps): JSX.Element {
     </svg>
   );
 }
+
+export function IconFitFrame(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M4 9V5a1 1 0 0 1 1-1h4" />
+      <path d="M20 9V5a1 1 0 0 1-1-1h-4" />
+      <path d="M4 15v4a1 1 0 0 0 1 1h4" />
+      <path d="M20 15v4a1 1 0 0 1-1 1h-4" />
+      <rect x="8" y="8" width="8" height="8" rx="1" />
+    </svg>
+  );
+}
+
+export function IconActualSize(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 14;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="1.5" />
+      <text
+        x="12"
+        y="15.5"
+        text-anchor="middle"
+        font-size="8.5"
+        font-family="var(--font-mono, monospace)"
+        stroke="none"
+        fill="currentColor"
+      >
+        1:1
+      </text>
+    </svg>
+  );
+}

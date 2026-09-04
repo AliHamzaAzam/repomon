@@ -80,7 +80,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+7` | Toggle the compact in-app editor in the right rail |
 | `mod+p` | Find file in workspace |
 | `mod+shift+f` | Search project files in workspace (inside a focused terminal, this searches the terminal) |
-| `mod+shift+v` | Toggle markdown preview |
+| `mod+shift+v` | Toggle preview (Markdown or SVG tab, whichever is active) |
 | `mod+k` | Open the control center |
 
 Git, repomind, and the compact editor share one right-rail panel host: a resizable pane (drag its
@@ -114,6 +114,12 @@ The center Editor workspace provides:
   `mod+shift+v`) opens a resizable side-by-side split. The editor and preview maintain scroll
   synchronization aligned to the nearest heading, with support for task lists, GitHub tables,
   fenced code highlighting, local image resolution, and external links.
+- For SVG buffers, the same preview toggle (and `mod+shift+v`) opens the rendered SVG in the
+  same resizable split, live from the unsaved buffer (sanitized before render). `.svg` files stay
+  text tabs otherwise - full syntax editing, not a dedicated image viewer.
+- The image viewer (PNG, JPEG, GIF, WebP, BMP, ICO) streams bytes through the asset protocol,
+  fills the tab, and supports fit/actual-size/free zoom (10-800%), `Mod` plus scroll-wheel zoom
+  around the cursor, drag-to-pan, and double-click to toggle fit and actual size.
 
 ### Layout
 

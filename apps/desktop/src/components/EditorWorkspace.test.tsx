@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileEntry, Lane, Repo } from "../bindings";
 import type { FleetStore } from "../stores/fleet";
@@ -46,6 +46,27 @@ vi.mock("./PdfViewer", () => ({
   },
 }));
 
+// Same reasoning as the PdfViewer stub above: ImageViewer owns its own asset-protocol load and
+// zoom/pan state and is covered by ImageViewer.test.tsx; here it just reports fixed state so the
+// status line's image branch can be tested in isolation.
+vi.mock("./ImageViewer", () => ({
+  default: (props: {
+    onStateChange?: (
+      state: {
+        format: string;
+        width: number | null;
+        height: number | null;
+        sizeBytes: number;
+        zoomPercent: number;
+        animated: boolean;
+      } | null,
+    ) => void;
+  }) => {
+    props.onStateChange?.({ format: "PNG", width: 432, height: 900, sizeBytes: 71168, zoomPercent: 100, animated: false });
+    return <div data-testid="image-viewer-stub" />;
+  },
+}));
+
 function mockRpc(handlers: Record<string, (params: unknown) => unknown>) {
   daemonCallMock.mockImplementation((method: string, params?: unknown) => {
     const handler = handlers[method];
@@ -57,6 +78,21 @@ function mockRpc(handlers: Record<string, (params: unknown) => unknown>) {
     }
   });
 }
+
+// jsdom has no createObjectURL/revokeObjectURL on URL at all (SvgPreview is the only component in
+// this file that calls them). Stubbing them for the whole file, reset before every test, keeps
+// them always callable even if a reactive effect from an unmounted component happens to fire late
+// - reassigning them to `undefined` per-test previously broke unrelated later tests that way.
+let capturedSvgBlobs: Blob[] = [];
+
+beforeEach(() => {
+  capturedSvgBlobs = [];
+  URL.createObjectURL = vi.fn((blob: Blob) => {
+    capturedSvgBlobs.push(blob);
+    return `blob:mock-${capturedSvgBlobs.length}`;
+  });
+  URL.revokeObjectURL = vi.fn();
+});
 
 afterEach(() => {
   cleanup();
@@ -237,6 +273,40 @@ describe("EditorWorkspace component", () => {
     expect(screen.queryByTitle("Toggle render whitespace")).not.toBeInTheDocument();
 
     expect(screen.getByText("PDF · 3 pages · 2.0 KB")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("shows image status (kind, dimensions, size, zoom) and hides the code items for an image tab", async () => {
+    const currentLane = lane();
+    mockRpc({
+      "file.list": () => ({
+        entries: [entry({ name: "logo.png", path: "logo.png", is_dir: false })],
+        truncated: false,
+      }),
+      "file.read": () => ({
+        content: "",
+        mtime_ms: 1000,
+        size: 71168,
+        truncated: false,
+        kind: "image",
+      }),
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await waitFor(() => expect(screen.getByText("logo.png")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("logo.png"));
+    await waitFor(() => expect(editor.activePath()).toBe("logo.png"));
+
+    // Same code-item hiding as the pdf tab above - ImageViewer's stub reports its own state.
+    expect(screen.queryByTitle("Click to override syntax language")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Ln \d+, Col \d+$/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Toggle line wrapping")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Toggle render whitespace")).not.toBeInTheDocument();
+
+    expect(screen.getByText("PNG · 432 x 900 · 69.5 KB")).toBeInTheDocument();
     expect(screen.getByText("100%")).toBeInTheDocument();
   });
 
@@ -514,6 +584,56 @@ describe("EditorWorkspace component", () => {
     expect(await screen.findByText("Preview: Off")).toBeInTheDocument();
     expect(container.querySelector("[data-testid='markdown-preview']")).not.toBeInTheDocument();
     expect(container.querySelector(".cm-content")).toBeInTheDocument();
+  });
+
+  it("shows the Preview toggle for an svg tab and renders sanitized markup in the split", async () => {
+    const currentLane = lane();
+    const svgWithScript =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">' +
+      "<script>alert(1)</script>" +
+      '<rect onclick="alert(2)" width="10" height="10" fill="red" /></svg>';
+    mockRpc({
+      "file.list": () => ({
+        entries: [entry({ name: "icon.svg", path: "icon.svg", is_dir: false })],
+        truncated: false,
+      }),
+      "file.read": () => ({
+        content: svgWithScript,
+        mtime_ms: 1000,
+        size: svgWithScript.length,
+        truncated: false,
+        kind: "text",
+      }),
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    const { container } = render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await waitFor(() => expect(screen.getByText("icon.svg")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("icon.svg"));
+    await waitFor(() => expect(editor.activePath()).toBe("icon.svg"));
+
+    const previewBtn = await screen.findByText("Preview: Off");
+    expect(container.querySelector("[data-testid='svg-preview']")).not.toBeInTheDocument();
+
+    fireEvent.click(previewBtn);
+    expect(await screen.findByText("Preview: On")).toBeInTheDocument();
+    expect(container.querySelector("[data-testid='svg-preview']")).toBeInTheDocument();
+    // The code editor stays mounted beside the split, same as the markdown case.
+    expect(container.querySelector(".cm-content")).toBeInTheDocument();
+
+    expect(capturedSvgBlobs.length).toBeGreaterThan(0);
+    // jsdom's Blob has no `.text()` method, so read it back through FileReader instead.
+    const sanitized = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(capturedSvgBlobs[capturedSvgBlobs.length - 1]);
+    });
+    expect(sanitized).not.toContain("<script");
+    expect(sanitized).not.toContain("onclick");
+    expect(sanitized).toContain("<rect");
   });
 
   it("renders Large file: read-only status line note for files over 2 MiB (item F6)", async () => {

@@ -517,7 +517,12 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                     >
                       <Switch>
                         <Match when={file().kind === "image"}>
-                          <ImageViewer laneId={lane()?.id ?? 0} path={file().path} size={file().size} />
+                          <ImageViewer
+                            worktreeRoot={lane()?.worktree.path ?? ""}
+                            laneId={lane()?.id ?? 0}
+                            path={file().path}
+                            size={file().size}
+                          />
                         </Match>
                         <Match when={file().kind === "binary"}>
                           <BinaryViewer path={file().path} size={file().size} />

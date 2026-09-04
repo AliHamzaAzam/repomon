@@ -16,9 +16,10 @@ import type { EditorStore, FileConflict } from "../stores/editor";
 import { daemonCall } from "../ipc/rpc";
 import CodeEditor, { type CodeEditorReplaceRequest } from "./CodeEditor";
 import ProjectSearchPanel from "./ProjectSearchPanel";
-import ImageViewer from "./ImageViewer";
+import ImageViewer, { type ImageViewerState } from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
 import PdfViewer, { type PdfViewerState } from "./PdfViewer";
+import SvgPreview from "./SvgPreview";
 import ConfirmDialog from "./ConfirmDialog";
 import {
   MarkdownPreview,
@@ -30,6 +31,18 @@ export function isMarkdownFile(path: string | null | undefined): boolean {
   if (!path) return false;
   const lower = path.toLowerCase();
   return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+export function isSvgFile(path: string | null | undefined): boolean {
+  if (!path) return false;
+  return path.toLowerCase().endsWith(".svg");
+}
+
+// Markdown and SVG tabs both get the live split preview - the panel and its ratio/persistence
+// are shared (see markdownPreview/markdownSplitRatio on the editor store), only which renderer
+// goes in the right-hand pane differs (see the Match on file().path further down).
+function isPreviewableFile(path: string | null | undefined): boolean {
+  return isMarkdownFile(path) || isSvgFile(path);
 }
 import {
   IconChevronDown,
@@ -195,6 +208,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   const [selectedChars, setSelectedChars] = createSignal(0);
   const [isResizing, setIsResizing] = createSignal(false);
   const [pdfState, setPdfState] = createSignal<PdfViewerState | null>(null);
+  const [imageState, setImageState] = createSignal<ImageViewerState | null>(null);
 
   // Compute line and column from doc length and head
   function updateCursorPos(head: number) {
@@ -1005,10 +1019,17 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                   >
                     <Switch>
                       <Match when={file().kind === "image"}>
+                        {/* Same row-direction container as PdfViewer below - ImageViewer claims
+                            the full tab itself (h-full w-full min-h-0 min-w-0) for the same
+                            reason: a lone flex child only gets its intrinsic content width
+                            otherwise, which was the v1 bug (a narrow image column with a dead
+                            pane beside it). */}
                         <ImageViewer
+                          worktreeRoot={lane()?.worktree.path ?? ""}
                           laneId={lane()?.id ?? 0}
                           path={file().path}
                           size={file().size}
+                          onStateChange={setImageState}
                         />
                       </Match>
                       <Match when={file().kind === "binary"}>
@@ -1033,7 +1054,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                           class="flex h-full min-w-0 flex-col overflow-hidden"
                           style={{
                             width:
-                              isMarkdownFile(file().path) && props.editor.markdownPreview()
+                              isPreviewableFile(file().path) && props.editor.markdownPreview()
                                 ? `${props.editor.markdownSplitRatio() * 100}%`
                                 : "100%",
                           }}
@@ -1063,21 +1084,28 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                           />
                         </div>
 
-                        <Show when={isMarkdownFile(file().path) && props.editor.markdownPreview()}>
+                        <Show when={isPreviewableFile(file().path) && props.editor.markdownPreview()}>
                           <div
-                            class={`relative flex w-1 cursor-col-resize items-center justify-center border-l border-r border-line bg-surface hover:bg-accent/40 ${
-                              isSplitResizing() ? "bg-accent" : ""
+                            class={`relative flex w-1 cursor-col-resize items-center justify-center border-l border-r border-line bg-surface hover:bg-signal/40 ${
+                              isSplitResizing() ? "bg-signal" : ""
                             }`}
                             onMouseDown={handleSplitResizeStart}
                             aria-hidden="true"
                           />
                           <div class="flex min-w-0 flex-1 flex-col overflow-hidden border-l border-line bg-surface/30">
-                            <MarkdownPreview
-                              content={file().content}
-                              filePath={file().path}
-                              laneId={lane()?.id}
-                              nearestHeading={nearestHeading()}
-                            />
+                            <Show
+                              when={isSvgFile(file().path)}
+                              fallback={
+                                <MarkdownPreview
+                                  content={file().content}
+                                  filePath={file().path}
+                                  laneId={lane()?.id}
+                                  nearestHeading={nearestHeading()}
+                                />
+                              }
+                            >
+                              <SvgPreview content={file().content} />
+                            </Show>
                           </div>
                         </Show>
                       </Match>
@@ -1091,8 +1119,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
         {/* Status Line */}
         <div class="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface/95 px-3 font-mono text-[11px] text-muted select-none">
-          <Show
-            when={activeFile()?.kind === "pdf"}
+          <Switch
             fallback={
               <>
           <div class="flex items-center gap-3">
@@ -1198,17 +1225,17 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               Whitespace: {props.editor.whitespace() ? "On" : "Off"}
             </button>
 
-            <Show when={isMarkdownFile(activePath())}>
+            <Show when={isPreviewableFile(activePath())}>
               <span class="text-line">|</span>
               <button
                 type="button"
                 class={`focus-ring rounded px-1.5 py-0.5 transition-colors ${
                   props.editor.markdownPreview()
-                    ? "bg-accent/15 font-medium text-accent"
+                    ? "bg-signal/15 font-medium text-signal"
                     : "text-muted hover:text-foreground"
                 }`}
                 onClick={props.editor.toggleMarkdownPreview}
-                title="Toggle markdown preview (Mod+Shift+V)"
+                title="Toggle preview (Mod+Shift+V)"
               >
                 Preview: {props.editor.markdownPreview() ? "On" : "Off"}
               </button>
@@ -1217,15 +1244,35 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               </>
             }
           >
-            <span>
-              PDF · {pdfState()?.numPages ?? "-"} {pdfState()?.numPages === 1 ? "page" : "pages"}
-              <Show when={activeFile()?.size}>
-                {" "}
-                · {formatBytes(activeFile()?.size)}
-              </Show>
-            </span>
-            <span>{pdfState()?.zoomPercent ?? 100}%</span>
-          </Show>
+            <Match when={activeFile()?.kind === "pdf"}>
+              <span>
+                PDF · {pdfState()?.numPages ?? "-"} {pdfState()?.numPages === 1 ? "page" : "pages"}
+                <Show when={activeFile()?.size}>
+                  {" "}
+                  · {formatBytes(activeFile()?.size)}
+                </Show>
+              </span>
+              <span>{pdfState()?.zoomPercent ?? 100}%</span>
+            </Match>
+            <Match when={activeFile()?.kind === "image"}>
+              <span>
+                {imageState()?.format ?? "IMAGE"}
+                <Show when={imageState()?.width != null && imageState()?.height != null}>
+                  {" "}
+                  · {imageState()!.width} x {imageState()!.height}
+                </Show>
+                <Show when={(imageState()?.sizeBytes ?? 0) > 0}>
+                  {" "}
+                  · {formatBytes(imageState()?.sizeBytes)}
+                </Show>
+                <Show when={imageState()?.animated}>
+                  {" "}
+                  · animated
+                </Show>
+              </span>
+              <span>{imageState()?.zoomPercent ?? 100}%</span>
+            </Match>
+          </Switch>
         </div>
       </div>
 
