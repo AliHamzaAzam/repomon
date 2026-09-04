@@ -88,20 +88,7 @@ async fn run() {
     // `git init`, and the socket should bind before any of that.
     {
         let ctx_r = ctx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = repomon_daemon::repomind::ensure_home(&ctx_r).await {
-                tracing::warn!("repomind home unavailable: {e}");
-                return;
-            }
-            // File-first records (repo notes, playbooks): copy anything that still only lives in
-            // the daemon's own storage into the home. Idempotent, and never deletes the original.
-            if let Err(e) = repomon_daemon::repomind::migrate_records(&ctx_r).await {
-                tracing::warn!("repomind record migration failed: {e}");
-            }
-            if let Err(e) = repomon_daemon::repomind::basic_memory::ensure_project(&ctx_r).await {
-                tracing::warn!("basic-memory project registration failed: {e}");
-            }
-        });
+        tokio::spawn(async move { repomon_daemon::repomind::start(&ctx_r).await });
     }
 
     // Watch registered repos; rebroadcast changes so clients can refresh. Done in a background
@@ -239,6 +226,11 @@ async fn run() {
     // Debounced one-way export of the journal, schedules, and approval rules into the repomind
     // home, plus the commit that records each batch there.
     tokio::spawn(repomon_daemon::repomind::export::export_watch(ctx.clone()));
+
+    // Once a day, roll journal day files past the 90-day horizon into their month's archive.
+    // The start-of-day pass is part of `repomind::start`; this only covers a daemon that stays
+    // up across midnights.
+    tokio::spawn(repomon_daemon::repomind::export::archive_watch(ctx.clone()));
 
     // Probe Claude's `/usage` for local UIs' account-usage display. Self-gates per tick on
     // `[usage_probe]` and a local UI being active, so it costs nothing until enabled and watched.

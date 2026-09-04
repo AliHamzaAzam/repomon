@@ -237,6 +237,36 @@ fn markdown_files(dir: &Path) -> usize {
         .count()
 }
 
+/// Everything the repomind home needs at daemon start, in order: make the home and its
+/// controller lane exist, migrate records that still only live in the daemon's own storage,
+/// register the home as a basic-memory project, roll expired journal days into the archive, and
+/// queue one export.
+///
+/// That last step is what makes a fresh install (or a restart that missed a burst of rows) catch
+/// up: exports are otherwise only triggered by a new store write or the `repomind.export` RPC,
+/// so rows written before the home existed would sit unexported forever. It goes through the
+/// ordinary debounced path, so it costs one commit, batched with anything else in flight.
+///
+/// Never fails the daemon: each step logs its own failure and the next one still runs.
+pub async fn start(ctx: &Ctx) {
+    if let Err(e) = ensure_home(ctx).await {
+        tracing::warn!("repomind home unavailable: {e}");
+        return;
+    }
+    // File-first records (repo notes, playbooks): copy anything that still only lives in the
+    // daemon's own storage into the home. Idempotent, and never deletes the original.
+    if let Err(e) = migrate_records(ctx).await {
+        tracing::warn!("repomind record migration failed: {e}");
+    }
+    if let Err(e) = basic_memory::ensure_project(ctx).await {
+        tracing::warn!("basic-memory project registration failed: {e}");
+    }
+    if let Err(e) = export::archive_now(ctx).await {
+        tracing::warn!("repomind journal archive rollup failed: {e}");
+    }
+    export::request(ctx).await;
+}
+
 /// One-time file-first migration, run once per daemon start right after [`ensure_home`]: records
 /// that only exist in the daemon's own storage are written into the home so an agent can read
 /// them as files. Nothing is ever deleted from the old location, so a rollback still finds it.

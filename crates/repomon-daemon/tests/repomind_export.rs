@@ -309,3 +309,69 @@ async fn repomind_status_reports_the_export_state_and_home_counts() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+/// A daemon start must bring the home up to date, not just react to new writes. Journal rows
+/// that predate the home (a fresh install, or a restart that missed a burst) are exported by the
+/// start pass and land as one commit within the debounce window.
+#[tokio::test]
+async fn a_daemon_start_exports_journal_rows_written_before_the_home_existed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("repomind");
+    // The basic-memory registration in the start pass must never reach the operator's real
+    // config; point it at a throwaway file instead.
+    let basic_memory = dir.path().join("basic-memory");
+    std::fs::create_dir_all(&basic_memory).unwrap();
+
+    let store = Store::open_in_memory().unwrap();
+    for action in ["spawn_agent", "merge_lane"] {
+        store
+            .append_journal(repomon_core::model::JournalEntry {
+                id: 0,
+                at: chrono::Utc::now(),
+                session: "pre-existing".into(),
+                action: action.into(),
+                lane_id: Some(1),
+                repo: Some("repomon".into()),
+                params: None,
+                outcome: "ok".into(),
+                detail: Some(format!("{action} before the home existed")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut config = Config::default();
+    config.repomind.home = home.to_string_lossy().into_owned();
+    config.repomind.basic_memory_config =
+        Some(basic_memory.join("config.json").to_string_lossy().into_owned());
+    let ctx = Ctx::new(store, config, None);
+
+    tokio::spawn(repomon_daemon::repomind::export::export_watch(ctx.clone()));
+    repomon_daemon::repomind::start(&ctx).await;
+
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let file = home.join(format!("journal/{day}.md"));
+    // `git log` errors on a repo with no commits yet, so poll on HEAD resolving instead.
+    let committed = |home: &Path| {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(home)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    for _ in 0..60 {
+        if file.exists() && committed(&home) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let body = std::fs::read_to_string(&file).expect("the start pass should write the day file");
+    assert!(body.contains("spawn_agent before the home existed"), "{body}");
+    assert!(body.contains("merge_lane before the home existed"), "{body}");
+    assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(
+        git(&home, &["log", "-1", "--format=%s"]),
+        "chore(repomind): export journal"
+    );
+}
