@@ -141,6 +141,9 @@ pub fn ensure_git_repo(home: &Path) -> std::io::Result<bool> {
 /// marked `role = "controller"`. Idempotent: safe to call on every daemon start and on every
 /// `orchestrator.start`.
 pub async fn ensure_home(ctx: &Ctx) -> repomon_core::Result<RepomindHome> {
+    // One ensure at a time: concurrent starts would otherwise race on `git init` in the same
+    // folder, and git fails the loser rather than treating the repo as already there.
+    let _guard = ctx.repomind_lock.lock().await;
     let path = ctx.config.read().await.repomind_home();
 
     let for_fs = path.clone();
@@ -316,6 +319,23 @@ mod tests {
             .filter(|m| m.role.as_deref() == Some(CONTROLLER_ROLE))
             .count();
         assert_eq!(controllers, 1);
+    }
+
+    /// Two `orchestrator.start` calls can land at once (the TUI's auto-start and
+    /// `repomon orchestrate` both fire at startup). Both ensure the home, and a `git init` race
+    /// between them must not fail either one.
+    #[tokio::test]
+    async fn concurrent_ensure_home_calls_both_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let ctx = test_ctx(&home).await;
+
+        let a = { let ctx = ctx.clone(); tokio::spawn(async move { ensure_home(&ctx).await }) };
+        let b = { let ctx = ctx.clone(); tokio::spawn(async move { ensure_home(&ctx).await }) };
+        let (a, b) = (a.await.unwrap(), b.await.unwrap());
+        let a = a.expect("first ensure_home");
+        let b = b.expect("second ensure_home");
+        assert_eq!(a, b);
     }
 
     /// A home the operator already wrote (R0's template files, a git repo of their own) is

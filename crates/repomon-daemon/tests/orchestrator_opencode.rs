@@ -46,10 +46,18 @@ async fn opencode_backend_starts_degrades_transcript_and_stops() {
         return;
     }
     let session = format!("repomon-orch-opencode-it-{}", std::process::id());
-    let config = Config {
+    // A throwaway repomind home: `orchestrator.start` ensures the home repo exists, and a test
+    // must never create or touch the developer's real `~/repomind`.
+    let repomind_home = tempfile::tempdir().expect("repomind home tempdir");
+    let mut config = Config {
         tmux_session: session.clone(),
         ..Default::default()
     };
+    config.repomind.home = repomind_home
+        .path()
+        .join("repomind")
+        .to_string_lossy()
+        .into_owned();
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
     let sock = std::env::temp_dir().join(format!(

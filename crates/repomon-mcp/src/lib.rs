@@ -37,6 +37,33 @@ and stay well inside the action cap.\n\
 - End with a compact briefing (2-6 short lines): what you saw, what you did, what needs the \
 human and your recommendation.";
 
+/// The env value that selects the restricted worker catalog.
+pub const MCP_MODE_AGENT: &str = "agent";
+/// The env value controllers are launched with. Explicit rather than implied by absence, so a
+/// controller window that inherits a stray `REPOMON_MCP_MODE` from its parent still gets the
+/// catalog it was launched for.
+pub const MCP_MODE_ORCHESTRATOR: &str = "orchestrator";
+
+/// Which tool catalog a server process serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogMode {
+    /// The restricted worker surface (`agent::agent_tool_catalog`).
+    Worker,
+    /// The full fleet catalog, with the policy layer in front of it.
+    Full,
+}
+
+impl CatalogMode {
+    /// Resolve the catalog from a raw `REPOMON_MCP_MODE` value. Only `agent` narrows the surface;
+    /// everything else - including the explicit `orchestrator` and an unset variable - is full.
+    pub fn from_env_value(raw: Option<&str>) -> CatalogMode {
+        match raw.map(|v| v.trim().to_ascii_lowercase()) {
+            Some(v) if v == MCP_MODE_AGENT => CatalogMode::Worker,
+            _ => CatalogMode::Full,
+        }
+    }
+}
+
 /// How to run the server.
 pub struct Options {
     /// The daemon socket to connect to.
@@ -53,7 +80,8 @@ pub async fn serve_stdio(opts: Options) -> Result<()> {
     .await
     .with_context(|| format!("connecting to repomon daemon at {}", opts.socket.display()))?;
     let fleet = fleet::Fleet::start(client.clone(), opts.socket.clone()).await;
-    if std::env::var("REPOMON_MCP_MODE").as_deref() == Ok("agent") {
+    let mode = CatalogMode::from_env_value(std::env::var("REPOMON_MCP_MODE").ok().as_deref());
+    if mode == CatalogMode::Worker {
         let token = std::env::var("REPOMON_MCP_IDENTITY_TOKEN").unwrap_or_default();
         tracing::info!("managed-agent mcp server ready");
         let server = Arc::new(agent::AgentServer::new(client, fleet, token));
@@ -67,4 +95,26 @@ pub async fn serve_stdio(opts: Options) -> Result<()> {
     );
     let server = Arc::new(server::Server::new(client, fleet, policy));
     mcp::run_stdio(server, "repomon", env!("CARGO_PKG_VERSION")).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `REPOMON_MCP_MODE` selects the catalog. `"agent"` is the restricted worker surface;
+    /// `"orchestrator"` is the explicit spelling controllers are launched with; an unset or
+    /// unrecognized value keeps the historical default of the full catalog.
+    #[test]
+    fn catalog_mode_selects_the_worker_surface_only_for_agent() {
+        assert_eq!(CatalogMode::from_env_value(Some("agent")), CatalogMode::Worker);
+        assert_eq!(
+            CatalogMode::from_env_value(Some("orchestrator")),
+            CatalogMode::Full
+        );
+        assert_eq!(CatalogMode::from_env_value(None), CatalogMode::Full);
+        assert_eq!(CatalogMode::from_env_value(Some("")), CatalogMode::Full);
+        assert_eq!(CatalogMode::from_env_value(Some("Agent")), CatalogMode::Worker);
+        assert_eq!(CatalogMode::from_env_value(Some(" agent ")), CatalogMode::Worker);
+        assert_eq!(CatalogMode::from_env_value(Some("whatever")), CatalogMode::Full);
+    }
 }

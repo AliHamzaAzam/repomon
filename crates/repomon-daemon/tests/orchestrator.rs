@@ -53,10 +53,18 @@ async fn orchestrator_adopts_a_surviving_window() {
     // A unique tmux session (name doubles as the `-L` socket) so parallel CI runs never collide
     // and we never touch the user's real `repomon` session.
     let session = format!("repomon-orch-lifecycle-it-{}", std::process::id());
-    let config = Config {
+    // A throwaway repomind home: `orchestrator.start` ensures the home repo exists, and a test
+    // must never create or touch the developer's real `~/repomind`.
+    let repomind_home = tempfile::tempdir().expect("repomind home tempdir");
+    let mut config = Config {
         tmux_session: session.clone(),
         ..Default::default()
     };
+    config.repomind.home = repomind_home
+        .path()
+        .join("repomind")
+        .to_string_lossy()
+        .into_owned();
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
     let sock = std::env::temp_dir().join(format!(
@@ -127,6 +135,32 @@ async fn orchestrator_adopts_a_surviving_window() {
         session_id.len(),
         36,
         "session_id must be UUID-shaped: {session_id}"
+    );
+    // The genuine spawn lands in the controller lane, not the old daemon-owned `orchestrator`
+    // window: the window is a `lane-*` name, and `lane.list` shows that lane with role
+    // "controller" and the running window recorded on it.
+    let window = status["window"].as_str().expect("a window").to_string();
+    assert!(
+        window.starts_with("lane-"),
+        "repomind must run in a lane window, got {window}"
+    );
+    let r = call(&mut stream, 20, "lane.list", None).await;
+    let lanes = r.result.expect("lane.list");
+    let controller = lanes
+        .as_array()
+        .expect("lane.list is an array")
+        .iter()
+        .find(|l| l["role"] == json!("controller"))
+        .unwrap_or_else(|| panic!("no controller lane in {lanes}"));
+    assert_eq!(
+        controller["repo"]["name"],
+        json!("repomind"),
+        "the controller lane is the repomind home repo: {controller}"
+    );
+    let lane_id = controller["id"].as_i64().expect("lane id");
+    assert!(
+        window.starts_with(&format!("lane-{lane_id}")),
+        "window {window} should belong to controller lane {lane_id}"
     );
 
     // Tear it down so the adopt scenario below starts from a clean slate.

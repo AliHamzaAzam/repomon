@@ -96,10 +96,11 @@ impl OverlayCache {
     }
 }
 
-/// The dedicated tmux window the repomind orchestrator runs in. Deliberately NOT a `lane-*` name,
-/// so it stays invisible to the lane overlay/reaper and never shows in `lane.list`. Shared by
-/// `rpc` (the RPC dispatch), `notify_watch` (the attention/pane watcher), and this module's own
-/// pane-streaming loop, so a rename can't desync them.
+/// The legacy daemon-owned tmux window the repomind orchestrator used to run in. Repomind now
+/// runs in the controller lane like any other agent (see [`crate::repomind`]), so this name is
+/// only a fallback: a window from a pre-R1 daemon that outlived its process is still adopted and
+/// driven by the `orchestrator.*` aliases, and it is what the resolvers return when no controller
+/// lane window has ever been recorded.
 pub(crate) const ORCHESTRATOR_WINDOW: &str = "orchestrator";
 
 /// Which agent CLI powers the orchestrator session. This is the seam every backend-specific
@@ -207,6 +208,11 @@ pub struct Ctx {
     pub backend: Arc<dyn SessionBackend>,
     /// Serializes slot allocation, MCP identity creation, and agent launch.
     pub spawn_lock: Mutex<()>,
+    /// Serializes [`crate::repomind::ensure_home`]. It runs on daemon start and on every
+    /// `orchestrator.start`, and two concurrent starts are a real scenario (the TUI's auto-start
+    /// racing `repomon orchestrate`) - without this they race on `git init` in the same folder
+    /// and one of them fails.
+    pub repomind_lock: Mutex<()>,
     /// Where per-repo notes files live: `data_dir()/repo-notes` in prod, a tempdir in tests
     /// (injected, not env-based: in-process daemon tests can't share process-global env safely).
     pub notes_dir: PathBuf,
@@ -457,6 +463,7 @@ impl Ctx {
             config_path,
             backend,
             spawn_lock: Mutex::new(()),
+            repomind_lock: Mutex::new(()),
             notes_dir,
             started: Instant::now(),
             db_path,
@@ -501,6 +508,31 @@ impl Ctx {
             lane_watchers: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         })
+    }
+
+    /// The tmux window last recorded for the controller lane, from the store. Deliberately does
+    /// not consult the tracked orchestrator session, so it is safe to call while holding
+    /// `self.orchestrator`.
+    pub(crate) async fn controller_lane_window(&self) -> Option<String> {
+        let lane = self.store.controller_lane().await.ok().flatten()?;
+        let metas = self.store.list_lane_meta().await.ok()?;
+        metas
+            .into_iter()
+            .find(|m| m.id == lane)
+            .and_then(|m| m.tmux_window)
+    }
+
+    /// The window repomind is running in: the tracked session's when one is tracked, otherwise
+    /// the controller lane's last recorded window, otherwise the legacy [`ORCHESTRATOR_WINDOW`].
+    /// Takes `self.orchestrator`, so never call it while that lock is held — use
+    /// [`Ctx::controller_lane_window`] there instead.
+    pub(crate) async fn controller_window(&self) -> String {
+        if let Some(session) = self.orchestrator.lock().await.as_ref() {
+            return session.window.clone();
+        }
+        self.controller_lane_window()
+            .await
+            .unwrap_or_else(|| ORCHESTRATOR_WINDOW.to_string())
     }
 
     /// Reconcile worktree watchers so exactly the lanes currently present in some connection's
@@ -897,13 +929,18 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
     loop {
         tick.tick().await;
         let watched = ctx.has_orchestrator_watcher().await;
-        let running = ctx.orchestrator.lock().await.is_some();
-        if !watched || !running {
+        let window = ctx
+            .orchestrator
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| session.window.clone());
+        let Some(window) = window.filter(|_| watched) else {
             last = None;
             last_cursor = None;
             backoff = WATCH_FLOOR;
             continue;
-        }
+        };
         let now = Instant::now();
         // Frame-rate while typing to repomind, else the watched-but-quiet focused cadence.
         let typing = ctx
@@ -924,8 +961,9 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         }
         last_cap = now;
         let tmux = ctx.backend.clone();
+        let capture_window = window.clone();
         let content = match tokio::task::spawn_blocking(move || {
-            tmux.capture_named(ORCHESTRATOR_WINDOW, CaptureOpts::visible())
+            tmux.capture_named(&capture_window, CaptureOpts::visible())
         })
         .await
         {
@@ -935,7 +973,8 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
         // Carry repomind's real cursor so the mediated pane draws it where you're typing (mirrors
         // the focused-lane path in `stream_output`). One extra tmux fork on the single pane.
         let tmux = ctx.backend.clone();
-        let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named(ORCHESTRATOR_WINDOW))
+        let cursor_window = window.clone();
+        let cursor = tokio::task::spawn_blocking(move || tmux.cursor_named(&cursor_window))
             .await
             .ok()
             .flatten()

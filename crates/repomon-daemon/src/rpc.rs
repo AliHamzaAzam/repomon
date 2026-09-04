@@ -1477,7 +1477,10 @@ async fn message_sender(
     }
     match source.as_deref() {
         None | Some("operator") => Ok(resolved_named("operator", None)),
-        Some("repomind") => Ok(resolved_named("repomind", Some(ORCHESTRATOR_WINDOW.into()))),
+        Some("repomind") => Ok(resolved_named(
+            "repomind",
+            Some(ctx.controller_window().await),
+        )),
         Some(_) => Err(RpcError::invalid_params("invalid message sender source")),
     }
 }
@@ -4648,6 +4651,10 @@ pub async fn dispatch(
         }
         "orchestrator.start" => {
             let p: OrchestratorStart = parse(params)?;
+            // Repomind runs in the controller lane now, not a daemon-owned `orchestrator` window.
+            // Make that lane (and the home repo behind it) exist before anything else: this is the
+            // path a fresh machine takes on its very first start.
+            let home = crate::repomind::ensure_home(ctx).await.map_err(internal)?;
             // Clear a session whose window died externally so a restart actually re-spawns instead
             // of no-op'ing on a corpse.
             reconcile_orchestrator(ctx).await;
@@ -4677,7 +4684,8 @@ pub async fn dispatch(
             let (cfg_agent, cfg_model, customs) = {
                 let cfg = ctx.config.read().await;
                 (
-                    cfg.orchestrator_agent.clone(),
+                    // `[repomind] primary_agent` when set, else the older `orchestrator_agent`.
+                    cfg.repomind_primary_agent(),
                     cfg.orchestrator_model.clone(),
                     cfg.agents.clone(),
                 )
@@ -4689,14 +4697,29 @@ pub async fn dispatch(
             // (guard drops, nothing recorded) on an agent that can't run the orchestrator at all.
             let backend = resolve_orchestrator_backend(&agent, &customs)?;
             // A window may survive a daemon restart (tmux outlives us). Adopt it instead of
-            // spawning a duplicate `orchestrator` window.
-            {
+            // spawning a duplicate. Two candidates, newest convention first: the controller lane's
+            // last recorded window, then the legacy daemon-owned `orchestrator` window a pre-R1
+            // daemon would have left behind.
+            let adopt_candidates: Vec<String> = ctx
+                .controller_lane_window()
+                .await
+                .into_iter()
+                .chain(std::iter::once(ORCHESTRATOR_WINDOW.to_string()))
+                .collect();
+            let mut adopted: Option<String> = None;
+            for candidate in adopt_candidates {
                 let tmux = ctx.backend.clone();
-                let exists =
-                    tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
-                        .await
-                        .map_err(internal)?;
+                let probe = candidate.clone();
+                let exists = tokio::task::spawn_blocking(move || tmux.has_named(&probe))
+                    .await
+                    .map_err(internal)?;
                 if exists {
+                    adopted = Some(candidate);
+                    break;
+                }
+            }
+            {
+                if let Some(window) = adopted {
                     // Adopting a window from a previous daemon lifetime: we don't know what
                     // autonomy — or session id — it was actually launched with (that lived in the
                     // prior process's memory, not anywhere persisted), so record both as unknown
@@ -4705,7 +4728,7 @@ pub async fn dispatch(
                     let session = crate::OrchestratorSession {
                         agent: agent.clone(),
                         model: model.clone(),
-                        window: ORCHESTRATOR_WINDOW.to_string(),
+                        window,
                         autonomy: None,
                         session_id: None,
                         backend,
@@ -4780,18 +4803,41 @@ pub async fn dispatch(
                     (command, None)
                 }
             };
-            // cwd = the user's home, so repomind starts from there rather than the daemon's cwd.
-            let home = config::home();
-            let spec = SpawnSpec::new(command, home);
+            // cwd = the repomind home, so the controller starts inside its own memory repo.
+            let mut spec = SpawnSpec::new(command, home.path.clone());
+            spec.env.extend([
+                (
+                    "REPOMON_MCP_SOCKET".into(),
+                    socket.to_string_lossy().into_owned(),
+                ),
+                (
+                    "REPOMON_MCP_MODE".into(),
+                    repomon_mcp::MCP_MODE_ORCHESTRATOR.into(),
+                ),
+            ]);
             let tmux = ctx.backend.clone();
-            tokio::task::spawn_blocking(move || tmux.spawn_named(ORCHESTRATOR_WINDOW, &spec))
+            let lane_id = home.lane_id;
+            let window = tokio::task::spawn_blocking(move || tmux.spawn(lane_id, &spec))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
+            // The lane owns the window now, so the store must know it: that is what lets a later
+            // daemon adopt this controller instead of spawning a second one.
+            let _ = ctx
+                .store
+                .set_lane_tmux_window(lane_id, Some(window.clone()))
+                .await;
+            if let Some(name) = &agent {
+                let _ = ctx
+                    .store
+                    .set_lane_agent_kind(lane_id, Some(name.clone()))
+                    .await;
+            }
+            ctx.invalidate_overlay().await;
             let session = crate::OrchestratorSession {
                 agent,
                 model,
-                window: ORCHESTRATOR_WINDOW.to_string(),
+                window,
                 autonomy: Some(p.autonomy),
                 session_id,
                 backend,
@@ -4808,8 +4854,19 @@ pub async fn dispatch(
             // first against nothing, or kills the fully-recorded window — never a window that a
             // mid-flight start is about to record (which would leave an untracked orphan running).
             let mut orch = ctx.orchestrator.lock().await;
+            // Resolved without re-taking `ctx.orchestrator` (this scope holds it): the tracked
+            // session's window, else whatever the controller lane last recorded, else the legacy
+            // daemon-owned window.
+            let window = match orch.as_ref() {
+                Some(session) => session.window.clone(),
+                None => ctx
+                    .controller_lane_window()
+                    .await
+                    .unwrap_or_else(|| ORCHESTRATOR_WINDOW.to_string()),
+            };
             let tmux = ctx.backend.clone();
-            let _ = tokio::task::spawn_blocking(move || tmux.kill_named(ORCHESTRATOR_WINDOW)).await;
+            let kill = window.clone();
+            let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&kill)).await;
             // Unlike `agent.stop` (see `reap::kill_and_forget`), no cache reconciliation is needed
             // after this kill: `prompt_cache` only ever holds lane-window sniffs (`overlay_agents`
             // keys it by lane candidates, which the orchestrator window deliberately isn't), and
@@ -4819,7 +4876,7 @@ pub async fn dispatch(
             ctx.last_good_windows
                 .lock()
                 .await
-                .retain(|w| w.name != ORCHESTRATOR_WINDOW);
+                .retain(|w| w.name != window);
             *orch = None;
             *ctx.orchestrator_attention.lock().await = ("none".to_string(), None);
             let status = orchestrator_status_value(None, "none", None);
@@ -4829,16 +4886,18 @@ pub async fn dispatch(
         "orchestrator.target" => {
             // Clear + broadcast stopped if the window died, so a stale "running" can't linger.
             reconcile_orchestrator(ctx).await;
+            let window = ctx.controller_window().await;
             let tmux = ctx.backend.clone();
             // Restore client-follow sizing before the attaching terminal renders it (mirrors
             // `agent.target`).
+            let probe = window.clone();
             let available = tokio::task::spawn_blocking(move || {
-                let _ = tmux.follow_client_named(ORCHESTRATOR_WINDOW);
-                tmux.has_named(ORCHESTRATOR_WINDOW)
+                let _ = tmux.follow_client_named(&probe);
+                tmux.has_named(&probe)
             })
             .await
             .map_err(internal)?;
-            let target = ctx.backend.exact_target_named(ORCHESTRATOR_WINDOW);
+            let target = ctx.backend.exact_target_named(&window);
             let attach = attach_json(&*ctx.backend, &target);
             Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
@@ -4851,13 +4910,14 @@ pub async fn dispatch(
                     "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
                 ));
             }
+            let window = ctx.controller_window().await;
             let tmux = ctx.backend.clone();
             let (text, enter) = (p.text, p.enter);
             tokio::task::spawn_blocking(move || {
                 if enter {
-                    tmux.send_text_named(ORCHESTRATOR_WINDOW, &text)
+                    tmux.send_text_named(&window, &text)
                 } else {
-                    tmux.send_literal_named(ORCHESTRATOR_WINDOW, &text)
+                    tmux.send_literal_named(&window, &text)
                 }
             })
             .await
@@ -4877,13 +4937,14 @@ pub async fn dispatch(
                     "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
                 ));
             }
+            let window = ctx.controller_window().await;
             let tmux = ctx.backend.clone();
             let (key, literal) = (p.key, p.literal);
             tokio::task::spawn_blocking(move || {
                 if literal {
-                    tmux.send_literal_named(ORCHESTRATOR_WINDOW, &key)
+                    tmux.send_literal_named(&window, &key)
                 } else {
-                    tmux.send_key_named(ORCHESTRATOR_WINDOW, &key)
+                    tmux.send_key_named(&window, &key)
                 }
             })
             .await
@@ -4908,7 +4969,8 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             // Clamp to a sane floor so a momentary tiny layout can't shrink the window to nothing.
             let (cols, rows) = (p.cols.max(20), p.rows.max(4));
-            tokio::task::spawn_blocking(move || tmux.resize_named(ORCHESTRATOR_WINDOW, cols, rows))
+            let window = ctx.controller_window().await;
+            tokio::task::spawn_blocking(move || tmux.resize_named(&window, cols, rows))
                 .await
                 .map_err(internal)?
                 .map_err(internal)?;
@@ -7439,12 +7501,13 @@ pub(crate) fn pick_orchestrator_transcript(
 /// `orchestrator.status` reads accurately and `orchestrator.start` re-spawns rather than no-op on a
 /// corpse. Returns whether a session is still tracked afterward.
 pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
-    if ctx.orchestrator.lock().await.is_none() {
-        return false;
-    }
+    let window = match ctx.orchestrator.lock().await.as_ref() {
+        Some(session) => session.window.clone(),
+        None => return false,
+    };
     let tmux = ctx.backend.clone();
     // On a probe failure keep the session: don't declare it dead on a transient tmux hiccup.
-    let alive = tokio::task::spawn_blocking(move || tmux.has_named(ORCHESTRATOR_WINDOW))
+    let alive = tokio::task::spawn_blocking(move || tmux.has_named(&window))
         .await
         .unwrap_or(true);
     if alive {
@@ -8152,8 +8215,10 @@ fn build_codex_orchestrator_command(
     // Interpolated straight into TOML basic strings: the paths this carries (the repomond binary,
     // the daemon socket) never contain quotes/backslashes on the platforms repomon ships for.
     let mut env = format!(
-        "REPOMON_MCP_SOCKET = \"{}\", REPOMON_MCP_AUTONOMY = \"{autonomy}\"",
+        "REPOMON_MCP_SOCKET = \"{}\", REPOMON_MCP_AUTONOMY = \"{autonomy}\", \
+         REPOMON_MCP_MODE = \"{}\"",
         socket.to_string_lossy(),
+        repomon_mcp::MCP_MODE_ORCHESTRATOR,
     );
     if let Some(n) = max_agents {
         env.push_str(&format!(", REPOMON_MCP_MAX_AGENTS = \"{n}\""));
@@ -8383,6 +8448,13 @@ pub(crate) fn write_orchestrator_mcp_config_named(
     let mut env = serde_json::Map::new();
     env.insert("REPOMON_MCP_SOCKET".into(), json!(socket.to_string_lossy()));
     env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
+    // Explicit rather than implied by absence: a controller window is an ordinary lane window
+    // now, so it could inherit a stray `REPOMON_MCP_MODE=agent` and silently serve the worker
+    // catalog. Naming the mode here settles it.
+    env.insert(
+        "REPOMON_MCP_MODE".into(),
+        json!(repomon_mcp::MCP_MODE_ORCHESTRATOR),
+    );
     if let Some(n) = max_agents {
         env.insert("REPOMON_MCP_MAX_AGENTS".into(), json!(n.to_string()));
     }

@@ -51,10 +51,18 @@ async fn concurrent_starts_spawn_exactly_one_orchestrator() {
         return;
     }
     let session = format!("repomon-orch-concurrent-it-{}", std::process::id());
-    let config = Config {
+    // A throwaway repomind home: `orchestrator.start` ensures the home repo exists, and a test
+    // must never create or touch the developer's real `~/repomind`.
+    let repomind_home = tempfile::tempdir().expect("repomind home tempdir");
+    let mut config = Config {
         tmux_session: session.clone(),
         ..Default::default()
     };
+    config.repomind.home = repomind_home
+        .path()
+        .join("repomind")
+        .to_string_lossy()
+        .into_owned();
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, config, None);
     let sock = std::env::temp_dir().join(format!(
@@ -116,11 +124,16 @@ async fn concurrent_starts_spawn_exactly_one_orchestrator() {
         .expect("start b must report the spawned session's id");
     assert_eq!(ida, idb, "both starts must resolve to one session");
 
+    // Repomind now runs in the controller lane, so the window is that lane's (`lane-<id>`), not
+    // the old daemon-owned `orchestrator` name. The invariant is unchanged: exactly one window,
+    // and it is the one both callers were told about.
+    let window = sa["window"].as_str().expect("a start reports its window");
+    assert_eq!(sb["window"], json!(window), "both starts name one window");
     let windows = ctx.backend.list_windows().unwrap();
-    let count = windows.iter().filter(|w| *w == "orchestrator").count();
+    let count = windows.iter().filter(|w| w.as_str() == window).count();
     assert_eq!(
         count, 1,
-        "expected exactly one orchestrator window, got {windows:?}"
+        "expected exactly one repomind window, got {windows:?}"
     );
 
     let r = call(&mut a, 2, "orchestrator.stop", None).await;

@@ -476,13 +476,16 @@ async fn check_orchestrator_attention(
         // backend with no parseable transcript (codex) must NOT reach the picker at all — with
         // its always-`None` session id the picker would fall back to the "newest `~/.claude`
         // transcript with content" heuristic and misattribute another live Claude session.
-        let (session_id, has_transcript) = {
+        let (session_id, has_transcript, window) = {
             let orch = ctx.orchestrator.lock().await;
             let o = orch.as_ref();
             (
                 o.and_then(|o| o.session_id.clone()),
                 // `None` (stopped between the reconcile above and here) also means "don't scan".
                 o.is_some_and(|o| o.backend.has_transcript()),
+                // The controller lane's window; the legacy name only when nothing is tracked.
+                o.map(|o| o.window.clone())
+                    .unwrap_or_else(|| ORCHESTRATOR_WINDOW.to_string()),
             )
         };
         if !has_transcript {
@@ -492,7 +495,7 @@ async fn check_orchestrator_attention(
         }
         let tmux = ctx.backend.clone();
         let pane = tokio::task::spawn_blocking(move || {
-            tmux.capture_named(ORCHESTRATOR_WINDOW, CaptureOpts::last(ORCH_CAPTURE_LINES))
+            tmux.capture_named(&window, CaptureOpts::last(ORCH_CAPTURE_LINES))
         })
         .await
         .ok()
