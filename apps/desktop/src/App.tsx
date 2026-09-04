@@ -27,7 +27,7 @@ import {
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
 import { matchChord } from "./keymap";
-import BrandMark from "./components/BrandMark";
+import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
@@ -462,10 +462,11 @@ function App(props: AppProps) {
   return (
     <div class="grid h-screen min-h-[36rem] grid-rows-[35px_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
       <WindowChromeHeader>
-        <div class="flex items-center gap-2" data-tauri-drag-region>
-          <BrandMark size={24} class="mt-[2px] pointer-events-none" />
-          <h1 class="text-xs font-semibold tracking-tight text-foreground pointer-events-none select-none">Repomon</h1>
-        </div>
+        <BrandLockup
+          heading
+          onActivate={() => actions.openSettingsTab("general")}
+          activateLabel="About Repomon"
+        />
 
         <div class="flex items-center">
           <button

@@ -1,10 +1,24 @@
 interface BrandMarkProps {
   /// Rendered size in pixels. The glyph is a 1254-unit grid with ~95-unit bars, so below about
-  /// 20px the bars fall under 1.5 device pixels and turn to mush. Keep it 24 or larger.
+  /// 20px the bars fall under 1.5 device pixels and turn to mush. Keep it 24 or larger, or pass
+  /// `tight`, which crops the icon padding and buys the bar weight back at a smaller box.
   size?: number;
+  /// Crop the viewBox to the glyph's own bounding box instead of the icon's padded 1254 canvas.
+  ///
+  /// The full canvas is what the app icon needs: the mark occupies the middle ~52% of it and the
+  /// rest is the margin a rounded app tile wants around its artwork. In a 35px title bar that
+  /// margin is dead weight, so a `size={24}` mark draws only 12.5px of ink and reads soft and
+  /// undersized. Cropping to the ink (x 300..955, y 280..968, squared about the glyph's own
+  /// centre) makes the requested size the size of the *mark*: at 16px a bar lands on 2.2 CSS
+  /// pixels instead of 1.2, which is crisp on a 1x display and sharp on a retina one.
+  tight?: boolean;
   title?: string;
   class?: string;
 }
+
+/// The glyph's bounding box, squared on its taller axis and centred on the ink. The ink spans
+/// 655 x 688 units, so the 688-wide box starts 16.5 units left of it.
+const TIGHT_VIEW_BOX = "283.5 280 688 688";
 
 /// The Repomon mark, the same geometry as the app icon
 /// (`design/repomon-logo/command-mesh-faithful/command-mesh-master.svg`), flattened from that
@@ -21,7 +35,7 @@ export default function BrandMark(props: BrandMarkProps) {
     <svg
       width={size()}
       height={size()}
-      viewBox="0 0 1254 1254"
+      viewBox={props.tight ? TIGHT_VIEW_BOX : "0 0 1254 1254"}
       class={props.class}
       role={props.title ? "img" : "presentation"}
       aria-label={props.title}
