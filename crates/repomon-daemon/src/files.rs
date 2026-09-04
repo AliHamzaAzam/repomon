@@ -279,6 +279,13 @@ pub fn is_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
 pub fn mime_for_path(path: &Path) -> &'static str {
     match path
         .extension()
@@ -315,6 +322,17 @@ pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
             size,
             truncated: false,
             kind: "image".to_string(),
+            large,
+        });
+    }
+
+    if is_pdf_path(path) {
+        return Ok(FileReadResult {
+            content: String::new(),
+            mtime_ms,
+            size,
+            truncated: false,
+            kind: "pdf".to_string(),
             large,
         });
     }
@@ -907,6 +925,17 @@ mod tests {
         let txt_res = read_file(&txt_path).unwrap();
         assert_eq!(txt_res.kind, "text");
         assert_eq!(txt_res.content, "hello text");
+    }
+
+    #[test]
+    fn read_file_detects_pdf_extension_before_binary_sniff() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("doc.pdf");
+        std::fs::write(&pdf_path, b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n").unwrap();
+        let pdf_res = read_file(&pdf_path).unwrap();
+        assert_eq!(pdf_res.kind, "pdf");
+        assert_eq!(pdf_res.content, "");
+        assert_ne!(pdf_res.kind, "binary");
     }
 
     #[test]

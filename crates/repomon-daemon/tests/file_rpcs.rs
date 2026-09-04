@@ -359,6 +359,26 @@ async fn file_read_classifies_svg_as_text() {
 }
 
 #[tokio::test]
+async fn file_read_classifies_pdf_by_extension() {
+    let mut h = setup("file-pdf").await;
+    std::fs::write(h.root.join("report.pdf"), b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n").unwrap();
+
+    let r = call(
+        &mut h.stream,
+        3,
+        "file.read",
+        Some(json!({ "lane_id": h.lane_id, "path": "report.pdf" })),
+    )
+    .await;
+    let res: repomon_core::model::FileReadResult =
+        serde_json::from_value(r.result.expect("file.read must succeed for pdf")).unwrap();
+    assert_eq!(res.kind, "pdf");
+    assert_eq!(res.content, "");
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn file_read_raw_returns_base64_for_image() {
     let mut h = setup("file-image").await;
     let png_bytes = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
