@@ -185,10 +185,21 @@ projects it, and never re-reads pane text or runs timers of its own.
 | inferred | the worktree is changing but the agent behind it could not be identified |
 | exited | the agent's process ended; nothing is running in the pane |
 
-The pane outranks the transcript on liveness. A transcript only records when the last message
-landed, so it decays to idle through a long tool call and reads "needs you" through a turn whose
-background agents are still working; both of those are panes the operator can see are busy. A
-dialog outranks everything: a pane asking a question is not working, whatever else is on screen.
+The pane outranks the transcript on liveness, in both directions. A transcript only records when
+the last message landed, so it decays to idle through a long tool call and reads "needs you"
+through a turn whose background agents are still working; both of those are panes the operator can
+see are busy. The other way round, an agent repomon has no transcript for (Codex, Antigravity,
+aider) is judged by how recently its files moved, which a background task the agent started keeps
+moving after the turn is over: a pane with no dialog, no subagent and no spinner ends that,
+reading "background file activity only, pane at rest" rather than "no output for 1s". An agent
+whose transcript shows a turn genuinely mid flight is never demoted this way, because a capture
+taken between redraws can miss a spinner; a frozen pane surfaces as stalled instead. A dialog
+outranks everything: a pane asking a question is not working, whatever else is on screen.
+
+Classification runs on the daemon every two seconds for every managed session, whatever any client
+has in view and whether or not notifications are on, and each status transition is pushed as
+`event.agent.status` (`lane_id`, `session`, `window`, `status`, `reason`, `previous`). The sidebar
+also polls, so a status change lands within one heartbeat even if nothing is pushed.
 
 Counts are agent counts, never lane counts. "Needs you" counts agents in needs you, decision,
 stalled or limited; "Running" counts agents in running. A lane pill shows the most urgent state
