@@ -20,6 +20,7 @@ export type { ExtSnapshot } from "./ExtSnapshot";
 export type { FanoutSummary } from "./FanoutSummary";
 export type { FileCreateResult } from "./FileCreateResult";
 export type { FileDeleteResult } from "./FileDeleteResult";
+export type { FileDiffBaseResult } from "./FileDiffBaseResult";
 export type { FileEntry } from "./FileEntry";
 export type { FileIndexResult } from "./FileIndexResult";
 export type { FileListResult } from "./FileListResult";

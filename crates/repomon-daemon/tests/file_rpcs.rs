@@ -1113,3 +1113,71 @@ async fn file_search_features_and_truncation() {
 
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn file_diff_base_rpc_integration() {
+    let mut h = setup("file-diff-base").await;
+
+    // 1. diff_base returns committed content
+    let r1 = call(
+        &mut h.stream,
+        20,
+        "file.diff_base",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "path": "README.md",
+        })),
+    )
+    .await;
+    let res1: repomon_core::model::FileDiffBaseResult = serde_json::from_value(r1.result.unwrap()).unwrap();
+    assert_eq!(res1.kind, "text");
+    assert_eq!(res1.content.as_deref(), Some("hi\n"));
+
+    // 2. Modify README.md on disk: file.read returns new content, file.diff_base still returns HEAD
+    std::fs::write(h.root.join("README.md"), "hi modified\n").unwrap();
+    let r2 = call(
+        &mut h.stream,
+        21,
+        "file.diff_base",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "path": "README.md",
+        })),
+    )
+    .await;
+    let res2: repomon_core::model::FileDiffBaseResult = serde_json::from_value(r2.result.unwrap()).unwrap();
+    assert_eq!(res2.kind, "text");
+    assert_eq!(res2.content.as_deref(), Some("hi\n"));
+
+    // 3. Newly created file on disk (untracked, not in HEAD): returns missing
+    std::fs::write(h.root.join("brand_new.txt"), "// new\n").unwrap();
+    let r3 = call(
+        &mut h.stream,
+        22,
+        "file.diff_base",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "path": "brand_new.txt",
+        })),
+    )
+    .await;
+    let res3: repomon_core::model::FileDiffBaseResult = serde_json::from_value(r3.result.unwrap()).unwrap();
+    assert_eq!(res3.kind, "missing");
+    assert_eq!(res3.content, None);
+
+    // 4. Path traversal attempt is rejected with invalid_params
+    let r4 = call(
+        &mut h.stream,
+        23,
+        "file.diff_base",
+        Some(json!({
+            "lane_id": h.lane_id,
+            "path": "../outside.txt",
+        })),
+    )
+    .await;
+    assert!(r4.error.is_some());
+    assert_eq!(r4.error.unwrap().code, -32602);
+
+    h.shutdown().await;
+}

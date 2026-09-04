@@ -921,6 +921,16 @@ pub struct FileSearchResult {
     pub truncated: bool,
 }
 
+/// `file.diff_base`'s result: the HEAD version of a file in the worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct FileDiffBaseResult {
+    pub content: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "\"text\" | \"binary\" | \"missing\""))]
+    pub kind: String,
+}
+
 /// Where a plugin's enabled/disabled value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

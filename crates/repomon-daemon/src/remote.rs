@@ -701,6 +701,7 @@ mod tests {
             "file.rename",
             "file.delete",
             "file.search",
+            "file.diff_base",
             // commit.show (item 6) shells out to `git show` for one caller-chosen oid at a time -
             // a much broader read surface than lane.diff (which is scoped to one lane's *current*
             // diff): a remote caller could walk an entire repo's commit history, one commit's

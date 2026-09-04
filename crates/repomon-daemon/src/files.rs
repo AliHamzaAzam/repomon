@@ -17,8 +17,9 @@ use std::time::UNIX_EPOCH;
 
 use base64::Engine;
 use repomon_core::model::{
-    FileCreateResult, FileDeleteResult, FileEntry, FileListResult, FileReadRawResult,
-    FileReadResult, FileRenameResult, FileSearchHit, FileSearchResult, FileWriteResult,
+    FileCreateResult, FileDeleteResult, FileDiffBaseResult, FileEntry, FileListResult,
+    FileReadRawResult, FileReadResult, FileRenameResult, FileSearchHit, FileSearchResult,
+    FileWriteResult,
 };
 use repomon_core::process::background_command;
 
@@ -358,6 +359,62 @@ pub fn read_file_raw(path: &Path) -> Result<FileReadRawResult, ReadError> {
         mime,
         size,
     })
+}
+
+/// Read the HEAD version of a worktree path for git diff and editor gutter markers.
+/// Executes `git show HEAD:<path>` in the lane worktree at `root`.
+/// Returns `missing` for untracked or newly added files, `binary` by null-byte sniff (or image extension),
+/// and `text` for valid UTF-8, capped at READ_CAP_BYTES.
+pub fn diff_base(root: &Path, rel: &str) -> Result<FileDiffBaseResult, ReadError> {
+    let norm_rel = rel.trim_start_matches("./").trim_start_matches('/');
+    if is_image_path(Path::new(norm_rel)) {
+        return Ok(FileDiffBaseResult {
+            content: None,
+            kind: "binary".to_string(),
+        });
+    }
+
+    let arg = format!("HEAD:{norm_rel}");
+    let child = background_command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", &arg])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Ok(FileDiffBaseResult {
+            content: None,
+            kind: "missing".to_string(),
+        });
+    }
+
+    let bytes = out.stdout;
+    let size = bytes.len() as u64;
+    if size > READ_CAP_BYTES {
+        return Err(ReadError::TooLarge(size));
+    }
+
+    let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
+    if bytes[..sniff_len].contains(&0u8) {
+        return Ok(FileDiffBaseResult {
+            content: None,
+            kind: "binary".to_string(),
+        });
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(FileDiffBaseResult {
+            content: Some(content),
+            kind: "text".to_string(),
+        }),
+        Err(_) => Ok(FileDiffBaseResult {
+            content: None,
+            kind: "binary".to_string(),
+        }),
+    }
 }
 
 /// Why `write_file` refused to write.
@@ -924,5 +981,57 @@ mod tests {
                 "src/nested/deep.txt"
             ]
         );
+    }
+
+    #[test]
+    fn diff_base_returns_head_version_and_handles_missing_or_binary() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let git_run = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@e.com")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@e.com")
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+
+        git_run(&["init", "-b", "main"]);
+
+        std::fs::write(root.join("hello.txt"), "original line\n").unwrap();
+        std::fs::write(root.join("binary.dat"), b"hello\0world").unwrap();
+        git_run(&["add", "hello.txt", "binary.dat"]);
+        git_run(&["commit", "-m", "initial commit"]);
+
+        // 1. diff_base returns committed text content
+        let base1 = diff_base(root, "hello.txt").unwrap();
+        assert_eq!(base1.kind, "text");
+        assert_eq!(base1.content, Some("original line\n".to_string()));
+
+        // 2. Modify hello.txt on disk: diff_base still returns the HEAD version
+        std::fs::write(root.join("hello.txt"), "modified line\n").unwrap();
+        let base2 = diff_base(root, "hello.txt").unwrap();
+        assert_eq!(base2.kind, "text");
+        assert_eq!(base2.content, Some("original line\n".to_string()));
+
+        // 3. Binary file returns binary kind with None content
+        let base_bin = diff_base(root, "binary.dat").unwrap();
+        assert_eq!(base_bin.kind, "binary");
+        assert_eq!(base_bin.content, None);
+
+        // 4. Untracked file returns missing kind
+        std::fs::write(root.join("new.txt"), "untracked\n").unwrap();
+        let base_missing = diff_base(root, "new.txt").unwrap();
+        assert_eq!(base_missing.kind, "missing");
+        assert_eq!(base_missing.content, None);
     }
 }

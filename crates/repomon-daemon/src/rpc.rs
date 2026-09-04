@@ -2279,6 +2279,20 @@ pub async fn dispatch(
                 .map_err(file_read_error)
                 .and_then(to_value)
         }
+        "file.diff_base" => {
+            let p: FileRead = parse(params)?;
+            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+            let root = lane.worktree.path.clone();
+            let Some(_target) = crate::files::worktree_path_allowed(&root, &p.path) else {
+                return Err(RpcError::invalid_params("path escapes the worktree root"));
+            };
+            let rel_path = p.path.clone();
+            tokio::task::spawn_blocking(move || crate::files::diff_base(&root, &rel_path))
+                .await
+                .map_err(internal)?
+                .map_err(file_read_error)
+                .and_then(to_value)
+        }
         "file.write" => {
             let p: FileWrite = parse(params)?;
             let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;

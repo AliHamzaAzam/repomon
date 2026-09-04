@@ -12,6 +12,7 @@ import type {
   FanoutSummary,
   FileCreateResult,
   FileDeleteResult,
+  FileDiffBaseResult,
   FileIndexResult,
   FileListResult,
   FileReadRawResult,
@@ -259,6 +260,10 @@ interface RpcMap {
       max_results?: number;
     };
     result: FileSearchResult;
+  };
+  "file.diff_base": {
+    params: { lane_id: number; path: string };
+    result: FileDiffBaseResult;
   };
   // `to` also accepts a list of addresses, "lane-2/*", or "*" (A6 broadcast/multi-recipient
   // mail). A single plain address still returns a bare `FleetMessage`; anything else returns a
