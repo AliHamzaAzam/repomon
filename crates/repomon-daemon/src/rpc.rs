@@ -4770,6 +4770,10 @@ pub async fn dispatch(
         }
 
         // ---- repomind orchestrator (a single daemon-owned `claude` session) ----
+        // `.stop`/`.target`/`.send_input`/`.key`/`.watch`/`.resize` below are deprecated thin
+        // aliases onto the controller lane's window; each logs `warn_deprecated_orchestrator_rpc`
+        // once per process lifetime naming its `agent.*`/`lane.*` replacement (docs/protocol.md).
+        // `.status`/`.transcript`/`.start` are not aliases and stay as they are.
         "orchestrator.status" => {
             // A window killed externally would otherwise still read as running; reconcile first.
             reconcile_orchestrator(ctx).await;
@@ -5121,6 +5125,7 @@ pub async fn dispatch(
             }))
         }
         "orchestrator.stop" => {
+            warn_deprecated_orchestrator_rpc("orchestrator.stop", "agent.stop");
             // Take the session lock BEFORE the kill so a stop can't interleave with a concurrent
             // `orchestrator.start` (which holds this lock across its spawn): stop either runs
             // first against nothing, or kills the fully-recorded window — never a window that a
@@ -5156,6 +5161,7 @@ pub async fn dispatch(
             Ok(status)
         }
         "orchestrator.target" => {
+            warn_deprecated_orchestrator_rpc("orchestrator.target", "agent.target");
             // Clear + broadcast stopped if the window died, so a stale "running" can't linger.
             reconcile_orchestrator(ctx).await;
             let window = ctx.controller_window().await;
@@ -5174,6 +5180,7 @@ pub async fn dispatch(
             Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
         "orchestrator.send_input" => {
+            warn_deprecated_orchestrator_rpc("orchestrator.send_input", "agent.send_input");
             let p: OrchestratorInput = parse(params)?;
             // A window killed externally would otherwise still read as running; reconcile first,
             // and refuse to type into a corpse instead of silently no-op'ing at the tmux layer.
@@ -5201,6 +5208,7 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
         "orchestrator.key" => {
+            warn_deprecated_orchestrator_rpc("orchestrator.key", "agent.key");
             let p: OrchestratorKey = parse(params)?;
             // Same reconcile-first guard as `orchestrator.send_input`: a dead window must not read
             // as a successful keystroke.
@@ -5229,6 +5237,7 @@ pub async fn dispatch(
         // view and `false` on leaving, so `stream_orchestrator` captures the window only while a
         // client is actually watching.
         "orchestrator.watch" => {
+            warn_deprecated_orchestrator_rpc("orchestrator.watch", "viewport.set");
             let p: OrchestratorWatch = parse(params)?;
             *sess.orchestrator_watched.lock().await = p.on;
             Ok(Value::Null)
@@ -5237,6 +5246,7 @@ pub async fn dispatch(
         // (no right-edge overflow, and no trailing blank rows from a too-tall window). Mirrors
         // `agent.resize`; `orchestrator.target` restores client-follow before a real attach.
         "orchestrator.resize" => {
+            warn_deprecated_orchestrator_rpc("orchestrator.resize", "agent.resize");
             let p: OrchestratorResize = parse(params)?;
             let tmux = ctx.backend.clone();
             // Clamp to a sane floor so a momentary tiny layout can't shrink the window to nothing.
@@ -7672,6 +7682,33 @@ async fn commits_in_range(
     Ok(out)
 }
 
+/// Logs a `tracing::warn!` naming `replacement` for a deprecated `orchestrator.*` alias — but
+/// only the first time `method` is called in this process's lifetime. These aliases are still on
+/// the hot path of anything still calling them (the TUI's command-center view drives several of
+/// them on every keystroke and on a render tick), so logging every call would flood the daemon
+/// log; one line per method for the life of the process is enough to tell an operator or a
+/// client author to move to the replacement before the alias is removed (target: the release
+/// after next — see `docs/protocol.md`).
+fn warn_deprecated_orchestrator_rpc(method: &str, replacement: &str) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let warned = WARNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut warned = warned.lock().unwrap_or_else(|e| e.into_inner());
+    if first_time_warned(&mut warned, method) {
+        tracing::warn!(
+            "{method} is deprecated and will be removed in the release after next; use \
+             {replacement} instead"
+        );
+    }
+}
+
+/// `true` the first time `method` is passed for a given `seen` set, `false` on every call after.
+/// Split out from [`warn_deprecated_orchestrator_rpc`] so the once-per-lifetime behavior is
+/// testable without depending on the process-global static or capturing `tracing` output.
+fn first_time_warned(seen: &mut std::collections::HashSet<String>, method: &str) -> bool {
+    seen.insert(method.to_string())
+}
+
 /// The `{running, agent, model, backend, window, autonomy, session_id, attention, headline}`
 /// status JSON for the orchestrator (shared by `orchestrator.status` and the
 /// `event.orchestrator.status` broadcast). `agent` is the raw name the session was started with
@@ -9301,6 +9338,28 @@ mod tests {
         assert!(controller_cap_refusal(3, 2).is_some());
         // A cap of zero closes the lane entirely.
         assert!(controller_cap_refusal(0, 0).is_some());
+    }
+
+    /// `warn_deprecated_orchestrator_rpc` logs one `warn` per process lifetime per method: the
+    /// dedup set (exercised directly here, rather than the process-global static, so this test
+    /// can't leak state into others) says "first time" exactly once per method and "already
+    /// warned" for every call after, independent of other methods.
+    #[test]
+    fn deprecated_orchestrator_rpc_warns_once_per_method_per_process() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            first_time_warned(&mut seen, "orchestrator.stop"),
+            "first call for a method must warn"
+        );
+        assert!(
+            !first_time_warned(&mut seen, "orchestrator.stop"),
+            "a repeat call for the same method must not warn again"
+        );
+        assert!(
+            first_time_warned(&mut seen, "orchestrator.key"),
+            "a different method warns independently"
+        );
+        assert!(!first_time_warned(&mut seen, "orchestrator.key"));
     }
 
     /// The daemon writes the role and `repomon-mcp`'s policy layer reads it off the wire, so the

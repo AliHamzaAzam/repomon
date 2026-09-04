@@ -208,11 +208,28 @@ composer. The file is daemon-owned and gitignored: never hand-edit it.
 Repomind runs in the **controller lane**, the main worktree of the repomind home repo
 (`~/repomind` by default, `[repomind] home`). It is registered like any other repo, and its lane
 carries `role: "controller"` in `lane.list`. Its window is therefore an ordinary `lane-*` window and does
-appear in `lane.list`, the lane overlay, and the reaper. Every `orchestrator.*` RPC above except
-`.status`/`.transcript`/`.start` is a **deprecated** thin alias onto that window: prefer
-`lane.list` plus the `agent.*` RPCs, which work on it like any other agent. The old daemon-owned
-`orchestrator` window is kept only as an adoption fallback, so a window left behind by a pre-R1
-daemon is adopted rather than duplicated.
+appear in `lane.list`, the lane overlay, and the reaper. The old daemon-owned `orchestrator`
+window is kept only as an adoption fallback, so a window left behind by a pre-R1 daemon is
+adopted rather than duplicated.
+
+Every `orchestrator.*` RPC above except `.status`/`.transcript`/`.start` is a **deprecated** thin
+alias onto the controller lane's window:
+
+| Deprecated alias | Replacement | Removal target |
+|---|---|---|
+| `orchestrator.stop` | `agent.stop` | the release after next |
+| `orchestrator.target` | `agent.target` | the release after next |
+| `orchestrator.send_input` | `agent.send_input` | the release after next |
+| `orchestrator.key` | `agent.key` | the release after next |
+| `orchestrator.watch` | `viewport.set` | the release after next |
+| `orchestrator.resize` | `agent.resize` | the release after next |
+
+Prefer `lane.list` plus the `agent.*`/`viewport.set` RPCs, which work on the controller lane's
+window like any other agent's; find the window itself from `lane.list`'s `role: "controller"`
+row or from `repomind.status`'s `window`. Each deprecated alias's handler logs one
+`tracing::warn!` naming its replacement the first time it is called in the daemon process's
+lifetime (not on every call, since some of these sit on a hot path), so an operator or client
+author watching the daemon log gets one nudge to move off it before it is removed.
 
 `attention` on the orchestrator payloads above is always present: one of `"none"`,
 `"permission"`, `"decision"`, `"end_of_turn"`. `headline` is non-null only alongside
