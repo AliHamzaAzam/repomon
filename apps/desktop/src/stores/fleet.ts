@@ -187,6 +187,17 @@ export function laneIndicator(lane: Lane): LaneIndicator {
   return { label, tone, urgent };
 }
 
+/// The pill for a bare state, with no lane to read a gate count off. `null` means nothing is
+/// running at all, which is what the pinned Repomind row shows as "off".
+export function stateIndicator(state: AgentState | null): LaneIndicator {
+  if (state === null) return { label: "off", tone: "muted", urgent: false };
+  return {
+    label: state === "needs-you" ? "needs you" : state,
+    tone: STATE_TONE[state],
+    urgent: isUrgentState(state),
+  };
+}
+
 /// Why an agent's state reads the way it does, straight from the daemon. Never invented here:
 /// with no reason on the payload the tooltip simply says less.
 export function agentStateReason(agent: AgentSession): string | null {

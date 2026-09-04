@@ -186,6 +186,20 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     });
   }
 
+  /// Start or stop the repomind controller. `orchestrator.start`/`orchestrator.stop` are the
+  /// daemon's aliases onto the controller lane's primary window, so the pinned sidebar row, its
+  /// context menu, and the panel header all drive one lifecycle rather than three.
+  async function repomindLifecycle(action: "start" | "stop") {
+    setError(null);
+    try {
+      if (action === "start") await daemonCall("orchestrator.start", {});
+      else await daemonCall("orchestrator.stop");
+      await fleet.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function adoptAgent(lane: Lane, agent: AgentSession | null) {
     setError(null);
     try {
@@ -285,6 +299,8 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     stopAgent,
     adoptAgent,
     restoreAllAgents,
+    startRepomind: () => repomindLifecycle("start"),
+    stopRepomind: () => repomindLifecycle("stop"),
   };
 }
 

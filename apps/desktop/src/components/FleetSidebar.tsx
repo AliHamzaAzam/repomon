@@ -3,6 +3,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } fro
 import type { AgentSession, Lane, Repo } from "../bindings";
 import { fleetCounts, laneIndicator, laneIndicatorTitle, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
+import type { RepomindStore } from "../stores/repomind";
 import type { WorkspaceStore } from "../stores/workspace";
 import {
   readAutoCollapseEmptyLanes,
@@ -17,6 +18,7 @@ import Modal from "./Modal";
 import { reorderAround } from "./ordering";
 import LaneRowMenu from "./LaneRowMenu";
 import RepoExtMenu from "./RepoExtMenu";
+import RepomindRow, { RepomindRowMenu, type RepomindMenuAction } from "./RepomindRow";
 import {
   AgentIcon,
   IconArrowDown,
@@ -42,9 +44,17 @@ interface FleetSidebarProps {
   fleet: FleetStore;
   actions: ActionsStore;
   workspace?: WorkspaceStore;
+  /// Feeds the pinned Repomind row its goal count and home path. Optional so a test can render
+  /// the sidebar without a daemon behind it; the row then shows the controller state alone.
+  repomind?: RepomindStore;
   searchRef?: (element: HTMLInputElement) => void;
   onOpenExtensions?: (repoId: number) => void;
   onSelectAgent?: (lane: Lane, session: AgentSession) => void;
+  /// Opens the Repomind panel in the right rail (the row's "Open panel").
+  onOpenRepomindPanel?: () => void;
+  /// Opens the center Editor mode on whichever lane is selected (the row's "Open home in editor",
+  /// which selects the controller lane first).
+  onOpenEditor?: () => void;
 }
 
 function dirtyCount(lane: Lane): number {
@@ -549,6 +559,7 @@ function RepoRenameModal(props: {
 export default function FleetSidebar(props: FleetSidebarProps) {
   const [extMenu, setExtMenu] = createSignal<{ repoId: number; x: number; y: number } | null>(null);
   const [laneMenu, setLaneMenu] = createSignal<{ lane: Lane; x: number; y: number } | null>(null);
+  const [repomindMenu, setRepomindMenu] = createSignal<{ x: number; y: number } | null>(null);
   const [renameRepoId, setRenameRepoId] = createSignal<number | null>(null);
   // Manual-mode drag state: which repo is being dragged, and which header is the current
   // insertion target (drives the drop indicator line).
@@ -713,6 +724,25 @@ export default function FleetSidebar(props: FleetSidebarProps) {
     setDropTargetId(null);
   };
 
+  /// Clicking the pinned row focuses the controller lane's agents in the terminal bay, exactly as
+  /// clicking a lane row does. The lane is a normal lane; only the sidebar hides its group.
+  const selectRepomind = () => {
+    const lane = props.fleet.controller().lane;
+    if (lane) props.fleet.setSelectedLaneId(lane.id);
+  };
+
+  const onRepomindAction = (action: RepomindMenuAction) => {
+    if (action === "start") void props.actions.startRepomind();
+    else if (action === "stop") void props.actions.stopRepomind();
+    else if (action === "panel") props.onOpenRepomindPanel?.();
+    else {
+      // The home is an ordinary worktree, so the editor opens on it the same way it opens on any
+      // lane: select the lane, then switch the center to Editor mode.
+      selectRepomind();
+      props.onOpenEditor?.();
+    }
+  };
+
   const renameTargetRepo = createMemo(
     () => props.fleet.repos().find((repo) => repo.id === renameRepoId()) ?? null,
   );
@@ -772,6 +802,22 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </button>
         </div>
       </div>
+
+      {/* The repomind home is pinned here rather than filed under the repo groups: it is the one
+          lane that is about the fleet instead of about a project, and it stays reachable whatever
+          the filters below are set to. */}
+      <Show when={props.fleet.controllerLanes().length}>
+        <div class="border-b border-line px-2 py-1.5">
+          <RepomindRow
+            controller={props.fleet.controller()}
+            activePlans={props.repomind?.status()?.counts.active_plans ?? null}
+            home={props.repomind?.status()?.home ?? null}
+            selected={props.fleet.selectedLaneId() === props.fleet.controller().lane?.id}
+            onSelect={selectRepomind}
+            onContextMenu={(x, y) => setRepomindMenu({ x, y })}
+          />
+        </div>
+      </Show>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         <Show when={!props.fleet.loading() || props.fleet.lanes().length} fallback={<p class="p-3 text-xs text-muted">Syncing fleet…</p>}>
@@ -962,6 +1008,18 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           </Show>
         </Show>
       </div>
+
+      <Show keyed when={repomindMenu()}>
+        {(menu) => (
+          <RepomindRowMenu
+            running={props.fleet.controller().agents > 0}
+            x={menu.x}
+            y={menu.y}
+            onAction={onRepomindAction}
+            onClose={() => setRepomindMenu(null)}
+          />
+        )}
+      </Show>
 
       <Show keyed when={laneMenu()}>
         {(menu) => (

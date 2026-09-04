@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
-import type { FleetStore } from "../stores/fleet";
+import { controllerSummary, isControllerRepo, type FleetStore } from "../stores/fleet";
+import type { RepomindStore } from "../stores/repomind";
 import FleetSidebar, {
   FILTER_ROW_COMPACT_THRESHOLD_PX,
   isFilterRowCompact,
@@ -56,7 +57,7 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
   };
 }
 
-function lane(id: number, target: Repo, sessions: AgentSession[] = []): Lane {
+function lane(id: number, target: Repo, sessions: AgentSession[] = [], role: string | null = null): Lane {
   return {
     id,
     repo: target,
@@ -65,7 +66,7 @@ function lane(id: number, target: Repo, sessions: AgentSession[] = []): Lane {
     agent_sessions: sessions,
     last_activity_at: "2026-07-20T00:00:00Z",
     pinned: false,
-    role: null,
+    role,
   };
 }
 
@@ -73,13 +74,15 @@ function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
   const setRepoHidden = vi.fn().mockResolvedValue(undefined);
   const renameRepo = vi.fn().mockResolvedValue(undefined);
   const reorderRepos = vi.fn().mockResolvedValue(undefined);
-  const visible = repos.filter((r) => !r.hidden);
+  const visible = repos.filter((r) => !r.hidden && !isControllerRepo(r.id, lanes));
   const fleet = {
     repos: () => repos,
     visibleRepos: () => visible,
     hiddenRepos: () => repos.filter((r) => r.hidden),
     lanes: () => lanes,
-    visibleLanes: () => lanes.filter((l) => !l.repo.hidden),
+    visibleLanes: () => lanes.filter((l) => !l.repo.hidden && l.role !== "controller"),
+    controllerLanes: () => lanes.filter((l) => l.role === "controller"),
+    controller: () => controllerSummary(lanes),
     selectedLaneId: () => null,
     setSelectedLaneId: vi.fn(),
     query: () => "",
@@ -107,6 +110,8 @@ function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
     openRepoNotes: vi.fn(),
     deleteLane,
     pinLane,
+    startRepomind: vi.fn().mockResolvedValue(undefined),
+    stopRepomind: vi.fn().mockResolvedValue(undefined),
   } as unknown as ActionsStore;
   return { fleet, actions, setRepoHidden, renameRepo, reorderRepos, deleteLane, pinLane };
 }
@@ -585,5 +590,122 @@ describe("manual repo reordering", () => {
     fireEvent.drop(betaHeader);
 
     expect(reorderRepos).not.toHaveBeenCalled();
+  });
+});
+
+describe("the pinned Repomind row", () => {
+  const home = repo(9, "repomind");
+  const project = repo(1, "alpha");
+
+  function repomindStub(activePlans: number, homePath: string) {
+    return {
+      status: () => ({
+        home: homePath,
+        exists: true,
+        repo_id: 9,
+        lane_id: 90,
+        window: "repomind-1",
+        max_controllers: 2,
+        export: { last_run: null, pending: false, last_error: null },
+        counts: { active_plans: activePlans, standing: 0, playbooks: 0, drafts: 0 },
+        boot: { generated_at: null, tokens_estimate: 0, trimmed: [] },
+      }),
+    } as unknown as RepomindStore;
+  }
+
+  it("states a live controller in the fleet's own one-word vocabulary", () => {
+    const controller = lane(90, home, [session({ status: "waiting", tmux_window: "repomind-1" })], "controller");
+    const { fleet, actions } = stubs([project, home], [lane(10, project), controller]);
+    render(() => (
+      <FleetSidebar fleet={fleet} actions={actions} repomind={repomindStub(3, "/Users/pat/repomind")} />
+    ));
+
+    const row = screen.getByRole("button", { name: /Repomind/ });
+    expect(row.textContent).toContain("Repomind");
+    expect(row.textContent).toContain("needs you");
+    expect(row.textContent).toContain("3 goals");
+    expect(row.textContent).toContain("/Users/pat/repomind");
+    // The home never also appears as a repo group.
+    expect(screen.queryByLabelText("repomind")).toBeNull();
+  });
+
+  it("reads off when the home has no controller running", () => {
+    const { fleet, actions } = stubs([project, home], [lane(10, project), lane(90, home, [], "controller")]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} repomind={repomindStub(0, "/Users/pat/repomind")} />);
+
+    const row = screen.getByRole("button", { name: /Repomind/ });
+    expect(row.textContent).toContain("off");
+    expect(row.textContent).toContain("0 goals");
+  });
+
+  it("is absent entirely when no controller lane exists", () => {
+    const { fleet, actions } = stubs([project], [lane(10, project)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+    expect(screen.queryByRole("button", { name: /^Repomind/ })).toBeNull();
+  });
+
+  it("selects the controller lane when clicked, like any lane row", () => {
+    const controller = lane(90, home, [session({ tmux_window: "repomind-1" })], "controller");
+    const { fleet, actions } = stubs([project, home], [lane(10, project), controller]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} repomind={repomindStub(1, "/home")} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Repomind/ }));
+    expect(fleet.setSelectedLaneId).toHaveBeenCalledWith(90);
+  });
+
+  it("offers start, the panel, and the home in its context menu when off", () => {
+    const onOpenRepomindPanel = vi.fn();
+    const onOpenEditor = vi.fn();
+    const { fleet, actions } = stubs([project, home], [lane(10, project), lane(90, home, [], "controller")]);
+    render(() => (
+      <FleetSidebar
+        fleet={fleet}
+        actions={actions}
+        repomind={repomindStub(0, "/home")}
+        onOpenRepomindPanel={onOpenRepomindPanel}
+        onOpenEditor={onOpenEditor}
+      />
+    ));
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /Repomind/ }));
+    expect(screen.queryByText("Stop Repomind")).toBeNull();
+
+    fireEvent.click(screen.getByText("Start Repomind"));
+    expect(actions.startRepomind).toHaveBeenCalled();
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /Repomind/ }));
+    fireEvent.click(screen.getByText("Open panel"));
+    expect(onOpenRepomindPanel).toHaveBeenCalled();
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /Repomind/ }));
+    fireEvent.click(screen.getByText("Open home in editor"));
+    // Opening the home in the editor selects its lane first, so the editor targets the home.
+    expect(fleet.setSelectedLaneId).toHaveBeenCalledWith(90);
+    expect(onOpenEditor).toHaveBeenCalled();
+  });
+
+  it("offers stop instead of start once a controller is running", () => {
+    const controller = lane(90, home, [session({ tmux_window: "repomind-1" })], "controller");
+    const { fleet, actions } = stubs([project, home], [lane(10, project), controller]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} repomind={repomindStub(0, "/home")} />);
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /Repomind/ }));
+    expect(screen.queryByText("Start Repomind")).toBeNull();
+    fireEvent.click(screen.getByText("Stop Repomind"));
+    expect(actions.stopRepomind).toHaveBeenCalled();
+  });
+
+  it("puts the row ahead of every repo group in the document order", () => {
+    const controller = lane(90, home, [session({ tmux_window: "repomind-1" })], "controller");
+    const { fleet, actions } = stubs([project, home], [lane(10, project), controller]);
+    const { container } = render(() => (
+      <FleetSidebar fleet={fleet} actions={actions} repomind={repomindStub(0, "/home")} />
+    ));
+
+    const row = screen.getByRole("button", { name: /Repomind/ });
+    const group = container.querySelector('section[aria-label="alpha"]');
+    expect(group).not.toBeNull();
+    // The row is the sidebar's first stop; `fleet.moveSelection` walks the same order.
+    expect(row.compareDocumentPosition(group as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

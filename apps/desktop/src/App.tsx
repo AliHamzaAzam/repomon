@@ -32,6 +32,7 @@ import { createExtensionsStore } from "./stores/extensions";
 import { createEditorStore } from "./stores/editor";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
+import { createRepomindStore } from "./stores/repomind";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
@@ -109,6 +110,7 @@ function App(props: AppProps) {
   const editor = createEditorStore(fleet);
   const actions = createActionsStore(fleet, workspace);
   const ext = createExtensionsStore();
+  const repomind = createRepomindStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   const messages = createMessageStore((laneId, slot, sourceWindow) => {
     fleet.setSelectedLaneId(laneId);
@@ -120,6 +122,7 @@ function App(props: AppProps) {
   let fleetStarted = false;
   let notificationsStarted = false;
   let messagesStarted = false;
+  let repomindStarted = false;
   let searchInput: HTMLInputElement | undefined;
   let active = true;
 
@@ -155,6 +158,27 @@ function App(props: AppProps) {
       fleetStarted = false;
       fleet.stop();
     }
+  });
+
+  createEffect(() => {
+    if (connection().phase === "connected" && !repomindStarted) {
+      repomindStarted = true;
+      repomind.start();
+    } else if (connection().phase !== "connected" && repomindStarted) {
+      repomindStarted = false;
+      repomind.stop();
+    }
+  });
+
+  // The status store refreshes itself the moment an agent in the controller lane changes state,
+  // which is when its counts actually move; this keeps it told which windows those are.
+  createEffect(() => {
+    repomind.setControllerWindows(
+      fleet
+        .controllerLanes()
+        .flatMap((lane) => lane.agent_sessions)
+        .flatMap((session) => (session.tmux_window ? [session.tmux_window] : [])),
+    );
   });
 
   createEffect(() => {
@@ -373,6 +397,7 @@ function App(props: AppProps) {
     fleet.stop();
     notifications.stop();
     messages.stop();
+    repomind.stop();
   });
 
   const cycleTheme = () => {
@@ -630,7 +655,15 @@ function App(props: AppProps) {
             fleet={fleet}
             actions={actions}
             workspace={workspace}
+            repomind={repomind}
             searchRef={(element) => { searchInput = element; }}
+            onOpenRepomindPanel={() => openPanelTab("repomind")}
+            onOpenEditor={() => {
+              workspace.setMultitasking(false);
+              setRepomindOpen(false);
+              persistRepomindOpen(false);
+              workspace.setEditorWorkspace(true);
+            }}
             onOpenExtensions={(repoId) => {
               ext.setScope({ scope: "repo", repo_id: repoId });
               setExtensionsOpen(true);

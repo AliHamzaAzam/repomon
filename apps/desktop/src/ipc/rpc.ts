@@ -27,6 +27,7 @@ import type {
   PendingDialog,
   Playbook,
   PolicyAction,
+  RepomindStatus,
   Repo,
   Schedule,
   SupervisionConfig,
@@ -348,6 +349,14 @@ interface RpcMap {
   "orchestrator.key": { params: { key: string; literal?: boolean }; result: null };
   "orchestrator.watch": { params: { on: boolean }; result: null };
   "orchestrator.resize": { params: { cols: number; rows: number }; result: null };
+  // The repomind home. `status` is read-only and remote-allowed; `boot` and `export` write files
+  // in the home and are local-only (see the daemon's `remote_method_allowed`).
+  "repomind.status": { params: undefined; result: RepomindStatus };
+  "repomind.boot": {
+    params: undefined;
+    result: { path: string; bytes: number; tokens_estimate: number; trimmed: string[] };
+  };
+  "repomind.export": { params: undefined; result: { files: string[]; kinds: string[] } };
   "ext.list": { params: ExtScopeParams; result: ExtSnapshot };
   "plugin.enable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
   "plugin.disable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
