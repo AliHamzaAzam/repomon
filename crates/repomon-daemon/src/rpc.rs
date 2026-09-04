@@ -194,6 +194,14 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "supervision": cfg.supervision,
     });
     value["message_hop_refresh_senders"] = json!(cfg.message_hop_refresh_senders);
+    // Built outside the big literal above: one more nesting level there blows serde_json's
+    // macro recursion limit.
+    value["repomind"] = json!({
+        "home": cfg.repomind.home,
+        "home_path": cfg.repomind_home().to_string_lossy(),
+        "primary_agent": cfg.repomind_primary_agent(),
+        "max_controllers": cfg.repomind.max_controllers,
+    });
     value
 }
 
@@ -8851,6 +8859,25 @@ mod tests {
             json!(["lane-81/3"])
         );
         assert!(!snapshot.to_string().contains("secret-token-1234"));
+    }
+
+    /// `config.get` carries the `[repomind]` table so the desktop can show the home path and the
+    /// controller cap without reading the config file itself. `home` is the raw setting (what a
+    /// `config.set` would write back); `home_path` is the same value tilde-expanded.
+    #[test]
+    fn config_snapshot_exposes_the_repomind_table() {
+        let mut cfg = repomon_core::config::Config::default();
+        cfg.repomind.primary_agent = Some("codex".into());
+        cfg.repomind.max_controllers = 3;
+
+        let snapshot = config_json(&cfg);
+        assert_eq!(snapshot["repomind"]["home"], "~/repomind");
+        assert_eq!(
+            snapshot["repomind"]["home_path"],
+            json!(cfg.repomind_home().to_string_lossy())
+        );
+        assert_eq!(snapshot["repomind"]["primary_agent"], "codex");
+        assert_eq!(snapshot["repomind"]["max_controllers"], 3);
     }
 
     fn mail_lane(id: i64, labels: &[Option<&str>]) -> Lane {

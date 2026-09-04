@@ -27,6 +27,13 @@ pub fn valid_tmux_session(s: &str) -> bool {
 }
 pub const DEFAULT_TIME_FORMAT: &str = "%H:%M %a %d %b %Y";
 
+/// Where the repomind home repo lives by default. A `~/`-prefixed path in the config file;
+/// [`expand_tilde`] turns it into an absolute path everywhere else.
+pub const DEFAULT_REPOMIND_HOME: &str = "~/repomind";
+
+/// How many controller agents may run in the repomind lane at once by default.
+pub const DEFAULT_MAX_CONTROLLERS: usize = 2;
+
 /// Top-level user configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -181,6 +188,10 @@ pub struct Config {
     /// Agent supervision configuration (autonomous auto-approval and intervention policies).
     #[serde(default)]
     pub supervision: crate::agent::supervision::SupervisionConfig,
+    /// The repomind home repo and its controller lane. Serialized last (after every scalar) so
+    /// the emitted TOML stays valid.
+    #[serde(default)]
+    pub repomind: RepomindConfig,
 }
 
 impl Default for Config {
@@ -234,6 +245,32 @@ impl Default for Config {
             standing_timeout_secs: 600,
             triage_after_mins: None,
             supervision: crate::agent::supervision::SupervisionConfig::default(),
+            repomind: RepomindConfig::default(),
+        }
+    }
+}
+
+/// The `[repomind]` table: where the repomind home repo lives, which agent runs as its primary
+/// controller, and how many controllers may share its lane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepomindConfig {
+    /// The home repo path, `~/`-expandable. See [`Config::repomind_home`].
+    pub home: String,
+    /// The agent that `orchestrator.start` spawns as the primary controller. `None` falls back
+    /// to [`Config::orchestrator_agent`], so an operator who already picked an orchestrator
+    /// agent does not have to pick it twice.
+    pub primary_agent: Option<String>,
+    /// How many controller agents may run in the controller lane at once.
+    pub max_controllers: usize,
+}
+
+impl Default for RepomindConfig {
+    fn default() -> Self {
+        RepomindConfig {
+            home: DEFAULT_REPOMIND_HOME.to_string(),
+            primary_agent: None,
+            max_controllers: DEFAULT_MAX_CONTROLLERS,
         }
     }
 }
@@ -411,6 +448,20 @@ impl Config {
         resolve_tab_sort_mode(self.tab_sort_mode)
     }
 
+    /// The repomind home as an absolute path (a leading `~/` expanded).
+    pub fn repomind_home(&self) -> PathBuf {
+        expand_tilde(&self.repomind.home)
+    }
+
+    /// The agent that runs as repomind's primary controller: the `[repomind]` setting if given,
+    /// otherwise the older `orchestrator_agent`. `None` means "let the launcher pick its default".
+    pub fn repomind_primary_agent(&self) -> Option<String> {
+        self.repomind
+            .primary_agent
+            .clone()
+            .or_else(|| self.orchestrator_agent.clone())
+    }
+
     /// Whether this resolved sender represents the human operator or an explicitly configured,
     /// human-supervised coordinator. Coordinator entries may be exact canonical addresses or a
     /// `lane-<id>/*` pattern covering every slot in one lane.
@@ -444,6 +495,17 @@ fn message_address_pattern_matches(pattern: &str, address: &str) -> bool {
         && pattern_lane == address_lane
         && !slot.is_empty()
         && !slot.contains('/')
+}
+
+/// Expand a leading `~/` against the user's home directory. Any other shape (absolute, relative,
+/// or a bare `~`) is taken verbatim, and so is `~/...` on a machine with no resolvable home.
+pub fn expand_tilde(s: &str) -> PathBuf {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(base) = directories::BaseDirs::new() {
+            return base.home_dir().join(rest);
+        }
+    }
+    PathBuf::from(s)
 }
 
 /// The user's home directory (portable — `$HOME` on unix, the profile dir on Windows).
@@ -899,5 +961,58 @@ mod tests {
         assert!(config.message_sender_refreshes_hops("lane-92/12"));
         assert!(!config.message_sender_refreshes_hops("lane-921/1"));
         assert!(config.message_sender_refreshes_hops("repomind"));
+    }
+
+    /// An existing config file that predates the `[repomind]` table must still load, with every
+    /// repomind setting at its documented default.
+    #[test]
+    fn repomind_settings_default_when_the_table_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "tmux_session = \"repomon\"\n").unwrap();
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!(c.repomind.home, DEFAULT_REPOMIND_HOME);
+        assert_eq!(c.repomind.max_controllers, 2);
+        assert_eq!(c.repomind.primary_agent, None);
+    }
+
+    /// `repomind.home` is a `~`-prefixed path in the file and an absolute path everywhere else.
+    #[test]
+    fn repomind_home_expands_a_leading_tilde() {
+        let c = Config::default();
+        assert_eq!(c.repomind_home(), home().join("repomind"));
+
+        let mut c = Config::default();
+        c.repomind.home = "/srv/repomind".into();
+        assert_eq!(c.repomind_home(), PathBuf::from("/srv/repomind"));
+    }
+
+    /// The primary controller agent falls back to the existing `orchestrator_agent` setting, so
+    /// an operator who already picked one does not have to pick it twice.
+    #[test]
+    fn repomind_primary_agent_falls_back_to_the_orchestrator_agent() {
+        let mut c = Config::default();
+        assert_eq!(c.repomind_primary_agent(), None);
+
+        c.orchestrator_agent = Some("claude-work".into());
+        assert_eq!(c.repomind_primary_agent(), Some("claude-work".to_string()));
+
+        c.repomind.primary_agent = Some("codex".into());
+        assert_eq!(c.repomind_primary_agent(), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn repomind_table_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.repomind.home = "~/elsewhere".into();
+        c.repomind.primary_agent = Some("codex".into());
+        c.repomind.max_controllers = 5;
+        c.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.repomind.home, "~/elsewhere");
+        assert_eq!(loaded.repomind.primary_agent, Some("codex".to_string()));
+        assert_eq!(loaded.repomind.max_controllers, 5);
     }
 }

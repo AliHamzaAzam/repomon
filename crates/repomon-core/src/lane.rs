@@ -567,7 +567,7 @@ impl Lanes {
         let rendered = template
             .replace("{repo}", &repo.name)
             .replace("{branch}", &safe_branch);
-        expand_tilde(&rendered)
+        crate::config::expand_tilde(&rendered)
     }
 }
 
@@ -589,15 +589,6 @@ fn sort_lanes(lanes: &mut [Lane]) {
             .then(b.worktree.is_main.cmp(&a.worktree.is_main)) // main first
             .then(b.last_activity_at.cmp(&a.last_activity_at)) // then activity desc
     });
-}
-
-fn expand_tilde(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(base) = directories::BaseDirs::new() {
-            return base.home_dir().join(rest);
-        }
-    }
-    PathBuf::from(s)
 }
 
 fn branch_exists(repo_path: &Path, branch: &str) -> bool {

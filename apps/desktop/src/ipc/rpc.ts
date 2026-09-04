@@ -115,7 +115,17 @@ export interface ConfigView {
   orchestrator_model?: string | null;
   agent_icons?: Record<string, string>;
   supervision: SupervisionConfig;
+  /** The `[repomind]` table: the home repo and its controller lane. */
+  repomind?: RepomindConfigView;
   [key: string]: unknown;
+}
+
+/** `config.get`'s `repomind` block. `home` is the raw setting, `home_path` its expanded form. */
+export interface RepomindConfigView {
+  home: string;
+  home_path: string;
+  primary_agent?: string | null;
+  max_controllers: number;
 }
 
 export interface RemoteDeviceSummary {
