@@ -5,7 +5,12 @@ import type { PaneTarget } from "../components/terminalTargets";
 import { createWorkspaceStore } from "./workspace";
 import type { FleetStore } from "./fleet";
 
-vi.mock("../ipc/rpc", () => ({ daemonCall: vi.fn().mockResolvedValue({ id: "term-1" }) }));
+// `subscribeDaemon` is here because the workspace store reads `isControllerLane` from the fleet
+// store, whose module imports it; nothing in this file subscribes to anything.
+vi.mock("../ipc/rpc", () => ({
+  daemonCall: vi.fn().mockResolvedValue({ id: "term-1" }),
+  subscribeDaemon: vi.fn().mockResolvedValue(() => undefined),
+}));
 
 function target(window: string): PaneTarget {
   return { laneId: 7, window, label: window, shell: false, sessionId: null, targetId: null };

@@ -12,6 +12,9 @@ export interface PaneTarget {
   /// UI action identity; managed transcript-less sessions use their tmux window.
   targetId: string | null;
   agent?: string | null;
+  /// True for a pane in the repomind home's controller lane. The pane picker groups these under
+  /// "Repomind" rather than under a project, mirroring the sidebar's pinned row.
+  controller?: boolean;
 }
 
 const PANE_ACCENTS = [
@@ -111,6 +114,7 @@ export function stabilizeTargets(
     prev.sessionId = target.sessionId;
     prev.targetId = target.targetId;
     prev.agent = target.agent;
+    prev.controller = target.controller;
     return prev;
   });
   for (const window of [...cache.keys()]) {

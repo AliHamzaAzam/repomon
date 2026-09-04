@@ -22,6 +22,7 @@ pub mod playbooks;
 
 use std::path::{Path, PathBuf};
 
+use repomon_core::agent::supervision::{DialogClass, PolicyAction, SupervisionOverrides};
 use repomon_core::model::{LaneId, RepoId};
 
 use crate::Ctx;
@@ -204,11 +205,54 @@ pub async fn ensure_home(ctx: &Ctx) -> repomon_core::Result<RepomindHome> {
         tracing::info!("repomind home: lane {lane_id} marked as the controller lane");
     }
 
+    seed_controller_policy(ctx, lane_id).await?;
+
     Ok(RepomindHome {
         path,
         repo_id: repo.id,
         lane_id,
     })
+}
+
+/// The dialog classes a controller may not answer for itself. A controller holds the fleet
+/// catalog, so a permission prompt in its lane is about the whole fleet rather than about one
+/// worktree; these classes wait for the operator instead of being auto-answered.
+const CONTROLLER_HOLD_CLASSES: &[DialogClass] = &[
+    DialogClass::Deletion,
+    DialogClass::PushRemote,
+    DialogClass::CredentialAccess,
+    DialogClass::Install,
+    DialogClass::DeviceAccess,
+];
+
+/// Give the controller lane its supervision default the first time the home is ensured: `hold` on
+/// every destructive class, supervision itself left off so the operator opts in exactly as they do
+/// for any other lane.
+///
+/// Written once and never again. An operator who relaxes a class here keeps that choice across
+/// daemon restarts, which is why this refuses to touch a lane that already has a policy row.
+async fn seed_controller_policy(ctx: &Ctx, lane_id: LaneId) -> repomon_core::Result<()> {
+    if ctx.store.lane_policy(lane_id).await?.is_some() {
+        return Ok(());
+    }
+    let classes = CONTROLLER_HOLD_CLASSES
+        .iter()
+        .map(|class| (*class, PolicyAction::Hold))
+        .collect();
+    ctx.store
+        .set_lane_policy(SupervisionOverrides {
+            lane_id,
+            enabled: false,
+            classes,
+            nudge_text: None,
+            stall_mins: None,
+            nudge_retries: None,
+            expect_work: false,
+            updated_at: chrono::Utc::now(),
+        })
+        .await?;
+    tracing::info!("repomind home: lane {lane_id} seeded with hold-on-destructive supervision");
+    Ok(())
 }
 
 /// Count what the home holds, for `repomind.status`. Directories that do not exist count zero,
@@ -420,6 +464,46 @@ mod tests {
             .filter(|m| m.role.as_deref() == Some(CONTROLLER_ROLE))
             .count();
         assert_eq!(controllers, 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_home_holds_destructive_dialogs_in_the_controller_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let ctx = test_ctx(&home).await;
+
+        let lane_id = ensure_home(&ctx).await.unwrap().lane_id;
+        let policy = ctx
+            .store
+            .lane_policy(lane_id)
+            .await
+            .unwrap()
+            .expect("the controller lane is seeded with a policy");
+
+        for class in CONTROLLER_HOLD_CLASSES {
+            assert_eq!(
+                policy.classes.get(class),
+                Some(&PolicyAction::Hold),
+                "{class:?} must hold for a controller"
+            );
+        }
+        // Supervision itself stays opt-in, exactly as it is for any other lane.
+        assert!(!policy.enabled);
+
+        // The operator's own relaxation survives the next ensure: this is a seed, not a policy the
+        // daemon re-imposes on every start.
+        let mut relaxed = policy.clone();
+        relaxed
+            .classes
+            .insert(DialogClass::Install, PolicyAction::AutoApprove);
+        ctx.store.set_lane_policy(relaxed).await.unwrap();
+
+        ensure_home(&ctx).await.unwrap();
+        let after = ctx.store.lane_policy(lane_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.classes.get(&DialogClass::Install),
+            Some(&PolicyAction::AutoApprove)
+        );
     }
 
     /// Two `orchestrator.start` calls can land at once (the TUI's auto-start and

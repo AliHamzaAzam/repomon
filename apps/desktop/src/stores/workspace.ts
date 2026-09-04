@@ -9,7 +9,7 @@ import {
   type PaneTarget,
 } from "../components/terminalTargets";
 import { agentSessionTargetId } from "../components/agentIdentity";
-import type { FleetStore } from "./fleet";
+import { isControllerLane, type FleetStore } from "./fleet";
 
 export type WorkspaceLayout = "auto" | "focused" | "split" | "grid";
 
@@ -122,6 +122,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
       sessionId: agent.session_id,
       targetId: agentSessionTargetId(agent),
       agent: agent.agent,
+      controller: isControllerLane(lane),
     }] : []),
     ...terminals()
       .filter((terminal) => terminal.lane_id === lane.id)
@@ -137,6 +138,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
         sessionId: null,
         targetId: null,
         agent: null,
+        controller: isControllerLane(lane),
       })),
   ]))), undefined, { equals: sameTargets });
 

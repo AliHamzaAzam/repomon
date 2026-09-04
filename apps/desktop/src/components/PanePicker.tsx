@@ -83,6 +83,17 @@ export default function PanePicker(props: PanePickerProps) {
 
   const spanOf = (window: string): PaneSpan => props.spans?.[window] ?? { columns: 1, rows: 1 };
 
+  /// The picker's list, split so the repomind home's controllers are found under their own name
+  /// instead of under a repo the sidebar deliberately hides. The fleet keeps its incoming order.
+  const groups = () => {
+    const controllers = props.available.filter((target) => target.controller);
+    const fleet = props.available.filter((target) => !target.controller);
+    const list: Array<{ label: string; targets: PaneTarget[] }> = [];
+    if (controllers.length) list.push({ label: "Repomind", targets: controllers });
+    if (fleet.length) list.push({ label: "Fleet", targets: fleet });
+    return list;
+  };
+
   return (
     <div ref={root} class="relative shrink-0">
       <button
@@ -129,95 +140,106 @@ export default function PanePicker(props: PanePickerProps) {
           </div>
 
           <div class="min-h-0 overflow-y-auto p-1.5">
-            <For each={props.available}>
-              {(target) => {
-                const selected = () => selectedWindows().includes(target.window);
-                const selectedIndex = () => selectedWindows().indexOf(target.window);
-                const span = () => spanOf(target.window);
-                return (
-                  <div
-                    class={`group rounded-lg border px-2.5 py-2 transition-colors ${
-                      selected() ? "border-line bg-raised/45" : "border-transparent hover:bg-raised/25"
-                    }`}
-                  >
-                    <div class="flex min-w-0 items-center gap-2">
-                      <button
-                        type="button"
-                        class={`focus-ring flex size-5 shrink-0 items-center justify-center rounded border transition-colors ${
-                          selected() ? "border-signal bg-signal text-white" : "border-line text-transparent hover:border-signal/60"
-                        }`}
-                        aria-label={`${selected() ? "Hide" : "Show"} ${target.label}`}
-                        aria-pressed={selected()}
-                        onClick={() => toggle(target)}
-                      >
-                        <IconCheck size={12} />
-                      </button>
-                      <span class={target.shell ? "text-attention" : "text-signal"}>
-                        <AgentIcon agent={target.agent} shell={target.shell} size={14} />
-                      </span>
-                      <div class="min-w-0 flex-1">
-                        <div class="truncate text-xs font-medium text-foreground">{target.label}</div>
-                        <Show when={props.multitasking}>
-                          <div class="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[9px] uppercase tracking-wide text-muted">
-                            <span class="size-1.5 shrink-0 rounded-full" style={{ "background-color": paneAccent(target) }} />
-                            <span class="truncate">{target.repoName} / {target.branch || target.laneName}</span>
+            <For each={groups()}>
+              {(group) => (
+                <>
+                  {/* Only labelled when there is more than one group: with no controller running,
+                      an unlabelled flat list is exactly what the picker was before. */}
+                  <Show when={groups().length > 1}>
+                    <p class="section-label px-2.5 pb-1 pt-1.5">{group.label}</p>
+                  </Show>
+                  <For each={group.targets}>
+                    {(target) => {
+                      const selected = () => selectedWindows().includes(target.window);
+                      const selectedIndex = () => selectedWindows().indexOf(target.window);
+                      const span = () => spanOf(target.window);
+                      return (
+                        <div
+                          class={`group rounded-lg border px-2.5 py-2 transition-colors ${
+                            selected() ? "border-line bg-raised/45" : "border-transparent hover:bg-raised/25"
+                          }`}
+                        >
+                          <div class="flex min-w-0 items-center gap-2">
+                            <button
+                              type="button"
+                              class={`focus-ring flex size-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                                selected() ? "border-signal bg-signal text-white" : "border-line text-transparent hover:border-signal/60"
+                              }`}
+                              aria-label={`${selected() ? "Hide" : "Show"} ${target.label}`}
+                              aria-pressed={selected()}
+                              onClick={() => toggle(target)}
+                            >
+                              <IconCheck size={12} />
+                            </button>
+                            <span class={target.shell ? "text-attention" : "text-signal"}>
+                              <AgentIcon agent={target.agent} shell={target.shell} size={14} />
+                            </span>
+                            <div class="min-w-0 flex-1">
+                              <div class="truncate text-xs font-medium text-foreground">{target.label}</div>
+                              <Show when={props.multitasking}>
+                                <div class="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[9px] uppercase tracking-wide text-muted">
+                                  <span class="size-1.5 shrink-0 rounded-full" style={{ "background-color": paneAccent(target) }} />
+                                  <span class="truncate">{target.repoName} / {target.branch || target.laneName}</span>
+                                </div>
+                              </Show>
+                            </div>
+
+                            <Show when={selected()}>
+                              <div class="flex shrink-0 items-center gap-0.5">
+                                <button
+                                  type="button"
+                                  class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-background hover:text-foreground disabled:opacity-25"
+                                  aria-label={`Move ${target.label} earlier`}
+                                  disabled={selectedIndex() <= 0}
+                                  onClick={() => move(target.window, -1)}
+                                >
+                                  <IconArrowUp size={10} />
+                                </button>
+                                <button
+                                  type="button"
+                                  class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-background hover:text-foreground disabled:opacity-25"
+                                  aria-label={`Move ${target.label} later`}
+                                  disabled={selectedIndex() === selectedWindows().length - 1}
+                                  onClick={() => move(target.window, 1)}
+                                >
+                                  <IconArrowDown size={10} />
+                                </button>
+                              </div>
+                            </Show>
                           </div>
-                        </Show>
-                      </div>
 
-                      <Show when={selected()}>
-                        <div class="flex shrink-0 items-center gap-0.5">
-                          <button
-                            type="button"
-                            class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-background hover:text-foreground disabled:opacity-25"
-                            aria-label={`Move ${target.label} earlier`}
-                            disabled={selectedIndex() <= 0}
-                            onClick={() => move(target.window, -1)}
-                          >
-                            <IconArrowUp size={10} />
-                          </button>
-                          <button
-                            type="button"
-                            class="focus-ring flex size-5 items-center justify-center rounded text-muted hover:bg-background hover:text-foreground disabled:opacity-25"
-                            aria-label={`Move ${target.label} later`}
-                            disabled={selectedIndex() === selectedWindows().length - 1}
-                            onClick={() => move(target.window, 1)}
-                          >
-                            <IconArrowDown size={10} />
-                          </button>
+                          <Show when={props.multitasking && selected()}>
+                            <div class="mt-2 ml-12 flex items-center gap-2 border-t border-line/50 pt-2">
+                              <span class="font-mono text-[9px] uppercase tracking-wider text-muted">Footprint</span>
+                              <div class="ml-auto flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().columns === 1 ? "bg-foreground text-background" : "bg-background text-muted hover:text-foreground"}`}
+                                  aria-label={`${target.label}: one column wide`}
+                                  onClick={() => props.onSpanChange?.(target.window, { ...span(), columns: 1 })}
+                                >1×</button>
+                                <button
+                                  type="button"
+                                  class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().columns === 2 ? "bg-foreground text-background" : "bg-background text-muted hover:text-foreground"}`}
+                                  aria-label={`${target.label}: two columns wide`}
+                                  onClick={() => props.onSpanChange?.(target.window, { ...span(), columns: 2 })}
+                                >2×</button>
+                                <button
+                                  type="button"
+                                  class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().rows === 2 ? "bg-signal/15 text-signal" : "bg-background text-muted hover:text-foreground"}`}
+                                  aria-pressed={span().rows === 2}
+                                  aria-label={`${target.label}: toggle double height`}
+                                  onClick={() => props.onSpanChange?.(target.window, { ...span(), rows: span().rows === 2 ? 1 : 2 })}
+                                >Tall</button>
+                              </div>
+                            </div>
+                          </Show>
                         </div>
-                      </Show>
-                    </div>
-
-                    <Show when={props.multitasking && selected()}>
-                      <div class="mt-2 ml-12 flex items-center gap-2 border-t border-line/50 pt-2">
-                        <span class="font-mono text-[9px] uppercase tracking-wider text-muted">Footprint</span>
-                        <div class="ml-auto flex items-center gap-1">
-                          <button
-                            type="button"
-                            class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().columns === 1 ? "bg-foreground text-background" : "bg-background text-muted hover:text-foreground"}`}
-                            aria-label={`${target.label}: one column wide`}
-                            onClick={() => props.onSpanChange?.(target.window, { ...span(), columns: 1 })}
-                          >1×</button>
-                          <button
-                            type="button"
-                            class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().columns === 2 ? "bg-foreground text-background" : "bg-background text-muted hover:text-foreground"}`}
-                            aria-label={`${target.label}: two columns wide`}
-                            onClick={() => props.onSpanChange?.(target.window, { ...span(), columns: 2 })}
-                          >2×</button>
-                          <button
-                            type="button"
-                            class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().rows === 2 ? "bg-signal/15 text-signal" : "bg-background text-muted hover:text-foreground"}`}
-                            aria-pressed={span().rows === 2}
-                            aria-label={`${target.label}: toggle double height`}
-                            onClick={() => props.onSpanChange?.(target.window, { ...span(), rows: span().rows === 2 ? 1 : 2 })}
-                          >Tall</button>
-                        </div>
-                      </div>
-                    </Show>
-                  </div>
-                );
-              }}
+                      );
+                    }}
+                  </For>
+                </>
+              )}
             </For>
           </div>
           </section>

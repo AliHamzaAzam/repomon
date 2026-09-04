@@ -317,4 +317,29 @@ describe("SupervisionPanel", () => {
     const indicator = screen.getByLabelText("Supervision status indicator");
     expect(indicator.getAttribute("title")).toContain("Last action: approve (sent)");
   });
+
+  it("treats the repomind controller lane like any other lane", async () => {
+    // The sidebar hides the home from the repo groups; Supervision does not. Selecting the pinned
+    // row makes the controller lane the selected lane, and this panel edits it as usual.
+    const lane = { ...sampleLane(90), role: "controller" };
+    const fleet = { selectedLane: () => lane } as unknown as FleetStore;
+
+    mockRpc({
+      "supervision.get": () => ({
+        defaults: defaultDefaults(),
+        lane: null,
+        // What ensure-home seeds for the controller: hold on the destructive classes.
+        effective: defaultEffective({
+          enabled: false,
+          classes: { ...defaultEffective().classes, deletion: "hold", push_remote: "hold" },
+        }),
+      }),
+      "supervision.audit": () => ({ entries: [] }),
+    });
+
+    render(() => <SupervisionPanel fleet={fleet} />);
+
+    await waitFor(() => expect(screen.getByText("Permission policies")).toBeInTheDocument());
+    expect(calls.list.some((call) => call.method === "supervision.get" && (call.params as { lane_id: number }).lane_id === 90)).toBe(true);
+  });
 });
