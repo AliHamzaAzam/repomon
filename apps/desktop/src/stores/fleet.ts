@@ -53,6 +53,21 @@ export const daemonFleetSource: FleetSource = {
 
 export type LaneTone = "attention" | "fault" | "signal" | "muted";
 
+/// The repomind home's lane, flagged by the daemon when it ensures the home repo. It stays a
+/// normal lane in every other respect (file RPCs, supervision and Multitasking treat it like any
+/// other), but the sidebar gives it the pinned Repomind row instead of a repo group, and its
+/// agents are counted there rather than in the chips and repo headers.
+export function isControllerLane(lane: Pick<Lane, "role">): boolean {
+  return lane.role === "controller";
+}
+
+/// Whether a repo is the repomind home: every lane it owns is a controller lane. A repo with no
+/// lanes at all is an ordinary empty repo, not the home.
+export function isControllerRepo(repoId: number, lanes: Lane[]): boolean {
+  const owned = lanes.filter((lane) => lane.repo.id === repoId);
+  return owned.length > 0 && owned.every(isControllerLane);
+}
+
 function isRepoSortMode(value: string): value is RepoSortMode {
   return value === "default" || value === "activity" || value === "manual";
 }
@@ -237,6 +252,31 @@ export function fleetCounts(lanes: Lane[]): FleetCounts {
   return counts;
 }
 
+/// What the pinned Repomind row says: which lane carries the controllers, how many are in it, the
+/// most urgent state among them, and how many of those want the operator.
+///
+/// The state deliberately reuses `agentState`'s vocabulary, so the pinned row's pill and a lane
+/// pill in the groups below can never describe the same agent with two different words. A lane
+/// with no live controller has `state: null`, which the row renders as "off".
+export interface ControllerSummary {
+  lane: Lane | null;
+  agents: number;
+  state: AgentState | null;
+  urgent: number;
+}
+
+export function controllerSummary(lanes: Lane[]): ControllerSummary {
+  const controllers = lanes.filter(isControllerLane);
+  const sessions = controllers.flatMap((lane) => lane.agent_sessions);
+  const states = new Set(sessions.map(agentState));
+  return {
+    lane: controllers[0] ?? null,
+    agents: sessions.length,
+    state: STATE_PRIORITY.find((state) => states.has(state)) ?? null,
+    urgent: sessions.filter((session) => isUrgentState(agentState(session))).length,
+  };
+}
+
 /// The usage-probe key for the account a session runs under, matching how the daemon keys its
 /// reports. Codex has one account and is probed under `"codex"`; Claude is keyed by config dir
 /// (`config_dir: null` = the default `~/.claude`, else the dir path). Branching on the agent
@@ -396,17 +436,28 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   // The daemon keeps returning hidden repos (flagged) so we can offer a way back; everything that
   // renders the fleet works from `visibleRepos` / `visibleLanes` / `unhiddenLanes` instead.
   const visibleRepos = createMemo(() =>
-    orderRepos(repos().filter((repo) => !repo.hidden), lanes(), sortMode()),
+    orderRepos(
+      // The repomind home is pinned above the groups instead of being one of them.
+      repos().filter((repo) => !repo.hidden && !isControllerRepo(repo.id, lanes())),
+      lanes(),
+      sortMode(),
+    ),
   );
   const hiddenRepos = createMemo(() => repos().filter((repo) => repo.hidden));
   // Everything a hidden repo owns goes with it, including its share of the urgent/running counts:
   // a badge you cannot click through to is just noise.
   const unhiddenLanes = createMemo(() => lanes().filter((lane) => !lane.repo.hidden));
+  // The lanes the repo groups actually render, and so the set every header count and filter chip
+  // is drawn from. Controller lanes are excluded on purpose: the pinned Repomind row carries
+  // their agents, and counting them twice would make a chip disagree with the rows under it.
+  const fleetLanes = createMemo(() => unhiddenLanes().filter((lane) => !isControllerLane(lane)));
+  const controllerLanes = createMemo(() => lanes().filter(isControllerLane));
+  const controller = createMemo(() => controllerSummary(lanes()));
 
   // Every filter reads the same `agentState` the rows and chips do, so a chip can never select a
   // set the rows disagree with.
   const visibleLanes = createMemo(() =>
-    unhiddenLanes()
+    fleetLanes()
       .filter((lane) => matchesLane(lane, query()))
       .filter((lane) => !urgentOnly() || laneIndicator(lane).urgent)
       .filter(
@@ -423,7 +474,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   // The usage pill follows the focused agent's account rather than always the first probe.
   const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane(), focusedWindow()));
 
-  const counts = createMemo(() => fleetCounts(unhiddenLanes()));
+  const counts = createMemo(() => fleetCounts(fleetLanes()));
 
   async function refresh() {
     if (!active) return;
@@ -450,7 +501,10 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       // in was just hidden.
       const selectable = snapshot.lanes.filter((lane) => !lane.repo.hidden);
       if (current === null || !selectable.some((lane) => lane.id === current)) {
-        setSelectedLaneId([...selectable].sort(byPriority)[0]?.id ?? null);
+        // The repomind home is selectable (the pinned row selects it) but never the default:
+        // landing there on first sync would leave every repo group unhighlighted.
+        const ordinary = selectable.filter((lane) => !isControllerLane(lane));
+        setSelectedLaneId([...ordinary].sort(byPriority)[0]?.id ?? null);
       }
     } catch (cause) {
       if (active) setError(cause instanceof Error ? cause.message : String(cause));
@@ -498,7 +552,11 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   }
 
   function moveSelection(delta: number, urgent = false) {
-    const candidates = visibleLanes().filter((lane) => !urgent || laneIndicator(lane).urgent);
+    // The pinned Repomind row is the sidebar's first stop, so arrow navigation starts there and
+    // then walks the repo groups in their rendered order.
+    const candidates = [...controllerLanes(), ...visibleLanes()].filter(
+      (lane) => !urgent || laneIndicator(lane).urgent,
+    );
     if (!candidates.length) return;
     const index = candidates.findIndex((lane) => lane.id === selectedLaneId());
     const next = index < 0 ? 0 : (index + delta + candidates.length) % candidates.length;
@@ -511,6 +569,9 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     hiddenRepos,
     lanes,
     unhiddenLanes,
+    fleetLanes,
+    controllerLanes,
+    controller,
     usage,
     focusedUsage,
     terminals,

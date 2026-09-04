@@ -623,7 +623,7 @@ function App(props: AppProps) {
           <div class="flex h-10 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5">
             <span class="section-label">Fleet</span>
             <span class="font-mono text-[10px] text-muted">
-              {fleet.visibleRepos().length} repos · {fleet.unhiddenLanes().length} lanes
+              {fleet.visibleRepos().length} repos · {fleet.fleetLanes().length} lanes
             </span>
           </div>
           <FleetSidebar

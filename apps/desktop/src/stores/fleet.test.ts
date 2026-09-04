@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import {
   agentState,
+  controllerSummary,
   createFleetStore,
   fleetCounts,
+  isControllerRepo,
   laneIndicator,
   laneIndicatorTitle,
   matchesLane,
@@ -433,5 +435,97 @@ describe("fleet presentation", () => {
     // External + stale -> external (not stalled)
     const extStale = lane({ agent_sessions: [agent({ status: "running", external: true, stale: true })] });
     expect(laneIndicator(extStale)).toEqual({ label: "external", tone: "muted", urgent: false });
+  });
+});
+
+describe("the repomind home", () => {
+  const home = repo(9, "repomind");
+  const project = repo(1, "repomon");
+
+  it("keeps the home out of the repo groups, the lane counts, and the chip counts", async () => {
+    const lanes = [
+      lane({ id: 10, repo: project, agent_sessions: [agent({ status: "running" })] }),
+      lane({
+        id: 90,
+        repo: home,
+        role: "controller",
+        agent_sessions: [agent({ status: "running" }), agent({ status: "waiting" })],
+      }),
+    ];
+    const { fleet, teardown } = await startedStore([project, home], lanes);
+    await fleet.refresh();
+
+    expect(fleet.visibleRepos().map((r) => r.id)).toEqual([1]);
+    expect(fleet.visibleLanes().map((l) => l.id)).toEqual([10]);
+    expect(fleet.fleetLanes().map((l) => l.id)).toEqual([10]);
+    // The controller's running agent and its waiting one are counted by the pinned row instead.
+    expect(fleet.counts()).toEqual({ urgent: 0, running: 1, idle: 0 });
+    // Auto-selection lands in the project, never in the home.
+    expect(fleet.selectedLaneId()).toBe(10);
+    // The daemon still hands the lane over, so the pinned row and Multitasking can use it.
+    expect(fleet.controllerLanes().map((l) => l.id)).toEqual([90]);
+    teardown();
+  });
+
+  it("holds an explicit selection of the home across a refresh", async () => {
+    const lanes = [
+      lane({ id: 10, repo: project }),
+      lane({ id: 90, repo: home, role: "controller" }),
+    ];
+    const { fleet, teardown } = await startedStore([project, home], lanes);
+    await fleet.refresh();
+
+    fleet.setSelectedLaneId(90);
+    await fleet.refresh();
+    expect(fleet.selectedLaneId()).toBe(90);
+    teardown();
+  });
+
+  it("makes the pinned row the first stop of arrow navigation", async () => {
+    const lanes = [
+      lane({ id: 10, repo: project }),
+      lane({ id: 11, repo: project }),
+      lane({ id: 90, repo: home, role: "controller" }),
+    ];
+    const { fleet, teardown } = await startedStore([project, home], lanes);
+    await fleet.refresh();
+
+    fleet.setSelectedLaneId(90);
+    fleet.moveSelection(1);
+    expect(fleet.selectedLaneId()).toBe(fleet.visibleLanes()[0].id);
+    fleet.moveSelection(-1);
+    expect(fleet.selectedLaneId()).toBe(90);
+    teardown();
+  });
+
+  it("still shows a repo that owns both a controller lane and ordinary ones", () => {
+    const mixed = [
+      lane({ id: 90, repo: home, role: "controller" }),
+      lane({ id: 91, repo: home }),
+    ];
+    expect(isControllerRepo(home.id, mixed)).toBe(false);
+    expect(isControllerRepo(home.id, [mixed[0]])).toBe(true);
+    // A repo with no lanes is empty, not the home.
+    expect(isControllerRepo(project.id, mixed)).toBe(false);
+  });
+
+  it("summarizes the controllers with the fleet's own state vocabulary", () => {
+    const idle = controllerSummary([lane({ id: 10, repo: project, agent_sessions: [agent()] })]);
+    expect(idle).toEqual({ lane: null, agents: 0, state: null, urgent: 0 });
+
+    const live = controllerSummary([
+      lane({ id: 10, repo: project, agent_sessions: [agent({ status: "running" })] }),
+      lane({
+        id: 90,
+        repo: home,
+        role: "controller",
+        agent_sessions: [agent({ status: "running" }), agent({ status: "waiting" })],
+      }),
+    ]);
+    expect(live.lane?.id).toBe(90);
+    expect(live.agents).toBe(2);
+    // "needs you" outranks "running", and only the controllers are counted.
+    expect(live.state).toBe("needs-you");
+    expect(live.urgent).toBe(1);
   });
 });
