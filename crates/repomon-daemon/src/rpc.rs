@@ -1542,7 +1542,9 @@ async fn resize_agent_grid(
 
 /// Dispatch a single request to its handler.
 pub async fn dispatch(
-    ctx: &Ctx,
+    // The `Arc` (rather than a bare `&Ctx`) so a handler can hand an owned context to a
+    // background task: the repomind boot announcement outlives the RPC that started it.
+    ctx: &Arc<Ctx>,
     sess: &Arc<ConnSession>,
     method: &str,
     params: Option<Value>,
@@ -3481,6 +3483,20 @@ pub async fn dispatch(
                     return Err(RpcError::invalid_params(refusal));
                 }
             }
+            // A controller reads the fleet's memory before it does anything, so the boot document
+            // is reassembled for this exact spawn. A home that cannot be written is logged and
+            // skipped: a controller with no boot context is still better than a failed spawn.
+            let boot = if is_controller {
+                match crate::repomind::boot::regenerate(ctx).await {
+                    Ok(run) => Some(run.path),
+                    Err(error) => {
+                        tracing::warn!("repomind boot context unavailable: {error}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             // Resolve the chosen name to a command AND the kind whose flag dialect we translate
             // launch options for: a config custom wins (kind inferred from the command it runs, so
@@ -3560,6 +3576,10 @@ pub async fn dispatch(
             } else {
                 plan.command
             };
+            let command = match boot.as_deref() {
+                Some(boot) => attach_boot_context(command, &kind, boot),
+                None => command,
+            };
             let mut spec = agent_spawn_spec(command, path, &kind);
             // A controller gets the full catalog; every other lane gets the restricted worker one.
             let mcp_mode = if is_controller {
@@ -3575,7 +3595,7 @@ pub async fn dispatch(
                 ("REPOMON_MCP_MODE".into(), mcp_mode.into()),
                 ("REPOMON_MCP_IDENTITY_TOKEN".into(), identity_token),
             ]);
-            configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
+            configure_backend_mcp(&kind, &mut spec, boot.as_deref()).map_err(internal)?;
             let inject = plan.effort_inject;
             // Hermes has no persistent-mode initial-prompt flag: `-q` is single-turn and exits.
             // Defer its task until the real TUI reports ready, then submit it like an operator.
@@ -3649,6 +3669,19 @@ pub async fn dispatch(
                     .set_mcp_identity_process_fingerprint(token_for_fingerprint, fingerprint)
                     .await
                     .map_err(internal)?;
+            }
+            // Backends with no launch-time context mechanism are told where the boot document
+            // is, once their composer is actually ready for a line.
+            if boot.is_some()
+                && crate::repomind::boot::delivery(&kind)
+                    == crate::repomind::boot::Delivery::TypedLine
+            {
+                crate::repomind::boot::announce_typed_line(
+                    ctx.clone(),
+                    p.lane_id,
+                    window.clone(),
+                    Some(kind.as_str().into_owned()),
+                );
             }
             let label_key = managed_session_key(&window);
             reset_managed_session_labels(ctx, &label_key).await;
@@ -3816,7 +3849,9 @@ pub async fn dispatch(
                 ("REPOMON_MCP_MODE".into(), "agent".into()),
                 ("REPOMON_MCP_IDENTITY_TOKEN".into(), token),
             ]);
-            configure_backend_mcp(&kind, &mut spec).map_err(internal)?;
+            // Adopt resumes a session that already has its own context; only a fresh spawn is
+            // handed the boot document.
+            configure_backend_mcp(&kind, &mut spec, None).map_err(internal)?;
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
             let kind_str = kind.as_str().into_owned();
@@ -4782,6 +4817,15 @@ pub async fn dispatch(
             // Make that lane (and the home repo behind it) exist before anything else: this is the
             // path a fresh machine takes on its very first start.
             let home = crate::repomind::ensure_home(ctx).await.map_err(internal)?;
+            // The controller's boot context, reassembled for this start. Logged and skipped on
+            // failure: repomind starting without its memory beats repomind not starting.
+            let boot = match crate::repomind::boot::regenerate(ctx).await {
+                Ok(run) => Some(run.path),
+                Err(error) => {
+                    tracing::warn!("repomind boot context unavailable: {error}");
+                    None
+                }
+            };
             // Clear a session whose window died externally so a restart actually re-spawns instead
             // of no-op'ing on a corpse.
             reconcile_orchestrator(ctx).await;
@@ -4888,6 +4932,7 @@ pub async fn dispatch(
                         &model,
                         &p.prompt,
                         &session_id,
+                        boot.as_deref(),
                     );
                     (command, Some(session_id))
                 }
@@ -4925,6 +4970,7 @@ pub async fn dispatch(
                         p.max_agents,
                         &model,
                         &p.prompt,
+                        boot.as_deref(),
                     )
                     .map_err(internal)?;
                     (command, None)
@@ -4964,6 +5010,21 @@ pub async fn dispatch(
                     .store
                     .set_lane_agent_kind(lane_id, Some(name.clone()))
                     .await;
+            }
+            // Codex and Antigravity take no system-prompt file, so the boot document is announced
+            // as the first line typed into the composer once it is ready.
+            if boot.is_some()
+                && matches!(
+                    backend,
+                    crate::OrchestratorBackend::Codex | crate::OrchestratorBackend::Antigravity
+                )
+            {
+                crate::repomind::boot::announce_typed_line(
+                    ctx.clone(),
+                    lane_id,
+                    window.clone(),
+                    agent.clone(),
+                );
             }
             ctx.invalidate_overlay().await;
             let session = crate::OrchestratorSession {
@@ -8164,7 +8225,24 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
 /// applied transparently. Completely unknown custom commands receive no MCP wiring.
 ///
 /// `Aider` has no native MCP client support as of its current release; no wiring is attempted.
-fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), String> {
+/// Attach the assembled boot document to a launch command, for the kinds whose CLI takes it as
+/// a launch flag. Every other kind is handed the document another way (OpenCode through its
+/// instructions list, the rest as a typed first line), so its command comes back unchanged.
+fn attach_boot_context(command: String, kind: &AgentKind, boot: &Path) -> String {
+    match crate::repomind::boot::delivery(kind) {
+        crate::repomind::boot::Delivery::AppendSystemPromptFile => format!(
+            "{command} --append-system-prompt-file {}",
+            shell_quote(&boot.to_string_lossy())
+        ),
+        _ => command,
+    }
+}
+
+fn configure_backend_mcp(
+    kind: &AgentKind,
+    spec: &mut SpawnSpec,
+    boot: Option<&Path>,
+) -> Result<(), String> {
     match kind {
         AgentKind::OpenCode => {
             let raw_existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
@@ -8175,6 +8253,7 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
                     "REPOMON_MCP_MODE",
                     "REPOMON_MCP_IDENTITY_TOKEN",
                 ],
+                boot,
             )?;
             spec.env
                 .push(("OPENCODE_CONFIG_CONTENT".into(), config_json));
@@ -8194,7 +8273,7 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
             // Fully unknown commands silently receive no MCP wiring.
             let dialect = kind_from_command(&spec.program);
             if !matches!(dialect, AgentKind::Other(_)) {
-                configure_backend_mcp(&dialect, spec)?;
+                configure_backend_mcp(&dialect, spec, boot)?;
             }
         }
         // ClaudeCode and Codex wiring is handled at the call site via attach_agent_mcp /
@@ -8212,6 +8291,7 @@ fn configure_backend_mcp(kind: &AgentKind, spec: &mut SpawnSpec) -> Result<(), S
 pub(crate) fn build_opencode_config_content(
     existing: Option<&str>,
     env_vars: &[&str],
+    boot: Option<&Path>,
 ) -> Result<String, String> {
     let mut root = match existing {
         Some(raw) if !raw.trim().is_empty() => serde_json::from_str::<serde_json::Value>(raw)
@@ -8238,6 +8318,20 @@ pub(crate) fn build_opencode_config_content(
             "environment": environment_map
         }),
     );
+    // OpenCode's own "additional instruction files" list is where the boot document belongs:
+    // the operator's entries are preserved, and re-adding the same path is a no-op.
+    if let Some(boot) = boot {
+        let boot = boot.to_string_lossy().into_owned();
+        let list = root_object
+            .entry("instructions")
+            .or_insert_with(|| json!([]));
+        let list = list
+            .as_array_mut()
+            .ok_or_else(|| "OPENCODE_CONFIG_CONTENT.instructions must be an array".to_string())?;
+        if !list.iter().any(|v| v.as_str() == Some(boot.as_str())) {
+            list.push(json!(boot));
+        }
+    }
     serde_json::to_string(&root).map_err(|error| error.to_string())
 }
 
@@ -8406,12 +8500,19 @@ fn build_claude_orchestrator_command(
     model: &Option<String>,
     prompt: &Option<String>,
     session_id: &str,
+    boot: Option<&Path>,
 ) -> String {
     let mut command = base.to_string();
     command.push_str(" --mcp-config ");
     command.push_str(&shell_quote(&mcp_config_path.to_string_lossy()));
     command.push_str(" --append-system-prompt ");
     command.push_str(&shell_quote(repomon_mcp::PERSONA));
+    // The assembled boot context, appended on top of the persona rather than replacing it.
+    // `--append-system-prompt-file` verified against the installed `claude` (2.1.260).
+    if let Some(boot) = boot {
+        command.push_str(" --append-system-prompt-file ");
+        command.push_str(&shell_quote(&boot.to_string_lossy()));
+    }
     command.push_str(" --allowedTools mcp__repomon,mcp__basic-memory");
     command.push_str(" --session-id ");
     command.push_str(&shell_quote(session_id));
@@ -8588,13 +8689,15 @@ fn build_opencode_orchestrator_command(
     max_agents: Option<usize>,
     model: &Option<String>,
     prompt: &Option<String>,
+    boot: Option<&Path>,
 ) -> Result<String, String> {
     let mut env_var_names = vec!["REPOMON_MCP_SOCKET", "REPOMON_MCP_AUTONOMY"];
     if max_agents.is_some() {
         env_var_names.push("REPOMON_MCP_MAX_AGENTS");
     }
     let raw_existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
-    let config_json = build_opencode_config_content(raw_existing.as_deref(), &env_var_names)?;
+    let config_json =
+        build_opencode_config_content(raw_existing.as_deref(), &env_var_names, boot)?;
 
     let mut env_parts = vec![
         format!("OPENCODE_CONFIG_CONTENT={}", shell_quote(&config_json)),
@@ -10920,6 +11023,7 @@ mod tests {
             Some(4),
             &None,
             &None,
+            None,
         )
         .unwrap();
         assert!(
@@ -10968,6 +11072,7 @@ mod tests {
             None,
             &Some("anthropic/claude-3-7-sonnet".into()),
             &Some("coordinate lane-1 and lane-2".into()),
+            None,
         )
         .unwrap();
         assert!(!cmd.contains("REPOMON_MCP_MAX_AGENTS"), "{cmd}");
@@ -10985,6 +11090,7 @@ mod tests {
             None,
             &None,
             &None,
+            None,
         )
         .unwrap();
         assert!(cmd.contains("REPOMON_MCP_AUTONOMY='read-only'"), "{cmd}");
@@ -11000,6 +11106,7 @@ mod tests {
                 "REPOMON_MCP_MODE",
                 "REPOMON_MCP_IDENTITY_TOKEN",
             ],
+            None,
         )
         .unwrap();
         let worker_val: serde_json::Value = serde_json::from_str(&worker_json).unwrap();
@@ -11027,6 +11134,7 @@ mod tests {
                 "REPOMON_MCP_AUTONOMY",
                 "REPOMON_MCP_MAX_AGENTS",
             ],
+            None,
         )
         .unwrap();
         let orch_val: serde_json::Value = serde_json::from_str(&orch_json).unwrap();
@@ -11093,7 +11201,7 @@ mod tests {
                 "secret-worker-token-xyz".into(),
             ),
         ]);
-        configure_backend_mcp(&AgentKind::Cursor, &mut spec).unwrap();
+        configure_backend_mcp(&AgentKind::Cursor, &mut spec, None).unwrap();
         assert!(config_path.exists(), "mcp.json must be created");
         let content = std::fs::read_to_string(&config_path).unwrap();
         let val: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -11122,7 +11230,7 @@ mod tests {
             std::env::set_var("REPOMON_ANTIGRAVITY_MCP_CONFIG", &mcp_cfg);
         }
         let mut spec = SpawnSpec::new("agy --mode plan", dir.path());
-        configure_backend_mcp(&AgentKind::Other("my-agy-wrapper".into()), &mut spec).unwrap();
+        configure_backend_mcp(&AgentKind::Other("my-agy-wrapper".into()), &mut spec, None).unwrap();
         // The Antigravity registration should have fired (dialect detected from spec.program).
         assert!(
             mcp_cfg.exists(),
@@ -11135,7 +11243,7 @@ mod tests {
             std::env::set_var("REPOMON_CURSOR_MCP_CONFIG", &cursor_cfg);
         }
         let mut spec2 = SpawnSpec::new("cursor-agent --approve-mcps", dir.path());
-        configure_backend_mcp(&AgentKind::Other("my-cursor-wrapper".into()), &mut spec2).unwrap();
+        configure_backend_mcp(&AgentKind::Other("my-cursor-wrapper".into()), &mut spec2, None).unwrap();
         assert!(
             cursor_cfg.exists(),
             "Cursor mcp.json must be created for cursor-agent wrapper"
@@ -11144,7 +11252,7 @@ mod tests {
         // A completely unknown custom command must produce no error and no file.
         let unknown_cfg = dir.path().join("unknown.json");
         let mut spec3 = SpawnSpec::new("my-exotic-agent", dir.path());
-        configure_backend_mcp(&AgentKind::Other("exotic".into()), &mut spec3).unwrap();
+        configure_backend_mcp(&AgentKind::Other("exotic".into()), &mut spec3, None).unwrap();
         assert!(
             !unknown_cfg.exists(),
             "unknown binary must not produce any config file"
@@ -11158,7 +11266,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut spec = SpawnSpec::new("aider", dir.path());
         let env_before: Vec<_> = spec.env.clone();
-        configure_backend_mcp(&AgentKind::Aider, &mut spec).unwrap();
+        configure_backend_mcp(&AgentKind::Aider, &mut spec, None).unwrap();
         assert_eq!(spec.env, env_before, "Aider must not alter spec.env");
     }
 
@@ -11439,12 +11547,87 @@ mod tests {
         );
     }
 
+    /// The boot document rides in as a *second*, file-form system-prompt append. The shipped
+    /// persona stays the system prompt; the boot file is added to it, never substituted for it.
+    #[test]
+    fn the_claude_orchestrator_command_appends_the_boot_file_alongside_the_persona() {
+        let path = PathBuf::from("/tmp/repomind-mcp.json");
+        let boot = PathBuf::from("/home/me/repomind/.repomind/boot.md");
+        let sid = "11111111-1111-4111-8111-111111111111";
+
+        let cmd = build_claude_orchestrator_command(
+            "claude",
+            &path,
+            &None,
+            &None,
+            sid,
+            Some(boot.as_path()),
+        );
+
+        assert!(
+            cmd.contains("--append-system-prompt-file '/home/me/repomind/.repomind/boot.md'"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("--append-system-prompt "), "the persona must survive: {cmd}");
+
+        // No boot file (the home could not be assembled): the command is exactly what it was.
+        let without = build_claude_orchestrator_command("claude", &path, &None, &None, sid, None);
+        assert!(!without.contains("--append-system-prompt-file"), "{without}");
+    }
+
+    /// OpenCode has its own documented "additional instruction files" list, so the boot document
+    /// joins it instead of being typed into the composer.
+    #[test]
+    fn the_opencode_config_lists_the_boot_file_as_an_instruction() {
+        let boot = PathBuf::from("/home/me/repomind/.repomind/boot.md");
+
+        let json = build_opencode_config_content(None, &["REPOMON_MCP_SOCKET"], Some(&boot))
+            .expect("config content");
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed["instructions"],
+            json!(["/home/me/repomind/.repomind/boot.md"])
+        );
+        // The MCP registration is untouched by the addition.
+        assert_eq!(parsed["mcp"]["repomon"]["type"], json!("local"));
+
+        // An operator's own instructions list is preserved, and the boot file is not duplicated.
+        let existing = r#"{"instructions":["/home/me/RULES.md","/home/me/repomind/.repomind/boot.md"]}"#;
+        let merged =
+            build_opencode_config_content(Some(existing), &[], Some(&boot)).expect("merged");
+        let parsed: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            parsed["instructions"],
+            json!(["/home/me/RULES.md", "/home/me/repomind/.repomind/boot.md"])
+        );
+    }
+
+    /// A worker agent's launch command is only touched for the kinds that take a launch flag.
+    #[test]
+    fn the_boot_file_is_attached_only_to_the_kinds_that_take_a_launch_flag() {
+        let boot = PathBuf::from("/home/me/repomind/.repomind/boot.md");
+
+        assert_eq!(
+            attach_boot_context("claude".into(), &AgentKind::ClaudeCode, &boot),
+            "claude --append-system-prompt-file '/home/me/repomind/.repomind/boot.md'"
+        );
+        assert_eq!(
+            attach_boot_context("codex".into(), &AgentKind::Codex, &boot),
+            "codex"
+        );
+        assert_eq!(
+            attach_boot_context("agy".into(), &AgentKind::Antigravity, &boot),
+            "agy"
+        );
+    }
+
     #[test]
     fn orchestrator_command_wires_mcp_persona_and_tools() {
         let path = PathBuf::from("/tmp/repomind-mcp.json");
         let sid = "11111111-1111-4111-8111-111111111111";
         // No model, no prompt: the core wiring is always present.
-        let cmd = build_claude_orchestrator_command("claude", &path, &None, &None, sid);
+        let cmd = build_claude_orchestrator_command("claude", &path, &None, &None, sid, None);
         assert!(cmd.starts_with("claude --mcp-config "));
         assert!(cmd.contains("/tmp/repomind-mcp.json"));
         assert!(cmd.contains("--append-system-prompt"));
@@ -11463,6 +11646,7 @@ mod tests {
             &Some("opus".into()),
             &Some("what needs me?".into()),
             sid,
+            None,
         );
         assert!(cmd.starts_with("CLAUDE_CONFIG_DIR=/h/.claude-work claude "));
         assert!(cmd.contains("--model 'opus'"));
@@ -11471,7 +11655,7 @@ mod tests {
 
         // An empty prompt is dropped (not quoted as an empty arg).
         let cmd =
-            build_claude_orchestrator_command("claude", &path, &None, &Some(String::new()), sid);
+            build_claude_orchestrator_command("claude", &path, &None, &Some(String::new()), sid, None);
         assert!(!cmd.trim_end().ends_with("''"));
     }
 

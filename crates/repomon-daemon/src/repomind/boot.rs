@@ -36,6 +36,43 @@ const HEADER: &str = "# Repomind boot context\n\n\
      `repomind.boot`, so never hand-edit it. Live fleet state beats anything written here: read\n\
      it with the fleet tools.\n";
 
+/// How a backend receives the boot document. Each arm is what that CLI actually supports, so a
+/// release that adds a real instructions mechanism is a one-line change here plus its wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Claude: `--append-system-prompt-file <path>`, appended on top of the shipped persona
+    /// (which stays the system prompt) rather than substituted for it.
+    AppendSystemPromptFile,
+    /// OpenCode: the path joins its config's `instructions` list, which is the CLI's own
+    /// documented "additional instruction files" mechanism.
+    InstructionsFile,
+    /// Codex and Antigravity: neither takes a system-prompt file, so the boot document is
+    /// announced as the first line typed into the composer once the session is ready.
+    TypedLine,
+}
+
+/// The marker the verified composer submission watches for, exactly as fleet mail uses one.
+pub const TYPED_MARKER: &str = "[END REPOMIND BOOT]";
+
+/// Which delivery a spawned agent kind gets. Anything with no launch-time context mechanism
+/// falls back to the typed line, which works on any TUI.
+pub fn delivery(kind: &repomon_core::model::AgentKind) -> Delivery {
+    use repomon_core::model::AgentKind::*;
+    match kind {
+        ClaudeCode => Delivery::AppendSystemPromptFile,
+        OpenCode => Delivery::InstructionsFile,
+        _ => Delivery::TypedLine,
+    }
+}
+
+/// The first line typed into a [`Delivery::TypedLine`] backend's composer. The controller's cwd
+/// is the home, so the home-relative path is the one the agent can open.
+pub fn typed_line() -> String {
+    format!(
+        "Read {BOOT_REL} in your working directory before anything else. It is your boot          context: the operator's overlay, the fleet profile, the active plans, the recent          journal, and a snapshot of every lane. {TYPED_MARKER}"
+    )
+}
+
 /// One lane of the fleet as the snapshot renders it. Built by the daemon from `lane.list`, and
 /// passed in rather than read here so the assembly stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +225,100 @@ pub struct BootRun {
     pub tokens_estimate: usize,
     pub trimmed: Vec<String>,
     pub generated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// How long to keep waiting for a freshly spawned CLI's composer to accept a typed line. A cold
+/// Codex or Antigravity start is a few seconds; a machine under load is more.
+const ANNOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_secs(90);
+/// How often to re-check readiness inside that window.
+const ANNOUNCE_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+/// How many verified sends to attempt once the session looks ready. Each writes exactly one
+/// supervision row, so this is deliberately small.
+const ANNOUNCE_ATTEMPTS: usize = 3;
+
+/// The managed session in `window` on `lane_id` that is safe to type a line into right now.
+/// The same eligibility fleet mail uses: repomon-managed, in a real window, and with neither a
+/// dialog nor a prompt already waiting on the operator.
+pub fn ready_target<'a>(
+    lanes: &'a [repomon_core::model::Lane],
+    lane_id: repomon_core::model::LaneId,
+    window: &str,
+) -> Option<&'a repomon_core::model::AgentSession> {
+    lanes
+        .iter()
+        .find(|lane| lane.id == lane_id)?
+        .agent_sessions
+        .iter()
+        .find(|s| {
+            s.tmux_window.as_deref() == Some(window) && crate::mail::injection_eligible(s)
+        })
+}
+
+/// Announce the boot document to a backend with no launch-time context mechanism, by typing one
+/// line into its composer once the session is ready.
+///
+/// Backgrounded on purpose: a spawn must return as soon as the window exists, and the CLI behind
+/// it takes seconds to draw a composer. Delivery goes through the same verified injection fleet
+/// mail uses, so it can never type over a busy composer, and it gives up quietly rather than
+/// retrying forever into a window that never became ready.
+pub fn announce_typed_line(
+    ctx: std::sync::Arc<crate::Ctx>,
+    lane_id: repomon_core::model::LaneId,
+    window: String,
+    agent_kind: Option<String>,
+) {
+    tokio::spawn(async move {
+        let deadline = std::time::Instant::now() + ANNOUNCE_WINDOW;
+        let mut attempts = 0;
+        while std::time::Instant::now() < deadline && attempts < ANNOUNCE_ATTEMPTS {
+            tokio::time::sleep(ANNOUNCE_POLL).await;
+            let lanes = ctx.lanes.list().await.unwrap_or_default();
+            let Some(session) = ready_target(&lanes, lane_id, &window) else {
+                continue;
+            };
+            let seed = crate::inject::AuditSeed {
+                lane_id,
+                window: window.clone(),
+                session_id: session.session_id.clone(),
+                agent_kind: agent_kind.clone(),
+                trigger: "boot".to_string(),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "boot_context".to_string(),
+                policy_source: None,
+                reason: Some("repomind boot context".to_string()),
+                subject: None,
+                pane_excerpt: None,
+            };
+            attempts += 1;
+            match crate::inject::verified_send(
+                &ctx,
+                crate::inject::Expectation::IdleNoDialog,
+                crate::inject::Payload::VerifiedLine {
+                    text: typed_line(),
+                    marker: TYPED_MARKER.to_string(),
+                },
+                seed,
+            )
+            .await
+            {
+                crate::inject::SendOutcome::Sent { .. } => {
+                    tracing::info!("repomind boot context announced to {window}");
+                    return;
+                }
+                crate::inject::SendOutcome::Skipped { reason, .. } => {
+                    if reason == crate::inject::SkipReason::WindowGone {
+                        return;
+                    }
+                }
+                crate::inject::SendOutcome::Failed { error, .. } => {
+                    tracing::warn!("repomind boot announcement to {window} failed: {error}");
+                    return;
+                }
+            }
+        }
+        tracing::debug!("repomind boot context was never announced to {window}");
+    });
 }
 
 /// Regenerate `.repomind/boot.md` from the live fleet and the home's own files, and record what
@@ -834,6 +965,58 @@ mod tests {
         let names: Vec<String> = fleet_snapshot(&lanes).into_iter().map(|l| l.lane).collect();
 
         assert_eq!(names, vec!["lane-2", "lane-4", "lane-9"]);
+    }
+
+    #[test]
+    fn each_backend_gets_the_delivery_its_cli_supports() {
+        use repomon_core::model::AgentKind;
+        assert_eq!(delivery(&AgentKind::ClaudeCode), Delivery::AppendSystemPromptFile);
+        assert_eq!(delivery(&AgentKind::OpenCode), Delivery::InstructionsFile);
+        assert_eq!(delivery(&AgentKind::Codex), Delivery::TypedLine);
+        assert_eq!(delivery(&AgentKind::Antigravity), Delivery::TypedLine);
+        // A CLI with no launch-time context mechanism still gets told where to look.
+        assert_eq!(delivery(&AgentKind::Other("hermes".into())), Delivery::TypedLine);
+    }
+
+    /// The typed line names the file by its home-relative path (the controller's cwd is the
+    /// home) and ends with the marker the verified composer submission watches for.
+    #[test]
+    fn the_typed_line_names_the_boot_file_and_carries_its_marker() {
+        let line = typed_line();
+        assert!(line.starts_with("Read .repomind/boot.md in your working directory before anything else."), "{line}");
+        assert!(line.ends_with(TYPED_MARKER), "{line}");
+    }
+
+    /// The typed line is only ever sent into a session that is actually ready for it: the right
+    /// lane, the right window, managed by repomon, and with no dialog already waiting.
+    #[test]
+    fn the_typed_line_target_is_the_managed_session_in_that_window() {
+        use repomon_core::model::AgentStatus;
+        let mut ready = session(AgentStatus::Idle);
+        ready.tmux_window = Some("lane-7-1".into());
+        let lanes = [test_lane(7, "repomind", Some("main"), vec![ready])];
+
+        assert!(ready_target(&lanes, 7, "lane-7-1").is_some());
+        assert!(ready_target(&lanes, 7, "lane-7-2").is_none(), "wrong window");
+        assert!(ready_target(&lanes, 9, "lane-7-1").is_none(), "wrong lane");
+    }
+
+    #[test]
+    fn a_session_with_a_dialog_waiting_is_not_a_typed_line_target() {
+        use repomon_core::model::AgentStatus;
+        let mut busy = session(AgentStatus::Waiting);
+        busy.tmux_window = Some("lane-7-1".into());
+        busy.pending_dialog = Some(repomon_core::agent::prompt::PendingDialog {
+            title: None,
+            question: "Allow?".into(),
+            body: Vec::new(),
+            options: Vec::new(),
+            selected: None,
+            context: Vec::new(),
+        });
+        let lanes = [test_lane(7, "repomind", Some("main"), vec![busy])];
+
+        assert!(ready_target(&lanes, 7, "lane-7-1").is_none());
     }
 
     #[test]
