@@ -17,6 +17,7 @@ pub mod pubsub;
 pub mod push;
 pub mod reap;
 pub mod remote;
+pub mod repomind;
 pub mod rpc;
 pub mod socket;
 pub mod standing;

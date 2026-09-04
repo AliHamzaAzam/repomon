@@ -83,6 +83,18 @@ async fn run() {
 
     let ctx = Ctx::new(store, config, Some(db));
 
+    // Make the repomind home exist, be registered, and carry its controller lane. In a background
+    // task for the same reason as the watcher below: a first run creates directories and runs
+    // `git init`, and the socket should bind before any of that.
+    {
+        let ctx_r = ctx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = repomon_daemon::repomind::ensure_home(&ctx_r).await {
+                tracing::warn!("repomind home unavailable: {e}");
+            }
+        });
+    }
+
     // Watch registered repos; rebroadcast changes so clients can refresh. Done in a background
     // task (and the watcher is owned by it) so the socket binds immediately — registering a
     // recursive watch on a large tree like ~/.claude/projects can take a few seconds, and we
