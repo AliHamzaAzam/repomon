@@ -206,6 +206,24 @@ mod tests {
         assert_eq!(s.status, AgentStatus::Running);
     }
 
+    /// The contract [`crate::agent::prompt`] and the daemon's `status_from_pane` rely on: a
+    /// monitor that only has a file's mtime reports Running on recency AND `ended_turn: true`, so
+    /// a consumer can tell "the file moved" apart from "a turn is genuinely mid flight" and let
+    /// the pane overrule the first. A background task touching that file is otherwise
+    /// indistinguishable from the agent working.
+    #[test]
+    fn mtime_only_running_always_reports_a_finished_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = dir.path().join(".aider.chat.history.md");
+        std::fs::write(&history, "# chat\n").unwrap();
+        let s = activity_summary(AgentKind::Aider, &history).expect("summary");
+        assert_eq!(s.status, AgentStatus::Running);
+        assert!(
+            s.ended_turn,
+            "an mtime-only monitor cannot see turn boundaries and must say so"
+        );
+    }
+
     #[test]
     fn aider_monitor_none_without_history() {
         let dir = tempfile::tempdir().unwrap();

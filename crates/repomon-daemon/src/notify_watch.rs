@@ -68,6 +68,12 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     // An entry is consumed when its triage fires or when the session stops needing attention;
     // the notify latch above prevents re-adds until the agent does real work again.
     let mut pending_triage: HashMap<(LaneId, SessKey), Instant> = HashMap::new();
+    // Every surfaced agent row's public status as of the previous tick, so a transition can be
+    // pushed to clients the moment the classifier sees it. Independent of `prev` above: that map
+    // is the notification engine's, filtered by the subagent setting and diffed for alert edges,
+    // whereas this one covers every row the sidebar draws and diffs for any status change at all.
+    let mut status_prev: StatusSnapshot = HashMap::new();
+    let mut status_seeded = false;
 
     loop {
         tick.tick().await;
@@ -92,6 +98,19 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
         )
         .await;
 
+        // Always recompute (bypass the lane.list cache): edge detection must never reuse a stale
+        // snapshot, and in a headless setup nothing else populates the cache.
+        //
+        // This runs ABOVE the `notify_enabled` gate and covers every managed session in the fleet,
+        // not just the lanes some client happens to have in its viewport. An agent's pill is not a
+        // notification: turning notifications off used to stop the daemon's only periodic
+        // re-classification dead, leaving every client's status as fresh as its own polling and
+        // nothing else. `event.agent.status` below is the push half of the same guarantee.
+        let Ok(lanes) = rpc::lanes_with_agents_fresh(&ctx).await else {
+            continue;
+        };
+        broadcast_status_changes(&ctx, &lanes, &mut status_prev, &mut status_seeded);
+
         if !cfg.notify_enabled {
             // Drop state while disabled so re-enabling re-seeds instead of firing a backlog.
             prev.clear();
@@ -100,12 +119,6 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             latch.clear();
             continue;
         }
-
-        // Always recompute (bypass the lane.list cache): edge detection must never reuse a stale
-        // snapshot, and in a headless setup nothing else populates the cache.
-        let Ok(lanes) = rpc::lanes_with_agents_fresh(&ctx).await else {
-            continue;
-        };
         let subagents = cfg.notify_subagents;
         let now: HashMap<(LaneId, SessKey), SessState> = lanes
             .iter()
@@ -1058,5 +1071,246 @@ mod legacy_auto_approve_tests {
             log.is_empty(),
             "zero backend sends attributable to the legacy block"
         );
+    }
+}
+
+/// One surfaced agent row's status as the sidebar reads it, keyed by lane and stable session
+/// identity (see [`rpc::sess_key`]).
+pub(crate) type StatusSnapshot = HashMap<(LaneId, String), StatusRow>;
+
+/// A row's public status plus the fields a client needs to place it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StatusRow {
+    pub status: AgentStatus,
+    pub reason: Option<String>,
+    pub window: Option<String>,
+}
+
+/// The status of every agent row in a fleet snapshot.
+pub(crate) fn status_snapshot(lanes: &[Lane]) -> StatusSnapshot {
+    lanes
+        .iter()
+        .flat_map(|lane| {
+            lane.agent_sessions.iter().map(move |s| {
+                (
+                    (lane.id, rpc::sess_key(s)),
+                    StatusRow {
+                        status: s.status,
+                        reason: s.status_reason.clone(),
+                        window: s.tmux_window.clone(),
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+/// Rows whose **status** changed between two snapshots, newly appeared rows included.
+///
+/// Diffed on `status` alone, never on the reason: a reason is a live phrase ("no output for 4m")
+/// that re-renders on its own every tick, and diffing it would put an event on the bus every 2s
+/// for a fleet that is doing nothing. A row that *left* the snapshot emits nothing either: the
+/// lane events and the client's own refresh already cover a session that ended.
+pub(crate) fn status_changes<'a>(
+    prev: &StatusSnapshot,
+    now: &'a StatusSnapshot,
+) -> Vec<(&'a (LaneId, String), &'a StatusRow, Option<AgentStatus>)> {
+    let mut changed: Vec<_> = now
+        .iter()
+        .filter_map(|(key, row)| {
+            let was = prev.get(key).map(|p| p.status);
+            (was != Some(row.status)).then_some((key, row, was))
+        })
+        .collect();
+    // Deterministic order so a tick's events read the same way twice.
+    changed.sort_by(|a, b| a.0.cmp(b.0));
+    changed
+}
+
+/// Push one `event.agent.status` per status transition the classifier just observed, and carry
+/// `status_prev` forward. The first tick only seeds: a client that just connected reads the fleet
+/// with `lane.list`, and replaying every row as a "change" would be noise.
+fn broadcast_status_changes(
+    ctx: &Arc<Ctx>,
+    lanes: &[Lane],
+    status_prev: &mut StatusSnapshot,
+    seeded: &mut bool,
+) {
+    let now = status_snapshot(lanes);
+    if *seeded {
+        for ((lane_id, session), row, was) in status_changes(status_prev, &now) {
+            ctx.broadcast(
+                crate::pubsub::topic::AGENT_STATUS,
+                json!({
+                    "lane_id": lane_id,
+                    "session": session,
+                    "window": row.window,
+                    "status": row.status.as_str(),
+                    "reason": row.reason,
+                    "previous": was.map(|s| s.as_str()),
+                }),
+            );
+        }
+    }
+    *status_prev = now;
+    *seeded = true;
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use repomon_core::model::AgentKind;
+
+    fn session(key: &str, status: AgentStatus, reason: &str) -> AgentSession {
+        AgentSession {
+            id: 0,
+            agent: AgentKind::Antigravity,
+            repo_id: 1,
+            worktree_id: Some(1),
+            started_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            ended_at: None,
+            manifest_path: std::path::PathBuf::new(),
+            tool_call_count: 0,
+            title: None,
+            status,
+            external: false,
+            session_id: Some(key.to_string()),
+            resume_at: None,
+            inferred: false,
+            tmux_window: Some(format!("lane-81-{key}")),
+            last_message: None,
+            pending_prompt: None,
+            pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            subagent_running: None,
+            status_reason: Some(reason.to_string()),
+            ended_turn: true,
+            gate: None,
+            config_dir: None,
+            custom_label: None,
+            generated_label: None,
+        }
+    }
+
+    fn fleet(sessions: Vec<AgentSession>) -> Vec<Lane> {
+        let now = Utc::now();
+        let repo = repomon_core::model::Repo {
+            id: 1,
+            path: std::path::PathBuf::from("/code/repomon"),
+            name: "repomon".into(),
+            added_at: now,
+            worktree_root_template: None,
+            hidden: false,
+            position: None,
+            label: None,
+        };
+        let worktree = repomon_core::model::Worktree {
+            id: 1,
+            repo_id: 1,
+            path: std::path::PathBuf::from("/code/repomon-wt/desktop"),
+            branch: Some("feat/desktop".into()),
+            head: "0000000000000000000000000000000000000000".parse().unwrap(),
+            is_main: false,
+            name: "desktop".into(),
+        };
+        let state = repomon_core::model::WorktreeState {
+            worktree_id: 1,
+            head: worktree.head,
+            branch: worktree.branch.clone(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            dirty: Default::default(),
+            last_commit_at: None,
+            locked: false,
+            prunable: false,
+            merged: false,
+            last_change_at: None,
+        };
+        vec![Lane {
+            id: 81,
+            repo,
+            worktree,
+            state,
+            agent_sessions: sessions,
+            last_activity_at: now,
+            pinned: false,
+        }]
+    }
+
+    #[test]
+    fn a_session_going_from_idle_to_running_is_one_event() {
+        let prev = status_snapshot(&fleet(vec![session(
+            "7",
+            AgentStatus::Idle,
+            "no output for 4m",
+        )]));
+        let now = status_snapshot(&fleet(vec![session(
+            "7",
+            AgentStatus::Running,
+            "spinner on screen: Thinking",
+        )]));
+        let changes = status_changes(&prev, &now);
+        assert_eq!(changes.len(), 1);
+        let (key, row, was) = changes[0];
+        assert_eq!(key.0, 81);
+        assert_eq!(row.status, AgentStatus::Running);
+        assert_eq!(row.window.as_deref(), Some("lane-81-7"));
+        assert_eq!(was, Some(AgentStatus::Idle));
+    }
+
+    /// The reason is a live phrase that re-renders every tick. Diffing it would put an event on
+    /// the bus every 2s for a fleet that is doing nothing at all.
+    #[test]
+    fn a_reason_that_only_counts_minutes_is_not_a_change() {
+        let prev = status_snapshot(&fleet(vec![session(
+            "7",
+            AgentStatus::Idle,
+            "no output for 4m",
+        )]));
+        let now = status_snapshot(&fleet(vec![session(
+            "7",
+            AgentStatus::Idle,
+            "no output for 5m",
+        )]));
+        assert!(status_changes(&prev, &now).is_empty());
+    }
+
+    /// A lane running five agents pushes only the one that moved, and the payload names its window
+    /// so a client can place it without re-deriving the roster.
+    #[test]
+    fn only_the_agent_that_moved_is_announced_in_a_multi_agent_lane() {
+        let idle = |k: &str| session(k, AgentStatus::Idle, "no output for 9m");
+        let prev = status_snapshot(&fleet(vec![
+            idle("2"),
+            idle("3"),
+            idle("5"),
+            idle("7"),
+            idle("8"),
+        ]));
+        let now = status_snapshot(&fleet(vec![
+            idle("2"),
+            idle("3"),
+            idle("5"),
+            session("7", AgentStatus::Running, "subagent running: audit"),
+            idle("8"),
+        ]));
+        let changes = status_changes(&prev, &now);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0.1, "7");
+        assert_eq!(changes[0].1.window.as_deref(), Some("lane-81-7"));
+    }
+
+    /// A freshly spawned agent has a status no client has seen yet, so its first appearance counts.
+    #[test]
+    fn a_newly_surfaced_agent_is_announced_once() {
+        let prev = StatusSnapshot::new();
+        let now = status_snapshot(&fleet(vec![session("7", AgentStatus::Running, "spawned")]));
+        let changes = status_changes(&prev, &now);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].2, None);
+        assert!(status_changes(&now, &now).is_empty());
     }
 }

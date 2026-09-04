@@ -5778,6 +5778,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             s.subagent_running = found_subagent;
             let (status, reason) = status_from_pane(
                 s.status,
+                s.ended_turn,
                 found_dialog.as_ref().map(|d| d.summary()).as_deref(),
                 s.subagent_running.as_deref(),
                 found_spinner.as_deref(),
@@ -5833,14 +5834,28 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 /// The status a sniffed pane reports, given the transcript-derived `base`, plus the phrase that
 /// explains it.
 ///
-/// The pane outranks the transcript on "is it working right now?". A transcript can only say when
-/// the last *message* landed, so it decays to Idle through a long tool call and reads Waiting
-/// through a turn whose background agents are still going, both of which the operator sees as an
-/// obviously busy pane. A dialog outranks everything: a pane asking a question is not working,
-/// whatever else is on screen. Returns `None` for the reason when the pane said nothing new, so
-/// the caller falls back to [`transcript_status_reason`].
+/// The pane outranks the transcript on "is it working right now?", in **both** directions.
+///
+/// Upward: a transcript can only say when the last *message* landed, so it decays to Idle through
+/// a long tool call and reads Waiting through a turn whose background agents are still going, both
+/// of which the operator sees as an obviously busy pane.
+///
+/// Downward: a monitor that has no transcript to read (Antigravity, aider, and every other
+/// [`repomon_core::agent`] mtime-only monitor) calls its manifest's recency "Running" and reports
+/// `ended_turn: true` to say so, because it cannot see turn boundaries at all. A background task
+/// touching that file (a dev server writing into the conversation database, say) then pins the
+/// lane pill to "running" for the whole recency window while the pane sits at its prompt. When the
+/// pane carries no dialog, no subagent and no spinner, it is the better witness and demotes the
+/// row to Idle. A `base` of Running from a monitor that *can* see turn boundaries
+/// (`ended_turn: false`, i.e. mid tool call) is never demoted: a capture taken between redraws can
+/// miss the spinner, and a genuinely frozen pane is the stall detector's job.
+///
+/// A dialog outranks everything: a pane asking a question is not working, whatever else is on
+/// screen. Returns `None` for the reason when the pane said nothing new, so the caller falls back
+/// to [`transcript_status_reason`].
 pub(crate) fn status_from_pane(
     base: AgentStatus,
+    ended_turn: bool,
     dialog: Option<&str>,
     subagent: Option<&str>,
     spinner: Option<&str>,
@@ -5867,6 +5882,14 @@ pub(crate) fn status_from_pane(
                 Some(format!("spinner on screen: {spin}")),
             );
         }
+    }
+    // Nothing on the pane says "working". A base of Running that only a file's recency produced
+    // (`ended_turn`, see the doc comment) is the one the pane is allowed to overrule.
+    if base == AgentStatus::Running && ended_turn && subagent.is_none() && spinner.is_none() {
+        return (
+            AgentStatus::Idle,
+            Some("background file activity only, pane at rest".to_string()),
+        );
     }
     (base, None)
 }
@@ -6510,7 +6533,7 @@ fn stall_since(
 
 /// A stable identity for a surfaced session: its transcript id, else `win:<window>` (a managed
 /// placeholder with no transcript yet) or `inferred:<wt>` (a file-activity session).
-fn sess_key(s: &repomon_core::model::AgentSession) -> String {
+pub(crate) fn sess_key(s: &repomon_core::model::AgentSession) -> String {
     if let Some(id) = &s.session_id {
         id.clone()
     } else if s.inferred {
@@ -8369,8 +8392,13 @@ mod tests {
             include_str!("../../repomon-core/src/agent/fixtures/claude_running_subagents.txt");
         let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
         let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
-        let (status, reason) =
-            status_from_pane(AgentStatus::Waiting, None, sub.as_deref(), spin.as_deref());
+        let (status, reason) = status_from_pane(
+            AgentStatus::Waiting,
+            false,
+            None,
+            sub.as_deref(),
+            spin.as_deref(),
+        );
         assert_eq!(status, AgentStatus::Running);
         assert!(
             reason
@@ -8390,8 +8418,13 @@ mod tests {
         );
         let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
         let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
-        let (status, reason) =
-            status_from_pane(AgentStatus::Idle, None, sub.as_deref(), spin.as_deref());
+        let (status, reason) = status_from_pane(
+            AgentStatus::Idle,
+            true,
+            None,
+            sub.as_deref(),
+            spin.as_deref(),
+        );
         assert_eq!(status, AgentStatus::Idle);
         assert_eq!(reason, None);
     }
@@ -8402,6 +8435,7 @@ mod tests {
     fn a_spinner_promotes_a_decayed_idle_transcript_to_running() {
         let (status, reason) = status_from_pane(
             AgentStatus::Idle,
+            true,
             None,
             None,
             Some("Thinking (2m 14s, esc to interrupt)"),
@@ -8413,11 +8447,178 @@ mod tests {
         );
     }
 
+    /// Real capture, 2026-09-04: window `lane-81-5` sat at an idle Antigravity composer while a
+    /// background `npm run dev` task kept touching the conversation database. Antigravity is an
+    /// mtime-only monitor, so that touch alone reads `Running` with `ended_turn: true`, and the
+    /// lane pill stayed on "running" for the whole two-minute recency window. Nothing on the pane
+    /// is a liveness signal, so the pane demotes it.
+    #[test]
+    fn a_ticking_background_task_does_not_keep_an_idle_pane_running() {
+        let pane =
+            include_str!("../../repomon-core/src/agent/fixtures/antigravity_idle_prompt.txt");
+        let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        let (status, reason) = status_from_pane(
+            AgentStatus::Running,
+            true,
+            None,
+            sub.as_deref(),
+            spin.as_deref(),
+        );
+        assert_eq!(status, AgentStatus::Idle);
+        // Never "no output for 1s": the file IS changing, the agent is not.
+        assert_eq!(
+            reason.as_deref(),
+            Some("background file activity only, pane at rest")
+        );
+    }
+
+    /// The demotion must not reach an agent whose monitor can see turn boundaries. A Claude
+    /// transcript frozen mid tool call reports `ended_turn: false`, and a capture taken between
+    /// redraws can miss its spinner; a frozen pane is the stall detector's job, not this one's.
+    #[test]
+    fn a_mid_tool_call_transcript_is_never_demoted_by_a_quiet_pane() {
+        let (status, reason) = status_from_pane(AgentStatus::Running, false, None, None, None);
+        assert_eq!(status, AgentStatus::Running);
+        assert_eq!(reason, None);
+    }
+
+    /// A working mtime-only agent still shows its spinner, and the spinner outranks the demotion.
+    #[test]
+    fn a_spinner_survives_the_mtime_only_demotion() {
+        let (status, reason) = status_from_pane(
+            AgentStatus::Running,
+            true,
+            None,
+            None,
+            Some("Thinking (12s, esc to interrupt)"),
+        );
+        assert_eq!(status, AgentStatus::Running);
+        // Base Running is not promotable, so the pane adds no phrase; the row stays running.
+        assert_eq!(reason, None);
+    }
+
+    /// Real capture, 2026-09-04: a finished Claude turn keeps its spinner glyph but stamps the
+    /// result (`done 4:52 AM`), so the glyph must not hold the row on "running".
+    #[test]
+    fn a_finished_turn_stamp_does_not_read_as_running() {
+        let pane =
+            include_str!("../../repomon-core/src/agent/fixtures/claude_idle_done_spinner.txt");
+        let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        assert_eq!(spin, None, "a done stamp is not an active spinner");
+        let (status, _) = status_from_pane(
+            AgentStatus::Idle,
+            true,
+            None,
+            sub.as_deref(),
+            spin.as_deref(),
+        );
+        assert_eq!(status, AgentStatus::Idle);
+    }
+
+    /// Both edges of a Claude Code 2.1.x turn. The transcript is written lazily, so at the moment
+    /// a turn starts it can still read Idle while the pane already shows the spinner (promoted),
+    /// and when the turn ends the spinner carries a `done` stamp that must not read as work.
+    #[test]
+    fn claude_turn_edges_follow_the_pane_in_both_directions() {
+        // Turn starts: transcript still Idle, spinner already on screen.
+        let (start, reason) = status_from_pane(
+            AgentStatus::Idle,
+            true,
+            None,
+            None,
+            Some("Thinking\u{2026} (3s \u{00b7} esc to interrupt)"),
+        );
+        assert_eq!(start, AgentStatus::Running);
+        assert!(reason.unwrap().starts_with("spinner on screen:"));
+
+        // Turn ends: the pane keeps the glyph but stamps the result, so nothing is live.
+        let pane =
+            include_str!("../../repomon-core/src/agent/fixtures/claude_idle_done_spinner.txt");
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        assert_eq!(spin, None);
+        let (end, _) = status_from_pane(AgentStatus::Idle, true, None, None, spin.as_deref());
+        assert_eq!(end, AgentStatus::Idle);
+    }
+
+    /// Both edges of an Antigravity 1.1.x turn. Antigravity has no parseable transcript, so its
+    /// base status is pure file recency and the pane is the only witness either way. The stop edge
+    /// is the one that was broken: a background task touching the conversation database held the
+    /// row on "running" for the whole recency window.
+    #[test]
+    fn antigravity_turn_edges_follow_the_pane_in_both_directions() {
+        // Turn starts: the braille spinner Antigravity streams with.
+        let (start, _) = status_from_pane(
+            AgentStatus::Idle,
+            true,
+            None,
+            None,
+            Some("\u{280b} Generating (4s)"),
+        );
+        assert_eq!(start, AgentStatus::Running);
+
+        // Turn ends: pane back at its composer while the conversation database keeps ticking.
+        let pane =
+            include_str!("../../repomon-core/src/agent/fixtures/antigravity_idle_prompt.txt");
+        let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        let (end, reason) = status_from_pane(
+            AgentStatus::Running,
+            true,
+            None,
+            sub.as_deref(),
+            spin.as_deref(),
+        );
+        assert_eq!(end, AgentStatus::Idle);
+        assert_eq!(
+            reason.as_deref(),
+            Some("background file activity only, pane at rest")
+        );
+    }
+
+    /// Codex has no on-disk transcript repomon can parse (`agent::CodexMonitor` returns `None`),
+    /// so every managed Codex row is a window placeholder: Idle base, `ended_turn: true`, and the
+    /// pane as its ONLY status signal. Both edges therefore have to come from the sniff.
+    ///
+    /// The running line here is Codex's documented working footer, not a live capture: no Codex
+    /// pane was up on the tmux server while this was written.
+    #[test]
+    fn codex_placeholder_status_comes_entirely_from_its_pane() {
+        let placeholder = window_placeholder_session(
+            &mail_lane(1, &[]),
+            AgentKind::Codex,
+            "lane-1-1".to_string(),
+        );
+        assert_eq!(placeholder.status, AgentStatus::Idle);
+        assert!(placeholder.ended_turn);
+
+        let working = "\u{2022} Working (12s \u{00b7} Esc to interrupt)";
+        let spin = repomon_core::agent::prompt::detect_active_spinner(working);
+        assert!(
+            spin.is_some(),
+            "codex working footer must read as a spinner"
+        );
+        let (start, _) = status_from_pane(
+            placeholder.status,
+            placeholder.ended_turn,
+            None,
+            None,
+            spin.as_deref(),
+        );
+        assert_eq!(start, AgentStatus::Running);
+
+        // And back: the composer with nothing streaming.
+        let (end, _) = status_from_pane(AgentStatus::Running, true, None, None, None);
+        assert_eq!(end, AgentStatus::Idle);
+    }
+
     /// A pane asking a question is not working, whatever else is on screen.
     #[test]
     fn a_dialog_outranks_every_liveness_signal() {
         let (status, reason) = status_from_pane(
             AgentStatus::Running,
+            false,
             Some("Bash: rm -rf build"),
             Some("subagent (3m)"),
             Some("Thinking"),
