@@ -5007,10 +5007,11 @@ pub async fn dispatch(
             // truth an agent reading the directory would.
             let pending = crate::repomind::export::pending(ctx).await;
             let probe = home.clone();
-            let (export_state, counts) = tokio::task::spawn_blocking(move || {
+            let (export_state, counts, boot_state) = tokio::task::spawn_blocking(move || {
                 (
                     crate::repomind::export::load_state(&probe),
                     crate::repomind::home_counts(&probe),
+                    crate::repomind::boot::load_state(&probe),
                 )
             })
             .await
@@ -5029,7 +5030,24 @@ pub async fn dispatch(
                     last_error: export_state.last_error,
                 },
                 counts,
+                boot: repomon_core::model::RepomindBootStatus {
+                    generated_at: boot_state.generated_at,
+                    tokens_estimate: boot_state.tokens_estimate,
+                    trimmed: boot_state.trimmed,
+                },
             })
+        }
+        // Local-only (see `remote::remote_method_allowed`): it rewrites the daemon-owned boot
+        // document. Every spawn into the controller lane does this too; the RPC exists so a
+        // client (and the operator) can see the exact context a controller would get right now.
+        "repomind.boot" => {
+            let run = crate::repomind::boot::regenerate(ctx).await.map_err(internal)?;
+            to_value(json!({
+                "path": run.path.to_string_lossy(),
+                "bytes": run.bytes,
+                "tokens_estimate": run.tokens_estimate,
+                "trimmed": run.trimmed,
+            }))
         }
         // Local-only (see `remote::remote_method_allowed`): it rewrites files in the home.
         // Runs the export immediately rather than waiting out the debounce, so a caller that

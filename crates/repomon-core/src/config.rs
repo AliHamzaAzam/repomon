@@ -31,6 +31,9 @@ pub const DEFAULT_TIME_FORMAT: &str = "%H:%M %a %d %b %Y";
 /// [`expand_tilde`] turns it into an absolute path everywhere else.
 pub const DEFAULT_REPOMIND_HOME: &str = "~/repomind";
 
+/// The default token budget for the assembled boot context. The design spec's "about 12k".
+pub const DEFAULT_BOOT_BUDGET_TOKENS: usize = 12_000;
+
 /// How many controller agents may run in the repomind lane at once by default.
 pub const DEFAULT_MAX_CONTROLLERS: usize = 2;
 
@@ -269,6 +272,10 @@ pub struct RepomindConfig {
     /// `BASIC_MEMORY_CONFIG_DIR` environment variable, basic-memory's own documented override,
     /// still wins over it. See `repomon_daemon::repomind::basic_memory`.
     pub basic_memory_config: Option<String>,
+    /// The hard token budget for the assembled boot context (`.repomind/boot.md`). Estimated at
+    /// four characters to a token; over budget, the journal is dropped first, then profile
+    /// notes, then plans, and the document names what it cut.
+    pub boot_budget_tokens: usize,
 }
 
 impl Default for RepomindConfig {
@@ -278,6 +285,7 @@ impl Default for RepomindConfig {
             primary_agent: None,
             max_controllers: DEFAULT_MAX_CONTROLLERS,
             basic_memory_config: None,
+            boot_budget_tokens: DEFAULT_BOOT_BUDGET_TOKENS,
         }
     }
 }
@@ -1044,6 +1052,20 @@ mod tests {
         assert_eq!(
             c.repomind_basic_memory_config(),
             Some(home().join("isolated").join("config.json"))
+        );
+    }
+
+    #[test]
+    fn repomind_boot_budget_defaults_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        assert_eq!(c.repomind.boot_budget_tokens, DEFAULT_BOOT_BUDGET_TOKENS);
+        c.repomind.boot_budget_tokens = 4000;
+        c.save_to(&path).unwrap();
+        assert_eq!(
+            Config::load_from(&path).unwrap().repomind.boot_budget_tokens,
+            4000
         );
     }
 

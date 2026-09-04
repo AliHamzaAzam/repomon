@@ -177,7 +177,8 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `orchestrator.key` | `{ key, literal=false }` | `null` (**deprecated** alias for `agent.key`: one keystroke to repomind, literal char or key name) |
 | `orchestrator.watch` | `{ on }` | `null` (**deprecated** alias: gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
 | `orchestrator.resize` | `{ cols, rows }` | `null` (**deprecated** alias: size the controller window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
-| `repomind.status` | — | [`RepomindStatus`](../apps/desktop/src/bindings/RepomindStatus.ts): `{ home, exists, repo_id?, lane_id?, window?, max_controllers, export, counts }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. `export` is `{ last_run?, pending, last_error? }`: when the one-way export last ran, whether a write is waiting for its 5 s debounce, and the last failure. `counts` is `{ active_plans, standing, playbooks, drafts }`, read from `plans/active/`, `plans/standing/`, `playbooks/`, and `playbooks/drafts/` (each directory's own `README.md` never counts). Never creates anything) |
+| `repomind.status` | — | [`RepomindStatus`](../apps/desktop/src/bindings/RepomindStatus.ts): `{ home, exists, repo_id?, lane_id?, window?, max_controllers, export, counts, boot }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. `export` is `{ last_run?, pending, last_error? }`: when the one-way export last ran, whether a write is waiting for its 5 s debounce, and the last failure. `counts` is `{ active_plans, standing, playbooks, drafts }`, read from `plans/active/`, `plans/standing/`, `playbooks/`, and `playbooks/drafts/` (each directory's own `README.md` never counts). `boot` is `{ generated_at?, tokens_estimate, trimmed }`: when `.repomind/boot.md` was last assembled, its size in the budget's four-characters-per-token units, and the home-relative paths the budget forced out of it (all zero/empty before the first regeneration). Never creates anything) |
+| `repomind.boot` | — | `{ path, bytes, tokens_estimate, trimmed }` (**local-only**: reassemble the daemon-owned boot context at `<home>/.repomind/boot.md` and report what it produced. `path` is absolute, `bytes` the document's size on disk, `tokens_estimate` its size in the budget's units, and `trimmed` the home-relative paths the budget forced out, least important first. Every spawn into the controller lane regenerates it too, so this is for seeing what a controller would be handed right now) |
 | `repomind.export` | — | `{ files, kinds }` (**local-only**: run the one-way export now instead of waiting out the debounce. `files` are the home-relative paths written or removed, `kinds` the record kinds they belong to (`journal`, `schedules`, `approvals`, `notes`, `playbooks`), which also form the commit subject `chore(repomind): export <kinds>`. Empty when nothing changed. Silently a no-op when the home does not exist) |
 
 The daemon exports its own records into the home one way and commits each batch there as
@@ -191,6 +192,18 @@ and playbooks (`playbooks/<name>.md`, drafts under `playbooks/drafts/`) are file
 playbook moves its file up out of `drafts/`. A daemon start migrates anything that still only
 exists in SQLite or the app-support `repo-notes/` directory into the home, and never deletes the
 original.
+
+At spawn the daemon assembles `<home>/.repomind/boot.md` and hands it to the controller: the
+operator's `REPOMIND.md` overlay whole, `profile/*.md` bodies with their frontmatter stripped,
+one status line per `plans/active/*.md`, yesterday's and today's journal day files, and a fleet
+snapshot of one line per lane (repo, lane, branch, agent count, most urgent state). The whole
+document is bounded by `[repomind] boot_budget_tokens` (12k by default, estimated at four
+characters to a token); over budget it drops the journal first, then profile notes, then plans,
+and ends with a `Trimmed: ...` line naming exactly what went. Claude receives it as
+`--append-system-prompt-file <path>` on top of the shipped persona (which stays the system
+prompt); Codex, Antigravity, and OpenCode get a first typed line pointing at the file, delivered
+through the same verified-composer injection fleet mail uses so it never types over a busy
+composer. The file is daemon-owned and gitignored: never hand-edit it.
 
 Repomind runs in the **controller lane**, the main worktree of the repomind home repo
 (`~/repomind` by default, `[repomind] home`). It is registered like any other repo, and its lane

@@ -21,8 +21,8 @@ use chrono::{Duration, Local};
 
 use super::md;
 
-/// The boot budget, in tokens. The spec's "about 12k".
-pub const DEFAULT_BUDGET_TOKENS: usize = 12_000;
+/// The boot budget, in tokens, when `[repomind] boot_budget_tokens` is left at its default.
+pub const DEFAULT_BUDGET_TOKENS: usize = repomon_core::config::DEFAULT_BOOT_BUDGET_TOKENS;
 
 /// The estimate: four characters to a token. Deliberately crude. The budget exists to keep a
 /// system prompt from growing without bound, not to match any tokenizer.
@@ -152,6 +152,79 @@ pub fn write_boot(home: &Path, doc: &BootDocument) -> std::io::Result<PathBuf> {
     }
     std::fs::write(&path, &doc.markdown)?;
     Ok(path)
+}
+
+/// `<home>/.repomind/boot.json`: what the last regeneration produced, so `repomind.status` can
+/// report it without re-reading and re-parsing the document. Daemon-owned and gitignored, like
+/// the export state beside it.
+pub fn state_path(home: &Path) -> PathBuf {
+    home.join(".repomind").join("boot.json")
+}
+
+/// What the last regeneration produced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootState {
+    #[serde(default)]
+    pub generated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub tokens_estimate: usize,
+    #[serde(default)]
+    pub trimmed: Vec<String>,
+}
+
+/// Read the boot state. A home that has never been booted reports the default, never an error.
+pub fn load_state(home: &Path) -> BootState {
+    std::fs::read_to_string(state_path(home))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// One regeneration: where the document landed and how big it came out.
+#[derive(Debug, Clone)]
+pub struct BootRun {
+    pub path: PathBuf,
+    pub bytes: usize,
+    pub tokens_estimate: usize,
+    pub trimmed: Vec<String>,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Regenerate `.repomind/boot.md` from the live fleet and the home's own files, and record what
+/// it produced. Called on every spawn into the controller lane and by the `repomind.boot` RPC;
+/// a spawn must never fail because the boot document could not be written, so callers log
+/// rather than propagate.
+pub async fn regenerate(ctx: &crate::Ctx) -> repomon_core::Result<BootRun> {
+    let (home, budget) = {
+        let cfg = ctx.config.read().await;
+        (cfg.repomind_home(), cfg.repomind.boot_budget_tokens)
+    };
+    // Live truth, read the same way any client reads it. A lane listing that fails (no repos
+    // registered yet on a first start) yields an empty snapshot rather than no document.
+    let fleet = fleet_snapshot(&ctx.lanes.list().await.unwrap_or_default());
+    let generated_at = chrono::Utc::now();
+
+    tokio::task::spawn_blocking(move || -> std::io::Result<BootRun> {
+        let doc = assemble_boot(&home, &fleet, budget);
+        let path = write_boot(&home, &doc)?;
+        let state = BootState {
+            generated_at: Some(generated_at),
+            tokens_estimate: tokens_estimate(&doc.markdown),
+            trimmed: doc.trimmed.clone(),
+        };
+        let body = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
+        std::fs::write(state_path(&home), body + "\n")?;
+        Ok(BootRun {
+            path,
+            bytes: doc.markdown.len(),
+            tokens_estimate: state.tokens_estimate,
+            trimmed: doc.trimmed,
+            generated_at,
+        })
+    })
+    .await
+    .map_err(|e| repomon_core::Error::Other(e.to_string()))?
+    .map_err(repomon_core::Error::Io)
 }
 
 /// Read a markdown file, optionally stripping its frontmatter. `None` when it is missing or has

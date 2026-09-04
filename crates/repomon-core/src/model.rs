@@ -411,6 +411,10 @@ pub struct RepomindStatus {
     pub max_controllers: usize,
     pub export: RepomindExportStatus,
     pub counts: RepomindCounts,
+    /// The assembled boot context: when it was last regenerated, how big it came out, and what
+    /// the budget forced out of it.
+    #[serde(default)]
+    pub boot: RepomindBootStatus,
 }
 
 /// How the daemon's one-way export into the home is doing.
@@ -426,6 +430,24 @@ pub struct RepomindExportStatus {
     /// The last export failure, cleared by the next successful run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+/// The state of the daemon-owned boot context at `<home>/.repomind/boot.md`, which every
+/// controller is handed at spawn. All zero/empty before the first regeneration.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RepomindBootStatus {
+    /// When the document was last assembled. `None` until the first spawn or `repomind.boot`.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+    pub generated_at: Option<DateTime<Utc>>,
+    /// Its size in the budget's own units (four characters to a token).
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub tokens_estimate: usize,
+    /// Home-relative paths the token budget forced out of the document, least important first.
+    #[serde(default)]
+    pub trimmed: Vec<String>,
 }
 
 /// What the home holds right now, counted from its directories. `README.md` in any of them is
