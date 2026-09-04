@@ -470,4 +470,53 @@ describe("EditorWorkspace component", () => {
     expect(container.querySelector("[data-testid='markdown-preview']")).not.toBeInTheDocument();
     expect(container.querySelector(".cm-content")).toBeInTheDocument();
   });
+
+  it("renders Large file: read-only status line note for files over 2 MiB (item F6)", async () => {
+    const currentLane = lane();
+    mockRpc({
+      "file.list": () => ({
+        entries: [
+          entry({ name: "large.txt", path: "large.txt", is_dir: false }),
+          entry({ name: "small.txt", path: "small.txt", is_dir: false }),
+        ],
+        truncated: false,
+      }),
+      "file.read": (p: unknown) => {
+        const path = (p as { path: string }).path;
+        if (path === "large.txt") {
+          return {
+            content: "lots of data",
+            mtime_ms: 1000,
+            size: 3 * 1024 * 1024,
+            truncated: false,
+            kind: "text",
+            large: true,
+          };
+        }
+        return {
+          content: "small data",
+          mtime_ms: 1000,
+          size: 100,
+          truncated: false,
+          kind: "text",
+          large: false,
+        };
+      },
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await waitFor(() => expect(screen.getByText("large.txt")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("large.txt"));
+    await waitFor(() => expect(editor.activePath()).toBe("large.txt"));
+
+    expect(await screen.findByText("Large file: read-only")).toBeInTheDocument();
+
+    // Switch to small file
+    fireEvent.click(screen.getByText("small.txt"));
+    await waitFor(() => expect(editor.activePath()).toBe("small.txt"));
+    expect(screen.queryByText("Large file: read-only")).not.toBeInTheDocument();
+  });
 });

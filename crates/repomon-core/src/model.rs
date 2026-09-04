@@ -832,12 +832,15 @@ pub struct FileReadResult {
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub size: u64,
     /// Always `false`: unlike display RPCs (e.g. `lane.diff`'s patch, which caps-and-flags),
-    /// `file.read` REJECTS a file over its size cap outright rather than truncating it — a
+    /// `file.read` REJECTS a file over its size cap outright rather than truncating it - a
     /// truncated read here risks the editor saving the truncated copy back over the real file.
     /// Kept for shape symmetry with other file DTOs (and a possible future soft-cap mode); the
     /// frontend should not expect this to ever be `true` today.
     pub truncated: bool,
     pub kind: String,
+    /// `true` when the file size exceeds 2 MiB (large file mode).
+    #[serde(default)]
+    pub large: bool,
 }
 
 /// `file.read_raw`'s result: base64-encoded file payload plus MIME type and size in bytes.

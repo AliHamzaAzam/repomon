@@ -321,3 +321,36 @@ describe("CodeEditor theme (item 1: theme regression)", () => {
     expect(src).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
   });
 });
+
+describe("large files read-only mode (item F6)", () => {
+  it("configures readOnly and disables fold and git gutters when large is true, and restores on file switch", () => {
+    let setProps!: (p: { value: string; path: string; large?: boolean }) => void;
+    function Harness() {
+      const [props, set] = createSignal<{ value: string; path: string; large?: boolean }>({
+        value: "line 1\nline 2",
+        path: "big.txt",
+        large: true,
+      });
+      setProps = set;
+      return (
+        <CodeEditor
+          value={props().value}
+          path={props().path}
+          large={props().large}
+        />
+      );
+    }
+    const { container } = render(() => <Harness />);
+    const view = getView(container);
+
+    expect(view.state.readOnly).toBe(true);
+    expect(container.querySelector(".cm-foldGutter")).toBeNull();
+    expect(container.querySelector(".cm-git-diff-gutter")).toBeNull();
+
+    // Switch to non-large file
+    setProps({ value: "line 1\nline 2", path: "small.txt", large: false });
+    expect(view.state.readOnly).toBe(false);
+    expect(container.querySelector(".cm-foldGutter")).not.toBeNull();
+    expect(container.querySelector(".cm-git-diff-gutter")).not.toBeNull();
+  });
+});

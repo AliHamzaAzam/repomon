@@ -526,6 +526,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                             value={file().content}
                             path={file().path}
                             laneId={lane()?.id}
+                            large={Boolean(file().large)}
                             wrap={editor()?.wrap()}
                             whitespace={editor()?.whitespace()}
                             initialCursor={file().cursor}

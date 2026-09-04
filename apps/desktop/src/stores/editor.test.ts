@@ -307,4 +307,40 @@ describe("editor store", () => {
       });
     });
   });
+
+  it("marks large files and prevents updateContent and saveFile", async () => {
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "file.read") {
+        return {
+          content: "big content",
+          mtime_ms: 1000,
+          size: 3 * 1024 * 1024,
+          truncated: false,
+          kind: "text",
+          large: true,
+        };
+      }
+      return { entries: [], truncated: false };
+    });
+
+    await new Promise<void>((resolve) => {
+      createRoot(async (dispose) => {
+        const [selectedId] = createSignal<number | null>(7);
+        const store = createEditorStore(fleetStub(selectedId, [lane(7)]));
+
+        await store.openFile("large.log");
+        expect(store.activeFile()?.large).toBe(true);
+
+        store.updateContent("large.log", "edited content");
+        expect(store.activeFile()?.content).toBe("big content");
+
+        await store.saveFile("large.log");
+        expect(daemonCallMock).not.toHaveBeenCalledWith("file.write", expect.anything());
+
+        dispose();
+        resolve();
+      });
+    });
+  });
 });
+

@@ -18,6 +18,7 @@ export interface OpenFile {
   mtimeMs: number | null;
   size?: number;
   kind?: "text" | "binary" | "image" | string;
+  large?: boolean;
   cursor: number;
   scrollTop: number;
   loading: boolean;
@@ -422,6 +423,7 @@ export function createEditorStore(fleet: FleetStore) {
         mtimeMs: result.mtime_ms,
         size: result.size,
         kind: result.kind || "text",
+        large: result.large,
         loading: false,
       }));
     } catch (cause) {
@@ -451,6 +453,8 @@ export function createEditorStore(fleet: FleetStore) {
   }
 
   function updateContent(path: string, content: string) {
+    const file = findOpenFile(path);
+    if (file?.large) return;
     updateOpenFile(path, (f) => ({ ...f, content }));
   }
 
@@ -472,7 +476,7 @@ export function createEditorStore(fleet: FleetStore) {
   async function saveFile(path: string) {
     const laneId = currentLaneId();
     const file = findOpenFile(path);
-    if (!file || laneId == null) return;
+    if (!file || laneId == null || file.large) return;
     if (file.content === file.savedContent && !file.conflict) return;
     const saveKey = `${laneId}:${path}`;
     savingPaths.set(saveKey, false);
@@ -534,6 +538,7 @@ export function createEditorStore(fleet: FleetStore) {
         mtimeMs: result.mtime_ms,
         size: result.size,
         kind: result.kind || "text",
+        large: result.large,
         loading: false,
         conflict: null,
         loadError: null,
@@ -605,6 +610,7 @@ export function createEditorStore(fleet: FleetStore) {
             mtimeMs: result.mtime_ms,
             size: result.size,
             kind: result.kind || "text",
+            large: result.large,
             conflict: null,
             loadError: null,
           }));
@@ -620,6 +626,7 @@ export function createEditorStore(fleet: FleetStore) {
               target.content = result.content;
               target.savedContent = result.content;
               target.mtimeMs = result.mtime_ms;
+              target.large = result.large;
               target.conflict = null;
               target.loadError = null;
             }
@@ -701,6 +708,7 @@ export function createEditorStore(fleet: FleetStore) {
             content: result.content,
             savedContent: result.content,
             mtimeMs: result.mtime_ms,
+            large: result.large,
             loading: false,
           }));
         } catch (cause) {

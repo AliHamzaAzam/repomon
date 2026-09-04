@@ -115,6 +115,7 @@ export interface CodeEditorProps {
   laneId?: number;
   diffBase?: string | null;
   disableGitGutter?: boolean;
+  large?: boolean;
   readOnly?: boolean;
   wrap?: boolean;
   whitespace?: boolean;
@@ -729,6 +730,8 @@ export default function CodeEditor(props: CodeEditorProps) {
   const whitespaceCompartment = new Compartment();
   const indentUnitCompartment = new Compartment();
   const gitGutterCompartment = new Compartment();
+  const foldCompartment = new Compartment();
+  const autocompleteCompartment = new Compartment();
 
   const [hunkPopover, setHunkPopover] = createSignal<{
     hunk: DiffHunk;
@@ -742,7 +745,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   let diffDebounceTimer: number | null = null;
 
   const updateGutterMarkers = (base: string | null, current: string) => {
-    if (!view || props.disableGitGutter) return;
+    if (!view || props.disableGitGutter || props.large) return;
     const diff = computeLineDiff(base, current);
     const doc = view.state.doc;
     const builder = new RangeSetBuilder<GutterMarker>();
@@ -775,7 +778,7 @@ export default function CodeEditor(props: CodeEditorProps) {
     path = props.path,
     laneId = props.laneId,
     diffBase = props.diffBase,
-    disabled = props.disableGitGutter,
+    disabled = Boolean(props.disableGitGutter || props.large),
   ) => {
     const reqId = ++gitDiffRequestId;
     currentDiffPath = path ?? "";
@@ -816,6 +819,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   const saveBinding: KeyBinding = {
     key: "Mod-s",
     run: () => {
+      if (props.large || props.readOnly) return true;
       props.onSave?.();
       void refreshDiffBase();
       return true;
@@ -848,7 +852,7 @@ export default function CodeEditor(props: CodeEditorProps) {
       extensions: [
         lineNumbers(),
         gitGutterCompartment.of(
-          props.disableGitGutter
+          props.disableGitGutter || props.large
             ? []
             : [
                 gitGutterField,
@@ -859,7 +863,7 @@ export default function CodeEditor(props: CodeEditorProps) {
                 }),
               ],
         ),
-        foldGutter(),
+        foldCompartment.of(props.large ? [] : [foldGutter()]),
         highlightActiveLineGutter(),
         highlightActiveLine(),
         highlightSelectionMatches(),
@@ -867,14 +871,15 @@ export default function CodeEditor(props: CodeEditorProps) {
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),
-        autocompletion(),
-        wordCompletionData,
+        autocompleteCompartment.of(
+          props.large ? [] : [autocompletion(), wordCompletionData],
+        ),
         EditorState.allowMultipleSelections.of(true),
         rectangularSelection(),
         crosshairCursor(),
         history(),
         indentGuidePlugin,
-        readOnlyCompartment.of(EditorState.readOnly.of(props.readOnly ?? false)),
+        readOnlyCompartment.of(EditorState.readOnly.of(Boolean(props.readOnly || props.large))),
         wrapCompartment.of(props.wrap ? [EditorView.lineWrapping] : []),
         whitespaceCompartment.of(props.whitespace ? [highlightWhitespace()] : []),
         indentUnitCompartment.of(indentUnit.of(unit)),
@@ -1023,10 +1028,28 @@ export default function CodeEditor(props: CodeEditorProps) {
   });
 
   createEffect(() => {
-    const ro = props.readOnly ?? false;
+    const ro = Boolean(props.readOnly || props.large);
     if (!view) return;
     view.dispatch({
       effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(ro)),
+    });
+  });
+
+  createEffect(() => {
+    const isLarge = Boolean(props.large);
+    if (!view) return;
+    view.dispatch({
+      effects: foldCompartment.reconfigure(isLarge ? [] : [foldGutter()]),
+    });
+  });
+
+  createEffect(() => {
+    const isLarge = Boolean(props.large);
+    if (!view) return;
+    view.dispatch({
+      effects: autocompleteCompartment.reconfigure(
+        isLarge ? [] : [autocompletion(), wordCompletionData],
+      ),
     });
   });
 
@@ -1047,7 +1070,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   });
 
   createEffect(() => {
-    const disabled = Boolean(props.disableGitGutter);
+    const disabled = Boolean(props.disableGitGutter || props.large);
     if (!view) return;
     view.dispatch({
       effects: gitGutterCompartment.reconfigure(
@@ -1069,7 +1092,7 @@ export default function CodeEditor(props: CodeEditorProps) {
     const path = props.path;
     const laneId = props.laneId;
     const diffBase = props.diffBase;
-    const disabled = props.disableGitGutter;
+    const disabled = Boolean(props.disableGitGutter || props.large);
     if (!view) return;
     void refreshDiffBase(path, laneId, diffBase, disabled);
   });
@@ -1149,7 +1172,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   let lastReplaceToken = 0;
   createEffect(() => {
     const req = props.replaceRequest;
-    if (!req || !view) return;
+    if (!req || !view || props.large || props.readOnly) return;
     if (req.token === lastReplaceToken) return;
     lastReplaceToken = req.token;
 

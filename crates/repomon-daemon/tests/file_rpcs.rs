@@ -393,8 +393,8 @@ async fn file_read_raw_returns_base64_for_image() {
 #[tokio::test]
 async fn file_read_rejects_over_cap_size_without_truncating() {
     let mut h = setup("file-toobig").await;
-    // 2MB cap: write one byte over it.
-    std::fs::write(h.root.join("big.txt"), vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+    // 8MB cap: write one byte over it.
+    std::fs::write(h.root.join("big.txt"), vec![b'x'; 8 * 1024 * 1024 + 1]).unwrap();
 
     let r = call(
         &mut h.stream,
@@ -411,6 +411,27 @@ async fn file_read_rejects_over_cap_size_without_truncating() {
         "message was: {}",
         err.message
     );
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_read_flags_large_files() {
+    let mut h = setup("file-large").await;
+    // 3MB file: over 2MB threshold, under 8MB cap
+    std::fs::write(h.root.join("large.txt"), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+
+    let r = call(
+        &mut h.stream,
+        3,
+        "file.read",
+        Some(json!({ "lane_id": h.lane_id, "path": "large.txt" })),
+    )
+    .await;
+    let res: repomon_core::model::FileReadResult =
+        serde_json::from_value(r.result.expect("read must succeed")).unwrap();
+    assert!(res.large);
+    assert_eq!(res.size, 3 * 1024 * 1024);
 
     h.shutdown().await;
 }

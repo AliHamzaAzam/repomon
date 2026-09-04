@@ -1015,6 +1015,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                             value={file().content}
                             path={file().path}
                             laneId={lane()?.id}
+                            large={Boolean(file().large)}
                             languageOverride={props.editor.languageOverrides()[file().path]}
                             wrap={props.editor.wrap()}
                             whitespace={props.editor.whitespace()}
@@ -1130,6 +1131,11 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
             <span class="text-line">|</span>
             <span>{currentIndentUnit()}</span>
+
+            <Show when={activeFile()?.large}>
+              <span class="text-line">|</span>
+              <span class="font-medium text-attention">Large file: read-only</span>
+            </Show>
           </div>
 
           <div class="flex items-center gap-2">

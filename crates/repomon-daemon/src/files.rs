@@ -29,9 +29,12 @@ use crate::ext::canonical_prefix;
 /// still needs a backstop (e.g. a `node_modules` targeted directly).
 pub const LIST_CAP: usize = 2000;
 
-/// Cap on `file.read`'s content size. Past this the RPC rejects rather than truncates — see
+/// Cap on `file.read`'s content size. Past this the RPC rejects rather than truncates - see
 /// [`ReadError::TooLarge`].
-pub const READ_CAP_BYTES: u64 = 2 * 1024 * 1024;
+pub const READ_CAP_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Threshold above which a file is flagged as `large` (over 2 MiB) for read-only mode in editor.
+pub const LARGE_FILE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 
 /// How many leading bytes to sniff for a null byte when classifying binary vs. text.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
@@ -303,6 +306,7 @@ pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
         return Err(ReadError::TooLarge(size));
     }
     let mtime_ms = mtime_ms_of(&meta)?;
+    let large = size > LARGE_FILE_THRESHOLD_BYTES;
 
     if is_image_path(path) {
         return Ok(FileReadResult {
@@ -311,6 +315,7 @@ pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
             size,
             truncated: false,
             kind: "image".to_string(),
+            large,
         });
     }
 
@@ -323,6 +328,7 @@ pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
             size,
             truncated: false,
             kind: "binary".to_string(),
+            large,
         });
     }
 
@@ -333,6 +339,7 @@ pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
             size,
             truncated: false,
             kind: "text".to_string(),
+            large,
         }),
         Err(_) => Ok(FileReadResult {
             content: String::new(),
@@ -340,11 +347,12 @@ pub fn read_file(path: &Path) -> Result<FileReadResult, ReadError> {
             size,
             truncated: false,
             kind: "binary".to_string(),
+            large,
         }),
     }
 }
 
-/// Read raw file bytes, returning base64 payload and MIME type under the same 2 MiB cap.
+/// Read raw file bytes, returning base64 payload and MIME type under the same 8 MiB cap.
 pub fn read_file_raw(path: &Path) -> Result<FileReadRawResult, ReadError> {
     let meta = std::fs::metadata(path)?;
     let size = meta.len();
@@ -893,6 +901,22 @@ mod tests {
             Err(ReadError::TooLarge(size)) => assert_eq!(size, READ_CAP_BYTES + 1),
             other => panic!("expected TooLarge, got is_ok={}", other.is_ok()),
         }
+    }
+
+    #[test]
+    fn read_file_flags_large_files_over_two_megabytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let small_path = dir.path().join("small.txt");
+        std::fs::write(&small_path, "small content").unwrap();
+        let small_read = read_file(&small_path).unwrap();
+        assert!(!small_read.large);
+
+        let large_path = dir.path().join("large.txt");
+        // 3 MiB file: exceeds 2 MiB threshold, under 8 MiB cap
+        std::fs::write(&large_path, vec![b'a'; 3 * 1024 * 1024]).unwrap();
+        let large_read = read_file(&large_path).unwrap();
+        assert!(large_read.large);
+        assert_eq!(large_read.size, 3 * 1024 * 1024);
     }
 
     #[test]
