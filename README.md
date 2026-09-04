@@ -227,16 +227,68 @@ finished one.
 repomind is an orchestrator agent for the fleet: a coding-agent session (Claude Code, Codex,
 Antigravity, or OpenCode) wired to repomon's own MCP server, so it can read every lane's status
 and act on your behalf, spawning workers, answering their permission prompts, and merging
-finished work, while you supervise or check in only when it needs you. It's built into Mission
-Control (the repomind panel, `⌘5`) and available from the CLI:
+finished work, while you supervise or check in only when it needs you.
+
+**A home, not a window.** repomind's memory lives in its own git repo, `~/repomind` by default
+(`[repomind] home`). The daemon creates it on first use, never deletes or merges it itself, and
+registers it like any other repo, with its main worktree marked the *controller lane*: the one
+lane every controller agent runs in, holding the full fleet catalog instead of a worker's
+restricted one. A worker agent cannot spawn into it, and up to `[repomind] max_controllers`
+controllers (2 by default) may run there at once.
+
+```
+~/repomind/
+  AGENTS.md              protocol every agent that runs here follows
+  REPOMIND.md            the operator's persona overlay: voice, defaults, house rules
+  profile/               standing facts about the fleet: repos, lanes, agents, quotas
+  plans/{active,standing,done}/   goals in flight, standing orchestrations, closed goals
+  playbooks/              approved procedures, drafts under playbooks/drafts/
+  fleet/<repo>/notes.md   per-repo notes
+  journal/YYYY-MM-DD.md   a daily digest exported from the orchestration journal
+  knowledge/              cross-cutting facts
+  .repomind/              daemon-owned: the assembled boot context, export state, locks
+```
+
+**How memory flows.** SQLite stays canonical for what the daemon writes itself (the journal,
+schedules, approval rules): a one-way, debounced export renders those rows into the files above
+and commits the batch to the home repo as `Repomind <repomind@local>`. Repo notes and playbooks
+are file-first instead - the `repo.notes.*` and `playbook.*` RPCs read and write
+`fleet/<repo>/notes.md` and `playbooks/<name>.md` directly, and approving a playbook moves its
+file out of `drafts/`. Claude controllers also get the home over basic-memory, registered as a
+second project beside your own vault, so `search_notes`/`read_note`/`write_note` work the same
+way there; other backends (Codex, Antigravity, OpenCode) read and write the files directly per
+`AGENTS.md`.
+
+**Boot context.** A controller starts with no memory of the fleet. Before every spawn into the
+controller lane, and on demand via `repomon repomind boot`, the daemon assembles
+`~/repomind/.repomind/boot.md`: the `REPOMIND.md` overlay, the `profile/*` notes, one status
+line per active plan, yesterday's and today's journal, and a one-line-per-lane fleet snapshot,
+bounded to a token budget with a trailing line naming anything it had to drop to fit. It is
+daemon-owned and gitignored; never hand-edit it.
+
+**Sidebar and panel.** A pinned Repomind row sits above the fleet sidebar's repo groups (brain
+icon, state, controller count, active-goal count); the repomind home itself is excluded from
+the ordinary repo groups and their counts. The Repomind panel (`⌘5`) is the detail view: agents,
+active plans, a journal tail, and mail.
+
+**CLI.**
+
+```sh
+repomon repomind status            # home, lane, window, controller cap, export state, counts, boot
+repomon repomind boot              # regenerate the boot context; prints its path, size, and what trimmed
+repomon repomind export            # run the one-way export now instead of waiting out its debounce
+repomon repomind open [--editor]   # print the home path, or open it in $EDITOR
+```
+
+It's built into Mission Control (the repomind panel, `⌘5`) and started from the CLI:
 
 ```sh
 repomon orchestrate [--autonomy read-only|supervised|autonomous] [--max-agents N] [--model m] [prompt]
 ```
 
-This makes sure the daemon is up, starts (or reuses) the single daemon-owned `orchestrator`
-tmux window running the orchestrator agent, and attaches you to it. `prompt` is an optional
-initial goal.
+This makes sure the daemon is up, ensures the home and its controller lane exist, spawns (or
+reuses) the primary controller there, and attaches you to it. `prompt` is an optional initial
+goal.
 
 **TUI command-center** (`O` key, or `6`): a pinned fleet row plus a dashboard for repomind,
 reachable like any other zoom level. The row and header escalate the moment repomind needs
@@ -252,7 +304,10 @@ cap (100 actions by default), a concurrent-agent cap (`--max-agents`, default 4)
 on sending the same text to the same lane twice in a row, and a two-phase human-confirmation
 flow for lane deletion (the first call only returns an impact summary and a token; the delete
 only happens once that token comes back). Pass `--autonomy supervised` to have it propose lane
-creation for you to confirm instead, or `--autonomy read-only` to keep it to observing.
+creation for you to confirm instead, or `--autonomy read-only` to keep it to observing. The
+controller lane is a hard exception regardless of autonomy: repomind may never delete or merge
+it, and destructive dialogs there (deletion, a push to remote, credential or device access,
+installs) always hold for you.
 
 Before merging a lane's work, repomind is expected to verify it: `lane_diff` (commits ahead of
 base with diffstat, plus uncommitted changes) before `merge_lane` lands them.
