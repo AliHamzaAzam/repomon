@@ -1,3 +1,4 @@
+mod assets;
 mod connection;
 mod control;
 mod ipc;
@@ -51,6 +52,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             connection_status,
+            assets::allow_worktree_assets,
             control::daemon_service_info,
             control::daemon_stop,
             control::daemon_start,
