@@ -82,6 +82,33 @@ export function RepomindRowMenu(props: {
   );
 }
 
+/// Tone classes for the one-word state vocabulary, written out per tone rather than interpolated:
+/// Tailwind only emits classes it can read as whole strings in the source.
+const DOT_TONE = {
+  signal: "bg-signal",
+  attention: "bg-attention",
+  fault: "bg-fault",
+  muted: "bg-muted/50",
+} as const;
+
+/// The Repomind toolbar button's state dot, the counterpart to Repomail's unread badge: a signal
+/// dot while a controller runs, the attention (or fault) color when one wants the operator, and
+/// nothing at all when the home is off. It says only "look here"; the word for what is happening
+/// lives on the pinned sidebar row and in the panel header.
+export function RepomindStateDot(props: { controller: ControllerSummary }) {
+  const indicator = () => stateIndicator(props.controller.agents ? props.controller.state : null);
+  return (
+    <Show when={props.controller.agents > 0}>
+      <span
+        class={`size-1.5 shrink-0 rounded-full ${DOT_TONE[indicator().tone]}`}
+        title={`Repomind: ${indicator().label}`}
+        aria-label={`Repomind: ${indicator().label}`}
+        role="img"
+      />
+    </Show>
+  );
+}
+
 /// The pinned Repomind row: one lane row's worth of the fleet's own grammar, standing in for the
 /// repo group the home would otherwise get. Line 1 names it and states it in the same one-word
 /// vocabulary every lane pill uses; line 2 says where the home is and what it holds.

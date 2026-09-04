@@ -6,6 +6,7 @@ import ControlCenter from "./components/ControlCenter";
 import ExtensionsView from "./components/ExtensionsView";
 import Onboarding from "./components/Onboarding";
 import RepomindPanel from "./components/RepomindPanel";
+import { RepomindStateDot } from "./components/RepomindRow";
 import RightPanelHost, {
   RIGHT_PANEL_DEFAULT_WIDTH_PX,
   RIGHT_PANEL_MAX_WIDTH_PX,
@@ -600,6 +601,7 @@ function App(props: AppProps) {
           >
             <IconSparkles size={13} />
             <span>Repomind</span>
+            <RepomindStateDot controller={fleet.controller()} />
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
