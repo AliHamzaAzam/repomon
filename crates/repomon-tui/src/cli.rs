@@ -987,7 +987,7 @@ pub enum RepomindCmd {
     },
 }
 
-/// `repomon repomind ...` — the CLI surface over the repomind home: `repomind.status`,
+/// `repomon repomind ...`: the CLI surface over the repomind home: `repomind.status`,
 /// `repomind.boot`, `repomind.export`, and (locally, no RPC) opening the home folder.
 async fn handle_repomind(cmd: RepomindCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
     match cmd {
@@ -1025,7 +1025,7 @@ async fn handle_repomind(cmd: RepomindCmd, config: &Config, socket: Option<PathB
     Ok(())
 }
 
-/// `repomon repomind status` — a short label/value table over `RepomindStatus`. Pure so it can
+/// `repomon repomind status`: a short label/value table over `RepomindStatus`. Pure so it can
 /// be unit tested without a daemon.
 fn format_repomind_status(status: &RepomindStatus) -> String {
     let mut out = String::new();
@@ -1081,7 +1081,7 @@ fn format_repomind_status(status: &RepomindStatus) -> String {
     out
 }
 
-/// `repomon repomind boot` — path, tokens, trimmed. Pure over the raw `repomind.boot` result.
+/// `repomon repomind boot`: path, tokens, trimmed. Pure over the raw `repomind.boot` result.
 fn format_repomind_boot(v: &Value) -> String {
     format!(
         "path     {}\ntokens   {}\ntrimmed  {}\n",
@@ -1097,7 +1097,7 @@ fn format_repomind_boot(v: &Value) -> String {
     )
 }
 
-/// `repomon repomind export` — files touched and the record kinds they belong to. Pure over the
+/// `repomon repomind export`: files touched and the record kinds they belong to. Pure over the
 /// raw `repomind.export` result.
 fn format_repomind_export(v: &Value) -> String {
     let files = v["files"].as_array().cloned().unwrap_or_default();
@@ -1651,7 +1651,7 @@ mod tests {
 
     /// Both the man page and the shell completions are generated straight from the `Command`
     /// enum, so the new `repomind` subcommand (and its `status`/`boot`/`export`/`open` verbs)
-    /// need no hand-written entry anywhere — this just guards that clap actually picked it up.
+    /// need no hand-written entry anywhere; this just guards that clap actually picked it up.
     #[test]
     fn man_and_completions_include_the_repomind_subcommand() {
         use clap::CommandFactory;
