@@ -470,7 +470,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
               </button>
             </div>
 
-            <div class="relative flex min-h-0 flex-1 flex-col">
+            <div class="relative flex min-h-0 min-w-0 flex-1 flex-col">
               <Show when={activeFile()?.conflict} keyed>
                 {(conflict) => (
                   <ConflictBanner

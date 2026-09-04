@@ -18,7 +18,7 @@ import CodeEditor, { type CodeEditorReplaceRequest } from "./CodeEditor";
 import ProjectSearchPanel from "./ProjectSearchPanel";
 import ImageViewer from "./ImageViewer";
 import BinaryViewer from "./BinaryViewer";
-import PdfViewer from "./PdfViewer";
+import PdfViewer, { type PdfViewerState } from "./PdfViewer";
 import ConfirmDialog from "./ConfirmDialog";
 import {
   MarkdownPreview,
@@ -59,6 +59,13 @@ export interface EditorWorkspaceProps {
 
 function basename(path: string): string {
   return path.split("/").pop() || path;
+}
+
+function formatBytes(bytes?: number | null): string {
+  if (bytes === undefined || bytes === null) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function getFileIcon(path: string, kind?: string): Component<IconProps> {
@@ -187,6 +194,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   const [selectionCount, setSelectionCount] = createSignal(1);
   const [selectedChars, setSelectedChars] = createSignal(0);
   const [isResizing, setIsResizing] = createSignal(false);
+  const [pdfState, setPdfState] = createSignal<PdfViewerState | null>(null);
 
   // Compute line and column from doc length and head
   function updateCursorPos(head: number) {
@@ -993,7 +1001,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                 >
                   <div
                     ref={editorContainerRef}
-                    class="relative flex min-h-0 flex-1 overflow-hidden"
+                    class="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
                   >
                     <Switch>
                       <Match when={file().kind === "image"}>
@@ -1007,10 +1015,17 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         <BinaryViewer path={file().path} size={file().size} />
                       </Match>
                       <Match when={file().kind === "pdf"}>
+                        {/* `editorContainerRef` above lays its children out in a row (it also
+                            hosts the markdown split view further down), so a lone child only
+                            gets its intrinsic content width unless it claims the full row itself
+                            - PdfViewer's root does that (h-full w-full), which is the fix for the
+                            v1 bug where the PDF iframe rendered in a narrow, content-sized column
+                            instead of filling the tab. */}
                         <PdfViewer
                           worktreeRoot={lane()?.worktree.path ?? ""}
                           path={file().path}
                           size={file().size}
+                          onStateChange={setPdfState}
                         />
                       </Match>
                       <Match when={true}>
@@ -1076,6 +1091,10 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
         {/* Status Line */}
         <div class="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface/95 px-3 font-mono text-[11px] text-muted select-none">
+          <Show
+            when={activeFile()?.kind === "pdf"}
+            fallback={
+              <>
           <div class="flex items-center gap-3">
             {/* Language override button */}
             <div class="relative">
@@ -1195,6 +1214,18 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               </button>
             </Show>
           </div>
+              </>
+            }
+          >
+            <span>
+              PDF · {pdfState()?.numPages ?? "-"} {pdfState()?.numPages === 1 ? "page" : "pages"}
+              <Show when={activeFile()?.size}>
+                {" "}
+                · {formatBytes(activeFile()?.size)}
+              </Show>
+            </span>
+            <span>{pdfState()?.zoomPercent ?? 100}%</span>
+          </Show>
         </div>
       </div>
 

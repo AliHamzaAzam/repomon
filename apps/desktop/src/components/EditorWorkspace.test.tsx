@@ -36,6 +36,16 @@ vi.mock("../ipc/rpc", async (importOriginal) => {
   };
 });
 
+// PdfViewer owns its own pdf.js pipeline and is covered by PdfViewer.test.tsx; here it's replaced
+// with a stand-in that reports fixed state, so the status line's kind-aware rendering can be
+// tested without dragging pdf.js, its worker, and the asset-protocol IPC into this file too.
+vi.mock("./PdfViewer", () => ({
+  default: (props: { onStateChange?: (state: { numPages: number; zoomPercent: number } | null) => void }) => {
+    props.onStateChange?.({ numPages: 3, zoomPercent: 100 });
+    return <div data-testid="pdf-viewer-stub" />;
+  },
+}));
+
 function mockRpc(handlers: Record<string, (params: unknown) => unknown>) {
   daemonCallMock.mockImplementation((method: string, params?: unknown) => {
     const handler = handlers[method];
@@ -193,6 +203,41 @@ describe("EditorWorkspace component", () => {
     fireEvent.click(whitespaceButton);
     expect(whitespaceButton).toHaveTextContent("Whitespace: On");
     expect(editor.whitespace()).toBe(true);
+  });
+
+  it("shows PDF status and hides the code items for a pdf tab", async () => {
+    const currentLane = lane();
+    mockRpc({
+      "file.list": () => ({
+        entries: [entry({ name: "report.pdf", path: "report.pdf", is_dir: false })],
+        truncated: false,
+      }),
+      "file.read": () => ({
+        content: "",
+        mtime_ms: 1000,
+        size: 2048,
+        truncated: false,
+        kind: "pdf",
+      }),
+    });
+
+    const fleet = fleetWith(currentLane);
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await waitFor(() => expect(screen.getByText("report.pdf")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("report.pdf"));
+    await waitFor(() => expect(editor.activePath()).toBe("report.pdf"));
+
+    // The code-editor status items (language, cursor position, indent, wrap, whitespace) are
+    // gone for a pdf tab - PdfViewer's stub reports its own state instead.
+    expect(screen.queryByTitle("Click to override syntax language")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Ln \d+, Col \d+$/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Toggle line wrapping")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Toggle render whitespace")).not.toBeInTheDocument();
+
+    expect(screen.getByText("PDF · 3 pages · 2.0 KB")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
   });
 
   it("allows overriding the syntax language from status line menu", async () => {

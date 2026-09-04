@@ -567,3 +567,41 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* PdfViewer text layer: one transparent span per pdf.js text item, positioned to sit exactly
+   over the glyphs drawn on the page canvas below it. Invisible by design - it exists only so the
+   browser's native selection/copy and PdfViewer's find-in-page have real text to work with. */
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  transform-origin: 0 0;
+  user-select: text;
+}
+
+.pdf-text-span {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.pdf-text-layer ::selection {
+  background: color-mix(in srgb, var(--signal) 30%, transparent);
+}
+
+.pdf-find-mark {
+  position: absolute;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--attention) 35%, transparent);
+}
+
+.pdf-find-mark.is-active {
+  background: color-mix(in srgb, var(--attention) 60%, transparent);
+  outline: 1px solid var(--attention);
+  outline-offset: 1px;
+}
