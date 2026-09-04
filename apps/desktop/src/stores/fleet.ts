@@ -68,35 +68,148 @@ function gateSuffix(lane: Lane): string {
   return blocked ? ` · gate ${blocked.net_new_findings}` : "";
 }
 
+/// One agent's state, the single vocabulary the sidebar speaks. Every pill, chip, count and
+/// filter is derived from this function and nothing else, so a lane pill reading "2 running" and
+/// a "Running" chip reading 1 can no longer describe the same fleet.
+///
+/// This is a pure projection of daemon fields. The frontend does not re-read pane text or run its
+/// own timers: when a status looks wrong, the daemon's `status_reason` says why, and the fix
+/// belongs there.
+export type AgentState =
+  | "decision"
+  | "stalled"
+  | "limited"
+  | "needs-you"
+  | "external"
+  | "running"
+  | "inferred"
+  | "idle";
+
+/// Most urgent first. `agentState` walks this order, and `laneIndicator` shows the most urgent
+/// state among a lane's agents.
+const STATE_PRIORITY: readonly AgentState[] = [
+  "decision",
+  "stalled",
+  "limited",
+  "needs-you",
+  "external",
+  "running",
+  "inferred",
+  "idle",
+];
+
+export function agentState(agent: AgentSession): AgentState {
+  if (agent.pending_dialog) return "decision";
+  const managed = !agent.external && !agent.inferred;
+  if (managed && agent.status === "running" && agent.stale) return "stalled";
+  if (agent.status === "rate-limited") return "limited";
+  if (managed && agent.status === "waiting") return "needs-you";
+  if (agent.external) return "external";
+  if (!agent.inferred && agent.status === "running") return "running";
+  if (agent.inferred) return "inferred";
+  return "idle";
+}
+
+/// States that put a lane in the "Needs attention" filter, and so in its count.
+const URGENT_STATES: ReadonlySet<AgentState> = new Set<AgentState>([
+  "decision",
+  "stalled",
+  "limited",
+  "needs-you",
+]);
+
+export function isUrgentState(state: AgentState): boolean {
+  return URGENT_STATES.has(state);
+}
+
+/// The most urgent state among a lane's agents, or null for a lane with no agents.
+export function laneState(lane: Lane): AgentState | null {
+  const states = new Set(lane.agent_sessions.map(agentState));
+  return STATE_PRIORITY.find((state) => states.has(state)) ?? null;
+}
+
+/// How many of a lane's agents share the lane's headline state, so the pill can say "2 running"
+/// truthfully rather than counting the whole roster.
+export function laneStateCount(lane: Lane, state: AgentState): number {
+  return lane.agent_sessions.filter((agent) => agentState(agent) === state).length;
+}
+
+const STATE_TONE: Record<AgentState, LaneTone> = {
+  decision: "attention",
+  stalled: "fault",
+  limited: "fault",
+  "needs-you": "attention",
+  external: "muted",
+  running: "signal",
+  inferred: "signal",
+  idle: "muted",
+};
+
 export function laneIndicator(lane: Lane): LaneIndicator {
-  const agents = lane.agent_sessions;
+  const state = laneState(lane);
+  if (state === null) return { label: "", tone: "muted", urgent: false };
   const gate = gateSuffix(lane);
-  if (agents.some((agent) => agent.pending_dialog)) {
-    return { label: `decision${gate}`, tone: "attention", urgent: true };
+  const urgent = isUrgentState(state);
+  const tone = STATE_TONE[state];
+  if (state === "running") {
+    const count = laneStateCount(lane, "running");
+    const running = lane.agent_sessions.filter((agent) => agentState(agent) === "running");
+    const onlySubagents = running.every((agent) => Boolean(agent.subagent_running));
+    const label =
+      onlySubagents && count === 1 ? "subagent running" : count > 1 ? `${count} running` : "running";
+    return { label: `${label}${gate}`, tone, urgent };
   }
-  if (agents.some((agent) => !agent.external && !agent.inferred && agent.status === "running" && agent.stale)) {
-    return { label: "stalled", tone: "fault", urgent: true };
+  const label =
+    state === "decision"
+      ? `decision${gate}`
+      : state === "needs-you"
+        ? `needs you${gate}`
+        : state === "inferred"
+          ? "active · inferred"
+          : state;
+  return { label, tone, urgent };
+}
+
+/// Why an agent's state reads the way it does, straight from the daemon. Never invented here:
+/// with no reason on the payload the tooltip simply says less.
+export function agentStateReason(agent: AgentSession): string | null {
+  return agent.status_reason ?? null;
+}
+
+/// The lane pill's tooltip: the headline state plus the daemon's reasons for the agents in it.
+export function laneIndicatorTitle(lane: Lane): string | undefined {
+  const state = laneState(lane);
+  if (state === null) return undefined;
+  const reasons = lane.agent_sessions
+    .filter((agent) => agentState(agent) === state)
+    .map((agent) => agentStateReason(agent))
+    .filter((reason): reason is string => Boolean(reason));
+  if (state === "external" && !reasons.length) {
+    return "External session running outside repomon. Select lane to adopt into tmux management.";
   }
-  if (agents.some((agent) => agent.status === "rate-limited")) {
-    return { label: "limited", tone: "fault", urgent: true };
+  if (!reasons.length) return undefined;
+  return reasons.join("\n");
+}
+
+export interface FleetCounts {
+  urgent: number;
+  running: number;
+  idle: number;
+}
+
+/// Agent counts, not lane counts. The lane pill counts agents, so the chips must too, or a lane
+/// showing "2 running" sits under a chip reading "Running 1".
+export function fleetCounts(lanes: Lane[]): FleetCounts {
+  const counts: FleetCounts = { urgent: 0, running: 0, idle: 0 };
+  for (const lane of lanes) {
+    for (const agent of lane.agent_sessions) {
+      const state = agentState(agent);
+      if (isUrgentState(state)) counts.urgent += 1;
+      else if (state === "running") counts.running += 1;
+      else if (state === "idle") counts.idle += 1;
+    }
   }
-  if (agents.some((agent) => !agent.external && !agent.inferred && agent.status === "waiting")) {
-    return { label: `needs you${gate}`, tone: "attention", urgent: true };
-  }
-  if (agents.some((agent) => agent.external)) {
-    return { label: "external", tone: "muted", urgent: false };
-  }
-  const runningAgents = agents.filter((agent) => !agent.inferred && agent.status === "running");
-  const runningCount = runningAgents.length;
-  if (runningCount > 0) {
-    const onlySubagents = runningAgents.every((agent) => Boolean(agent.subagent_running));
-    const label = onlySubagents && runningCount === 1 ? "subagent running" : runningCount > 1 ? `${runningCount} running` : "running";
-    return { label: `${label}${gate}`, tone: "signal", urgent: false };
-  }
-  if (agents.some((agent) => agent.inferred)) {
-    return { label: "active · inferred", tone: "signal", urgent: false };
-  }
-  return { label: agents.length ? "idle" : "", tone: "muted", urgent: false };
+  return counts;
 }
 
 /// The usage-probe key for the account a session runs under, matching how the daemon keys its
@@ -241,6 +354,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [query, setQuery] = createSignal("");
   const [urgentOnly, setUrgentOnly] = createSignal(false);
   const [runningOnly, setRunningOnly] = createSignal(false);
+  const [idleOnly, setIdleOnly] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
   const [synced, setSynced] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -265,11 +379,19 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   // a badge you cannot click through to is just noise.
   const unhiddenLanes = createMemo(() => lanes().filter((lane) => !lane.repo.hidden));
 
+  // Every filter reads the same `agentState` the rows and chips do, so a chip can never select a
+  // set the rows disagree with.
   const visibleLanes = createMemo(() =>
     unhiddenLanes()
       .filter((lane) => matchesLane(lane, query()))
       .filter((lane) => !urgentOnly() || laneIndicator(lane).urgent)
-      .filter((lane) => !runningOnly() || lane.agent_sessions.some((agent) => agent.status === "running"))
+      .filter(
+        (lane) =>
+          !runningOnly() || lane.agent_sessions.some((agent) => agentState(agent) === "running"),
+      )
+      .filter(
+        (lane) => !idleOnly() || lane.agent_sessions.some((agent) => agentState(agent) === "idle"),
+      )
       .sort(byPriority),
   );
 
@@ -280,10 +402,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   // The usage pill follows the focused agent's account rather than always the first probe.
   const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane(), focusedWindow()));
 
-  const counts = createMemo(() => ({
-    urgent: unhiddenLanes().filter((lane) => laneIndicator(lane).urgent).length,
-    running: unhiddenLanes().filter((lane) => lane.agent_sessions.some((agent) => agent.status === "running")).length,
-  }));
+  const counts = createMemo(() => fleetCounts(unhiddenLanes()));
 
   async function refresh() {
     if (!active) return;
@@ -385,6 +504,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     setUrgentOnly,
     runningOnly,
     setRunningOnly,
+    idleOnly,
+    setIdleOnly,
     loading,
     synced,
     error,

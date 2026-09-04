@@ -1,0 +1,60 @@
+       4 the image occupies a ~520px column on the left, the remaining pane is empty; the toolbar is only
+       5 name, dimensions, size, and a "Fit" button; the status line shows code items (Auto Language,
+       6 Ln/Col, Spaces, Wrap, Whitespace). Root cause is the same as the PDF viewer v1 (fixed in
+       7 1355bb5): the tab content container is a row-direction flex box that never stretches a child's
+       8 width; the viewer must size itself `h-full w-full min-h-0 min-w-0`.
+       9
+      10 Branch: `feat/editor-image-viewer-v2` in a fresh worktree at `/private/tmp/repomon-feat-editor-image-v2`
+     … +51 lines
+  ⎿  Allowed by auto mode classifier
+
+⏺ Agent(Rebuild image viewer) Sonnet 5
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ Dispatched. The subagent is rebuilding the image viewer: fills the pane (same root-cause fix as the PDF viewer), streams through the asset protocol with no size cap, fit / 1:1 / free zoom with wheel and drag
+  panning, a proper toolbar, themed transparency backdrop, kind-aware status line (format, dimensions, size, zoom), and a live SVG preview split for .svg tabs sharing the markdown preview's chord and split. I'll
+  gate, merge, rebuild, and install when it reports.
+
+✻ Waiting for 1 background agent to finish
+
+❯ [Image #13] see what can be done to improve this sidebar. also the status ('running', 'needs you' etc. are mostly not correct) so work on that too. use a new sonnet/opus agent
+  ⎿  [Image #13]
+
+⏺ Two problems in one area, so one agent on Opus in a single worktree: first the status correctness (evidence-driven, since "mostly wrong" needs root cause, not guesses), then the sidebar design pass on top.
+  Writing the brief and dispatching.
+
+⏺ Write(~/Developer/Claude/repomon/.briefs/2026-09-04-sidebar-and-status.md)
+  ⎿  Wrote 97 lines to ../../Claude/repomon/.briefs/2026-09-04-sidebar-and-status.md
+       1 # Brief K: Fleet sidebar redesign and agent status correctness
+       2
+       3 Two parts, in order, on one branch: `feat/fleet-sidebar-status` in a fresh worktree at
+       4 `/private/tmp/repomon-feat-fleet-sidebar` from current main (1355bb5 or later). Part 1 is a
+       5 correctness investigation and fix (daemon and store); part 2 is a design pass on the sidebar.
+       6 Commit them separately (part 1 may need several commits).
+       7
+       8 ## Part 1: agent status is mostly wrong
+       9
+      10 The operator reports that the statuses shown in the sidebar (RUNNING, IDLE, NEEDS YOU, the
+     … +87 lines
+  ⎿  Allowed by auto mode classifier
+
+⏺ Agent(Fix agent status and redesign sidebar) Opus 5 (1M context)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ Dispatched on Opus. The agent starts with a read-only audit of the live fleet (daemon-reported status versus what each pane actually shows for at least eight agent windows), traces the classification pipeline
+  from the daemon through the fleet store, fixes the real causes with fixture-based tests from those captures, adds an explainable reason for each status so a pill tooltip can say why, and aligns the filter
+  counts with the rows. Then the sidebar pass: collapsing the nine-row Hidden section to one, giving every lane row the same compact structure with agent count and status, explaining the repo header counts,
+  marking merged worktrees, and tightening spacing so twelve lanes fit.
+
+  The image viewer subagent is still running in its own worktree; the two don't overlap in files.
+
+✻ Waiting for 2 background agents to finish
+                                                                                                                                                                           ✔ Update installed · Restart to update
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── repomon-desktop-orchestration ─
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents · ↓ to manage                                                                                                                                             /rc
+
+  ⏺ main
+  ◯ general-purpose  Reading handleSplitResizeStart and nearestHeading memo                                                                                                              6m 40s · ↓ 155.6k tokens
+  ◯ general-purpose  Reading laneIndicator counts in fleet.ts                                                                                                                            4m 21s · ↓ 101.6k tokens

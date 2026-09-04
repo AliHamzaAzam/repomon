@@ -73,6 +73,13 @@ stalled_since?: string | null,
  */
 subagent_running?: string | null, 
 /**
+ * One short phrase explaining why `status` reads the way it does: "permission dialog: Bash",
+ * "subagent running", "spinner on screen", "no transcript activity for 6m". Overlaid at list
+ * time and never persisted. Clients put it in a tooltip so a wrong status is reportable
+ * rather than merely disbelieved.
+ */
+status_reason?: string | null, 
+/**
  * The latest dxkit stop-gate verdict from the worktree's `.dxkit/loop/ledger.jsonl`,
  * when the lane uses dxkit. Overlaid at list time; not persisted. A fresh `allowed`
  * grants done-candidate, a fresh block vetoes it (see `agent_attention_in`).

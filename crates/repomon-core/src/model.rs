@@ -575,6 +575,12 @@ pub struct AgentSession {
     /// Overlaid at list time; not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_running: Option<String>,
+    /// One short phrase explaining why `status` reads the way it does: "permission dialog: Bash",
+    /// "subagent running", "spinner on screen", "no transcript activity for 6m". Overlaid at list
+    /// time and never persisted. Clients put it in a tooltip so a wrong status is reportable
+    /// rather than merely disbelieved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     /// Whether the transcript's last entry is the agent speaking with no tool call — i.e. it
     /// finished its turn — independent of the Idle time-decay that hides this in `status`.
     /// Daemon-internal (feeds the stall detector); never serialized.

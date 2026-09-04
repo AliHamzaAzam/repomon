@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import {
+  agentState,
   createFleetStore,
+  fleetCounts,
   laneIndicator,
+  laneIndicatorTitle,
   matchesLane,
   orderRepos,
   pickFocusedUsage,
@@ -218,6 +221,93 @@ describe("fleet presentation", () => {
       ],
     });
     expect(laneIndicator(subRunning)).toEqual({ label: "subagent running", tone: "signal", urgent: false });
+  });
+
+  it("counts agents rather than lanes, so a chip can never undercount its own rows", async () => {
+    // The operator's report: one lane's pill read "2 RUNNING" under a "Running 1" chip, because
+    // the pill counted agents and the chip counted lanes.
+    const only = repo(1, "upwork");
+    const busy = lane({
+      id: 10,
+      repo: only,
+      agent_sessions: [agent({ status: "running" }), agent({ status: "running" })],
+    });
+    expect(laneIndicator(busy).label).toBe("2 running");
+
+    const { fleet, teardown } = await startedStore([only], [busy]);
+    await fleet.refresh();
+    expect(fleet.counts().running).toBe(2);
+    teardown();
+  });
+
+  it("counts the same agents the pills do, inferred sessions included nowhere", () => {
+    // The chip used a bare `status === "running"` test while the pill filtered inferred
+    // sessions out, so an inferred lane inflated the chip past what any row claimed.
+    const inferredOnly = lane({
+      id: 11,
+      agent_sessions: [agent({ status: "running", inferred: true, tmux_window: null })],
+    });
+    expect(laneIndicator(inferredOnly).label).toBe("active · inferred");
+    expect(fleetCounts([inferredOnly])).toEqual({ urgent: 0, running: 0, idle: 0 });
+  });
+
+  it("counts needs-you and stalled agents as needing attention, and idle agents apart", () => {
+    const mixed = [
+      lane({ id: 12, agent_sessions: [agent({ status: "waiting" }), agent({ status: "idle" })] }),
+      lane({ id: 13, agent_sessions: [agent({ status: "running", stale: true })] }),
+      lane({ id: 14, agent_sessions: [agent({ status: "running" }), agent({ status: "idle" })] }),
+    ];
+    expect(fleetCounts(mixed)).toEqual({ urgent: 2, running: 1, idle: 2 });
+  });
+
+  it("gives every agent exactly one state, in urgency order", () => {
+    expect(agentState(agent({ status: "waiting", pending_dialog: { question: "Run?", body: [], options: [], selected: null } }))).toBe("decision");
+    expect(agentState(agent({ status: "running", stale: true }))).toBe("stalled");
+    expect(agentState(agent({ status: "rate-limited" }))).toBe("limited");
+    expect(agentState(agent({ status: "waiting" }))).toBe("needs-you");
+    expect(agentState(agent({ status: "running", external: true }))).toBe("external");
+    expect(agentState(agent({ status: "running" }))).toBe("running");
+    expect(agentState(agent({ status: "running", inferred: true }))).toBe("inferred");
+    expect(agentState(agent({ status: "idle" }))).toBe("idle");
+    // A stalled external session is not "stalled": the daemon never watches its pane.
+    expect(agentState(agent({ status: "running", stale: true, external: true }))).toBe("external");
+  });
+
+  it("explains a status from the daemon's reason instead of guessing at one", () => {
+    const explained = lane({
+      agent_sessions: [
+        agent({ status: "running", status_reason: "spinner on screen: Thinking (2m 14s)" }),
+        agent({ status: "idle", status_reason: "no output for 41m" }),
+      ],
+    });
+    expect(laneIndicatorTitle(explained)).toBe("spinner on screen: Thinking (2m 14s)");
+    expect(laneIndicatorTitle(lane({ agent_sessions: [agent({ status: "idle" })] }))).toBeUndefined();
+  });
+
+  it("filters to the same lanes the chips count", async () => {
+    const only = repo(1, "repomon");
+    const lanes = [
+      lane({ id: 20, repo: only, agent_sessions: [agent({ status: "running" })] }),
+      lane({ id: 21, repo: only, agent_sessions: [agent({ status: "idle" })] }),
+      lane({ id: 22, repo: only, agent_sessions: [agent({ status: "waiting" })] }),
+    ];
+    const { fleet, teardown } = await startedStore([only], lanes);
+    await fleet.refresh();
+
+    fleet.setRunningOnly(true);
+    expect(fleet.visibleLanes().map((l) => l.id)).toEqual([20]);
+    expect(fleet.counts().running).toBe(1);
+    fleet.setRunningOnly(false);
+
+    fleet.setIdleOnly(true);
+    expect(fleet.visibleLanes().map((l) => l.id)).toEqual([21]);
+    expect(fleet.counts().idle).toBe(1);
+    fleet.setIdleOnly(false);
+
+    fleet.setUrgentOnly(true);
+    expect(fleet.visibleLanes().map((l) => l.id)).toEqual([22]);
+    expect(fleet.counts().urgent).toBe(1);
+    teardown();
   });
 
   it("fuzzy matches repo, branch, and agent text", () => {

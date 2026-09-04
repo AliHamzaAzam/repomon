@@ -2351,12 +2351,14 @@ pub async fn dispatch(
                     .map_err(internal)?;
 
             let mut indices = ctx.file_indices.lock().await;
-            let entry = indices.entry(p.lane_id).or_insert_with(|| crate::CachedIndex {
-                generation,
-                paths: Vec::new(),
-                truncated: false,
-                valid: false,
-            });
+            let entry = indices
+                .entry(p.lane_id)
+                .or_insert_with(|| crate::CachedIndex {
+                    generation,
+                    paths: Vec::new(),
+                    truncated: false,
+                    valid: false,
+                });
 
             if entry.generation == generation {
                 entry.paths = paths.clone();
@@ -3947,11 +3949,12 @@ pub async fn dispatch(
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             let win = window.clone();
-            let (dialog, sub) = tokio::task::spawn_blocking(move || {
+            let (dialog, sub, spinner) = tokio::task::spawn_blocking(move || {
                 tmux.capture_named(&win, CaptureOpts::last(45)).map(|pane| {
                     (
                         agent::prompt::detect_dialog(&pane),
                         agent::prompt::detect_subagent_running(&pane),
+                        agent::prompt::detect_active_spinner(&pane),
                     )
                 })
             })
@@ -3960,7 +3963,13 @@ pub async fn dispatch(
             .map_err(internal)?;
             ctx.prompt_cache.lock().await.insert(
                 window,
-                (std::time::Instant::now(), None, dialog.clone(), sub),
+                (
+                    std::time::Instant::now(),
+                    None,
+                    dialog.clone(),
+                    sub,
+                    spinner,
+                ),
             );
             Ok(json!({ "dialog": dialog }))
         }
@@ -3987,7 +3996,7 @@ pub async fn dispatch(
                 ctx.prompt_cache
                     .lock()
                     .await
-                    .insert(window, (std::time::Instant::now(), None, None, None));
+                    .insert(window, (std::time::Instant::now(), None, None, None, None));
                 return Err(RpcError {
                     code: DIALOG_CHANGED,
                     message: "no pending dialog".into(),
@@ -3998,7 +4007,13 @@ pub async fn dispatch(
                 if *expect != dialog.summary() {
                     ctx.prompt_cache.lock().await.insert(
                         window,
-                        (std::time::Instant::now(), None, Some(dialog.clone()), None),
+                        (
+                            std::time::Instant::now(),
+                            None,
+                            Some(dialog.clone()),
+                            None,
+                            None,
+                        ),
                     );
                     return Err(RpcError {
                         code: DIALOG_CHANGED,
@@ -5470,6 +5485,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     stale: false,
                     stalled_since: None,
                     subagent_running: None,
+                    status_reason: None,
                     ended_turn: false,
                     gate: None,
                     config_dir: None,
@@ -5653,8 +5669,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // sees), so a NeedsYou can be up to SNIFF_TTL late. Re-capture those on a short 1.5s TTL
         // so status updates and decision prompts appear almost instantly.
         const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
-        let mut sniffs: Vec<(Option<agent::prompt::PendingDialog>, Option<String>)> =
-            Vec::with_capacity(candidates.len());
+        type Sniff = (
+            Option<agent::prompt::PendingDialog>,
+            Option<String>,
+            Option<String>,
+        );
+        let mut sniffs: Vec<Sniff> = Vec::with_capacity(candidates.len());
         let mut misses: Vec<usize> = Vec::new();
         {
             let cache = ctx.prompt_cache.lock().await;
@@ -5665,14 +5685,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     SNIFF_TTL
                 };
                 match cache.get(w) {
-                    Some((t, cached_status, p, sub))
+                    Some((t, cached_status, p, sub, spin))
                         if t.elapsed() < ttl
                             && sniff_cache_status_matches(*cached_status, *status) =>
                     {
-                        sniffs.push((p.clone(), sub.clone()))
+                        sniffs.push((p.clone(), sub.clone(), spin.clone()))
                     }
                     _ => {
-                        sniffs.push((None, None));
+                        sniffs.push((None, None, None));
                         misses.push(idx);
                     }
                 }
@@ -5687,6 +5707,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let fresh: Vec<(
                 Option<agent::prompt::PendingDialog>,
                 Option<String>,
+                Option<String>,
                 Option<u64>,
             )> = tokio::task::spawn_blocking(move || {
                 miss_windows
@@ -5699,10 +5720,11 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                             (
                                 agent::prompt::detect_dialog(&pane),
                                 agent::prompt::detect_subagent_running(&pane),
+                                agent::prompt::detect_active_spinner(&pane),
                                 Some(h.finish()),
                             )
                         }
-                        Err(_) => (None, None, None),
+                        Err(_) => (None, None, None, None),
                     })
                     .collect::<Vec<_>>()
             })
@@ -5711,7 +5733,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let now_utc = chrono::Utc::now();
             let mut cache = ctx.prompt_cache.lock().await;
             let mut seen = ctx.pane_seen.lock().await;
-            for (&i, (p, sub, hash)) in misses.iter().zip(fresh) {
+            for (&i, (p, sub, spin, hash)) in misses.iter().zip(fresh) {
                 let window = &candidates[i].2;
                 cache.insert(
                     window.clone(),
@@ -5720,6 +5742,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         Some(candidates[i].3),
                         p.clone(),
                         sub.clone(),
+                        spin.clone(),
                     ),
                 );
                 // Stamp the pane's last-change time only when the content actually differs.
@@ -5731,7 +5754,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         }
                     }
                 }
-                sniffs[i] = (p, sub);
+                sniffs[i] = (p, sub, spin);
             }
         }
         // Prune the sniff caches so they can't grow without bound — every window name ever
@@ -5742,21 +5765,27 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let live: std::collections::HashSet<&str> =
                 windows.iter().map(|w| w.name.as_str()).collect();
             let mut cache = ctx.prompt_cache.lock().await;
-            cache.retain(|w, (t, _, _, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
+            cache.retain(|w, (t, _, _, _, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
             let mut seen = ctx.pane_seen.lock().await;
             seen.retain(|w, _| live.contains(w.as_str()));
         }
         let now_utc = chrono::Utc::now();
         let seen = ctx.pane_seen.lock().await;
-        for ((li, si, w, _), (found_dialog, found_subagent)) in candidates.into_iter().zip(sniffs) {
+        for ((li, si, w, _), (found_dialog, found_subagent, found_spinner)) in
+            candidates.into_iter().zip(sniffs)
+        {
             let s = &mut lanes[li].agent_sessions[si];
             s.subagent_running = found_subagent;
-            if s.subagent_running.is_some() && s.status == AgentStatus::Idle {
-                s.status = AgentStatus::Running;
-            }
+            let (status, reason) = status_from_pane(
+                s.status,
+                found_dialog.as_ref().map(|d| d.summary()).as_deref(),
+                s.subagent_running.as_deref(),
+                found_spinner.as_deref(),
+            );
+            s.status = status;
+            s.status_reason = reason;
             match found_dialog {
                 Some(dialog) => {
-                    s.status = AgentStatus::Waiting;
                     let summary = dialog.summary();
                     s.last_message = Some(summary.clone());
                     s.pending_prompt = Some(summary);
@@ -5770,8 +5799,24 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     {
                         s.stale = true;
                         s.stalled_since = Some(since);
+                        let mins = (now_utc - since).num_minutes().max(0);
+                        s.status_reason = Some(format!("pane unchanged for {mins}m"));
                     }
                 }
+            }
+            if s.status_reason.is_none() {
+                s.status_reason = Some(transcript_status_reason(s, now_utc));
+            }
+        }
+    }
+
+    // Every session leaves with a reason, sniffed or not, so a status the operator disbelieves
+    // can be reported instead of merely doubted.
+    {
+        let now_utc = chrono::Utc::now();
+        for s in lanes.iter_mut().flat_map(|l| l.agent_sessions.iter_mut()) {
+            if s.status_reason.is_none() {
+                s.status_reason = Some(transcript_status_reason(s, now_utc));
             }
         }
     }
@@ -5783,6 +5828,83 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
     // intermittent "sessions disappear after idle" report names its own cause in the log.
     diagnose_vanished_sessions(ctx, lanes, live.as_ref()).await;
+}
+
+/// The status a sniffed pane reports, given the transcript-derived `base`, plus the phrase that
+/// explains it.
+///
+/// The pane outranks the transcript on "is it working right now?". A transcript can only say when
+/// the last *message* landed, so it decays to Idle through a long tool call and reads Waiting
+/// through a turn whose background agents are still going, both of which the operator sees as an
+/// obviously busy pane. A dialog outranks everything: a pane asking a question is not working,
+/// whatever else is on screen. Returns `None` for the reason when the pane said nothing new, so
+/// the caller falls back to [`transcript_status_reason`].
+pub(crate) fn status_from_pane(
+    base: AgentStatus,
+    dialog: Option<&str>,
+    subagent: Option<&str>,
+    spinner: Option<&str>,
+) -> (AgentStatus, Option<String>) {
+    if let Some(summary) = dialog {
+        return (
+            AgentStatus::Waiting,
+            Some(format!("dialog pending: {summary}")),
+        );
+    }
+    let promotable = matches!(base, AgentStatus::Idle | AgentStatus::Waiting);
+    if let Some(sub) = subagent {
+        if promotable {
+            return (
+                AgentStatus::Running,
+                Some(format!("subagent running: {sub}")),
+            );
+        }
+    }
+    if let Some(spin) = spinner {
+        if promotable {
+            return (
+                AgentStatus::Running,
+                Some(format!("spinner on screen: {spin}")),
+            );
+        }
+    }
+    (base, None)
+}
+
+/// Why a session reads the way it does when nothing on its pane explained it: the transcript
+/// and the session's own flags are the whole story. Kept short enough for a pill tooltip.
+pub(crate) fn transcript_status_reason(
+    s: &repomon_core::model::AgentSession,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let quiet_for = || {
+        let mins = (now - s.last_activity_at).num_minutes().max(0);
+        if mins >= 1 {
+            format!("no output for {mins}m")
+        } else {
+            let secs = (now - s.last_activity_at).num_seconds().max(0);
+            format!("no output for {secs}s")
+        }
+    };
+    if s.inferred {
+        return "worktree files changing, agent not identified".to_string();
+    }
+    if s.external {
+        return "session running outside repomon".to_string();
+    }
+    match s.status {
+        AgentStatus::Ended => "process gone".to_string(),
+        AgentStatus::RateLimited => match s.resume_at {
+            Some(at) => format!("usage limit, auto-continue at {}", at.format("%H:%M UTC")),
+            None => "usage limit, waiting for a reset time".to_string(),
+        },
+        AgentStatus::Waiting => match s.pending_prompt.as_deref() {
+            Some(p) => format!("dialog pending: {p}"),
+            None => format!("turn ended, {}", quiet_for()),
+        },
+        AgentStatus::Running => "transcript still being written".to_string(),
+        AgentStatus::Idle => quiet_for(),
+    }
 }
 
 /// How many of a lane's newest-first transcript sessions to keep, given the worktree's live
@@ -6762,6 +6884,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         stale: false,
         stalled_since: None,
         subagent_running: None,
+        status_reason: None,
         ended_turn: true,
         gate: None,
         config_dir: None,
@@ -8237,6 +8360,136 @@ pub(crate) fn write_orchestrator_mcp_config_named(
 mod tests {
     use super::*;
 
+    /// Real capture, 2026-09-04: window `lane-81-7` had an on-screen spinner and two live
+    /// subagent rows while its transcript, whose last entry was assistant text, read `Waiting`.
+    /// The sidebar rendered that as NEEDS YOU for an agent that was plainly working.
+    #[test]
+    fn running_subagents_outrank_a_transcript_that_says_waiting() {
+        let pane =
+            include_str!("../../repomon-core/src/agent/fixtures/claude_running_subagents.txt");
+        let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        let (status, reason) =
+            status_from_pane(AgentStatus::Waiting, None, sub.as_deref(), spin.as_deref());
+        assert_eq!(status, AgentStatus::Running);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("subagent running:")),
+            "reason was {reason:?}"
+        );
+    }
+
+    /// Real capture, 2026-09-04: window `lane-81-5` sat at an empty Antigravity composer whose
+    /// scrollback still held the agent's sentence about background agents. Nothing on that pane
+    /// is a liveness signal, so an idle transcript must stay idle.
+    #[test]
+    fn prose_about_background_agents_leaves_an_idle_pane_idle() {
+        let pane = include_str!(
+            "../../repomon-core/src/agent/fixtures/antigravity_idle_prose_subagents.txt"
+        );
+        let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        let (status, reason) =
+            status_from_pane(AgentStatus::Idle, None, sub.as_deref(), spin.as_deref());
+        assert_eq!(status, AgentStatus::Idle);
+        assert_eq!(reason, None);
+    }
+
+    /// A long tool call writes no transcript message, so the transcript decays to Idle while the
+    /// pane is visibly streaming. The spinner is what the operator sees, so it wins.
+    #[test]
+    fn a_spinner_promotes_a_decayed_idle_transcript_to_running() {
+        let (status, reason) = status_from_pane(
+            AgentStatus::Idle,
+            None,
+            None,
+            Some("Thinking (2m 14s, esc to interrupt)"),
+        );
+        assert_eq!(status, AgentStatus::Running);
+        assert_eq!(
+            reason.as_deref(),
+            Some("spinner on screen: Thinking (2m 14s, esc to interrupt)")
+        );
+    }
+
+    /// A pane asking a question is not working, whatever else is on screen.
+    #[test]
+    fn a_dialog_outranks_every_liveness_signal() {
+        let (status, reason) = status_from_pane(
+            AgentStatus::Running,
+            Some("Bash: rm -rf build"),
+            Some("subagent (3m)"),
+            Some("Thinking"),
+        );
+        assert_eq!(status, AgentStatus::Waiting);
+        assert_eq!(
+            reason.as_deref(),
+            Some("dialog pending: Bash: rm -rf build")
+        );
+    }
+
+    #[test]
+    fn every_status_explains_itself() {
+        let now = chrono::Utc::now();
+        let mut s = fake_agent_session();
+        s.status = AgentStatus::Idle;
+        s.last_activity_at = now - chrono::Duration::minutes(6);
+        assert_eq!(transcript_status_reason(&s, now), "no output for 6m");
+
+        s.status = AgentStatus::Waiting;
+        assert_eq!(
+            transcript_status_reason(&s, now),
+            "turn ended, no output for 6m"
+        );
+
+        s.pending_prompt = Some("Edit: src/main.rs".into());
+        assert_eq!(
+            transcript_status_reason(&s, now),
+            "dialog pending: Edit: src/main.rs"
+        );
+
+        s.pending_prompt = None;
+        s.external = true;
+        assert_eq!(
+            transcript_status_reason(&s, now),
+            "session running outside repomon"
+        );
+    }
+
+    fn fake_agent_session() -> AgentSession {
+        AgentSession {
+            id: 1,
+            agent: AgentKind::ClaudeCode,
+            repo_id: 1,
+            worktree_id: Some(1),
+            started_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+            ended_at: None,
+            manifest_path: std::path::PathBuf::new(),
+            tool_call_count: 0,
+            title: None,
+            status: AgentStatus::Idle,
+            external: false,
+            session_id: None,
+            resume_at: None,
+            inferred: false,
+            tmux_window: Some("lane-1".into()),
+            last_message: None,
+            pending_prompt: None,
+            pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            subagent_running: None,
+            status_reason: None,
+            ended_turn: true,
+            gate: None,
+            config_dir: None,
+            custom_label: None,
+            generated_label: None,
+        }
+    }
+
     #[test]
     fn config_snapshot_exposes_remote_state_without_the_raw_token() {
         let mut cfg = repomon_core::config::Config::default();
@@ -8316,6 +8569,7 @@ mod tests {
                 stale: false,
                 stalled_since: None,
                 subagent_running: None,
+                status_reason: None,
                 ended_turn: true,
                 gate: None,
                 config_dir: None,
@@ -8394,6 +8648,7 @@ mod tests {
                 stale: false,
                 stalled_since: None,
                 subagent_running: None,
+                status_reason: None,
                 ended_turn: true,
                 gate: None,
                 config_dir: None,
@@ -9423,6 +9678,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             subagent_running: None,
+            status_reason: None,
             ended_turn: true,
             gate: None,
             config_dir: None,

@@ -431,6 +431,96 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Glyphs a coding CLI cycles through while a turn is streaming. Claude Code 2.1.x rotates the
+/// asterisk family; Codex and Antigravity use the braille dots.
+const SPINNER_GLYPHS: [char; 14] = [
+    '\u{273b}', '\u{273d}', '\u{2733}', '\u{2736}', '\u{2722}', '\u{2217}', '\u{2807}', '\u{280b}',
+    '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}', '\u{280f}',
+];
+
+/// The "N background agents are still working" status line, when this pane line really IS that
+/// status line rather than an agent's own prose *about* background agents.
+///
+/// The line is printed on its own, optionally behind a spinner glyph:
+///
+/// ```text
+/// Waiting for 2 background agents to finish
+/// 3 background agents running
+/// ```
+///
+/// The previous rule accepted "background agent" plus "running" anywhere on a line, so an agent
+/// that merely wrote "Here is the status of the running background agents:" pinned its own window
+/// to Running for as long as that sentence stayed in the captured scrollback.
+fn subagent_wait_count(line: &str) -> Option<usize> {
+    // Drop a leading spinner/bullet glyph and its padding; a digit is alphanumeric, so a line
+    // that opens with its count survives.
+    let t = line
+        .trim()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim();
+    let lower = t.to_lowercase();
+    if !(lower.contains("background agent")
+        || lower.contains("background task")
+        || lower.contains("subagent"))
+    {
+        return None;
+    }
+    // Prose introduces something; a status line states it. A trailing colon is prose.
+    if t.ends_with(':') {
+        return None;
+    }
+    let is_wait_line = lower.starts_with("waiting for");
+    let is_count_line = t
+        .split_whitespace()
+        .next()
+        .is_some_and(|w| w.parse::<usize>().is_ok())
+        && lower.contains("running");
+    if !(is_wait_line || is_count_line) {
+        return None;
+    }
+    Some(
+        t.split_whitespace()
+            .find_map(|w| w.parse::<usize>().ok())
+            .unwrap_or(1),
+    )
+}
+
+/// A live streaming/thinking indicator on screen, as the short phrase behind it.
+///
+/// This is the only signal that survives a long tool call: the transcript-derived status decays to
+/// `Idle` after two silent minutes, so an agent grinding through a five-minute build reads Idle
+/// while its pane is visibly working. A spinner line is what the operator actually sees, so it is
+/// what "running" is defined against.
+///
+/// A finished turn keeps its glyph but stamps the result (`\u{273b} Baked for 1m 9s . done 1:00 PM`),
+/// so a "done" stamp disqualifies the line.
+pub fn detect_active_spinner(pane: &str) -> Option<String> {
+    // Bottom-up: a capture carries scrollback, and only the last frame describes what the pane is
+    // doing now. Scanning top-down reported a stale frame's phrase.
+    for line in pane.lines().rev().map(strip_ansi) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let lower = t.to_lowercase();
+        // A turn that has ended still shows its glyph plus a "done" stamp.
+        if lower.contains("done ") || lower.ends_with("done") {
+            continue;
+        }
+        let spinning = t.starts_with(SPINNER_GLYPHS) || lower.contains("esc to interrupt");
+        if !spinning {
+            continue;
+        }
+        // The glyph alone (a bare redraw frame) says nothing worth reporting.
+        let phrase = t.trim_start_matches(SPINNER_GLYPHS).trim();
+        if phrase.is_empty() {
+            continue;
+        }
+        return Some(truncate(phrase, 60));
+    }
+    None
+}
+
 /// Detect running background subagents from pane text.
 /// Returns a concise description if subagent(s) are actively running.
 pub fn detect_subagent_running(pane: &str) -> Option<String> {
@@ -445,18 +535,8 @@ pub fn detect_subagent_running(pane: &str) -> Option<String> {
         }
         let lower = t.to_lowercase();
 
-        // 1. Match "Waiting for N background agent(s)/task(s) to finish"
-        if (lower.contains("waiting for")
-            && (lower.contains("background agent")
-                || lower.contains("background task")
-                || lower.contains("subagent")))
-            || (lower.contains("background agent") && lower.contains("running"))
-        {
-            // Update to latest count if present
-            let count = t
-                .split_whitespace()
-                .find_map(|w| w.parse::<usize>().ok())
-                .unwrap_or(1);
+        // 1. The "N background agents still working" status line.
+        if let Some(count) = subagent_wait_count(t) {
             waiting_count = Some(count);
         }
 
@@ -1087,6 +1167,77 @@ Do you want to proceed?
         assert_eq!(
             sub.as_deref(),
             Some("Waiting for 1 background agent to finish")
+        );
+    }
+
+    /// Real capture, 2026-09-04, of an Antigravity window parked at an empty composer whose
+    /// scrollback still held the agent's own sentence "Here is the status of the running
+    /// background agents:". The daemon reported it Running for as long as that line stayed in
+    /// the captured window.
+    #[test]
+    fn prose_about_background_agents_is_not_a_running_subagent() {
+        let pane = include_str!("fixtures/antigravity_idle_prose_subagents.txt");
+        assert_eq!(detect_subagent_running(pane), None);
+        assert_eq!(detect_active_spinner(pane), None);
+    }
+
+    #[test]
+    fn prose_mentioning_background_agents_never_counts() {
+        assert_eq!(
+            detect_subagent_running("Here is the status of the running background agents:"),
+            None
+        );
+        assert_eq!(
+            detect_subagent_running("I dispatched the background agents and they are running now"),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_count_status_line_still_counts() {
+        assert_eq!(
+            detect_subagent_running("3 background agents running").as_deref(),
+            Some("Waiting for 3 background agents to finish")
+        );
+    }
+
+    /// Real capture, 2026-09-04, of a Claude Code window whose pane changed inside six seconds
+    /// while the daemon reported it `waiting` (rendered as NEEDS YOU).
+    #[test]
+    fn claude_pane_with_live_subagents_reads_running() {
+        let pane = include_str!("fixtures/claude_running_subagents.txt");
+        assert!(detect_subagent_running(pane).is_some());
+        assert_eq!(
+            detect_active_spinner(pane).as_deref(),
+            Some("Waiting for 2 background agents to finish")
+        );
+        assert_eq!(detect_dialog(pane), None);
+    }
+
+    /// Real capture, 2026-09-04: a finished Claude turn keeps its spinner glyph but stamps the
+    /// result, so the glyph alone must not read as "still working".
+    #[test]
+    fn finished_turn_spinner_stamp_is_not_active() {
+        let pane = include_str!("fixtures/claude_idle_done_spinner.txt");
+        assert_eq!(detect_active_spinner(pane), None);
+        assert_eq!(detect_subagent_running(pane), None);
+    }
+
+    /// Real capture, 2026-09-04: an Antigravity window at an idle prompt whose scrollback holds
+    /// the near-miss sentence "Waiting for cargo test -p repomon-daemon to finish."
+    #[test]
+    fn idle_antigravity_prompt_reads_neither_running_nor_dialog() {
+        let pane = include_str!("fixtures/antigravity_idle_prompt.txt");
+        assert_eq!(detect_subagent_running(pane), None);
+        assert_eq!(detect_active_spinner(pane), None);
+    }
+
+    #[test]
+    fn detects_streaming_spinner_without_done_stamp() {
+        assert_eq!(
+            detect_active_spinner("\u{273b} Thinking\u{2026} (12s \u{00b7} esc to interrupt)")
+                .as_deref(),
+            Some("Thinking\u{2026} (12s \u{00b7} esc to interrupt)")
         );
     }
 

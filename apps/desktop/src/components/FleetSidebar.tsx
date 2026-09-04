@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
-import { laneIndicator, type FleetStore } from "../stores/fleet";
+import { laneIndicator, laneIndicatorTitle, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
 import type { WorkspaceStore } from "../stores/workspace";
 import {
@@ -107,6 +107,8 @@ function LaneRow(props: {
   };
 
   const indicator = () => laneIndicator(props.lane);
+  // The daemon says why a status reads the way it does; the row never invents an explanation.
+  const indicatorTitle = () => laneIndicatorTitle(props.lane);
   const primary = () => primarySession(props.lane.agent_sessions);
   const title = () => primary()?.custom_label ?? props.lane.worktree.name;
   const branchName = () => props.lane.worktree.branch ?? "detached";
@@ -270,14 +272,7 @@ function LaneRow(props: {
                   </span>
                 </Show>
                 <Show when={indicator().label}>
-                  <span
-                    class={`lane-badge is-${indicator().tone}`}
-                    title={
-                      indicator().label === "external"
-                        ? "External session running outside repomon. Select lane to adopt into tmux management."
-                        : undefined
-                    }
-                  >
+                  <span class={`lane-badge is-${indicator().tone}`} title={indicatorTitle()}>
                     {indicator().label}
                   </span>
                 </Show>

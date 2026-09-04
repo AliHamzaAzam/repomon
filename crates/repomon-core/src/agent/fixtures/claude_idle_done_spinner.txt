@@ -1,0 +1,60 @@
+          };'''+s[end:]
+  rep("        if (!isLiteralPreview) addHalo(mesh, 0.15);","        if (!isLiteralPreview) addEdgeTone(mesh, proxyGeometry);")
+  rep("          addHalo(literalGroup, Math.max(...(LITERAL_MODEL_PROXY_SIZE[project.id] ?? [0.2, 0.2, 0.2])) * 0.62);","          applyTwoTone(literalGroup);")
+  # rename control everywhere
+  s=s.replace("secondaryHalo","twoToneSatellites")
+  rep('''    title: "Satellites — Secondary Halo",
+      description: "Draws a thin ring in the project's secondary category colour around its model, so a project spanning two categories shows both.",''','''    title: "Satellites — Two-tone",
+      description: "Colours each model's secondary parts (panels, rods, nodes, or the edges of the abstract shapes) in the project's secondary category colour, so a project spanning two areas shows both
+  hues.",''')
+  open(p,"w").write(s); print("ok", s.count("twoToneSatellites"), s.count("applyTwoTone("), s.count("addEdgeTone("))
+  PY
+  scripts/push.sh src/OrbitalGlobeStandaloneV2.tsx 2>&1 | grep -E "^(updated|created)|rror" | head -3 && git add src/OrbitalGlobeStandaloneV2.tsx && git commit -q -m "Make V2 satellites two-tone instead of
+  haloed" && git log --oneline -1)
+  ⎿  ok 8 1 1
+     updated p04lRV1
+     f9901b6 Make V2 satellites two-tone instead of haloed
+  ⎿  (timeout 5m)
+
+⏺ Bash(npx @framer/agent@latest exec -s 2 <<'FRAMER_EXEC' 2>&1 | head -3
+  const shots = await framer.agent.readProject([{ type: "screenshot", id: "K9DfI_c59" }]);
+  console.log(shots.results[0].image_url);
+  FRAMER_EXEC)
+  ⎿  https://framerusercontent.com/screenshots/on-demand/ed715cc4-ab9f-4201-8510-1f8480271b95.jpg
+  ⎿  (timeout 3m)
+
+⏺ Bash(curl -sL -o /tmp/tt.jpg "https://framerusercontent.com/screenshots/on-demand/ed715cc4-ab9f-4201-8510-1f8480271b95.jpg" && python3 - <<'PY'
+  from PIL import Image
+  im=Image.open("/tmp/tt.jpg"); print(im.size)
+  # crop the satellite band around the globe at 2x
+  crop=im.crop((150,120,1000,600)); crop=crop.resize((crop.size[0]*2//1, crop.size[1]*2//1), Image.LANCZOS); crop.save("/tmp/tt-zoom.png"); print(crop.size)
+  PY)
+  ⎿  (1200, 850)
+     (1700, 960)
+
+⏺ Read(/tmp/tt-zoom.png)
+  ⎿  Read image (947.1KB)
+
+⏺ Bash(M=/Users/dev/.claude/projects/-Users-dev-Developer-Github-AliHamzaAzam/memory/project-portfolio-field-index.md && sed -i '' 's/secondaryHalo (torus ring in secondaryCategory colour around each
+  model)/twoToneSatellites (secondary category colour on the model'"'"'s derived materials, edges for abstract shapes; replaced the halo ring on 2026-09-04, commit f9901b6)/' $M && grep -c twoToneSatellites $M)
+  ⎿  1
+
+
+⏺ The models are two-tone now, pushed and committed. Verified on the canvas at 2x: the DHT simulator shows red nodes on a cyan ring, Chattr is backend green with frontend amber panels, Montage AI violet with
+  cyan reels, Pulselog green with a darker base, and the abstract shapes carry their second colour on the edges.
+
+  How it works, so you can tune it in the properties panel:
+
+  - Satellites, Two-tone (on by default). The primary category colour stays on the model's main body. Every part the builder derives from that base colour, the panels, rods, nodes and dark faces, takes the
+    secondary category colour. Models built from a single material get every other part recoloured instead, and the abstract shape families get their edges drawn in the second colour. Projects with no secondary
+    category stay single-colour.
+  - Satellites, Muting still applies to both hues together, so they always match the skill clusters.
+
+  The halo ring is gone. Republish to see it on the live site.
+
+✻ Crunched for 2m 19s · done 4:52 AM
+                                                                                                                                                                           new task? /clear to save 869.3k tokens
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents · 1 feedback draft                                                                                                                                        /rc

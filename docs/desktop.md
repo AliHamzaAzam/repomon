@@ -142,6 +142,35 @@ The center Editor workspace provides:
 | `mod+shift+h` | Hide the selected lane's project |
 | `mod+shift+b` | Edit the selected lane's project notes |
 
+#### Agent status
+
+Every pill, chip, count and filter in the sidebar is derived from one per-agent state, so a lane
+row and the chip above it can never disagree. The daemon decides the state; the frontend only
+projects it, and never re-reads pane text or runs timers of its own.
+
+| State | Means |
+|---|---|
+| running | the pane is working: a spinner or streaming marker is on screen, background subagents are going, or the transcript is still being written |
+| needs you | the turn ended with nothing pending, and the agent is waiting for the next instruction |
+| decision | a permission, plan or question dialog is open on the pane |
+| stalled | a running agent whose pane has not changed for longer than the stall threshold |
+| limited | paused on a usage limit; repomon auto-continues it at the reset time |
+| idle | at its prompt with no dialog and nothing running |
+| external | a session running outside repomon, adoptable but not managed |
+| inferred | the worktree is changing but the agent behind it could not be identified |
+
+The pane outranks the transcript on liveness. A transcript only records when the last message
+landed, so it decays to idle through a long tool call and reads "needs you" through a turn whose
+background agents are still working; both of those are panes the operator can see are busy. A
+dialog outranks everything: a pane asking a question is not working, whatever else is on screen.
+
+Counts are agent counts, never lane counts. "Needs attention" counts agents in needs you,
+decision, stalled or limited; "Running" counts agents in running; "Idle" counts agents in idle. A
+lane pill shows the most urgent state among its agents plus, for running, how many of them are in
+it. Hovering a pill shows the daemon's `status_reason` for the agents behind it ("spinner on
+screen: Thinking (2m 14s)", "dialog pending: Bash", "no output for 41m"), so a status you do not
+believe can be reported rather than merely doubted.
+
 ### Lane
 
 These need a selected lane. With nothing selected they do nothing.
