@@ -6030,6 +6030,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             subagent_running: None,
+            status_reason: None,
             ended_turn: false,
             gate: None,
             config_dir: None,
