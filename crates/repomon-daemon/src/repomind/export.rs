@@ -279,6 +279,130 @@ pub fn export_journal(home: &Path, entries: &[JournalEntry]) -> std::io::Result<
     Ok(touched)
 }
 
+/// How long a journal day file stays a day file. Past this, it is appended to its month's
+/// archive and removed, so `journal/` stays the working set an agent can read at a glance.
+/// The design spec's trim policy.
+pub const ARCHIVE_AFTER_DAYS: i64 = 90;
+
+/// The marker that keys an archived day to its date, so a rollup can never append the same day
+/// twice. Same idea as [`row_marker`] for journal rows.
+fn day_marker(day: &str) -> String {
+    format!("<!-- repomind:day {day} -->")
+}
+
+/// Roll every `journal/YYYY-MM-DD.md` older than [`ARCHIVE_AFTER_DAYS`] into
+/// `journal/archive/YYYY-MM.md`, then delete the day file. Returns the home-relative paths
+/// touched, removals included, so the export commit stages both sides of the move.
+pub fn archive_journal(home: &Path, today: chrono::NaiveDate) -> std::io::Result<Vec<String>> {
+    let dir = home.join("journal");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    let horizon = today - chrono::Duration::days(ARCHIVE_AFTER_DAYS);
+
+    // Group the expired days by month, oldest first, so an archive reads chronologically.
+    let mut by_month: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(day) = name.strip_suffix(".md") else {
+            continue;
+        };
+        let Ok(date) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+            continue;
+        };
+        if date >= horizon {
+            continue;
+        }
+        by_month
+            .entry(date.format("%Y-%m").to_string())
+            .or_default()
+            .push((day.to_string(), entry.path()));
+    }
+
+    let mut touched = Vec::new();
+    for (month, mut days) in by_month {
+        days.sort();
+        let rel = format!("journal/archive/{month}.md");
+        let path = home.join(&rel);
+        let mut doc = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                md::frontmatter(&[
+                    ("title", format!("Journal archive {month}")),
+                    ("type", "journal-archive".to_string()),
+                    ("permalink", format!("repomind/journal/archive/{month}")),
+                    ("source", format!("repomond {month}")),
+                ]) + &format!(
+                    "# Journal archive {month}\n\n\
+                     Day files older than {ARCHIVE_AFTER_DAYS} days, rolled up one section per\n\
+                     day. Read it; do not hand-edit it.\n\n"
+                )
+            }
+            Err(e) => return Err(e),
+        };
+
+        let mut appended = false;
+        for (day, day_path) in &days {
+            if !doc.contains(&day_marker(day)) {
+                let body = std::fs::read_to_string(day_path)?;
+                let body = md::split_frontmatter(&body).1;
+                doc.push_str(&format!(
+                    "{}\n## {day}\n\n{}\n\n",
+                    day_marker(day),
+                    body.trim()
+                ));
+                appended = true;
+            }
+            std::fs::remove_file(day_path)?;
+            touched.push(format!("journal/{day}.md"));
+        }
+        if appended {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, doc)?;
+        }
+        touched.push(rel);
+    }
+    Ok(touched)
+}
+
+/// Run the rollup against the configured home and queue whatever it moved for the next export
+/// commit. A missing home is a silent no-op, the same as an export run's.
+pub async fn archive_now(ctx: &crate::Ctx) -> repomon_core::Result<Vec<String>> {
+    let home = ctx.config.read().await.repomind_home();
+    let today = Local::now().date_naive();
+    let touched = tokio::task::spawn_blocking(move || {
+        if !home.is_dir() {
+            return Ok(Vec::new());
+        }
+        archive_journal(&home, today)
+    })
+    .await
+    .map_err(|e| repomon_core::Error::Other(e.to_string()))?
+    .map_err(repomon_core::Error::Io)?;
+
+    if !touched.is_empty() {
+        tracing::info!(files = touched.len(), "repomind journal archive rollup");
+        request_files(ctx, "journal", touched.clone()).await;
+    }
+    Ok(touched)
+}
+
+/// The daily rollup. The start-of-day pass runs in [`crate::repomind::start`]; this only covers
+/// a daemon that stays up across midnights.
+pub async fn archive_watch(ctx: std::sync::Arc<crate::Ctx>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        if let Err(e) = archive_now(&ctx).await {
+            tracing::warn!("repomind journal archive rollup failed: {e}");
+        }
+    }
+}
+
 /// The mirror file name for a schedule, collision-aware against the other schedules the same
 /// way `repomon_core::notes` handles two repos with one name.
 fn schedule_slug(s: &Schedule, all: &[Schedule]) -> String {
@@ -1221,5 +1345,73 @@ mod tests {
             "the deferred day file must be in the new commit"
         );
         assert!(!pending(&ctx).await);
+    }
+
+    /// The trim policy from the design spec: a day file older than 90 days is appended to its
+    /// month's archive and the day file goes away, so the journal directory stays a working set.
+    #[test]
+    fn journal_days_past_the_horizon_roll_into_a_monthly_archive() {
+        let (_dir, home) = home();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+        std::fs::write(
+            home.join("journal/2026-03-02.md"),
+            "---\ntitle: Journal 2026-03-02\n---\n\nmarch second happened\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("journal/2026-03-09.md"),
+            "---\ntitle: Journal 2026-03-09\n---\n\nmarch ninth happened\n",
+        )
+        .unwrap();
+
+        let touched = archive_journal(&home, today).unwrap();
+
+        assert_eq!(
+            touched,
+            vec![
+                "journal/2026-03-02.md".to_string(),
+                "journal/2026-03-09.md".to_string(),
+                "journal/archive/2026-03.md".to_string(),
+            ]
+        );
+        assert!(!home.join("journal/2026-03-02.md").exists());
+        assert!(!home.join("journal/2026-03-09.md").exists());
+        let archive = std::fs::read_to_string(home.join("journal/archive/2026-03.md")).unwrap();
+        assert!(archive.contains("## 2026-03-02"), "{archive}");
+        assert!(archive.contains("march second happened"), "{archive}");
+        assert!(archive.contains("march ninth happened"), "{archive}");
+        assert!(
+            archive.find("march second").unwrap() < archive.find("march ninth").unwrap(),
+            "days must land in order: {archive}"
+        );
+    }
+
+    #[test]
+    fn a_day_inside_the_horizon_is_left_where_it_is() {
+        let (_dir, home) = home();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+        std::fs::write(home.join("journal/2026-09-03.md"), "yesterday\n").unwrap();
+        std::fs::write(home.join("journal/notes.md"), "not a day file\n").unwrap();
+
+        assert!(archive_journal(&home, today).unwrap().is_empty());
+        assert!(home.join("journal/2026-09-03.md").exists());
+        assert!(home.join("journal/notes.md").exists());
+    }
+
+    /// The rollup runs on every daemon start, so a day that is already archived must not be
+    /// appended a second time even if its day file somehow reappears.
+    #[test]
+    fn archiving_the_same_day_twice_appends_it_once() {
+        let (_dir, home) = home();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+        std::fs::write(home.join("journal/2026-03-02.md"), "march second\n").unwrap();
+        archive_journal(&home, today).unwrap();
+        std::fs::write(home.join("journal/2026-03-02.md"), "march second\n").unwrap();
+
+        archive_journal(&home, today).unwrap();
+
+        let archive = std::fs::read_to_string(home.join("journal/archive/2026-03.md")).unwrap();
+        assert_eq!(archive.matches("## 2026-03-02").count(), 1, "{archive}");
+        assert!(!home.join("journal/2026-03-02.md").exists());
     }
 }
