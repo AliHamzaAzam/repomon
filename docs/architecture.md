@@ -89,13 +89,31 @@ alert still reaches you when you're heads-down in an agent pane.
 **History.** On startup and after `repo.add`, the indexer walks HEAD history into SQLite, so
 `timeline`, `sessions`, and `commit.search` work over history rather than just live HEAD.
 
-**repomind.** The orchestrator is a daemon-owned agent session (Claude by default, or Codex,
-Antigravity, or OpenCode, via `orchestrator.start`'s `agent` param, the `orchestrator_agent` config),
-running in its own `orchestrator` tmux window (`orchestrator.start`/`.stop`), reachable like any
-other window (`.target`/`.send_input`/`.key`/`.resize`). Only MCP-capable CLIs qualify (aider and
-cursor can't drive the fleet tools, so both are rejected); a Codex/Antigravity/OpenCode-backed
-session degrades to pane-only monitoring, with no parsed transcript chat, no end-of-turn attention, and no
-session pinning (Claude is the only backend with a parseable on-disk transcript).
+**repomind.** Repomind is an agent session in a lane of its own: the *controller lane*, the main
+worktree of the repomind home repo (`~/repomind` by default, `[repomind] home`). The daemon
+ensures that repo on startup and on every `orchestrator.start`: it creates the layout and runs
+`git init -b main` when it is missing, never overwrites a file that already exists, registers
+it like any other repo, and marks its lane `role = "controller"` (`lanes.role`, migration
+0022). Every agent in that lane is a controller: it is launched with
+`REPOMON_MCP_MODE=orchestrator`, so `repomon-mcp` serves it the full fleet catalog rather than the
+restricted worker one, and `[repomind] max_controllers` caps how many may run there at once. A
+worker agent (one holding an MCP identity bound to some other lane) cannot spawn into the
+controller lane, and `delete_lane`/`merge_lane` on it are refused outright in the MCP policy
+layer, before the two-phase confirm and at every autonomy level.
+
+The primary controller starts with `orchestrator.start` (Claude by default, or Codex,
+Antigravity, or OpenCode, via its `agent` param or `[repomind] primary_agent`, which falls back
+to the older `orchestrator_agent`). Only MCP-capable CLIs qualify (aider and cursor can't drive
+the fleet tools, so both are rejected); a Codex/Antigravity/OpenCode-backed session degrades to
+pane-only monitoring, with no parsed transcript chat, no end-of-turn attention, and no session
+pinning (Claude is the only backend with a parseable on-disk transcript).
+
+The `orchestrator.*` RPCs (`.stop`, `.target`, `.send_input`, `.key`, `.resize`, `.watch`) are
+now thin aliases onto the controller lane's window and are deprecated in favor of the ordinary
+lane/agent RPCs; the daemon-owned `orchestrator` tmux window survives only as an adoption
+fallback, so a window left by a pre-R1 daemon is still picked up rather than duplicated.
+`repomind.status` reports the home path, its repo and lane, the controller window, and the cap.
+
 `repomon-mcp` (invoked as `repomond mcp`) is a stdio MCP server the orchestrator agent launches
 as a subprocess and wires up as a tool server; it connects back to the same daemon socket as an
 ordinary client and keeps a fleet snapshot refreshed by poll-and-diff (`lane.list` on a ~1.5s

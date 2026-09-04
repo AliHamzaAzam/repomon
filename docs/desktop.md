@@ -369,6 +369,14 @@ The repomind panel is one tab of the right-rail panel host (alongside git and th
 and opens with `mod+5`. `mod+shift+5` blows it up to full screen, and Escape or **Exit** brings it
 back; going full screen opens the panel if it was closed, so it has somewhere to shrink back to.
 
+**Repomind lives in a lane now.** Starting repomind creates (once) a home repo at `~/repomind` -
+its memory: plans, playbooks, per-repo notes, a journal - registers it like any other repo, and
+runs the agent in that repo's lane, marked as the *controller lane*. Everything the app already
+does with a lane therefore works on it: the agent shows in the fleet list, the terminal bay
+renders its pane, and Multitasking and Supervision treat its agents like any others. That lane
+cannot be deleted or merged from the fleet tools, and a worker agent cannot spawn into it. A
+dedicated sidebar row and a panel rebuilt on the lane come later; for now the panel is unchanged.
+
 **Answering prompts.** Repomind's agent sometimes stops on something only you can answer, like
 Claude Code's "Do you trust this folder?" trust prompt. The message box types text and presses
 Enter, which cannot express "just press Enter" or "press Escape", so a prompt like that used to be

@@ -100,7 +100,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `repo.add` | `{ path }` | `Repo` |
 | `repo.remove` | `{ repo_id }` | `null` |
 | `repo.discover` | `{ root, max_depth=4 }` | `[String]` (repo paths) |
-| `lane.list` | — | `[Lane]` (agent sessions overlaid; each session may carry `pending_dialog`, `stale`/`stalled_since`, and `gate` — the worktree's latest dxkit stop-gate verdict `{ allowed, net_new_findings, at, session_id? }`, tailed from `.dxkit/loop/ledger.jsonl` when the lane runs dxkit's loop pack. A fresh `allowed` grants the done-candidate attention; a fresh block vetoes it) |
+| `lane.list` | — | `[Lane]` (each lane carries `role`: `null` for an ordinary work lane, `"controller"` for the repomind home lane. Agent sessions overlaid; each session may carry `pending_dialog`, `stale`/`stalled_since`, and `gate` — the worktree's latest dxkit stop-gate verdict `{ allowed, net_new_findings, at, session_id? }`, tailed from `.dxkit/loop/ledger.jsonl` when the lane runs dxkit's loop pack. A fresh `allowed` grants the done-candidate attention; a fresh block vetoes it) |
 | `lane.get` | `{ lane_id }` | `Lane` |
 | `lane.create` | `CreateLaneParams` | `Lane` |
 | `lane.delete` | `{ lane_id, also_delete_branch=false }` | `null` |
@@ -123,7 +123,7 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.add` | `{ name, command }` | `null` (upsert a custom agent; rejects built-in names; persists to config.toml) |
 | `agent.remove` | `{ name }` | `null` (drop a custom agent; clears it as default; rejects built-ins) |
 | `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |
-| `agent.spawn` | `{ lane_id, agent, task? }` | `{ lane_id, window, agent }` |
+| `agent.spawn` | `{ lane_id, agent, task?, effort?, mode?, model?, identity_token? }` | `{ lane_id, window, agent, role? }`. `role` is `"controller"` when `lane_id` is the repomind controller lane, and absent otherwise. A controller is launched with `REPOMON_MCP_MODE=orchestrator` (the full fleet catalog) and counted against `[repomind] max_controllers`; `identity_token` is the caller's own MCP identity, and a caller whose identity belongs to another lane is refused with `invalid_params` when it targets the controller lane. |
 | `agent.capture` | `{ lane_id, lines?, window?, include_state=false }` | `{ content }` normally. With `include_state=true`, also returns `{ alternate, cols, rows, cursor?, generation?, sequence?, stable }` as a terminal checkpoint. A sequenced client must only resume with stream chunks after the checkpoint cursor and recapture when `stable=false`. |
 | `agent.transcript` | `{ lane_id, session_id?, limit=50 }` | `[TranscriptItem]` — `{ role, text, at? }` with role `user`/`assistant`/`tools`; full unwrapped message text for clients that lay text out themselves (the mobile chat view). Claude sessions only (empty otherwise). |
 | `agent.transcript_page` | `{ lane_id, session_id?, before? }` | `{ items: [TranscriptItem], next_before: number? }` - reads one bounded Claude transcript page backwards on JSONL boundaries. Omit `before` for the newest page, then pass `next_before` to load older pages without skipping messages. A known `session_id` is resolved directly regardless of age. |
@@ -170,15 +170,23 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
 | `orchestrator.status` | — | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
 | `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts. Always `[]` while `backend` is `"codex"`, `"antigravity"`, or `"opencode"` (none of their on-disk session formats are parsed); treat it as "no chat view for this backend" and render the `event.orchestrator.output` pane stream instead, never as an error/loading state) |
-| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (spawn or adopt the singleton `orchestrator` window wired to the repomon MCP server; idempotent; re-spawns if the prior window died. `agent` picks the backend: a Claude account / custom agent name, `codex`, `antigravity`/`agy`, or `opencode`/`open-code`; an agent with no MCP client for orchestration (e.g. `aider` or `cursor`) is rejected with `invalid_params` instead of spawning a broken window) |
-| `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (kill the orchestrator window) |
-| `orchestrator.target` | — | `{ target, available, attach? }` (attach target for the orchestrator window; resets it to follow the attaching client's size; `attach` as in `agent.target`) |
-| `orchestrator.send_input` | `{ text, enter=true }` | `null` (type an instruction to repomind, then Enter unless `enter=false`) |
-| `orchestrator.key` | `{ key, literal=false }` | `null` (one keystroke to repomind: literal char or key name) |
-| `orchestrator.watch` | `{ on }` | `null` (gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
-| `orchestrator.resize` | `{ cols, rows }` | `null` (size the orchestrator window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
+| `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (ensure the repomind home repo and its controller lane, then spawn or adopt the primary controller in that lane's window, wired to the repomon MCP server with `REPOMON_MCP_MODE=orchestrator`; idempotent; re-spawns if the prior window died. `agent` picks the backend: a Claude account / custom agent name, `codex`, `antigravity`/`agy`, or `opencode`/`open-code`, defaulting to `[repomind] primary_agent` then `orchestrator_agent`; an agent with no MCP client for orchestration (e.g. `aider` or `cursor`) is rejected with `invalid_params` instead of spawning a broken window) |
+| `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (**deprecated** alias: kill the controller lane's window) |
+| `orchestrator.target` | — | `{ target, available, attach? }` (**deprecated** alias: attach target for the controller window; resets it to follow the attaching client's size; `attach` as in `agent.target`) |
+| `orchestrator.send_input` | `{ text, enter=true }` | `null` (**deprecated** alias for `agent.send_input` on the controller window: type an instruction to repomind, then Enter unless `enter=false`) |
+| `orchestrator.key` | `{ key, literal=false }` | `null` (**deprecated** alias for `agent.key`: one keystroke to repomind, literal char or key name) |
+| `orchestrator.watch` | `{ on }` | `null` (**deprecated** alias: gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
+| `orchestrator.resize` | `{ cols, rows }` | `null` (**deprecated** alias: size the controller window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
+| `repomind.status` | — | `{ home, exists, repo_id?, lane_id?, window?, max_controllers }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. Never creates anything) |
 
-The `orchestrator` window is deliberately not a `lane-*` name, so it never appears in `lane.list` / the lane overlay / the reaper. It is the in-daemon backing for `repomon orchestrate` and the TUI's command-center view.
+Repomind runs in the **controller lane**, the main worktree of the repomind home repo
+(`~/repomind` by default, `[repomind] home`). It is registered like any other repo, and its lane
+carries `role: "controller"` in `lane.list`. Its window is therefore an ordinary `lane-*` window and does
+appear in `lane.list`, the lane overlay, and the reaper. Every `orchestrator.*` RPC above except
+`.status`/`.transcript`/`.start` is a **deprecated** thin alias onto that window: prefer
+`lane.list` plus the `agent.*` RPCs, which work on it like any other agent. The old daemon-owned
+`orchestrator` window is kept only as an adoption fallback, so a window left behind by a pre-R1
+daemon is adopted rather than duplicated.
 
 `attention` on the orchestrator payloads above is always present: one of `"none"`,
 `"permission"`, `"decision"`, `"end_of_turn"`. `headline` is non-null only alongside
