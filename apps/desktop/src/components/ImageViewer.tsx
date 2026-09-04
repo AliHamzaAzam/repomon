@@ -510,7 +510,9 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
               data-testid="image-viewer-img"
               alt={basename(props.path)}
               src={TRANSPARENT_PIXEL}
-              class={`block rounded shadow-[0_1px_3px_var(--shadow)] ${status() === "loaded" ? "" : "invisible"}`}
+              class={`block max-w-none max-h-none rounded shadow-[0_1px_3px_var(--shadow)] ${
+                status() === "loaded" ? "" : "invisible"
+              }`}
               style={{
                 width: dimensions() ? `${dimensions()!.width * effectiveScale()}px` : undefined,
                 height: dimensions() ? `${dimensions()!.height * effectiveScale()}px` : undefined,

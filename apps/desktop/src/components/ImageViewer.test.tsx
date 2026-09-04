@@ -206,4 +206,71 @@ describe("ImageViewer", () => {
 
     expect(img.src).toBe(freshSrc);
   });
+
+  it("locks the displayed width and height to naturalWidth/naturalHeight times scale at every zoom level", async () => {
+    // Regression test: Tailwind v4 preflight applies `img, video { max-width: 100%; height: auto }`.
+    // The inline `height` style below always overrides preflight's `height: auto`, but nothing used
+    // to override preflight's `max-width: 100%` - so once the scaled width exceeded the stage's
+    // content-box width, the browser clamped the rendered width while the height rendered at its
+    // full inline value, squashing the image horizontally. `max-w-none`/`max-h-none` on the <img>
+    // (in the utilities layer, which always wins over preflight's base layer) fixes that at the
+    // root. jsdom performs no layout, so this asserts the inline styles and classes that determine
+    // the ratio in a real browser rather than a computed, laid-out box.
+    render(() => <ImageViewer worktreeRoot="/repo/lane" laneId={1} path="assets/photo.png" />);
+
+    const img = (await screen.findByTestId("image-viewer-img")) as HTMLImageElement;
+    await waitForAssetSrc(img, "/repo/lane/assets/photo.png");
+    // Matches the dimensions from the reported bug (a 1400 x 1640 PNG squashed at 152% zoom).
+    setNaturalSize(img, 1400, 1640);
+    fireEvent.load(img);
+    await screen.findByTitle("Reset zoom to fit");
+
+    const root = screen.getByTestId("image-viewer-root");
+    const stage = screen.getByTestId("image-stage");
+
+    function assertLocked(expectedPercent: number, scale: number, exact: boolean) {
+      expect(screen.getByTitle("Reset zoom to fit")).toHaveTextContent(`${expectedPercent}%`);
+      if (exact) {
+        expect(img.style.width).toBe(`${1400 * scale}px`);
+        expect(img.style.height).toBe(`${1640 * scale}px`);
+      } else {
+        // Wheel-driven scales go through Math.exp/Math.log, so allow for floating-point slack -
+        // the ratio itself (not just each dimension in isolation) must still hold exactly.
+        expect(parseFloat(img.style.width)).toBeCloseTo(1400 * scale, 5);
+        expect(parseFloat(img.style.height)).toBeCloseTo(1640 * scale, 5);
+      }
+      expect(parseFloat(img.style.width) / parseFloat(img.style.height)).toBeCloseTo(1400 / 1640, 6);
+      // The classes that keep preflight's `max-width: 100%; height: auto` from ever re-clamping
+      // one axis once the scaled size exceeds the stage.
+      expect(img.className).toContain("max-w-none");
+      expect(img.className).toContain("max-h-none");
+    }
+
+    // 100% - "actual size"
+    fireEvent.keyDown(root, { key: "1", metaKey: true });
+    assertLocked(100, 1, true);
+
+    // 50% - fit mode, driven by a stage resize (mirrors the fit-scale test above).
+    Object.defineProperty(stage, "clientWidth", { value: 732, configurable: true }); // (732-32)/1400 = 0.5
+    Object.defineProperty(stage, "clientHeight", { value: 900, configurable: true }); // (900-32)/1640 = 0.529
+    fireEvent.keyDown(root, { key: "0", metaKey: true });
+    vi.useFakeTimers();
+    ResizeObserverMock.instances[0]?.trigger();
+    await vi.advanceTimersByTimeAsync(150);
+    vi.useRealTimers();
+    assertLocked(50, 0.5, true);
+
+    // 152% - the zoom level from the bug report, reached the way the app reaches it: a
+    // ctrl/meta-wheel gesture (onWheel) from "actual size", larger than the stage in both axes.
+    fireEvent.keyDown(root, { key: "1", metaKey: true });
+    const deltaY152 = -Math.log(1.52) / 0.0025;
+    fireEvent.wheel(stage, { deltaY: deltaY152, ctrlKey: true, clientX: 0, clientY: 0 });
+    assertLocked(152, 1.52, false);
+
+    // 300% - well past MIN/MAX guard rails, still no clamp.
+    fireEvent.keyDown(root, { key: "1", metaKey: true });
+    const deltaY300 = -Math.log(3) / 0.0025;
+    fireEvent.wheel(stage, { deltaY: deltaY300, ctrlKey: true, clientX: 0, clientY: 0 });
+    assertLocked(300, 3, false);
+  });
 });
