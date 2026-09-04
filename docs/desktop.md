@@ -400,22 +400,52 @@ lane is about the whole fleet rather than about one worktree. Supervision itself
 you turn it on, exactly as for any other lane, and the seed is written once - relax a class in
 **Settings > Supervision** and your choice survives every restart.
 
-**What the panel shows.** Its header states the controller lane in the fleet's own vocabulary, the
-number of controllers in it, and the lifecycle: **Start** or **Stop**, plus a **+** that spawns
-another controller into the lane up to the configured maximum. Below that, three views:
+**The panel is a control room, not a second chat.** The conversation with a controller happens in
+its pane in the terminal bay, which is a real terminal with scrollback, dialogs and colour; the
+panel holds the state that conversation is about. It carries no composer, no live feed and no
+transcript, and every row here that names a controller ends in a way back to its pane.
 
-- **Home** reads the home itself. *Active plans* lists one entry per file in `plans/active`, each
-  with its title and its next step; clicking one opens that file in the editor on the home lane.
-  *Journal* shows the last entries of today's `journal/` digest. *Boot context* says when the boot
-  document was last assembled, how big it came out, and what the token budget left out, with
-  **Regenerate** and **Open boot.md**. *Export* says when the daemon's one-way export last ran,
-  whether one is pending, and what failed if anything did, with **Export now**. *Controllers* lists
-  the agents in the lane with their status pill and the daemon's reason for it.
-- **Live Feed** and **Transcript** are the primary controller's own session, unchanged.
+**The header** states the controller lane in the fleet's own vocabulary, the number of controllers
+in it, and the lifecycle: **Start** or **Stop**, plus a **+** that spawns another controller into
+the lane up to the configured maximum. The line under it names the lane and the home path on disk.
+Below that, five sections in one scrolling column:
 
-The Home view reads the home through the ordinary lane file RPCs, because the home is an ordinary
-lane; it re-reads when the plan count moves, when an export lands, or when you switch back to it,
-not on every heartbeat.
+- **Plans** lists one row per file in `plans/active`, with its title, its next step, its owner and
+  when it last moved; clicking one opens that file in the editor on the home lane. **Add goal**
+  takes a title and one line of intent, writes `plans/active/<slug>.md` in the home's frontmatter
+  conventions, and then tells the primary controller the goal exists. A home with no controller
+  running still gets its file, and the panel says so rather than pretending the handoff happened.
+  **Done** on a row asks for a one-line outcome, then moves the file into `plans/done/` with
+  `status: done` and that outcome appended.
+- **Playbooks** is the approval gate. Drafts from `playbooks/drafts/` sit at the top with
+  **Approve** and **Reject**; approved ones follow, each opening its file. Rejecting moves the
+  draft into `playbooks/rejected/` rather than deleting it, so the text stays readable in the
+  home's history. An approved playbook with a revision waiting appears on both lists: the approved
+  text is what agents get, and the revision is still a decision you owe.
+- **Standing duties** lists the schedules from **Settings > Automation > Schedules**, each with its
+  spec, its goal, its action cap, when it last ran and when it runs next, and **Remove** behind a
+  confirmation. **Add** opens that settings surface rather than growing a second form for the same
+  record.
+- **Memory** answers whether the memory feeding all of this is current. The boot line says when the
+  context was last assembled, how big it came out, and what the token budget left out, with
+  **Regenerate** and **Open**. The export line says when the daemon's one-way export last ran,
+  whether one is pending, and what failed if anything did, with **Export now**. Below them the
+  journal browser picks a day out of `journal/` (newest first, with archived months behind a
+  disclosure) and shows that day's entries, with **Open** for the day file itself.
+- **Controllers** lists the agents in the lane with their status pill and the daemon's reason for
+  it, each with **Focus pane**, which selects the lane and brings that controller's pane to the
+  front of the terminal bay.
+
+Every section reads the home through the ordinary lane file RPCs, because the home is an ordinary
+lane. They re-read when the home's own counts move, when an export lands, or when you act on
+something here, never on a heartbeat of their own.
+
+**A controller between instructions reads idle.** A worker that stops talking is waiting to be
+picked up, so it reads "needs you". A controller is a standing coordinator: sitting at the end of
+its turn is its resting state, and you do not owe it an answer for that. "Needs you" on a
+controller therefore means a pending dialog or an explicit question, and nothing else. The pinned
+sidebar row, the toolbar dot and this panel all read it the same way, from the attention word the
+daemon puts on the session.
 
 **What a fresh repomind already knows.** It does not start blank. Before every start, the daemon
 assembles a boot document from the home and hands it to the agent, so the first thing in its head
@@ -430,27 +460,11 @@ rewritten every time repomind starts, and is not yours to edit: change the files
 instead. Day files in `journal/` older than 90 days roll into `journal/archive/`, so the journal
 stays the recent past rather than everything that ever happened.
 
-**Answering prompts.** Repomind's agent sometimes stops on something only you can answer, like
-Claude Code's "Do you trust this folder?" trust prompt. The message box types text and presses
-Enter, which cannot express "just press Enter" or "press Escape", so a prompt like that used to be
-unanswerable from the app: the question was visible and there was no way through it. The key row
-above the pane sends those directly. `1` `2` `3` pick a numbered option, **Enter** confirms the
-highlighted one, and **Esc** cancels. The row's label turns amber and reads **Answer** while the
-daemon reports the pane is waiting on a permission or a decision.
-
-Note that the panel's **Esc** button sends Escape to repomind, while pressing Escape on the
-keyboard leaves full screen. They are deliberately different: one is aimed at the agent, the other
-at the window.
-
-The live pane is a raw terminal capture, so it is stripped of escape sequences and trimmed of the
-blank rows a full-pane grab pads with. Colour is lost, but the text is readable; the alternative
-was the literal bytes.
-
-Wrapping depends on width. In the sidebar a terminal line is far wider than the column, so it
-wraps, which is the only readable option there. Full screen keeps the true terminal layout and
-scrolls sideways instead, because there is room for it and reflowed box drawing looks worse than a
-scrollbar. The key row appears only while something is actually waiting on you; the message box is
-the input the rest of the time.
+**Answering a controller's prompt.** A controller sometimes stops on something only you can
+answer, like Claude Code's "Do you trust this folder?" trust prompt. That happens in its pane, and
+it is answered there: **Focus pane** in the Controllers section puts the pane in front, where the
+full terminal, its dialog and its keys are. Supervision can also answer routine classes for you,
+per lane, from **Settings > Supervision**.
 
 ## Git explorer
 
