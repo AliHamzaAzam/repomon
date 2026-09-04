@@ -91,6 +91,15 @@ async fn run() {
         tokio::spawn(async move {
             if let Err(e) = repomon_daemon::repomind::ensure_home(&ctx_r).await {
                 tracing::warn!("repomind home unavailable: {e}");
+                return;
+            }
+            // File-first records (repo notes, playbooks): copy anything that still only lives in
+            // the daemon's own storage into the home. Idempotent, and never deletes the original.
+            if let Err(e) = repomon_daemon::repomind::migrate_records(&ctx_r).await {
+                tracing::warn!("repomind record migration failed: {e}");
+            }
+            if let Err(e) = repomon_daemon::repomind::basic_memory::ensure_project(&ctx_r).await {
+                tracing::warn!("basic-memory project registration failed: {e}");
             }
         });
     }
