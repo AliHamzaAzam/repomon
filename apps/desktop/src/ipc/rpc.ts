@@ -192,6 +192,12 @@ interface RpcMap {
   "playbook.search": { params: { query: string; limit?: number }; result: { playbooks: Playbook[] } };
   "playbook.list": { params: undefined; result: { playbooks: Playbook[] } };
   "playbook.approve": { params: { name: string }; result: Playbook };
+  // The other half of the approval gate: moves the draft into `playbooks/rejected/` with
+  // `status: rejected`. Never deletes, so a rejected idea stays readable in the home's history.
+  "playbook.reject": {
+    params: { name: string };
+    result: { name: string; path: string; status: string };
+  };
   "playbook.delete": { params: { name: string }; result: null };
   "journal.append": {
     params: {
@@ -357,6 +363,13 @@ interface RpcMap {
     result: { path: string; bytes: number; tokens_estimate: number; trimmed: string[] };
   };
   "repomind.export": { params: undefined; result: { files: string[]; kinds: string[] } };
+  // Local-only: types one instruction into the primary controller's composer through the
+  // daemon's verified injection. `outcome` is "sent", "skipped" (the composer was busy, `reason`
+  // says which) or "failed"; it rejects outright when no controller is running.
+  "repomind.instruct": {
+    params: { text: string };
+    result: { outcome: string; window: string; entry_id?: number | null; reason?: string };
+  };
   "ext.list": { params: ExtScopeParams; result: ExtSnapshot };
   "plugin.enable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
   "plugin.disable": { params: { id: string } & ExtScopeParams; result: { ok: boolean; fanout: FanoutSummary | null } };
