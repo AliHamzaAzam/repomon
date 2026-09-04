@@ -14,6 +14,7 @@
 //!   second run does nothing and logs nothing.
 
 pub mod basic_memory;
+pub mod boot;
 pub mod export;
 pub mod md;
 pub mod notes;
