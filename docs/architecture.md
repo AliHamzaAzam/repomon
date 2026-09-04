@@ -112,7 +112,40 @@ The `orchestrator.*` RPCs (`.stop`, `.target`, `.send_input`, `.key`, `.resize`,
 now thin aliases onto the controller lane's window and are deprecated in favor of the ordinary
 lane/agent RPCs; the daemon-owned `orchestrator` tmux window survives only as an adoption
 fallback, so a window left by a pre-R1 daemon is still picked up rather than duplicated.
-`repomind.status` reports the home path, its repo and lane, the controller window, and the cap.
+`repomind.status` reports the home path, its repo and lane, the controller window, the cap, the
+export state, what the home holds, and the state of the boot context.
+
+**Boot context.** A controller starts with no memory of the fleet, so the daemon assembles one
+before every spawn into the controller lane (and on the `repomind.boot` RPC) and writes it to
+`<home>/.repomind/boot.md`, which is daemon-owned and gitignored. `repomind::boot::assemble_boot`
+is pure: it reads the home and concatenates, in this order, the operator's `REPOMIND.md` overlay
+whole, each `profile/*.md` body with its frontmatter stripped, one status line per
+`plans/active/*.md` (title, status, owner, and the body's `Next step` line), yesterday's and
+today's journal day files, and a fleet snapshot of one line per lane (repo, lane, branch, agent
+count, most urgent agent state). The snapshot is the only live truth in the document; everything
+else is memory, and the persona in `crates/repomon-mcp/assets/repomind.md` stays authoritative
+for tool semantics and safety.
+
+The whole document is bounded by `[repomind] boot_budget_tokens` (12k by default, estimated at
+four characters to a token). Over budget it drops whole files from the least important end, the
+journal first (older day before newer), then profile notes, then plan lines, and ends with a
+`Trimmed: ...` line naming exactly what went, so a controller can tell "nothing to say" from "it
+did not fit". The overlay and the fleet snapshot are never trimmed.
+
+Delivery is per backend, because no two of these CLIs take context the same way. Claude gets
+`--append-system-prompt-file <path>` *in addition to* the persona's `--append-system-prompt`, so
+the boot document is appended and never substituted. OpenCode gets the path in the `instructions`
+list of the `OPENCODE_CONFIG_CONTENT` the daemon already synthesizes, preserving the operator's
+own entries. Codex and Antigravity have neither mechanism, so the daemon types one line naming
+the file into the composer once the session is ready, through the same verified-composer
+injection fleet mail uses (`inject::Payload::VerifiedLine`): it waits for a session with no
+dialog and no pending prompt, gives up after 90 seconds, and writes at most three supervision
+rows. `repomind::boot::delivery` is the single place that maps an agent kind to its mechanism.
+
+**Journal trim.** Day files older than 90 days are rolled into `journal/archive/YYYY-MM.md` (one
+section per day, keyed by an HTML comment so a re-run cannot duplicate one) and the day file is
+removed. The rollup runs in `repomind::start` and once a day after that, and both the archive
+write and the day-file removal ride the ordinary export commit.
 
 `repomon-mcp` (invoked as `repomond mcp`) is a stdio MCP server the orchestrator agent launches
 as a subprocess and wires up as a tool server; it connects back to the same daemon socket as an

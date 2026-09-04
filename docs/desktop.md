@@ -377,6 +377,19 @@ renders its pane, and Multitasking and Supervision treat its agents like any oth
 cannot be deleted or merged from the fleet tools, and a worker agent cannot spawn into it. A
 dedicated sidebar row and a panel rebuilt on the lane come later; for now the panel is unchanged.
 
+**What a fresh repomind already knows.** It does not start blank. Before every start, the daemon
+assembles a boot document from the home and hands it to the agent, so the first thing in its head
+is your `REPOMIND.md` house rules, whatever standing facts you keep in `profile/`, one line for
+each goal in `plans/active/` (its status, its owner, its next step), yesterday's and today's
+journal, and a snapshot of every lane in the fleet with its branch, agent count, and state. That
+means you can open a brand new repomind and ask "what goals are active" or "who needs me" and get
+a real answer without it calling a single tool. The document is capped at about 12k tokens; when
+your home outgrows that, the oldest journal goes first, then profile notes, then plans, and the
+document says at the end exactly what it dropped. It lives at `~/repomind/.repomind/boot.md`, is
+rewritten every time repomind starts, and is not yours to edit: change the files it is built from
+instead. Day files in `journal/` older than 90 days roll into `journal/archive/`, so the journal
+stays the recent past rather than everything that ever happened.
+
 **Answering prompts.** Repomind's agent sometimes stops on something only you can answer, like
 Claude Code's "Do you trust this folder?" trust prompt. The message box types text and presses
 Enter, which cannot express "just press Enter" or "press Escape", so a prompt like that used to be
