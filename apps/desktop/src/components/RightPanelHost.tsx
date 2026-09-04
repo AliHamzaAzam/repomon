@@ -11,6 +11,7 @@ import type { ActionsStore } from "../stores/actions";
 import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
 import type { MessageStore } from "../stores/messages";
+import type { RepomindStore } from "../stores/repomind";
 import type { WorkspaceStore } from "../stores/workspace";
 
 /**
@@ -52,6 +53,8 @@ export interface RightPanelHostProps {
   editor?: EditorStore;
   /** Shared workspace store. */
   workspace?: WorkspaceStore;
+  /** The repomind home's status, shared with the pinned sidebar row. */
+  repomind?: RepomindStore;
   /** Ensures center editor workspace is open when opening a file from GitExplorerPanel. */
   onEnsureEditorOpen?: () => void;
   /**
@@ -75,13 +78,23 @@ function buildDefaultPanels(
   editor?: EditorStore,
   workspace?: WorkspaceStore,
   onEnsureEditorOpen?: () => void,
+  repomind?: RepomindStore,
 ): RightPanelTabDef[] {
   return [
     {
       id: "repomind",
       label: "Repomind",
       icon: IconSparkles,
-      component: () => <RepomindPanel onToggleFullscreen={onToggleFullscreen} />,
+      component: () => (
+        <RepomindPanel
+          onToggleFullscreen={onToggleFullscreen}
+          fleet={fleet}
+          repomind={repomind}
+          actions={actions}
+          editor={editor}
+          onEnsureEditorOpen={onEnsureEditorOpen}
+        />
+      ),
     },
 
     // C1: git status/diff for the active lane.
@@ -133,6 +146,7 @@ export default function RightPanelHost(props: RightPanelHostProps) {
       props.editor,
       props.workspace,
       props.onEnsureEditorOpen,
+      props.repomind,
     );
 
   const [activeId, setActiveId] = createSignal((() => {

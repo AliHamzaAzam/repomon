@@ -746,6 +746,7 @@ function App(props: AppProps) {
                     workspace.setMultitasking(false);
                     workspace.setEditorWorkspace(true);
                   }}
+                  repomind={repomind}
                   requestTab={panelTabRequest()}
                   onActiveTabChange={setRightPanelTab}
                 />
@@ -757,7 +758,19 @@ function App(props: AppProps) {
 
       <Show when={repomindFull()}>
         <div class="fixed inset-0 z-50 flex flex-col bg-background" role="dialog" aria-modal="true" aria-label="Repomind, full screen">
-          <RepomindPanel fullscreen onToggleFullscreen={() => setRepomindFull(false)} />
+          <RepomindPanel
+            fullscreen
+            onToggleFullscreen={() => setRepomindFull(false)}
+            fleet={fleet}
+            repomind={repomind}
+            actions={actions}
+            editor={editor}
+            onEnsureEditorOpen={() => {
+              setRepomindFull(false);
+              workspace.setMultitasking(false);
+              workspace.setEditorWorkspace(true);
+            }}
+          />
         </div>
       </Show>
 
