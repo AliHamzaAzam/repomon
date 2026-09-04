@@ -22,6 +22,7 @@ export default function ActionModals(props: {
         <SettingsModal
           onClose={actions.closeSettings}
           initialTab={actions.settingsTab()}
+          initialAutomationSection={actions.automationSection()}
           onConfigSaved={props.notifications.setConfig}
           onPreviewSound={props.notifications.preview}
           onUpdateAvailable={(version) => void props.notifications.notifyUpdateReady(version)}

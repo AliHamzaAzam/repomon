@@ -26,7 +26,7 @@ import {
   readAutoCollapseEmptyLanes,
   saveAutoCollapseEmptyLanes,
 } from "../stores/uiSettings";
-import AutomationSettings from "./AutomationSettings";
+import AutomationSettings, { type AutomationSection } from "./AutomationSettings";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
 import Switch from "./controls/Switch";
@@ -52,6 +52,8 @@ export type SettingsTab = "general" | "system" | "agents" | "notifications" | "a
 interface SettingsModalProps {
   onClose: () => void;
   initialTab?: SettingsTab;
+  /// Which sub-tab of the Automation tab to open on, when that is the initial tab.
+  initialAutomationSection?: AutomationSection;
   onConfigSaved?: (config: ConfigView) => void;
   onPreviewSound?: (cue: SoundCue, volume: number, profile?: SoundProfile) => boolean;
   onUpdateAvailable?: (version: string) => void;
@@ -1674,7 +1676,7 @@ export default function SettingsModal(props: SettingsModalProps) {
             </Show>
 
             <Show when={tab() === "automation"}>
-              <AutomationSettings />
+              <AutomationSettings initialSection={props.initialAutomationSection} />
             </Show>
 
             <Show when={tab() === "keyboard"}>

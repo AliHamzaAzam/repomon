@@ -17,12 +17,21 @@ import Select from "./controls/Select";
 import Switch from "./controls/Switch";
 import { IconCheck, IconClose, IconPlus, IconRefresh, IconSearch } from "./icons";
 
+/// The sub-tabs of Settings > Automation. Exported so a caller elsewhere in the app can send the
+/// operator straight to one of them instead of describing where to click.
+export type AutomationSection = "playbooks" | "schedules" | "approvals" | "supervision" | "journal";
+
 interface AutomationSettingsProps {
   onConfirmDeletePlaybook?: (name: string, onConfirm: () => Promise<void>) => void;
+  /// Which sub-tab to open on. Read once, at mount, so a later change does not yank the operator
+  /// off whichever one they moved to.
+  initialSection?: AutomationSection;
 }
 
 export default function AutomationSettings(props: AutomationSettingsProps) {
-  const [activeSubTab, setActiveSubTab] = createSignal<"playbooks" | "schedules" | "approvals" | "supervision" | "journal">("playbooks");
+  const [activeSubTab, setActiveSubTab] = createSignal<AutomationSection>(
+    props.initialSection ?? "playbooks",
+  );
   const [playbooks, setPlaybooks] = createSignal<Playbook[]>([]);
   const [openPlaybook, setOpenPlaybook] = createSignal<string | null>(null);
   const [schedules, setSchedules] = createSignal<Schedule[]>([]);

@@ -1,0 +1,84 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import RepomindDuties from "./RepomindDuties";
+
+const daemonCall = vi.fn();
+
+vi.mock("../ipc/rpc", () => ({
+  daemonCall: (...args: unknown[]) => daemonCall(...args),
+}));
+
+afterEach(() => {
+  cleanup();
+  daemonCall.mockReset();
+});
+
+const NIGHTLY = {
+  id: 4,
+  spec: "daily 09:00",
+  prompt: "sweep every lane for stalled agents",
+  max_actions: 6,
+  created_at: "2026-09-01T00:00:00Z",
+  last_run_at: "2026-09-05T09:00:00Z",
+  next_run: "2026-09-06T09:00:00Z",
+};
+
+function mockDaemon(schedules: unknown[], overrides: Record<string, unknown> = {}) {
+  daemonCall.mockImplementation((method: string) => {
+    if (method in overrides) {
+      const value = overrides[method];
+      return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+    }
+    if (method === "schedule.list") return Promise.resolve({ schedules });
+    return Promise.resolve(null);
+  });
+}
+
+describe("the standing duties section", () => {
+  it("states the spec, the goal, the cap and both run times", async () => {
+    mockDaemon([NIGHTLY]);
+    render(() => <RepomindDuties />);
+
+    await waitFor(() => expect(screen.getByText("daily 09:00")).toBeInTheDocument());
+    expect(screen.getByText("sweep every lane for stalled agents")).toBeInTheDocument();
+    expect(screen.getByText(/cap 6/)).toBeInTheDocument();
+    expect(screen.getByText(/ran /)).toBeInTheDocument();
+    expect(screen.getByText(/next /)).toBeInTheDocument();
+  });
+
+  it("asks before removing a duty, and removes it once confirmed", async () => {
+    mockDaemon([NIGHTLY]);
+    render(() => <RepomindDuties />);
+
+    await waitFor(() => expect(screen.getByText("Remove")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Remove"));
+    expect(daemonCall).not.toHaveBeenCalledWith("schedule.remove", expect.anything());
+
+    fireEvent.click(screen.getByText("Confirm"));
+    await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("schedule.remove", { id: 4 }));
+  });
+
+  it("lets a confirmation be backed out of", async () => {
+    mockDaemon([NIGHTLY]);
+    render(() => <RepomindDuties />);
+
+    await waitFor(() => expect(screen.getByText("Remove")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Remove"));
+    fireEvent.click(screen.getByText("Keep"));
+
+    await waitFor(() => expect(screen.getByText("Remove")).toBeInTheDocument());
+    expect(daemonCall).not.toHaveBeenCalledWith("schedule.remove", expect.anything());
+  });
+
+  it("sends adding one to the surface that already owns the form", async () => {
+    mockDaemon([]);
+    const onAdd = vi.fn();
+    render(() => <RepomindDuties onAdd={onAdd} />);
+
+    await waitFor(() => expect(screen.getByText("Add")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Add"));
+    expect(onAdd).toHaveBeenCalled();
+    expect(screen.getByText(/runs repomind on a timer/)).toBeInTheDocument();
+  });
+});
