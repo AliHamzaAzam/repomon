@@ -525,6 +525,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                           <CodeEditor
                             value={file().content}
                             path={file().path}
+                            laneId={lane()?.id}
                             wrap={editor()?.wrap()}
                             whitespace={editor()?.whitespace()}
                             initialCursor={file().cursor}

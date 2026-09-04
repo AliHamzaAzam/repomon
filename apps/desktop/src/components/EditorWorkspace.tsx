@@ -953,6 +953,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                       <CodeEditor
                         value={file().content}
                         path={file().path}
+                        laneId={lane()?.id}
                         languageOverride={props.editor.languageOverrides()[file().path]}
                         wrap={props.editor.wrap()}
                         whitespace={props.editor.whitespace()}

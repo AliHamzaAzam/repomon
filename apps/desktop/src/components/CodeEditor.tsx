@@ -42,13 +42,22 @@ import {
   searchKeymap,
   selectNextOccurrence,
 } from "@codemirror/search";
-import { Compartment, EditorState, RangeSetBuilder } from "@codemirror/state";
+import {
+  Compartment,
+  EditorState,
+  RangeSet,
+  RangeSetBuilder,
+  StateEffect,
+  StateField,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
+  GutterMarker,
   ViewPlugin,
   crosshairCursor,
   drawSelection,
+  gutter,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightWhitespace,
@@ -60,7 +69,15 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
-import { createEffect, onCleanup, onMount, untrack } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import { daemonCall } from "../ipc/rpc";
+import { IconClose } from "./icons";
+import {
+  computeLineDiff,
+  computeRevertChange,
+  type DiffChangeType,
+  type DiffHunk,
+} from "./lineDiff";
 
 export type EditorLanguage =
   | "javascript"
@@ -95,6 +112,9 @@ export interface CodeEditorReplaceRequest {
 export interface CodeEditorProps {
   value: string;
   path?: string;
+  laneId?: number;
+  diffBase?: string | null;
+  disableGitGutter?: boolean;
   readOnly?: boolean;
   wrap?: boolean;
   whitespace?: boolean;
@@ -366,6 +386,84 @@ export const indentGuidePlugin = ViewPlugin.fromClass(
   },
 );
 
+class GitDiffGutterMarker extends GutterMarker {
+  type: DiffChangeType;
+  hunk: DiffHunk;
+  onMarkerClick: (hunk: DiffHunk, el: HTMLElement) => void;
+
+  constructor(
+    type: DiffChangeType,
+    hunk: DiffHunk,
+    onMarkerClick: (hunk: DiffHunk, el: HTMLElement) => void,
+  ) {
+    super();
+    this.type = type;
+    this.hunk = hunk;
+    this.onMarkerClick = onMarkerClick;
+  }
+
+  eq(other: GutterMarker): boolean {
+    return (
+      other instanceof GitDiffGutterMarker &&
+      other.type === this.type &&
+      other.hunk.id === this.hunk.id
+    );
+  }
+
+  toDOM(): Node {
+    const el = document.createElement("div");
+    el.className = `cm-git-gutter-marker cm-git-gutter-${this.type}`;
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", `${this.type} diff hunk`);
+    el.title = `${this.type} hunk: click to inspect or revert`;
+    el.onmousedown = (e) => {
+      e.stopPropagation();
+    };
+    el.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.onMarkerClick(this.hunk, el);
+    };
+    if (this.type === "removed") {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("width", "6");
+      svg.setAttribute("height", "6");
+      svg.setAttribute("viewBox", "0 0 6 6");
+      svg.setAttribute("class", "cm-git-removed-triangle");
+      const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+      polygon.setAttribute("points", "0,0 6,0 3,6");
+      polygon.setAttribute("fill", "var(--fault)");
+      svg.appendChild(polygon);
+      el.appendChild(svg);
+    }
+    return el;
+  }
+}
+
+class GitSpacerMarker extends GutterMarker {
+  toDOM() {
+    const el = document.createElement("div");
+    el.style.width = "6px";
+    return el;
+  }
+}
+
+const setGitMarkersEffect = StateEffect.define<RangeSet<GutterMarker>>();
+
+const gitGutterField = StateField.define<RangeSet<GutterMarker>>({
+  create() {
+    return RangeSet.empty;
+  },
+  update(markers, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setGitMarkersEffect)) {
+        return e.value;
+      }
+    }
+    return markers.map(tr.changes);
+  },
+});
+
 const appTheme = EditorView.theme(
   {
     "&": {
@@ -402,6 +500,44 @@ const appTheme = EditorView.theme(
       color: "color-mix(in srgb, var(--muted) 60%, transparent)",
       borderRight: "1px solid var(--line)",
       paddingRight: "4px",
+    },
+    ".cm-git-diff-gutter": {
+      width: "6px",
+      minWidth: "6px",
+      backgroundColor: "var(--surface)",
+      borderRight: "none",
+    },
+    ".cm-git-diff-gutter .cm-gutterElement": {
+      padding: "0",
+      minWidth: "6px",
+      width: "6px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+    },
+    ".cm-git-gutter-marker": {
+      width: "3px",
+      height: "100%",
+      borderRadius: "1px",
+      transition: "opacity 0.15s ease",
+    },
+    ".cm-git-gutter-marker:hover": {
+      opacity: "0.8",
+    },
+    ".cm-git-gutter-added": {
+      backgroundColor: "var(--signal)",
+    },
+    ".cm-git-gutter-modified": {
+      backgroundColor: "var(--attention)",
+    },
+    ".cm-git-gutter-removed": {
+      width: "6px",
+      height: "6px",
+      backgroundColor: "transparent",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
     },
     ".cm-gutterElement": {
       paddingLeft: "8px",
@@ -591,11 +727,96 @@ export default function CodeEditor(props: CodeEditorProps) {
   const wrapCompartment = new Compartment();
   const whitespaceCompartment = new Compartment();
   const indentUnitCompartment = new Compartment();
+  const gitGutterCompartment = new Compartment();
+
+  const [hunkPopover, setHunkPopover] = createSignal<{
+    hunk: DiffHunk;
+    top: number;
+    left: number;
+  } | null>(null);
+
+  let gitDiffRequestId = 0;
+  let currentBaseContent: string | null = null;
+  let currentDiffPath = props.path ?? "";
+  let diffDebounceTimer: number | null = null;
+
+  const updateGutterMarkers = (base: string | null, current: string) => {
+    if (!view || props.disableGitGutter) return;
+    const diff = computeLineDiff(base, current);
+    const doc = view.state.doc;
+    const builder = new RangeSetBuilder<GutterMarker>();
+    const sortedLines = Array.from(diff.markers.keys()).sort((a, b) => a - b);
+    for (const lineNum of sortedLines) {
+      if (lineNum >= 1 && lineNum <= doc.lines) {
+        const line = doc.line(lineNum);
+        const m = diff.markers.get(lineNum)!;
+        builder.add(
+          line.from,
+          line.from,
+          new GitDiffGutterMarker(m.type, m.hunk, (hunk, el) => {
+            const elRect = el.getBoundingClientRect();
+            const contRect = containerRef.getBoundingClientRect();
+            setHunkPopover({
+              hunk,
+              top: Math.max(8, elRect.top - contRect.top),
+              left: Math.max(8, elRect.right - contRect.left + 6),
+            });
+          }),
+        );
+      }
+    }
+    view.dispatch({
+      effects: setGitMarkersEffect.of(builder.finish()),
+    });
+  };
+
+  const refreshDiffBase = async (
+    path = props.path,
+    laneId = props.laneId,
+    diffBase = props.diffBase,
+    disabled = props.disableGitGutter,
+  ) => {
+    const reqId = ++gitDiffRequestId;
+    currentDiffPath = path ?? "";
+    setHunkPopover(null);
+
+    if (disabled) {
+      currentBaseContent = null;
+      if (view) {
+        view.dispatch({ effects: setGitMarkersEffect.of(RangeSet.empty) });
+      }
+      return;
+    }
+
+    if (diffBase !== undefined) {
+      currentBaseContent = diffBase;
+      updateGutterMarkers(currentBaseContent, view ? view.state.doc.toString() : (props.value ?? ""));
+      return;
+    }
+
+    if (!laneId || !path) {
+      currentBaseContent = null;
+      updateGutterMarkers(null, view ? view.state.doc.toString() : (props.value ?? ""));
+      return;
+    }
+
+    try {
+      const res = await daemonCall("file.diff_base", { lane_id: laneId, path });
+      if (reqId !== gitDiffRequestId || (props.path ?? "") !== path) return;
+      currentBaseContent = res.kind === "text" ? res.content : null;
+      updateGutterMarkers(currentBaseContent, view ? view.state.doc.toString() : (props.value ?? ""));
+    } catch {
+      if (reqId !== gitDiffRequestId || (props.path ?? "") !== path) return;
+      currentBaseContent = null;
+      updateGutterMarkers(null, view ? view.state.doc.toString() : (props.value ?? ""));
+    }
+  };
 
   const saveBinding: KeyBinding = {
     key: "Mod-s",
     run: () => {
       props.onSave?.();
+      void refreshDiffBase();
       return true;
     },
   };
@@ -625,6 +846,18 @@ export default function CodeEditor(props: CodeEditorProps) {
       doc: props.value,
       extensions: [
         lineNumbers(),
+        gitGutterCompartment.of(
+          props.disableGitGutter
+            ? []
+            : [
+                gitGutterField,
+                gutter({
+                  class: "cm-git-diff-gutter",
+                  markers: (v) => v.state.field(gitGutterField),
+                  initialSpacer: () => new GitSpacerMarker(),
+                }),
+              ],
+        ),
         foldGutter(),
         highlightActiveLineGutter(),
         highlightActiveLine(),
@@ -663,6 +896,12 @@ export default function CodeEditor(props: CodeEditorProps) {
             if (!applyingExternalValue) {
               props.onChange?.(lastKnownDoc);
             }
+            if (diffDebounceTimer !== null) {
+              clearTimeout(diffDebounceTimer);
+            }
+            diffDebounceTimer = window.setTimeout(() => {
+              updateGutterMarkers(currentBaseContent, lastKnownDoc);
+            }, 300);
           }
           if (update.selectionSet || update.docChanged) {
             const selection = update.state.selection;
@@ -693,7 +932,12 @@ export default function CodeEditor(props: CodeEditorProps) {
       view.scrollDOM.scrollTop = props.initialScrollTop;
     }
 
+    void refreshDiffBase();
+
     onCleanup(() => {
+      if (diffDebounceTimer !== null) {
+        clearTimeout(diffDebounceTimer);
+      }
       view?.destroy();
       view = undefined;
     });
@@ -785,6 +1029,57 @@ export default function CodeEditor(props: CodeEditorProps) {
     if (!view) return;
     view.dispatch({
       effects: whitespaceCompartment.reconfigure(ws ? [highlightWhitespace()] : []),
+    });
+  });
+
+  createEffect(() => {
+    const disabled = Boolean(props.disableGitGutter);
+    if (!view) return;
+    view.dispatch({
+      effects: gitGutterCompartment.reconfigure(
+        disabled
+          ? []
+          : [
+              gitGutterField,
+              gutter({
+                class: "cm-git-diff-gutter",
+                markers: (v) => v.state.field(gitGutterField),
+                initialSpacer: () => new GitSpacerMarker(),
+              }),
+            ],
+      ),
+    });
+  });
+
+  createEffect(() => {
+    const path = props.path;
+    const laneId = props.laneId;
+    const diffBase = props.diffBase;
+    const disabled = props.disableGitGutter;
+    if (!view) return;
+    void refreshDiffBase(path, laneId, diffBase, disabled);
+  });
+
+  createEffect(() => {
+    if (!hunkPopover()) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setHunkPopover(null);
+      }
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const popoverEl = containerRef.querySelector("[role=dialog]");
+      if (popoverEl && !popoverEl.contains(e.target as Node)) {
+        setHunkPopover(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("pointerdown", onPointerDown, true);
     });
   });
 
@@ -912,7 +1207,75 @@ export default function CodeEditor(props: CodeEditorProps) {
   return (
     <div
       ref={containerRef}
-      class={props.class ? `min-h-0 flex-1 overflow-hidden ${props.class}` : "min-h-0 flex-1 overflow-hidden"}
-    />
+      class={props.class ? `relative min-h-0 flex-1 overflow-hidden ${props.class}` : "relative min-h-0 flex-1 overflow-hidden"}
+    >
+      <Show when={hunkPopover()}>
+        {(popover) => {
+          const hunk = popover().hunk;
+          return (
+            <div
+              role="dialog"
+              aria-label="Diff hunk details"
+              class="absolute z-50 min-w-[240px] max-w-sm rounded-lg border border-line bg-surface p-3 shadow-xl font-mono text-xs"
+              style={{
+                top: `${popover().top}px`,
+                left: `${popover().left}px`,
+              }}
+            >
+              <div class="flex items-center justify-between gap-2 border-b border-line pb-1.5 mb-2">
+                <span class="font-semibold text-foreground">
+                  {hunk.type === "added"
+                    ? "Added lines"
+                    : hunk.type === "modified"
+                    ? "Modified lines"
+                    : "Removed lines"}
+                </span>
+                <button
+                  type="button"
+                  class="focus-ring text-muted hover:text-foreground"
+                  onClick={() => setHunkPopover(null)}
+                  aria-label="Close diff popover"
+                >
+                  <IconClose size={12} />
+                </button>
+              </div>
+
+              <Show
+                when={hunk.originalLines.length > 0}
+                fallback={
+                  <div class="mb-2 text-[11px] text-muted italic">
+                    New lines (not in HEAD)
+                  </div>
+                }
+              >
+                <div class="mb-2 max-h-36 overflow-y-auto rounded border border-line/60 bg-background p-2 text-[11px] text-foreground">
+                  <div class="mb-1 text-[10px] uppercase tracking-wider text-muted">
+                    HEAD version:
+                  </div>
+                  <pre class="whitespace-pre font-mono">{hunk.originalLines.join("\n")}</pre>
+                </div>
+              </Show>
+
+              <div class="flex items-center justify-end gap-2 pt-1 border-t border-line/40">
+                <button
+                  type="button"
+                  class="focus-ring rounded border border-line bg-surface px-2.5 py-1 text-xs font-medium text-foreground hover:bg-raised"
+                  onClick={() => {
+                    if (!view) return;
+                    if ((props.path ?? "") !== currentDiffPath) return;
+                    const change = computeRevertChange(hunk, view.state.doc);
+                    view.dispatch({ changes: change });
+                    props.onChange?.(view.state.doc.toString());
+                    setHunkPopover(null);
+                  }}
+                >
+                  Revert hunk
+                </button>
+              </div>
+            </div>
+          );
+        }}
+      </Show>
+    </div>
   );
 }
