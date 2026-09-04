@@ -221,6 +221,41 @@ pub fn approve(home: &Path, name: &str) -> Result<Playbook> {
     get(home, name)?.ok_or_else(|| Error::NotFound(format!("playbook {name}")))
 }
 
+/// `<home>/playbooks/rejected/<name>.md`: a draft a human turned down. Kept, never deleted, so
+/// the reasoning stays in the home's history and the same idea does not come back unnoticed.
+pub fn rejected_path(home: &Path, name: &str) -> PathBuf {
+    home.join("playbooks")
+        .join("rejected")
+        .join(format!("{name}.md"))
+}
+
+/// Reject a draft by moving its file into `playbooks/rejected/` with `status: rejected`.
+///
+/// The counterpart to [`approve`], and deliberately the same shape: a move, not a delete. The
+/// approved file (if the draft was a revision of one) is left exactly as it was, so rejecting a
+/// revision means the live playbook simply keeps standing.
+pub fn reject(home: &Path, name: &str) -> Result<PathBuf> {
+    let draft = draft_path(home, name);
+    let Some((fm, body)) = read_doc(&draft)? else {
+        return Err(Error::NotFound(format!("playbook draft {name}")));
+    };
+    let now = Utc::now();
+    let rejected = rejected_path(home, name);
+    std::fs::create_dir_all(rejected.parent().unwrap_or(home))?;
+    let fields = [
+        ("title", name.to_string()),
+        ("type", "playbook".to_string()),
+        ("permalink", format!("repomind/playbooks/rejected/{name}")),
+        ("status", "rejected".to_string()),
+        ("source", format!("repomond {}", now.format("%Y-%m-%d"))),
+        ("created", stamp(&fm, "created", now).to_rfc3339()),
+        ("rejected", now.to_rfc3339()),
+    ];
+    std::fs::write(&rejected, md::frontmatter(&fields) + &body)?;
+    std::fs::remove_file(&draft)?;
+    Ok(rejected)
+}
+
 /// Delete a playbook outright: the approved file, the draft, or both.
 pub fn delete(home: &Path, name: &str) -> Result<()> {
     let mut removed = false;
@@ -470,6 +505,55 @@ mod tests {
         assert!(!approved_path(&home, "fleet-sweep").exists());
         assert!(!draft_path(&home, "fleet-sweep").exists());
         assert!(delete(&home, "fleet-sweep").is_err(), "gone means not found");
+    }
+
+    #[test]
+    fn reject_moves_the_draft_into_rejected_and_never_deletes_it() {
+        let (_d, home) = home();
+        save(&home, "fleet-sweep", "sweep the fleet\n").unwrap();
+
+        let path = reject(&home, "fleet-sweep").unwrap();
+
+        assert_eq!(path, rejected_path(&home, "fleet-sweep"));
+        assert!(path.is_file(), "a rejected draft is kept, not deleted");
+        assert!(!draft_path(&home, "fleet-sweep").exists());
+        assert!(!approved_path(&home, "fleet-sweep").exists());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let (fm, body) = md::split_frontmatter(&raw);
+        let fm = fm.expect("frontmatter");
+        assert_eq!(md::field(&fm, "status").as_deref(), Some("rejected"));
+        assert!(md::field(&fm, "rejected").is_some());
+        assert_eq!(body, "sweep the fleet\n", "the text survives the move");
+        // Gone from every surface an agent can reach.
+        assert!(list(&home).unwrap().is_empty());
+        assert!(search(&home, "sweep", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejecting_a_revision_leaves_the_approved_playbook_standing() {
+        let (_d, home) = home();
+        save(&home, "fleet-sweep", "v1\n").unwrap();
+        approve(&home, "fleet-sweep").unwrap();
+        save(&home, "fleet-sweep", "v2\n").unwrap();
+
+        reject(&home, "fleet-sweep").unwrap();
+
+        let book = get(&home, "fleet-sweep").unwrap().unwrap();
+        assert_eq!(book.status, "approved");
+        assert_eq!(book.content, "v1\n");
+        assert_eq!(book.draft_content, None);
+        assert!(rejected_path(&home, "fleet-sweep").is_file());
+    }
+
+    #[test]
+    fn rejecting_a_name_with_no_draft_is_not_found() {
+        let (_d, home) = home();
+        save(&home, "fleet-sweep", "v1\n").unwrap();
+        approve(&home, "fleet-sweep").unwrap();
+
+        assert!(reject(&home, "fleet-sweep").is_err(), "nothing is pending");
+        assert!(reject(&home, "nothing-here").is_err());
+        assert!(approved_path(&home, "fleet-sweep").is_file());
     }
 
     #[test]

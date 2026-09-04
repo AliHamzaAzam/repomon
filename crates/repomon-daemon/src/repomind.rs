@@ -38,6 +38,7 @@ const HOME_DIRS: &[&str] = &[
     "plans/standing",
     "plans/done",
     "playbooks/drafts",
+    "playbooks/rejected",
     "fleet",
     "journal",
     "knowledge",
