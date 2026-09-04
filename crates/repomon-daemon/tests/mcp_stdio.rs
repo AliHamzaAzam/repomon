@@ -80,6 +80,13 @@ async fn boot_daemon_cfg(tag: &str, mut config: Config) -> (PathBuf, IpcStream, 
     let store = Store::open_in_memory().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     config.worktree_template = format!("{}/wt/{{repo}}/{{branch}}", state_dir.path().display());
+    // The repomind home is redirected too: repo notes and playbooks are files in it since R2,
+    // so a default `~/repomind` would write into the operator's real fleet memory.
+    config.repomind.home = state_dir
+        .path()
+        .join("repomind")
+        .to_string_lossy()
+        .into_owned();
     let ctx = Ctx::new_with_paths(
         store,
         config,
@@ -581,10 +588,11 @@ async fn mcp_stdio_repo_notes_round_trip() {
     assert!(!is_error, "repo_notes_write errored: {text}");
     let parsed: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(parsed["ok"], json!(true));
+    // File-first since R2: notes live at `fleet/<repo>/notes.md` inside the repomind home.
     let path = PathBuf::from(parsed["path"].as_str().unwrap());
     assert!(
-        path.starts_with(state_dir.path().join("repo-notes")),
-        "notes path {path:?} escaped the injected dir"
+        path.starts_with(state_dir.path().join("repomind").join("fleet")),
+        "notes path {path:?} escaped the injected home"
     );
 
     mcp_request(

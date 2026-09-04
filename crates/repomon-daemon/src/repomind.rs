@@ -17,6 +17,7 @@ pub mod basic_memory;
 pub mod export;
 pub mod md;
 pub mod notes;
+pub mod playbooks;
 
 use std::path::{Path, PathBuf};
 
@@ -221,20 +222,30 @@ pub async fn migrate_records(ctx: &Ctx) -> repomon_core::Result<Vec<String>> {
     let repos = ctx.registry.list().await?;
     let legacy = ctx.notes_dir.clone();
 
-    let for_fs = home.clone();
-    let written = tokio::task::spawn_blocking(move || notes::migrate(&for_fs, &legacy, &repos))
-        .await
-        .map_err(|e| repomon_core::Error::Other(e.to_string()))??;
+    let rows = ctx.store.list_playbooks().await?;
 
-    let rel: Vec<String> = written
-        .iter()
-        .map(|p| notes::rel_path(&home, p))
-        .collect();
-    for path in &rel {
-        tracing::info!("repomind home: migrated repo notes into {path}");
+    let for_fs = home.clone();
+    let (notes_written, books_written) = tokio::task::spawn_blocking(
+        move || -> repomon_core::Result<_> {
+            Ok((
+                notes::migrate(&for_fs, &legacy, &repos)?,
+                playbooks::migrate(&for_fs, &rows)?,
+            ))
+        },
+    )
+    .await
+    .map_err(|e| repomon_core::Error::Other(e.to_string()))??;
+
+    let mut all = Vec::new();
+    for (kind, written) in [("notes", notes_written), ("playbooks", books_written)] {
+        let rel: Vec<String> = written.iter().map(|p| notes::rel_path(&home, p)).collect();
+        for path in &rel {
+            tracing::info!("repomind home: migrated {kind} into {path}");
+        }
+        export::request_files(ctx, kind, rel.clone()).await;
+        all.extend(rel);
     }
-    export::request_files(ctx, "notes", rel.clone()).await;
-    Ok(rel)
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -427,6 +438,39 @@ mod tests {
         assert!(
             migrate_records(&ctx).await.unwrap().is_empty(),
             "a second start migrates nothing"
+        );
+    }
+
+    /// Playbook rows that only exist in SQLite become files on the first start after R2: an
+    /// approved one at the root, a draft under `drafts/`, and the approval gate is unchanged.
+    #[tokio::test]
+    async fn migrate_records_writes_playbook_rows_as_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let store = Store::open_in_memory().unwrap();
+        store
+            .save_playbook("blessed".into(), "live\n".into())
+            .await
+            .unwrap();
+        store.approve_playbook("blessed".into()).await.unwrap();
+        store
+            .save_playbook("pending".into(), "wip\n".into())
+            .await
+            .unwrap();
+
+        let mut config = Config::default();
+        config.repomind.home = home.to_string_lossy().into_owned();
+        let ctx = Ctx::new(store, config, None);
+        ensure_home(&ctx).await.unwrap();
+
+        let written = migrate_records(&ctx).await.unwrap();
+
+        assert!(written.contains(&"playbooks/blessed.md".to_string()), "{written:?}");
+        assert!(written.contains(&"playbooks/drafts/pending.md".to_string()), "{written:?}");
+        assert_eq!(playbooks::search(&home, "live", 10).unwrap().len(), 1);
+        assert!(
+            playbooks::search(&home, "wip", 10).unwrap().is_empty(),
+            "a migrated draft stays inert"
         );
     }
 }

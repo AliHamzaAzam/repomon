@@ -44,6 +44,13 @@ async fn scheduler_fires_due_schedules_once_and_journals() {
         .agents
         .insert("noop".to_string(), "echo BRIEFING: all quiet".to_string());
     let state_dir = tempfile::tempdir().unwrap();
+    // A throwaway repomind home: a standing run asks for an export, and a default `~/repomind`
+    // would point the test at the operator's real fleet memory.
+    config.repomind.home = state_dir
+        .path()
+        .join("repomind")
+        .to_string_lossy()
+        .into_owned();
     let ctx = Ctx::new_with_paths(
         store,
         config,

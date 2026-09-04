@@ -56,6 +56,16 @@ fn git_dated(dir: &Path, args: &[&str], date: &str) {
     assert!(ok, "git {args:?}");
 }
 
+/// A config whose repomind home is a throwaway directory. Every test that reaches a home-backed
+/// RPC (repo notes, playbooks, and the export triggers behind the journal, schedules, and
+/// approval rules) must use one: with the default `~/repomind` the suite would write into the
+/// operator's real fleet memory.
+fn isolated_config(dir: &Path) -> Config {
+    let mut config = Config::default();
+    config.repomind.home = dir.join("repomind").to_string_lossy().into_owned();
+    config
+}
+
 async fn call(
     stream: &mut IpcStream,
     id: u64,
@@ -1507,7 +1517,7 @@ async fn repo_notes_get_set_round_trip() {
     let notes_dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new_with_paths(
         store,
-        Config::default(),
+        isolated_config(cfg_dir.path()),
         None,
         cfg_dir.path().join("config.toml"),
         notes_dir.path().to_path_buf(),
@@ -1552,7 +1562,7 @@ async fn repo_notes_get_set_round_trip() {
     assert_eq!(got["repo_id"], json!(repo_id));
     assert_eq!(got["name"], json!(repo_name));
 
-    // Set → get round-trips and reports the path inside the injected notes dir.
+    // Set → get round-trips and reports the path inside the repomind home.
     let r = call(
         &mut stream,
         3,
@@ -1571,8 +1581,16 @@ async fn repo_notes_get_set_round_trip() {
     let got = r.result.unwrap();
     assert_eq!(got["exists"], json!(true));
     assert_eq!(got["content"], json!("use `pnpm test`, never `npm test`"));
+    // File-first since R2: the notes live in the repomind home, not the app-support directory.
     let path = std::path::PathBuf::from(got["path"].as_str().unwrap());
-    assert!(path.starts_with(notes_dir.path()), "path was {path:?}");
+    assert!(
+        path.starts_with(cfg_dir.path().join("repomind").join("fleet")),
+        "path was {path:?}"
+    );
+    assert!(
+        std::fs::read_dir(notes_dir.path()).unwrap().next().is_none(),
+        "the app-support repo-notes directory must no longer be written"
+    );
 
     // Over the cap: rejected with an error that names the limit.
     let r = call(
@@ -1617,7 +1635,8 @@ async fn repo_notes_get_set_round_trip() {
 #[tokio::test]
 async fn journal_append_and_query() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let home_dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
     let sock = std::env::temp_dir().join(format!("repomon-jrnl-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1693,7 +1712,8 @@ async fn journal_append_and_query() {
 #[tokio::test]
 async fn playbook_lifecycle_over_rpc() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let home_dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
     let sock = std::env::temp_dir().join(format!("repomon-pb-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1808,7 +1828,8 @@ async fn playbook_lifecycle_over_rpc() {
 #[tokio::test]
 async fn schedule_add_list_remove() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let home_dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
     let sock = std::env::temp_dir().join(format!("repomon-sch-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1880,7 +1901,8 @@ async fn schedule_add_list_remove() {
 #[tokio::test]
 async fn approval_record_and_rules_lifecycle() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let home_dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
     let sock = std::env::temp_dir().join(format!("repomon-ap-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {

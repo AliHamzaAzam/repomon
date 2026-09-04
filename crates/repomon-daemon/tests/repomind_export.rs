@@ -185,3 +185,74 @@ async fn repo_notes_are_written_to_and_read_from_the_home() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+/// Playbooks are file-first: a save lands in `playbooks/drafts/` and stays invisible to search
+/// until approval moves the file up into `playbooks/`.
+#[tokio::test]
+async fn a_playbook_draft_is_inert_until_approval_moves_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("repomind");
+    let mut config = Config::default();
+    config.repomind.home = home.to_string_lossy().into_owned();
+    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
+
+    let sock = std::env::temp_dir().join(format!("repomon-rmp-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let saved = call(
+        &mut stream,
+        1,
+        "playbook.save",
+        Some(json!({ "name": "fleet-sweep", "content": "sweep every lane\n" })),
+    )
+    .await;
+    assert!(saved.error.is_none(), "{:?}", saved.error);
+    assert_eq!(saved.result.unwrap()["status"], json!("draft"));
+    assert!(home.join("playbooks/drafts/fleet-sweep.md").is_file());
+    assert!(!home.join("playbooks/fleet-sweep.md").exists());
+
+    let found = call(
+        &mut stream,
+        2,
+        "playbook.search",
+        Some(json!({ "query": "sweep" })),
+    )
+    .await;
+    assert_eq!(
+        found.result.unwrap()["playbooks"],
+        json!([]),
+        "a draft must never reach search"
+    );
+
+    let approved = call(
+        &mut stream,
+        3,
+        "playbook.approve",
+        Some(json!({ "name": "fleet-sweep" })),
+    )
+    .await;
+    assert!(approved.error.is_none(), "{:?}", approved.error);
+    assert_eq!(approved.result.unwrap()["status"], json!("approved"));
+    assert!(home.join("playbooks/fleet-sweep.md").is_file());
+    assert!(!home.join("playbooks/drafts/fleet-sweep.md").exists());
+
+    let found = call(
+        &mut stream,
+        4,
+        "playbook.search",
+        Some(json!({ "query": "sweep" })),
+    )
+    .await;
+    let books = found.result.unwrap();
+    assert_eq!(books["playbooks"][0]["name"], json!("fleet-sweep"));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

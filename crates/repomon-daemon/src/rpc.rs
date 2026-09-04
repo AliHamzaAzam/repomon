@@ -1928,50 +1928,107 @@ pub async fn dispatch(
                     "playbook name must be 1-64 chars of [A-Za-z0-9._-] (kebab-case works well)",
                 ));
             }
-            if p.content.len() > 16384 {
+            let cap = crate::repomind::playbooks::MAX_PLAYBOOK_BYTES;
+            if p.content.len() > cap {
                 return Err(RpcError::invalid_params(format!(
-                    "playbook is {} bytes; the cap is 16384 bytes",
+                    "playbook is {} bytes; the cap is {cap} bytes",
                     p.content.len()
                 )));
             }
-            let book = ctx
-                .store
-                .save_playbook(name.to_string(), p.content)
-                .await
-                .map_err(internal)?;
+            // File-first since R2: a save can only ever write `playbooks/drafts/<name>.md`.
+            // Approval is the file moving up a level, so the gate is visible in the home.
+            let home = ctx.config.read().await.repomind_home();
+            let name = name.to_string();
+            let content = p.content.clone();
+            let for_rel = home.clone();
+            let (book, path) = tokio::task::spawn_blocking(move || {
+                let path = crate::repomind::playbooks::draft_path(&home, &name);
+                crate::repomind::playbooks::save(&home, &name, &content).map(|b| (b, path))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
             tracing::info!(playbook = %book.name, status = %book.status, "playbook saved");
+            crate::repomind::export::request_files(
+                ctx,
+                "playbooks",
+                vec![crate::repomind::playbooks::rel_path(&for_rel, &path)],
+            )
+            .await;
             to_value(book)
         }
         "playbook.search" => {
             let p: PlaybookSearch = parse(params)?;
-            let books = ctx
-                .store
-                .search_playbooks(p.query, p.limit.unwrap_or(10).min(50))
-                .await
-                .map_err(internal)?;
+            let home = ctx.config.read().await.repomind_home();
+            let limit = p.limit.unwrap_or(10).min(50);
+            let books = tokio::task::spawn_blocking(move || {
+                crate::repomind::playbooks::search(&home, &p.query, limit)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
             to_value(json!({ "playbooks": books }))
         }
         "playbook.list" => {
-            let books = ctx.store.list_playbooks().await.map_err(internal)?;
+            let home = ctx.config.read().await.repomind_home();
+            let books = tokio::task::spawn_blocking(move || crate::repomind::playbooks::list(&home))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
             to_value(json!({ "playbooks": books }))
         }
         "playbook.approve" => {
             let p: PlaybookName = parse(params)?;
-            let book = ctx
-                .store
-                .approve_playbook(p.name)
-                .await
-                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            let home = ctx.config.read().await.repomind_home();
+            let name = p.name.clone();
+            let for_rel = home.clone();
+            let (book, paths) = tokio::task::spawn_blocking(move || {
+                let moved = vec![
+                    crate::repomind::playbooks::draft_path(&home, &name),
+                    crate::repomind::playbooks::approved_path(&home, &name),
+                ];
+                crate::repomind::playbooks::approve(&home, &name).map(|b| (b, moved))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
             tracing::info!(playbook = %book.name, "playbook approved");
+            crate::repomind::export::request_files(
+                ctx,
+                "playbooks",
+                paths
+                    .iter()
+                    .map(|p| crate::repomind::playbooks::rel_path(&for_rel, p))
+                    .collect(),
+            )
+            .await;
             to_value(book)
         }
         "playbook.delete" => {
             let p: PlaybookName = parse(params)?;
-            ctx.store
-                .delete_playbook(p.name.clone())
-                .await
-                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            let home = ctx.config.read().await.repomind_home();
+            let name = p.name.clone();
+            let for_rel = home.clone();
+            let paths = tokio::task::spawn_blocking(move || {
+                let removed = vec![
+                    crate::repomind::playbooks::draft_path(&home, &name),
+                    crate::repomind::playbooks::approved_path(&home, &name),
+                ];
+                crate::repomind::playbooks::delete(&home, &name).map(|()| removed)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
             tracing::info!(playbook = %p.name, "playbook deleted");
+            crate::repomind::export::request_files(
+                ctx,
+                "playbooks",
+                paths
+                    .iter()
+                    .map(|p| crate::repomind::playbooks::rel_path(&for_rel, p))
+                    .collect(),
+            )
+            .await;
             Ok(Value::Null)
         }
 
