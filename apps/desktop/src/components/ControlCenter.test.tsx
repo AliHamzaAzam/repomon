@@ -183,6 +183,7 @@ describe("ControlCenter component UI", () => {
     agent_sessions: [],
     last_activity_at: "2026-07-20T00:00:00Z",
     pinned: false,
+    role: null,
   };
 
   function setup() {

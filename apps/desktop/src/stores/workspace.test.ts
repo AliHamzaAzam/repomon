@@ -58,6 +58,7 @@ function lane(id: number, windows: string[]): import("../bindings").Lane {
     })),
     last_activity_at: "",
     pinned: false,
+    role: null,
   };
 }
 

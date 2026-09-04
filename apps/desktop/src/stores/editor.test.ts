@@ -60,6 +60,7 @@ function lane(id: number): Lane {
     agent_sessions: [],
     last_activity_at: "",
     pinned: false,
+    role: null,
   };
 }
 

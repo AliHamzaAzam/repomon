@@ -23,6 +23,7 @@ function lane(overrides: Partial<Lane> = {}): Lane {
     agent_sessions: [],
     last_activity_at: "2026-07-26T00:00:00Z",
     pinned: false,
+    role: null,
     ...overrides,
   };
 }

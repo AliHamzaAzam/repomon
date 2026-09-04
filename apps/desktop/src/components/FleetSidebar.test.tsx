@@ -65,6 +65,7 @@ function lane(id: number, target: Repo, sessions: AgentSession[] = []): Lane {
     agent_sessions: sessions,
     last_activity_at: "2026-07-20T00:00:00Z",
     pinned: false,
+    role: null,
   };
 }
 

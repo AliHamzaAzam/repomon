@@ -97,6 +97,7 @@ function sampleLane(id = 7): Lane {
     agent_sessions: [],
     last_activity_at: "2026-08-01T00:00:00Z",
     pinned: false,
+    role: null,
   };
 }
 

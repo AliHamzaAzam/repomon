@@ -37,6 +37,7 @@ describe("SpawnModal error rendering", () => {
   const dummyLane: Lane = {
     id: 1,
     pinned: false,
+    role: null,
     last_activity_at: "2026-08-01T00:00:00Z",
     repo: { id: 1, name: "repomon", path: "/tmp/repo", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null },
     worktree: { id: 1, repo_id: 1, name: "main", branch: "main", path: "/tmp/repo", head: "abc", is_main: true },

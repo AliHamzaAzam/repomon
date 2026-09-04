@@ -65,6 +65,7 @@ function lane(id: number, repo: string, branch: string): Lane {
     agent_sessions: [],
     last_activity_at: "2026-08-28T00:00:00Z",
     pinned: false,
+    role: null,
   };
 }
 
