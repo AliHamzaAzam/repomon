@@ -1,10 +1,12 @@
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 
 import type { Commit, CommitShow, Lane } from "../bindings";
-import DiffView from "./DiffView";
+import DiffView, { findFileFirstChangedLine, parseDiff } from "./DiffView";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall, type LaneDiff } from "../ipc/rpc";
+import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
+import type { WorkspaceStore } from "../stores/workspace";
 import { formatRelativeTime } from "./relativeTime";
 import {
   IconArrowDown,
@@ -12,6 +14,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
+  IconFileCode,
   IconGitBranch,
   IconGitCommit,
   IconRefresh,
@@ -123,14 +126,30 @@ function splitPath(path: string): { dir: string; base: string } {
 /// with the file's (post-rename) path. Commit rows in Branch/History (see `openCommit`) share the
 /// same view via `commit.show` (item 6), each opening that one commit's detail instead of the
 /// lane's working-tree patch.
-function StatFileRowView(props: { file: StatFileRow; onSelect: (path: string) => void }) {
+function StatFileRowView(props: {
+  file: StatFileRow;
+  onSelect: (path: string) => void;
+  onOpenInEditor?: (path: string) => void;
+  onContextMenu?: (e: MouseEvent, path: string) => void;
+}) {
   const parts = () => splitPath(props.file.path);
   return (
-    <li>
+    <li class="group flex items-center justify-between rounded-lg hover:bg-raised/60">
       <button
         type="button"
-        class="focus-ring flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left hover:bg-raised/60"
+        class="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left"
         onClick={() => props.onSelect(props.file.path)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            props.onOpenInEditor?.(props.file.path);
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          props.onContextMenu?.(e, props.file.path);
+        }}
       >
         <span class="min-w-0 flex-1 truncate font-mono text-xs">
           <span class="text-muted/70">{parts().dir}</span>
@@ -154,6 +173,20 @@ function StatFileRowView(props: { file: StatFileRow; onSelect: (path: string) =>
           </span>
         </Show>
       </button>
+      <Show when={props.onOpenInEditor}>
+        <button
+          type="button"
+          class="focus-ring mr-1 hidden size-5 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground group-hover:flex group-focus-within:flex"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onOpenInEditor!(props.file.path);
+          }}
+          title="Open in editor"
+          aria-label="Open in editor"
+        >
+          <IconFileCode size={12} />
+        </button>
+      </Show>
     </li>
   );
 }
@@ -198,6 +231,9 @@ interface GitExplorerPanelProps {
   /// prop. Optional so RightPanelHost's default-registry wiring degrades to the empty state
   /// instead of a type error if a future caller ever mounts this without a live fleet.
   fleet?: FleetStore;
+  editor?: EditorStore;
+  workspace?: WorkspaceStore;
+  onEnsureEditorOpen?: () => void;
 }
 
 export default function GitExplorerPanel(props: GitExplorerPanelProps) {
@@ -207,9 +243,10 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   const [history, setHistory] = createSignal<Commit[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<TranslatedError | null>(null);
+  const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; path: string } | null>(null);
   // Hoisted above the branchData Show block (rather than declared inside it) so it survives the
   // panel's 1.2s poll-driven refetches instead of collapsing back open every time git state
-  // changes; session-local only, per C3 — no localStorage persistence needed here.
+  // changes; session-local only, per C3 - no localStorage persistence needed here.
   const [changesExpanded, setChangesExpanded] = createSignal(true);
 
   // C4: the Diff view replaces the Branch/Working tree/History sections while open (see the
@@ -220,6 +257,39 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   // nobody's looking at.
   const [diffOpen, setDiffOpen] = createSignal(false);
   const [diffFocusPath, setDiffFocusPath] = createSignal<string | null>(null);
+
+  function handleOpenInEditor(path: string, line: number = 1) {
+    if (props.onEnsureEditorOpen) {
+      props.onEnsureEditorOpen();
+    } else if (props.workspace && !props.workspace.editorWorkspace()) {
+      props.workspace.setEditorWorkspace(true);
+    }
+    void props.editor?.openAt(path, line, 1);
+  }
+
+  async function openFileInEditor(filePath: string, explicitLine?: number) {
+    let targetLine = explicitLine;
+    if (targetLine === undefined) {
+      let patch = branchData()?.patch;
+      if (!patch && lane()) {
+        try {
+          const res = await daemonCall("lane.diff", { lane_id: lane()!.id, include_patch: true });
+          patch = res.patch;
+          setBranchData((prev) => (prev ? { ...prev, patch: res.patch } : prev));
+        } catch {
+          // Fallback to line 1 if patch fetch fails
+        }
+      }
+      if (patch) {
+        const diffFiles = parseDiff(patch);
+        const df = diffFiles.find((f) => f.path === filePath || f.newPath === filePath || f.oldPath === filePath);
+        if (df && df.hunks.length > 0) {
+          targetLine = findFileFirstChangedLine(df);
+        }
+      }
+    }
+    handleOpenInEditor(filePath, targetLine ?? 1);
+  }
 
   // Item 6: commit-detail view, mutually exclusive with the working-tree Diff view above (opening
   // one closes the other - see `openDiff`/`openCommit`). Kept as its own signal group rather than
@@ -463,6 +533,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                 truncated={branchData()?.patch_truncated ?? false}
                 focusPath={diffFocusPath() ?? undefined}
                 onClose={closeDiff}
+                onOpenInEditor={(path, line) => void openFileInEditor(path, line)}
               />
             </Show>
           </div>
@@ -525,6 +596,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                             </div>
                           </div>
                         }
+                        onOpenInEditor={(path, line) => void openFileInEditor(path, line)}
                       />
                     )}
                   </Show>
@@ -661,7 +733,14 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                               >
                                 <ul class="space-y-0.5">
                                   <For each={files()}>
-                                    {(f) => <StatFileRowView file={f} onSelect={openDiff} />}
+                                    {(f) => (
+                                      <StatFileRowView
+                                        file={f}
+                                        onSelect={openDiff}
+                                        onOpenInEditor={(path) => void openFileInEditor(path)}
+                                        onContextMenu={(e, path) => setContextMenu({ x: e.clientX, y: e.clientY, path })}
+                                      />
+                                    )}
                                   </For>
                                 </ul>
                               </Show>
@@ -720,6 +799,53 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
             </section>
           </div>
         </Show>
+      </Show>
+
+      <Show when={contextMenu()} keyed>
+        {(menu) => (
+          <>
+            <div
+              class="fixed inset-0 z-40"
+              onClick={() => setContextMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu(null);
+              }}
+            />
+            <div
+              role="menu"
+              class="fixed z-50 min-w-[140px] rounded-lg border border-line bg-surface py-1 text-xs shadow-xl backdrop-blur"
+              style={{
+                left: `${Math.min(menu.x, window.innerWidth - 150)}px`,
+                top: `${Math.min(menu.y, window.innerHeight - 100)}px`,
+              }}
+            >
+              <button
+                role="menuitem"
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  void openFileInEditor(menu.path);
+                }}
+              >
+                <IconFileCode size={12} class="text-muted" />
+                <span>Open in editor</span>
+              </button>
+              <button
+                role="menuitem"
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  setContextMenu(null);
+                  openDiff(menu.path);
+                }}
+              >
+                <span>View diff</span>
+              </button>
+            </div>
+          </>
+        )}
       </Show>
     </div>
   );

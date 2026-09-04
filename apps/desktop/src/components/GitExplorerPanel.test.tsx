@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Commit, Lane, Repo } from "../bindings";
 import App from "../App";
 import type { ConnectionSnapshot, ConnectionSource } from "../ipc/connection";
+import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
 import GitExplorerPanel, { parseCommits, parseStatFiles } from "./GitExplorerPanel";
 
@@ -793,5 +794,120 @@ describe("header Git/Editor buttons (App integration)", () => {
 
     fireEvent.click(editorButton);
     await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "false"));
+  });
+});
+
+describe("GitExplorerPanel open in editor (F4)", () => {
+  const PATCH = [
+    "diff --git a/App.tsx b/App.tsx",
+    "index 1111111..2222222 100644",
+    "--- a/App.tsx",
+    "+++ b/App.tsx",
+    "@@ -10,3 +10,4 @@",
+    " context line",
+    "-removed line",
+    "+added line",
+    " trailing context",
+    "",
+  ].join("\n");
+
+  it("clicking the Open in editor hover button on a file row opens at the first changed line", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " App.tsx | 1 +\n 1 file changed, 1 insertion(+)\n",
+      untracked: 0,
+      patch: PATCH,
+      patch_truncated: false,
+    };
+    responses.history = [];
+
+    const openAt = vi.fn();
+    const onEnsureEditorOpen = vi.fn();
+    const mockEditor = { openAt } as unknown as EditorStore;
+
+    render(() => (
+      <GitExplorerPanel
+        fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))}
+        editor={mockEditor}
+        onEnsureEditorOpen={onEnsureEditorOpen}
+      />
+    ));
+
+    const openBtn = await screen.findByRole("button", { name: "Open in editor" });
+    fireEvent.click(openBtn);
+
+    expect(onEnsureEditorOpen).toHaveBeenCalled();
+    // In PATCH: line 10 is context, line 11 is remove/add
+    expect(openAt).toHaveBeenCalledWith("App.tsx", 11, 1);
+  });
+
+  it("pressing Enter on a focused file row opens it in the center editor", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " App.tsx | 1 +\n 1 file changed, 1 insertion(+)\n",
+      untracked: 0,
+      patch: PATCH,
+      patch_truncated: false,
+    };
+    responses.history = [];
+
+    const openAt = vi.fn();
+    const onEnsureEditorOpen = vi.fn();
+    const mockEditor = { openAt } as unknown as EditorStore;
+
+    render(() => (
+      <GitExplorerPanel
+        fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))}
+        editor={mockEditor}
+        onEnsureEditorOpen={onEnsureEditorOpen}
+      />
+    ));
+
+    const row = await screen.findByRole("button", { name: /App\.tsx/ });
+    fireEvent.keyDown(row, { key: "Enter" });
+
+    expect(onEnsureEditorOpen).toHaveBeenCalled();
+    expect(openAt).toHaveBeenCalledWith("App.tsx", 11, 1);
+  });
+
+  it("right-clicking file row opens context menu with Open in editor", async () => {
+    responses.diff = {
+      base: "main",
+      merge_base: "abc0000",
+      commits: "",
+      committed_stat: "",
+      uncommitted_stat: " App.tsx | 1 +\n 1 file changed, 1 insertion(+)\n",
+      untracked: 0,
+      patch: PATCH,
+      patch_truncated: false,
+    };
+    responses.history = [];
+
+    const openAt = vi.fn();
+    const onEnsureEditorOpen = vi.fn();
+    const mockEditor = { openAt } as unknown as EditorStore;
+
+    render(() => (
+      <GitExplorerPanel
+        fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 0, untracked: 0 }))}
+        editor={mockEditor}
+        onEnsureEditorOpen={onEnsureEditorOpen}
+      />
+    ));
+
+    const row = await screen.findByRole("button", { name: /App\.tsx/ });
+    fireEvent.contextMenu(row);
+
+    const menuBtn = await screen.findByRole("menuitem", { name: "Open in editor" });
+    fireEvent.click(menuBtn);
+
+    expect(onEnsureEditorOpen).toHaveBeenCalled();
+    expect(openAt).toHaveBeenCalledWith("App.tsx", 11, 1);
   });
 });

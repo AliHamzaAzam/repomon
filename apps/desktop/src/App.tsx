@@ -703,6 +703,11 @@ function App(props: AppProps) {
                   actions={actions}
                   messages={messages}
                   editor={editor}
+                  workspace={workspace}
+                  onEnsureEditorOpen={() => {
+                    workspace.setMultitasking(false);
+                    workspace.setEditorWorkspace(true);
+                  }}
                   requestTab={panelTabRequest()}
                   onActiveTabChange={setRightPanelTab}
                 />

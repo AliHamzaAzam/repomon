@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
 
-import { IconChevronDown, IconChevronRight, IconClose } from "./icons";
+import { IconChevronDown, IconChevronRight, IconClose, IconFileCode } from "./icons";
 
 /// Change types a `diff --git` block can describe. Binary is tracked as a separate flag on
 /// `DiffFile` (not folded into this union) since a binary file can also be an add, delete, or
@@ -197,6 +197,69 @@ const GLYPH: Record<DiffChangeType, { letter: string; class: string }> = {
   modify: { letter: "M", class: "bg-muted/10 text-muted/70" },
 };
 
+export interface DecoratedDiffLine {
+  type: "context" | "add" | "remove";
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+  targetLine: number;
+}
+
+export function findFirstChangedLine(hunk: DiffHunk): number {
+  let line = hunk.newStart;
+  for (const l of hunk.lines) {
+    if (l.type === "add" || l.type === "remove") {
+      return Math.max(1, line);
+    }
+    if (l.type === "context") {
+      line += 1;
+    }
+  }
+  return Math.max(1, hunk.newStart);
+}
+
+export function findFileFirstChangedLine(file: DiffFile): number {
+  if (!file.hunks.length) return 1;
+  return findFirstChangedLine(file.hunks[0]);
+}
+
+export function decorateHunkLines(hunk: DiffHunk): DecoratedDiffLine[] {
+  let oldLine = hunk.oldStart;
+  let newLine = hunk.newStart;
+  const result: DecoratedDiffLine[] = [];
+
+  for (const line of hunk.lines) {
+    if (line.type === "context") {
+      result.push({
+        type: "context",
+        text: line.text,
+        oldLine,
+        newLine,
+        targetLine: Math.max(1, newLine),
+      });
+      oldLine += 1;
+      newLine += 1;
+    } else if (line.type === "add") {
+      result.push({
+        type: "add",
+        text: line.text,
+        newLine,
+        targetLine: Math.max(1, newLine),
+      });
+      newLine += 1;
+    } else if (line.type === "remove") {
+      result.push({
+        type: "remove",
+        text: line.text,
+        oldLine,
+        targetLine: Math.max(1, newLine),
+      });
+      oldLine += 1;
+    }
+  }
+  return result;
+}
+
 function DiffTypeGlyph(props: { type: DiffChangeType }) {
   const glyph = () => GLYPH[props.type];
   return (
@@ -209,12 +272,51 @@ function DiffTypeGlyph(props: { type: DiffChangeType }) {
   );
 }
 
-function DiffLineRow(props: { line: DiffLine }) {
+function DiffLineRow(props: {
+  line: DecoratedDiffLine;
+  onOpenAtLine?: (line: number) => void;
+}) {
   const tint = () => (props.line.type === "add" ? "diff-line-add" : props.line.type === "remove" ? "diff-line-remove" : "");
   const marker = () => (props.line.type === "add" ? "+" : props.line.type === "remove" ? "-" : "");
   const markerClass = () => (props.line.type === "add" ? "text-signal" : props.line.type === "remove" ? "text-fault" : "text-muted/40");
   return (
-    <div class={`flex px-3 py-px font-mono text-[11px] leading-[1.5] ${tint()}`}>
+    <div class={`flex items-center px-2 py-px font-mono text-[11px] leading-[1.5] ${tint()}`}>
+      <div class="flex shrink-0 select-none tabular-nums text-[10px]">
+        <Show
+          when={props.line.oldLine !== undefined}
+          fallback={<span class="w-7 text-right pr-1" aria-hidden="true" />}
+        >
+          {(oldNum) => (
+            <button
+              type="button"
+              class="w-7 text-right text-muted/40 pr-1 hover:text-foreground hover:underline cursor-pointer disabled:cursor-default disabled:hover:text-muted/40 disabled:hover:no-underline"
+              onClick={() => props.onOpenAtLine?.(props.line.targetLine)}
+              title={`Open line ${props.line.targetLine} in editor`}
+              aria-label={`Open line ${props.line.targetLine} in editor`}
+              disabled={!props.onOpenAtLine}
+            >
+              {oldNum()}
+            </button>
+          )}
+        </Show>
+        <Show
+          when={props.line.newLine !== undefined}
+          fallback={<span class="w-7 text-right pr-2" aria-hidden="true" />}
+        >
+          {(newNum) => (
+            <button
+              type="button"
+              class="w-7 text-right text-muted/50 pr-2 hover:text-foreground hover:underline cursor-pointer disabled:cursor-default disabled:hover:text-muted/50 disabled:hover:no-underline"
+              onClick={() => props.onOpenAtLine?.(props.line.targetLine)}
+              title={`Open line ${props.line.targetLine} in editor`}
+              aria-label={`Open line ${props.line.targetLine} in editor`}
+              disabled={!props.onOpenAtLine}
+            >
+              {newNum()}
+            </button>
+          )}
+        </Show>
+      </div>
       <span class={`w-3 shrink-0 select-none ${markerClass()}`}>{marker()}</span>
       <span class="whitespace-pre text-foreground/90">{props.line.text}</span>
     </div>
@@ -226,42 +328,67 @@ function DiffFileCard(props: {
   expanded: boolean;
   onToggle: () => void;
   ref?: (el: HTMLDivElement) => void;
+  onOpenInEditor?: (path: string, line?: number) => void;
+  onContextMenu?: (e: MouseEvent, path: string) => void;
 }) {
   const parts = () => splitPath(props.file.path);
   return (
     <div ref={props.ref} class="diff-file-card overflow-hidden rounded-xl border border-line bg-surface">
-      <button
-        type="button"
-        class="focus-ring flex w-full items-center gap-1.5 px-2 py-1.5 text-left hover:bg-raised/40"
-        onClick={props.onToggle}
-        aria-expanded={props.expanded}
+      <div
+        class="flex w-full items-center justify-between hover:bg-raised/40"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          props.onContextMenu?.(e, props.file.path);
+        }}
       >
-        <Show when={props.expanded} fallback={<IconChevronRight size={10} class="shrink-0 text-muted/50" />}>
-          <IconChevronDown size={10} class="shrink-0 text-muted/50" />
-        </Show>
-        <DiffTypeGlyph type={props.file.changeType} />
-        <span class="min-w-0 flex-1 truncate font-mono text-xs">
-          <span class="text-muted/70">{parts().dir}</span>
-          <span class="text-foreground">{parts().base}</span>
-          <Show when={props.file.renamedFrom} keyed>
-            {(from) => <span class="text-muted/50"> ← {from}</span>}
-          </Show>
-        </span>
-        <Show
-          when={!props.file.binary}
-          fallback={<span class="shrink-0 text-[10px] text-muted/60">binary</span>}
+        <button
+          type="button"
+          class="focus-ring flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left"
+          onClick={props.onToggle}
+          aria-expanded={props.expanded}
         >
-          <span class="shrink-0 text-[10px] tabular-nums">
-            <Show when={props.file.adds > 0}>
-              <span class="text-signal">+{props.file.adds}</span>
-            </Show>
-            <Show when={props.file.adds > 0 && props.file.dels > 0}> </Show>
-            <Show when={props.file.dels > 0}>
-              <span class="text-fault">-{props.file.dels}</span>
+          <Show when={props.expanded} fallback={<IconChevronRight size={10} class="shrink-0 text-muted/50" />}>
+            <IconChevronDown size={10} class="shrink-0 text-muted/50" />
+          </Show>
+          <DiffTypeGlyph type={props.file.changeType} />
+          <span class="min-w-0 flex-1 truncate font-mono text-xs">
+            <span class="text-muted/70">{parts().dir}</span>
+            <span class="text-foreground">{parts().base}</span>
+            <Show when={props.file.renamedFrom} keyed>
+              {(from) => <span class="text-muted/50"> ← {from}</span>}
             </Show>
           </span>
+          <Show
+            when={!props.file.binary}
+            fallback={<span class="shrink-0 text-[10px] text-muted/60">binary</span>}
+          >
+            <span class="shrink-0 text-[10px] tabular-nums">
+              <Show when={props.file.adds > 0}>
+                <span class="text-signal">+{props.file.adds}</span>
+              </Show>
+              <Show when={props.file.adds > 0 && props.file.dels > 0}> </Show>
+              <Show when={props.file.dels > 0}>
+                <span class="text-fault">-{props.file.dels}</span>
+              </Show>
+            </span>
+          </Show>
+        </button>
+        <Show when={props.onOpenInEditor && !props.file.binary}>
+          <button
+            type="button"
+            class="focus-ring mr-1.5 flex size-5 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
+            onClick={(e) => {
+              e.stopPropagation();
+              const firstLine = findFileFirstChangedLine(props.file);
+              props.onOpenInEditor!(props.file.path, firstLine);
+            }}
+            title="Open in editor"
+            aria-label="Open in editor"
+          >
+            <IconFileCode size={12} />
+          </button>
         </Show>
-      </button>
+      </div>
       <Show when={props.expanded}>
         <div class="border-t border-line">
           <Show
@@ -275,14 +402,24 @@ function DiffFileCard(props: {
               <div class="overflow-x-auto py-1">
                 <div class="min-w-max">
                   <For each={props.file.hunks}>
-                    {(hunk) => (
-                      <div>
-                        <div class="bg-raised/50 px-3 py-1 font-mono text-[10px] text-muted">
-                          @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@ {hunk.heading}
+                    {(hunk) => {
+                      const lines = () => decorateHunkLines(hunk);
+                      return (
+                        <div>
+                          <div class="bg-raised/50 px-3 py-1 font-mono text-[10px] text-muted">
+                            @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@ {hunk.heading}
+                          </div>
+                          <For each={lines()}>
+                            {(line) => (
+                              <DiffLineRow
+                                line={line}
+                                onOpenAtLine={(lineNum) => props.onOpenInEditor?.(props.file.path, lineNum)}
+                              />
+                            )}
+                          </For>
                         </div>
-                        <For each={hunk.lines}>{(line) => <DiffLineRow line={line} />}</For>
-                      </div>
-                    )}
+                      );
+                    }}
                   </For>
                 </div>
               </div>
@@ -309,6 +446,8 @@ export interface DiffViewProps {
   /// the commit view, so that view owns its own title/close chrome instead of stacking a second
   /// header row above this one's default.
   header?: JSX.Element;
+  /// F4: Opens the file in the center editor at the given line number.
+  onOpenInEditor?: (path: string, line?: number) => void;
 }
 
 /// Lightweight unified-diff viewer for the Git explorer's right rail. Pure presentation: the
@@ -317,6 +456,7 @@ export interface DiffViewProps {
 export default function DiffView(props: DiffViewProps) {
   const files = createMemo(() => parseDiff(props.patch));
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; path: string } | null>(null);
   const fileRefs = new Map<string, HTMLDivElement>();
 
   // Re-focusing on a new path (a fresh file-row click) collapses every other card down to just
@@ -378,11 +518,52 @@ export default function DiffView(props: DiffViewProps) {
                 expanded={expanded().has(file.path)}
                 onToggle={() => toggle(file.path)}
                 ref={(el) => fileRefs.set(file.path, el)}
+                onOpenInEditor={props.onOpenInEditor}
+                onContextMenu={(e, path) => setContextMenu({ x: e.clientX, y: e.clientY, path })}
               />
             )}
           </For>
         </Show>
       </div>
+
+      <Show when={contextMenu()} keyed>
+        {(menu) => (
+          <>
+            <div
+              class="fixed inset-0 z-40"
+              onClick={() => setContextMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu(null);
+              }}
+            />
+            <div
+              role="menu"
+              class="fixed z-50 min-w-[140px] rounded-lg border border-line bg-surface py-1 text-xs shadow-xl backdrop-blur"
+              style={{
+                left: `${Math.min(menu.x, window.innerWidth - 150)}px`,
+                top: `${Math.min(menu.y, window.innerHeight - 100)}px`,
+              }}
+            >
+              <button
+                role="menuitem"
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-foreground/90 hover:bg-raised hover:text-foreground"
+                onClick={() => {
+                  const targetPath = menu.path;
+                  setContextMenu(null);
+                  const file = files().find((f) => f.path === targetPath);
+                  const firstLine = file ? findFileFirstChangedLine(file) : 1;
+                  props.onOpenInEditor?.(targetPath, firstLine);
+                }}
+              >
+                <IconFileCode size={12} class="text-muted" />
+                <span>Open in editor</span>
+              </button>
+            </div>
+          </>
+        )}
+      </Show>
     </div>
   );
 }

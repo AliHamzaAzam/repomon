@@ -11,6 +11,7 @@ import type { ActionsStore } from "../stores/actions";
 import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
 import type { MessageStore } from "../stores/messages";
+import type { WorkspaceStore } from "../stores/workspace";
 
 /**
  * F2: the right rail generalizes from "the Repomind panel" into a tabbed host any number of
@@ -47,11 +48,15 @@ export interface RightPanelHostProps {
   actions?: ActionsStore;
   /** Shared durable-mail store used by the Repomail management panel. */
   messages?: MessageStore;
-  /** Shared editor store used by the inline FileEditorPanel. */
+  /** Shared editor store used by the inline FileEditorPanel and GitExplorerPanel. */
   editor?: EditorStore;
+  /** Shared workspace store. */
+  workspace?: WorkspaceStore;
+  /** Ensures center editor workspace is open when opening a file from GitExplorerPanel. */
+  onEnsureEditorOpen?: () => void;
   /**
    * One-shot activation command some external shortcut can push to select a tab even after the
-   * host has already mounted — e.g. App.tsx's `panel.git` binding switching away from an
+   * host has already mounted - e.g. App.tsx's `panel.git` binding switching away from an
    * already-open Repomind tab. Bump `token` on every dispatch (the id alone would not refire the
    * effect on repeated presses of the same shortcut); the id is also consulted on first mount so
    * "closed → open already on git" works without waiting on a post-mount effect.
@@ -68,6 +73,8 @@ function buildDefaultPanels(
   actions?: ActionsStore,
   messages?: MessageStore,
   editor?: EditorStore,
+  workspace?: WorkspaceStore,
+  onEnsureEditorOpen?: () => void,
 ): RightPanelTabDef[] {
   return [
     {
@@ -78,7 +85,19 @@ function buildDefaultPanels(
     },
 
     // C1: git status/diff for the active lane.
-    { id: "git", label: "Git", icon: IconGitBranch, component: () => <GitExplorerPanel fleet={fleet} /> },
+    {
+      id: "git",
+      label: "Git",
+      icon: IconGitBranch,
+      component: () => (
+        <GitExplorerPanel
+          fleet={fleet}
+          editor={editor}
+          workspace={workspace}
+          onEnsureEditorOpen={onEnsureEditorOpen}
+        />
+      ),
+    },
 
     // D4: file tree + multi-tab editor for the active lane's worktree.
     { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} editor={editor} onOpenFinder={() => editor?.openFinder()} /> },
@@ -112,6 +131,8 @@ export default function RightPanelHost(props: RightPanelHostProps) {
       props.actions,
       props.messages,
       props.editor,
+      props.workspace,
+      props.onEnsureEditorOpen,
     );
 
   const [activeId, setActiveId] = createSignal((() => {

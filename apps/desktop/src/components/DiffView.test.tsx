@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 
-import DiffView, { parseDiff } from "./DiffView";
+import DiffView, { findFirstChangedLine, findFileFirstChangedLine, parseDiff } from "./DiffView";
 
 afterEach(() => {
   cleanup();
@@ -279,5 +279,79 @@ describe("DiffView renderer", () => {
     cleanup();
     render(() => <DiffView patch={MODIFY_PATCH} />);
     expect(screen.queryByRole("button", { name: "Close diff" })).not.toBeInTheDocument();
+  });
+
+  it("calculates first changed line correctly for various hunk patterns", () => {
+    const files = parseDiff(MODIFY_PATCH);
+    expect(files[0].hunks.length).toBe(1);
+    // In MODIFY_PATCH: line 1 is context ("line1"), line 2 is remove ("-line2")
+    expect(findFirstChangedLine(files[0].hunks[0])).toBe(2);
+    expect(findFileFirstChangedLine(files[0])).toBe(2);
+
+    const addFiles = parseDiff(ADD_PATCH);
+    // In ADD_PATCH: line 1 is add ("+new content")
+    expect(findFileFirstChangedLine(addFiles[0])).toBe(1);
+  });
+
+  it("clicking Open in editor button on file card calls onOpenInEditor at first changed line", () => {
+    let targetPath = "";
+    let targetLine = -1;
+    render(() => (
+      <DiffView
+        patch={MODIFY_PATCH}
+        onOpenInEditor={(path, line) => {
+          targetPath = path;
+          targetLine = line ?? -1;
+        }}
+      />
+    ));
+
+    const openBtn = screen.getByRole("button", { name: "Open in editor" });
+    fireEvent.click(openBtn);
+    expect(targetPath).toBe("a.txt");
+    expect(targetLine).toBe(2);
+  });
+
+  it("clicking a line number calls onOpenInEditor at that line", () => {
+    let targetPath = "";
+    let targetLine = -1;
+    render(() => (
+      <DiffView
+        patch={MODIFY_PATCH}
+        focusPath="a.txt"
+        onOpenInEditor={(path, line) => {
+          targetPath = path;
+          targetLine = line ?? -1;
+        }}
+      />
+    ));
+
+    // The line 4 button corresponding to added line "+line4"
+    const lineBtn = screen.getByRole("button", { name: "Open line 4 in editor" });
+    fireEvent.click(lineBtn);
+    expect(targetPath).toBe("a.txt");
+    expect(targetLine).toBe(4);
+  });
+
+  it("right-clicking file card header opens context menu with Open in editor", () => {
+    let targetPath = "";
+    let targetLine = -1;
+    render(() => (
+      <DiffView
+        patch={MODIFY_PATCH}
+        onOpenInEditor={(path, line) => {
+          targetPath = path;
+          targetLine = line ?? -1;
+        }}
+      />
+    ));
+
+    const toggle = screen.getByRole("button", { name: /a\.txt/ });
+    fireEvent.contextMenu(toggle);
+
+    const menuBtn = screen.getByRole("menuitem", { name: "Open in editor" });
+    fireEvent.click(menuBtn);
+    expect(targetPath).toBe("a.txt");
+    expect(targetLine).toBe(2);
   });
 });
