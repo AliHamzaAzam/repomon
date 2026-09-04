@@ -64,6 +64,11 @@ vi.mock("@xterm/xterm", () => ({
     blur() {}
     scrollLines() {}
     scrollToBottom = vi.fn();
+    linkProviders: Array<{ provideLinks: (bufferLineNumber: number, callback: (links: any[] | undefined) => void) => void }> = [];
+    registerLinkProvider(provider: { provideLinks: (bufferLineNumber: number, callback: (links: any[] | undefined) => void) => void }) {
+      this.linkProviders.push(provider);
+      return { dispose: vi.fn() };
+    }
     dispose() {}
   },
 }));
@@ -395,5 +400,87 @@ describe("TerminalPane header containment (bug 5: header can disappear under hig
     // burst of live output can't paint upward over the header strip.
     expect(host!.classList.contains("overflow-hidden")).toBe(true);
     expect(host!.classList.contains("top-7")).toBe(true);
+  });
+});
+
+describe("TerminalPane clickable path links", () => {
+  it("registers link provider that verifies against file.index and opens in editor on Cmd-click", async () => {
+    watchTerminalMock.mockResolvedValue({
+      ack: { cols: 80, rows: 24, generation: 1, sequence: 1 },
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const openAt = vi.fn();
+    const isPathInIndex = vi.fn((_laneId: number, path: string) => path === "src/foo.rs");
+    const ensureIndex = vi.fn();
+    const onEnsureEditorOpen = vi.fn();
+
+    const mockFleet = {
+      lanes: () => [{
+        id: 1,
+        worktree: { path: "/tmp/worktree", name: "worktree", branch: "main", is_main: true, id: 1, repo_id: 1 },
+      }],
+    } as any;
+
+    const mockEditor = {
+      openAt,
+      isPathInIndex,
+      ensureIndex,
+    } as any;
+
+    render(() => (
+      <TerminalPane
+        laneId={1}
+        window="lane-1-1"
+        label="Terminal"
+        fleet={mockFleet}
+        editor={mockEditor}
+        onEnsureEditorOpen={onEnsureEditorOpen}
+      />
+    ));
+    await flushMicrotasks();
+
+    expect(ensureIndex).toHaveBeenCalledWith(1);
+
+    const termInstance = terminalInstances[terminalInstances.length - 1] as any;
+    expect(termInstance.linkProviders.length).toBeGreaterThan(0);
+
+    const provider = termInstance.linkProviders[0];
+
+    // Mock buffer active line
+    termInstance.buffer = {
+      active: {
+        getLine: (lineIdx: number) => {
+          if (lineIdx === 0) {
+            return {
+              translateToString: () => "error at src/foo.rs:12:4 and src/missing.rs:1",
+            };
+          }
+          return null;
+        },
+      },
+    };
+
+    let providedLinks: any[] | undefined;
+    provider.provideLinks(1, (links: any[] | undefined) => {
+      providedLinks = links;
+    });
+
+    // Only src/foo.rs exists in index, src/missing.rs does not
+    expect(providedLinks).toBeDefined();
+    expect(providedLinks).toHaveLength(1);
+    expect(providedLinks![0].text).toBe("src/foo.rs:12:4");
+
+    // Plain click should not trigger openAt
+    const plainClickEvent = { metaKey: false, ctrlKey: false } as MouseEvent;
+    providedLinks![0].activate(plainClickEvent, "src/foo.rs:12:4");
+    expect(openAt).not.toHaveBeenCalled();
+    expect(onEnsureEditorOpen).not.toHaveBeenCalled();
+
+    // Cmd-click triggers openAt and ensureEditorOpen
+    const cmdClickEvent = { metaKey: true, ctrlKey: false } as MouseEvent;
+    providedLinks![0].activate(cmdClickEvent, "src/foo.rs:12:4");
+    expect(onEnsureEditorOpen).toHaveBeenCalled();
+    expect(openAt).toHaveBeenCalledWith("src/foo.rs", 12, 4);
   });
 });

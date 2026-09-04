@@ -799,6 +799,31 @@ export function createEditorStore(fleet: FleetStore) {
     }, 300);
   }
 
+  const indexCacheByLane = new Map<number, Set<string>>();
+  const indexFetchingLanes = new Set<number>();
+
+  async function ensureIndex(laneId: number): Promise<void> {
+    if (indexCacheByLane.has(laneId) || indexFetchingLanes.has(laneId)) return;
+    indexFetchingLanes.add(laneId);
+    try {
+      const res = await daemonCall("file.index", { lane_id: laneId });
+      indexCacheByLane.set(laneId, new Set(res.paths));
+    } catch {
+      // Ignore failures
+    } finally {
+      indexFetchingLanes.delete(laneId);
+    }
+  }
+
+  function isPathInIndex(laneId: number, relativePath: string): boolean {
+    const cache = indexCacheByLane.get(laneId);
+    return cache ? cache.has(relativePath) : false;
+  }
+
+  function setCachedIndex(laneId: number, paths: string[]): void {
+    indexCacheByLane.set(laneId, new Set(paths));
+  }
+
   onMount(() => {
     let active = true;
     let stop: (() => void) | undefined;
@@ -822,14 +847,20 @@ export function createEditorStore(fleet: FleetStore) {
       queueDirReload(laneId, parentDir);
 
       if (op === "renamed" && from) {
+        indexCacheByLane.get(laneId)?.delete(from);
+        indexCacheByLane.get(laneId)?.add(path);
         const fromParentDir = from.split("/").slice(0, -1).join("/");
         if (fromParentDir !== parentDir) {
           queueDirReload(laneId, fromParentDir);
         }
         handleFileRenamed(from, path, laneId);
       } else if (op === "removed") {
+        indexCacheByLane.get(laneId)?.delete(path);
         handleFileDeleted(path, laneId);
       } else {
+        if (op === "created") {
+          indexCacheByLane.get(laneId)?.add(path);
+        }
         const saveKey = `${laneId}:${path}`;
         if (savingPaths.has(saveKey)) {
           // Our own save is in flight and the daemon broadcasts the change before file.write
@@ -904,6 +935,9 @@ export function createEditorStore(fleet: FleetStore) {
     closeFinder,
     handleFileRenamed,
     handleFileDeleted,
+    ensureIndex,
+    isPathInIndex,
+    setCachedIndex,
     getLaneState: (id: number) => laneStates.get(id),
   };
 }

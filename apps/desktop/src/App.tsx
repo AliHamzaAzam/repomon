@@ -642,7 +642,20 @@ function App(props: AppProps) {
             aria-hidden={extensionsOpen() || workspace.editorWorkspace() ? "true" : undefined}
             inert={extensionsOpen() || workspace.editorWorkspace()}
           >
-            <TerminalWorkspace fleet={fleet} actions={actions} workspace={workspace} />
+            <TerminalWorkspace
+              fleet={fleet}
+              actions={actions}
+              workspace={workspace}
+              editor={editor}
+              onEnsureEditorOpen={() => {
+                if (!isEditorActive()) {
+                  workspace.setMultitasking(false);
+                  setRepomindOpen(false);
+                  persistRepomindOpen(false);
+                  workspace.setEditorWorkspace(true);
+                }
+              }}
+            />
           </div>
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">

@@ -3,7 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ILink } from "@xterm/xterm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
@@ -22,9 +22,13 @@ import {
 } from "../ipc/term";
 import { readTerminalAppearance, type TerminalAppearance } from "../theme";
 import { onLayoutChanged } from "../stores/uiSettings";
+import type { FleetStore } from "../stores/fleet";
+import type { EditorStore } from "../stores/editor";
+import type { WorkspaceStore } from "../stores/workspace";
 import AgentHistory from "./AgentHistory";
 import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
 import { multitaskRowFloor } from "./terminalMetrics";
+import { findPathRefs, isMacPlatform } from "./terminalPathLinks";
 
 interface TerminalPaneProps extends TerminalTarget {
   label: string;
@@ -37,9 +41,13 @@ interface TerminalPaneProps extends TerminalTarget {
   /// `MULTITASK_MIN_ROWS` rows at the renderer's cell height, see `terminalMetrics.ts`).
   /// Multitasking takes the max across all visible panes to size its grid rows.
   onMinimumHeight?: (pixels: number) => void;
-  /// A GUI-owned shell (no other viewer) — safe to force the pane to our size so it always fits.
+  /// A GUI-owned shell (no other viewer): safe to force the pane to our size so it always fits.
   shell?: boolean;
   sessionId?: string | null;
+  fleet?: FleetStore;
+  editor?: EditorStore;
+  workspace?: WorkspaceStore;
+  onEnsureEditorOpen?: () => void;
 }
 
 type PaneView = "live" | "history";
@@ -166,6 +174,13 @@ export default function TerminalPane(props: TerminalPaneProps) {
   const [query, setQuery] = createSignal("");
   const [view, setView] = createSignal<PaneView>("live");
   const [paneBg, setPaneBg] = createSignal<string>("");
+
+  createEffect(() => {
+    const laneId = props.laneId;
+    if (typeof laneId === "number" && props.editor) {
+      void props.editor.ensureIndex(laneId);
+    }
+  });
 
   function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error);
@@ -390,6 +405,82 @@ export default function TerminalPane(props: TerminalPaneProps) {
       terminal.loadAddon(new ClipboardAddon());
       terminal.loadAddon(new Unicode11Addon());
       terminal.unicode.activeVersion = "11";
+
+      terminal.registerLinkProvider({
+        provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
+          const bufferLine = terminal?.buffer.active.getLine(bufferLineNumber - 1);
+          if (!bufferLine) {
+            callback(undefined);
+            return;
+          }
+          const lineText = bufferLine.translateToString(true);
+          if (!lineText) {
+            callback(undefined);
+            return;
+          }
+
+          const matches = findPathRefs(lineText);
+          if (matches.length === 0) {
+            callback(undefined);
+            return;
+          }
+
+          const laneId = props.laneId;
+          const lane = typeof laneId === "number" ? props.fleet?.lanes().find((l) => l.id === laneId) : undefined;
+          const worktreeRoot = lane?.worktree.path;
+
+          const links: ILink[] = [];
+          for (const match of matches) {
+            let relPath: string | null = null;
+            if (match.path.startsWith("/")) {
+              if (worktreeRoot) {
+                const normRoot = worktreeRoot.endsWith("/") ? worktreeRoot.slice(0, -1) : worktreeRoot;
+                if (match.path === normRoot || match.path.startsWith(normRoot + "/")) {
+                  relPath = match.path.slice(normRoot.length).replace(/^\/+/, "");
+                }
+              }
+            } else {
+              relPath = match.path.replace(/^\.\//, "");
+            }
+
+            if (!relPath) continue;
+
+            // Only link paths that exist in the lane's file.index cache
+            if (typeof laneId === "number" && props.editor) {
+              if (!props.editor.isPathInIndex(laneId, relPath)) {
+                continue;
+              }
+            }
+
+            const targetRelPath = relPath;
+            links.push({
+              range: {
+                start: { x: match.startIndex + 1, y: bufferLineNumber },
+                end: { x: match.endIndex, y: bufferLineNumber },
+              },
+              text: match.raw,
+              decorations: {
+                underline: true,
+                pointerCursor: true,
+              },
+              activate: (event: MouseEvent) => {
+                const isMac = isMacPlatform();
+                const isModifier = isMac ? event.metaKey : event.ctrlKey;
+                if (!isModifier) return; // Plain click keeps default selection behavior
+                if (props.onEnsureEditorOpen) {
+                  props.onEnsureEditorOpen();
+                } else if (props.workspace && !props.workspace.editorWorkspace()) {
+                  props.workspace.setEditorWorkspace(true);
+                }
+                void props.editor?.openAt(targetRelPath, match.line ?? 1, match.column ?? 1);
+              },
+            });
+          }
+
+          callback(links.length > 0 ? links : undefined);
+        },
+      });
+
       terminal.open(container);
 
       terminal.attachCustomKeyEventHandler((event) => {

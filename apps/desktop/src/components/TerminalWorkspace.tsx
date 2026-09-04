@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onM
 
 import { daemonCall } from "../ipc/rpc";
 import type { ActionsStore } from "../stores/actions";
+import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
 import type { WorkspaceLayout, WorkspaceStore } from "../stores/workspace";
 import { notifyLayoutChanged } from "../stores/uiSettings";
@@ -80,6 +81,8 @@ interface TerminalWorkspaceProps {
   fleet: FleetStore;
   actions: ActionsStore;
   workspace: WorkspaceStore;
+  editor?: EditorStore;
+  onEnsureEditorOpen?: () => void;
 }
 
 export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
@@ -763,6 +766,10 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     onMinimumHeight={(pixels) => recordPaneMinimumHeight(target.window, pixels)}
                     shell={target.shell}
                     sessionId={sessionId()}
+                    fleet={props.fleet}
+                    editor={props.editor}
+                    workspace={props.workspace}
+                    onEnsureEditorOpen={props.onEnsureEditorOpen}
                   />
                 </div>
               );
