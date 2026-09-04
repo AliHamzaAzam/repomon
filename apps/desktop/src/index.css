@@ -419,10 +419,10 @@
   }
 }
 
-/* One line per lane, so twelve lanes fit the default sidebar without scrolling. The columns are
-   fixed at the edges and elastic in the middle: the health dot, the status pill and the change
-   cell each hold a column the eye can run down, and only the branch gives way when space runs
-   out. */
+/* Two lines per lane: name plus status pill on top, branch plus counts below. The shared box
+   (border, radius, color, hover/selected state) lives here; `.is-stacked` below turns it into the
+   two-line grammar the expanded row needs. The single-line collapsed row (an inactive lane with
+   no agents) keeps this base layout unchanged. */
 .fleet-row {
   display: flex;
   width: 100%;
@@ -446,6 +446,34 @@
   border-color: color-mix(in srgb, var(--signal) 30%, var(--line));
   background: color-mix(in srgb, var(--signal) 8%, var(--raised));
   color: var(--foreground);
+}
+
+/* The expanded lane row: name and its status pill get their own line so neither has to compete
+   with the branch, agent count and change cell below for space. `align-items: stretch` (rather
+   than the base row's `center`) lets each line's flex children fill the full width, which is what
+   makes `min-w-0` truncation on the name and branch spans actually engage. About 2.4rem (38-40px)
+   tall - roomier than the old single line, but still dense enough that a working sidebar's lanes
+   fit without feeling like an empty state. */
+.fleet-row.is-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0.2rem;
+  min-height: 2.4rem;
+  padding-block: 0.3rem;
+}
+
+/* Truncates from the start instead of the end, so a long branch name keeps its most identifying
+   part - the tail - on screen instead of a shared prefix like "feature/". Standard trick for
+   plain left-to-right text: reversing the box's direction moves the ellipsis to the visual start
+   without reordering the characters themselves. */
+.truncate-tail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
 }
 
 .lane-pulse {
@@ -484,8 +512,10 @@
   background: var(--raised);
 }
 
-/* The row's status. Narrower than `.lane-badge` (which also sets keyboard chords) and given a
-   floor width so the pills stack into a column instead of ragging with their labels. */
+/* The row's status: one short word from a fixed vocabulary (`laneIndicator`), never a compound
+   phrase with a count baked in - that detail lives in the tooltip instead. Narrower than
+   `.lane-badge` (which also sets keyboard chords) and given a floor width so the pills right-align
+   into a column across rows instead of ragging with the name next to them. */
 .lane-status {
   flex: 0 0 auto;
   min-width: 4.25rem;

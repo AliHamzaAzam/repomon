@@ -179,6 +179,46 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByTitle(/2 ahead, 1 behind upstream/)).toBeInTheDocument();
   });
 
+  it("splits the lane row into a name-plus-pill line and a branch-plus-counts line", () => {
+    // The row grammar is two lines: line 1 carries the name and the status pill, line 2 carries
+    // the branch and the counts. A crowded single line was exactly the bug ("Upw... | ma... | 5 |
+    // SUBAGENT RUNNING | 69") - the name and branch must never share a line with the pill again.
+    const alpha = repo(1, "alpha");
+    const testLane = lane(10, alpha, [session({ worktree_id: 10 })]);
+    const { fleet, actions } = stubs([alpha], [testLane]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    const name = screen.getByText("main", { selector: "span.truncate" });
+    const pill = screen.getByText("running");
+    const branch = screen.getByText("main", { selector: "span.truncate-tail" });
+
+    // The name and the pill share one line...
+    expect(pill.parentElement).toBe(name.parentElement);
+    // ...and the branch lives on a different line from both of them.
+    expect(branch.parentElement).not.toBe(name.parentElement);
+    // The pill never truncates - it is a fixed short word, not flexible text.
+    expect(pill.className).not.toMatch(/\btruncate\b/);
+    expect(pill.className).not.toMatch(/\btruncate-tail\b/);
+    // The branch is the tail-preserving variant (its identifying suffix stays visible), never the
+    // plain end-truncating one the name uses as its own last resort.
+    const branchClasses = branch.className.split(/\s+/);
+    expect(branchClasses).toContain("truncate-tail");
+    expect(branchClasses).not.toContain("truncate");
+  });
+
+  it("shows the status pill in one short word, and only for a lane with agents", () => {
+    const alpha = repo(1, "alpha");
+    const idling = lane(10, alpha, [session({ worktree_id: 10, status: "idle" })]);
+    const empty = lane(11, alpha);
+    const { fleet, actions } = stubs([alpha], [idling, empty]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    // A lane with an idle agent gets the "idle" pill...
+    expect(screen.getByText("idle")).toBeInTheDocument();
+    // ...but an empty lane (auto-collapsed, no agents at all) never claims to be idle.
+    expect(screen.queryAllByText("idle")).toHaveLength(1);
+  });
+
   it("names what the repo header count is counting", () => {
     const alpha = repo(1, "alpha");
     const { fleet, actions } = stubs([alpha], [lane(10, alpha), lane(11, alpha)]);

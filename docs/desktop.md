@@ -144,10 +144,14 @@ The center Editor workspace provides:
 
 #### The sidebar
 
-One line per lane, with the same anatomy on every row so the columns can be read down rather than
-across: a health dot, the lane name and its branch, the agent count or agent icon, the most urgent
-status, and one change cell holding either uncommitted files or divergence from upstream (the
-tooltip carries both). Twelve lanes fit the default sidebar without scrolling.
+Two lines per lane, with the same anatomy on every row so the columns can be read down rather than
+across. The first line is the health dot, the lane name (the part that gives way if the sidebar
+runs out of room), and the most urgent status, one short word from a fixed vocabulary that never
+truncates. The second line is the branch (truncating from its start so the identifying tail stays
+visible, unlike the name), the agent count or agent icon, and one change cell holding either
+uncommitted files or divergence from upstream (the tooltip carries both, and the status pill's
+tooltip carries the daemon's fuller explanation). The sidebar scrolls once a project's lanes
+outgrow the visible height.
 
 A project header names its own count ("12 lanes") and carries an amber pip with the number of its
 agents that need you, so a collapsed project still reports. Hidden projects sit behind one
@@ -179,6 +183,7 @@ projects it, and never re-reads pane text or runs timers of its own.
 | idle | at its prompt with no dialog and nothing running |
 | external | a session running outside repomon, adoptable but not managed |
 | inferred | the worktree is changing but the agent behind it could not be identified |
+| exited | the agent's process ended; nothing is running in the pane |
 
 The pane outranks the transcript on liveness. A transcript only records when the last message
 landed, so it decays to idle through a long tool call and reads "needs you" through a turn whose

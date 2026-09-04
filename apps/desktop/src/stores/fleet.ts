@@ -83,7 +83,8 @@ export type AgentState =
   | "external"
   | "running"
   | "inferred"
-  | "idle";
+  | "idle"
+  | "exited";
 
 /// Most urgent first. `agentState` walks this order, and `laneIndicator` shows the most urgent
 /// state among a lane's agents.
@@ -96,6 +97,7 @@ const STATE_PRIORITY: readonly AgentState[] = [
   "running",
   "inferred",
   "idle",
+  "exited",
 ];
 
 export function agentState(agent: AgentSession): AgentState {
@@ -107,6 +109,7 @@ export function agentState(agent: AgentSession): AgentState {
   if (agent.external) return "external";
   if (!agent.inferred && agent.status === "running") return "running";
   if (agent.inferred) return "inferred";
+  if (agent.status === "ended") return "exited";
   return "idle";
 }
 
@@ -143,30 +146,29 @@ const STATE_TONE: Record<AgentState, LaneTone> = {
   running: "signal",
   inferred: "signal",
   idle: "muted",
+  exited: "muted",
 };
 
+/// The row's status pill speaks one short word: `needs you`, `stalled`, `decision`, `limited`,
+/// `running`, `inferred`, `idle`, `external`, `exited`. Anything more specific than that (how many
+/// agents share the state, whether a "running" lane's only activity is a background subagent, why
+/// an inferred lane could not be identified) lives in the tooltip instead, via
+/// `laneIndicatorDetail`/`laneIndicatorTitle` - never packed into the label, where it used to
+/// crowd the row into truncating the lane name and branch next to it.
 export function laneIndicator(lane: Lane): LaneIndicator {
   const state = laneState(lane);
   if (state === null) return { label: "", tone: "muted", urgent: false };
   const gate = gateSuffix(lane);
   const urgent = isUrgentState(state);
   const tone = STATE_TONE[state];
-  if (state === "running") {
-    const count = laneStateCount(lane, "running");
-    const running = lane.agent_sessions.filter((agent) => agentState(agent) === "running");
-    const onlySubagents = running.every((agent) => Boolean(agent.subagent_running));
-    const label =
-      onlySubagents && count === 1 ? "subagent running" : count > 1 ? `${count} running` : "running";
-    return { label: `${label}${gate}`, tone, urgent };
-  }
   const label =
     state === "decision"
       ? `decision${gate}`
       : state === "needs-you"
         ? `needs you${gate}`
-        : state === "inferred"
-          ? "active · inferred"
-          : state;
+        : state === "running"
+          ? `running${gate}`
+          : state; // stalled, limited, idle, external, inferred, exited render as their own name
   return { label, tone, urgent };
 }
 
@@ -176,19 +178,42 @@ export function agentStateReason(agent: AgentSession): string | null {
   return agent.status_reason ?? null;
 }
 
-/// The lane pill's tooltip: the headline state plus the daemon's reasons for the agents in it.
+/// The headline detail that used to live in the pill label itself (how many agents share the
+/// state, and whether a "running" lane's only activity is a background subagent), surfaced only
+/// in the tooltip now. `inferred` gets a standing explanation here because the daemon rarely has
+/// a `status_reason` for it: nothing failed, it just could not attribute the worktree's changes to
+/// a session.
+function laneIndicatorDetail(lane: Lane, state: AgentState): string | null {
+  if (state === "running") {
+    const count = laneStateCount(lane, "running");
+    const running = lane.agent_sessions.filter((agent) => agentState(agent) === "running");
+    const onlySubagents = running.every((agent) => Boolean(agent.subagent_running));
+    if (onlySubagents && count === 1) return "subagent running";
+    if (count > 1) return `${count} running`;
+    return null;
+  }
+  if (state === "inferred") {
+    return "the worktree is changing but the agent behind it could not be identified";
+  }
+  return null;
+}
+
+/// The lane pill's tooltip: the headline detail the label used to carry, plus the daemon's
+/// reasons for the agents in it.
 export function laneIndicatorTitle(lane: Lane): string | undefined {
   const state = laneState(lane);
   if (state === null) return undefined;
+  const detail = laneIndicatorDetail(lane, state);
   const reasons = lane.agent_sessions
     .filter((agent) => agentState(agent) === state)
     .map((agent) => agentStateReason(agent))
     .filter((reason): reason is string => Boolean(reason));
-  if (state === "external" && !reasons.length) {
+  const lines = detail ? [detail, ...reasons] : reasons;
+  if (state === "external" && !lines.length) {
     return "External session running outside repomon. Select lane to adopt into tmux management.";
   }
-  if (!reasons.length) return undefined;
-  return reasons.join("\n");
+  if (!lines.length) return undefined;
+  return lines.join("\n");
 }
 
 export interface FleetCounts {

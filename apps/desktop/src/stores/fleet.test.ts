@@ -188,14 +188,17 @@ describe("fleet presentation", () => {
     });
 
     expect(laneIndicator(blocked)).toEqual({ label: "running · gate 3", tone: "signal", urgent: false });
-    expect(laneIndicator(inferred)).toEqual({ label: "active · inferred", tone: "signal", urgent: false });
+    expect(laneIndicator(inferred)).toEqual({ label: "inferred", tone: "signal", urgent: false });
+    expect(laneIndicatorTitle(inferred)).toBe(
+      "the worktree is changing but the agent behind it could not be identified",
+    );
     expect(laneIndicator(lane({ agent_sessions: [] }))).toEqual({ label: "", tone: "muted", urgent: false });
     expect(laneIndicator(lane({ agent_sessions: [agent({ status: "idle" })] }))).toEqual({ label: "idle", tone: "muted", urgent: false });
   });
 
-  it("counts only the agents actually running, not the lane's whole roster", () => {
-    // A lane with 3 agents where only 1 is running must say "running", not "3 running" -
-    // the label previously used the total agent count regardless of status.
+  it("keeps the pill to one short word regardless of how many agents share the state", () => {
+    // A lane with 3 agents where only 1 is running must say "running", not "3 running" - the
+    // label never carries the agent count. That count moves to the tooltip instead.
     const mostlyIdle = lane({
       agent_sessions: [
         agent({ status: "running" }),
@@ -204,6 +207,7 @@ describe("fleet presentation", () => {
       ],
     });
     expect(laneIndicator(mostlyIdle)).toEqual({ label: "running", tone: "signal", urgent: false });
+    expect(laneIndicatorTitle(mostlyIdle)).toBeUndefined();
 
     const twoRunning = lane({
       agent_sessions: [
@@ -212,7 +216,8 @@ describe("fleet presentation", () => {
         agent({ status: "idle" }),
       ],
     });
-    expect(laneIndicator(twoRunning)).toEqual({ label: "2 running", tone: "signal", urgent: false });
+    expect(laneIndicator(twoRunning)).toEqual({ label: "running", tone: "signal", urgent: false });
+    expect(laneIndicatorTitle(twoRunning)).toBe("2 running");
 
     const subRunning = lane({
       agent_sessions: [
@@ -220,7 +225,8 @@ describe("fleet presentation", () => {
         agent({ status: "idle" }),
       ],
     });
-    expect(laneIndicator(subRunning)).toEqual({ label: "subagent running", tone: "signal", urgent: false });
+    expect(laneIndicator(subRunning)).toEqual({ label: "running", tone: "signal", urgent: false });
+    expect(laneIndicatorTitle(subRunning)).toBe("subagent running");
   });
 
   it("counts agents rather than lanes, so a chip can never undercount its own rows", async () => {
@@ -232,7 +238,8 @@ describe("fleet presentation", () => {
       repo: only,
       agent_sessions: [agent({ status: "running" }), agent({ status: "running" })],
     });
-    expect(laneIndicator(busy).label).toBe("2 running");
+    expect(laneIndicator(busy).label).toBe("running");
+    expect(laneIndicatorTitle(busy)).toBe("2 running");
 
     const { fleet, teardown } = await startedStore([only], [busy]);
     await fleet.refresh();
@@ -247,7 +254,7 @@ describe("fleet presentation", () => {
       id: 11,
       agent_sessions: [agent({ status: "running", inferred: true, tmux_window: null })],
     });
-    expect(laneIndicator(inferredOnly).label).toBe("active · inferred");
+    expect(laneIndicator(inferredOnly).label).toBe("inferred");
     expect(fleetCounts([inferredOnly])).toEqual({ urgent: 0, running: 0, idle: 0 });
   });
 
@@ -269,8 +276,14 @@ describe("fleet presentation", () => {
     expect(agentState(agent({ status: "running" }))).toBe("running");
     expect(agentState(agent({ status: "running", inferred: true }))).toBe("inferred");
     expect(agentState(agent({ status: "idle" }))).toBe("idle");
+    expect(agentState(agent({ status: "ended" }))).toBe("exited");
     // A stalled external session is not "stalled": the daemon never watches its pane.
     expect(agentState(agent({ status: "running", stale: true, external: true }))).toBe("external");
+  });
+
+  it("marks an ended session exited rather than idle, with its own pill", () => {
+    const exited = lane({ agent_sessions: [agent({ status: "ended" })] });
+    expect(laneIndicator(exited)).toEqual({ label: "exited", tone: "muted", urgent: false });
   });
 
   it("explains a status from the daemon's reason instead of guessing at one", () => {

@@ -196,7 +196,7 @@ function LaneRow(props: {
           <button
             ref={rowRef}
             type="button"
-            class={`group/lane-row fleet-row focus-ring ${props.selected ? "is-selected" : ""}`}
+            class={`group/lane-row fleet-row is-stacked focus-ring ${props.selected ? "is-selected" : ""}`}
             onClick={onClick}
             onMouseEnter={onRowMouseEnter}
             onMouseLeave={onRowMouseLeave}
@@ -208,60 +208,69 @@ function LaneRow(props: {
             }}
             aria-current={props.selected ? "true" : undefined}
           >
-            {/* Column 1: one health dot per row, so the left edge reads as a single strip. */}
-            <span class="relative flex size-3 shrink-0 items-center justify-center">
-              <Show
-                when={sessionCount() === 0}
-                fallback={
-                  <span
-                    class={`size-1.5 rounded-full ${
-                      indicator().tone === "signal"
-                        ? "bg-signal"
-                        : indicator().tone === "attention"
-                          ? "bg-attention"
-                          : indicator().tone === "fault"
-                            ? "bg-fault"
-                            : "bg-muted/50"
-                    }`}
-                    aria-hidden="true"
-                  />
-                }
-              >
-                <button
-                  type="button"
-                  class="focus-ring flex size-3 items-center justify-center rounded text-muted/40 opacity-60 transition-opacity hover:text-foreground group-hover/lane-row:opacity-100"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.toggleCollapse?.();
-                  }}
-                  title="Minimize inactive lane"
-                  aria-label={`Minimize inactive lane ${title()}`}
+            {/* Line 1: health dot, lane name (gives way last), status pill (never truncates -
+                one short word from a fixed vocabulary; see `laneIndicator`). */}
+            <div class="flex min-w-0 items-center gap-1.5">
+              <span class="relative flex size-3 shrink-0 items-center justify-center">
+                <Show
+                  when={sessionCount() === 0}
+                  fallback={
+                    <span
+                      class={`size-1.5 rounded-full ${
+                        indicator().tone === "signal"
+                          ? "bg-signal"
+                          : indicator().tone === "attention"
+                            ? "bg-attention"
+                            : indicator().tone === "fault"
+                              ? "bg-fault"
+                              : "bg-muted/50"
+                      }`}
+                      aria-hidden="true"
+                    />
+                  }
                 >
-                  <IconChevronDown size={10} />
-                </button>
-              </Show>
-            </span>
-
-            {/* Column 2: identity. The branch is the part that gives way when space runs out. */}
-            <span class="flex min-w-0 flex-1 items-baseline gap-1.5 text-left">
+                  <button
+                    type="button"
+                    class="focus-ring flex size-3 items-center justify-center rounded text-muted/40 opacity-60 transition-opacity hover:text-foreground group-hover/lane-row:opacity-100"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.toggleCollapse?.();
+                    }}
+                    title="Minimize inactive lane"
+                    aria-label={`Minimize inactive lane ${title()}`}
+                  >
+                    <IconChevronDown size={10} />
+                  </button>
+                </Show>
+              </span>
               <span
-                class={`shrink-0 truncate text-xs ${
+                class={`min-w-0 flex-1 truncate text-left text-xs ${
                   props.selected ? "font-semibold text-foreground" : "font-medium text-foreground/90"
                 }`}
-                style={{ "max-width": "60%" }}
               >
                 {title()}
               </span>
               <Show when={props.lane.pinned}>
                 <span
-                  class="flex shrink-0 self-center text-signal"
+                  class="flex shrink-0 items-center text-signal"
                   title="Pinned lane"
                   aria-label="Pinned"
                 >
                   <IconPin size={9} />
                 </span>
               </Show>
-              <span class="min-w-0 truncate font-mono text-[10px] text-muted/80" title={branchName()}>
+              <Show when={indicator().label}>
+                <span class={`lane-status is-${indicator().tone}`} title={indicatorTitle()}>
+                  {indicator().label}
+                </span>
+              </Show>
+            </div>
+
+            {/* Line 2: branch (the part that gives way first - truncates from the left so the
+                identifying tail stays visible), agent count, then the fixed change cell. */}
+            <div class="flex min-w-0 items-center gap-1.5">
+              <span class="size-3 shrink-0" aria-hidden="true" />
+              <span class="truncate-tail min-w-0 flex-1 font-mono text-[10px] text-muted/70" title={branchName()}>
                 {branchName()}
               </span>
               <Show when={props.lane.state.merged && !props.lane.worktree.is_main}>
@@ -272,52 +281,43 @@ function LaneRow(props: {
                   merged
                 </span>
               </Show>
-            </span>
-
-            {/* Column 3: how many agents, and what the most urgent one is doing. */}
-            <span class="flex shrink-0 items-center gap-1">
-              <Show when={sessionCount() > 1}>
-                <span
-                  class="inline-flex items-center gap-0.5 font-mono text-[10px] leading-none text-muted"
-                  aria-label={`${sessionCount()} agents in this lane`}
-                  title={`${sessionCount()} agents in this lane`}
-                >
-                  <IconLayers size={9} class="shrink-0 text-muted/70" />
-                  {sessionCount()}
-                </span>
-              </Show>
-              <Show when={sessionCount() === 1 ? primary() : null}>
-                {(agentSession) => (
-                  <AgentIcon
-                    agent={agentSession().agent}
-                    size={10}
-                    class="shrink-0 text-muted/70"
-                  />
-                )}
-              </Show>
-              <Show when={indicator().label}>
-                <span class={`lane-status is-${indicator().tone}`} title={indicatorTitle()}>
-                  {indicator().label}
-                </span>
-              </Show>
-            </span>
-
-            {/* Column 4: one fixed-width change cell, so every row's numbers stack in a column. */}
-            <span class="flex w-9 shrink-0 justify-end font-mono text-[10px] leading-none text-muted">
-              <Show when={changeSummary()}>
-                {(summary) => (
+              <span class="flex shrink-0 items-center gap-1">
+                <Show when={sessionCount() > 1}>
                   <span
-                    class={`inline-flex items-center gap-0.5 ${dirty() > 0 ? "font-semibold text-attention" : ""}`}
-                    title={summary().title}
+                    class="inline-flex items-center gap-0.5 font-mono text-[10px] leading-none text-muted"
+                    aria-label={`${sessionCount()} agents in this lane`}
+                    title={`${sessionCount()} agents in this lane`}
                   >
-                    <Show when={dirty() > 0} fallback={summary().icon}>
-                      <span class="size-1.5 rounded-full bg-attention" />
-                    </Show>
-                    {summary().count}
+                    <IconLayers size={9} class="shrink-0 text-muted/70" />
+                    {sessionCount()}
                   </span>
-                )}
-              </Show>
-            </span>
+                </Show>
+                <Show when={sessionCount() === 1 ? primary() : null}>
+                  {(agentSession) => (
+                    <AgentIcon
+                      agent={agentSession().agent}
+                      size={10}
+                      class="shrink-0 text-muted/70"
+                    />
+                  )}
+                </Show>
+              </span>
+              <span class="flex w-9 shrink-0 justify-end font-mono text-[10px] leading-none text-muted">
+                <Show when={changeSummary()}>
+                  {(summary) => (
+                    <span
+                      class={`inline-flex items-center gap-0.5 ${dirty() > 0 ? "font-semibold text-attention" : ""}`}
+                      title={summary().title}
+                    >
+                      <Show when={dirty() > 0} fallback={summary().icon}>
+                        <span class="size-1.5 rounded-full bg-attention" />
+                      </Show>
+                      {summary().count}
+                    </span>
+                  )}
+                </Show>
+              </span>
+            </div>
           </button>
           <LaneAgentRosterPopover
             lane={props.lane}
