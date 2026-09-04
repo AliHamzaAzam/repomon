@@ -3949,12 +3949,13 @@ pub async fn dispatch(
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             let win = window.clone();
-            let (dialog, sub, spinner) = tokio::task::spawn_blocking(move || {
+            let (dialog, sub, spinner, quota) = tokio::task::spawn_blocking(move || {
                 tmux.capture_named(&win, CaptureOpts::last(45)).map(|pane| {
                     (
                         agent::prompt::detect_dialog(&pane),
                         agent::prompt::detect_subagent_running(&pane),
                         agent::prompt::detect_active_spinner(&pane),
+                        agent::prompt::detect_quota_exhausted(&pane),
                     )
                 })
             })
@@ -3969,6 +3970,7 @@ pub async fn dispatch(
                     dialog.clone(),
                     sub,
                     spinner,
+                    quota,
                 ),
             );
             Ok(json!({ "dialog": dialog }))
@@ -3993,10 +3995,10 @@ pub async fn dispatch(
             .map_err(internal)?;
             let Some(dialog) = dialog else {
                 // Record the no-dialog result so `lane.list` stops advertising the ghost.
-                ctx.prompt_cache
-                    .lock()
-                    .await
-                    .insert(window, (std::time::Instant::now(), None, None, None, None));
+                ctx.prompt_cache.lock().await.insert(
+                    window,
+                    (std::time::Instant::now(), None, None, None, None, None),
+                );
                 return Err(RpcError {
                     code: DIALOG_CHANGED,
                     message: "no pending dialog".into(),
@@ -4011,6 +4013,7 @@ pub async fn dispatch(
                             std::time::Instant::now(),
                             None,
                             Some(dialog.clone()),
+                            None,
                             None,
                             None,
                         ),
@@ -5673,6 +5676,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             Option<agent::prompt::PendingDialog>,
             Option<String>,
             Option<String>,
+            Option<String>,
         );
         let mut sniffs: Vec<Sniff> = Vec::with_capacity(candidates.len());
         let mut misses: Vec<usize> = Vec::new();
@@ -5685,14 +5689,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     SNIFF_TTL
                 };
                 match cache.get(w) {
-                    Some((t, cached_status, p, sub, spin))
+                    Some((t, cached_status, p, sub, spin, quota))
                         if t.elapsed() < ttl
                             && sniff_cache_status_matches(*cached_status, *status) =>
                     {
-                        sniffs.push((p.clone(), sub.clone(), spin.clone()))
+                        sniffs.push((p.clone(), sub.clone(), spin.clone(), quota.clone()))
                     }
                     _ => {
-                        sniffs.push((None, None, None));
+                        sniffs.push((None, None, None, None));
                         misses.push(idx);
                     }
                 }
@@ -5704,12 +5708,16 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 misses.iter().map(|&i| candidates[i].2.clone()).collect();
             // Each fresh capture yields the parsed dialog, running subagents, AND a content hash —
             // the hash feeds the stall detector's "when did this pane last change?" clock.
-            let fresh: Vec<(
+            /// One freshly captured pane: its dialog, running subagents, spinner phrase, quota
+            /// wall, and a content hash for the stall detector's "when did this last change?".
+            type FreshSniff = (
                 Option<agent::prompt::PendingDialog>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
                 Option<u64>,
-            )> = tokio::task::spawn_blocking(move || {
+            );
+            let fresh: Vec<FreshSniff> = tokio::task::spawn_blocking(move || {
                 miss_windows
                     .iter()
                     .map(|w| match tmux.capture_named(w, CaptureOpts::last(45)) {
@@ -5721,10 +5729,11 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                                 agent::prompt::detect_dialog(&pane),
                                 agent::prompt::detect_subagent_running(&pane),
                                 agent::prompt::detect_active_spinner(&pane),
+                                agent::prompt::detect_quota_exhausted(&pane),
                                 Some(h.finish()),
                             )
                         }
-                        Err(_) => (None, None, None, None),
+                        Err(_) => (None, None, None, None, None),
                     })
                     .collect::<Vec<_>>()
             })
@@ -5733,7 +5742,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let now_utc = chrono::Utc::now();
             let mut cache = ctx.prompt_cache.lock().await;
             let mut seen = ctx.pane_seen.lock().await;
-            for (&i, (p, sub, spin, hash)) in misses.iter().zip(fresh) {
+            for (&i, (p, sub, spin, quota, hash)) in misses.iter().zip(fresh) {
                 let window = &candidates[i].2;
                 cache.insert(
                     window.clone(),
@@ -5743,6 +5752,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         p.clone(),
                         sub.clone(),
                         spin.clone(),
+                        quota.clone(),
                     ),
                 );
                 // Stamp the pane's last-change time only when the content actually differs.
@@ -5754,7 +5764,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         }
                     }
                 }
-                sniffs[i] = (p, sub, spin);
+                sniffs[i] = (p, sub, spin, quota);
             }
         }
         // Prune the sniff caches so they can't grow without bound — every window name ever
@@ -5765,13 +5775,15 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let live: std::collections::HashSet<&str> =
                 windows.iter().map(|w| w.name.as_str()).collect();
             let mut cache = ctx.prompt_cache.lock().await;
-            cache.retain(|w, (t, _, _, _, _)| live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL);
+            cache.retain(|w, (t, _, _, _, _, _)| {
+                live.contains(w.as_str()) && t.elapsed() < SNIFF_TTL
+            });
             let mut seen = ctx.pane_seen.lock().await;
             seen.retain(|w, _| live.contains(w.as_str()));
         }
         let now_utc = chrono::Utc::now();
         let seen = ctx.pane_seen.lock().await;
-        for ((li, si, w, _), (found_dialog, found_subagent, found_spinner)) in
+        for ((li, si, w, _), (found_dialog, found_subagent, found_spinner, found_quota)) in
             candidates.into_iter().zip(sniffs)
         {
             let s = &mut lanes[li].agent_sessions[si];
@@ -5782,6 +5794,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 found_dialog.as_ref().map(|d| d.summary()).as_deref(),
                 s.subagent_running.as_deref(),
                 found_spinner.as_deref(),
+                found_quota.as_deref(),
             );
             s.status = status;
             s.status_reason = reason;
@@ -5851,14 +5864,17 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 /// miss the spinner, and a genuinely frozen pane is the stall detector's job.
 ///
 /// A dialog outranks everything: a pane asking a question is not working, whatever else is on
-/// screen. Returns `None` for the reason when the pane said nothing new, so the caller falls back
-/// to [`transcript_status_reason`].
+/// screen. A quota wall (`quota`) is the opposite case: nothing is working and the pane says why,
+/// so the row stays Idle but carries the cause instead of a bare silence timer. Returns `None` for
+/// the reason when the pane said nothing new, so the caller falls back to
+/// [`transcript_status_reason`].
 pub(crate) fn status_from_pane(
     base: AgentStatus,
     ended_turn: bool,
     dialog: Option<&str>,
     subagent: Option<&str>,
     spinner: Option<&str>,
+    quota: Option<&str>,
 ) -> (AgentStatus, Option<String>) {
     if let Some(summary) = dialog {
         return (
@@ -5882,6 +5898,11 @@ pub(crate) fn status_from_pane(
                 Some(format!("spinner on screen: {spin}")),
             );
         }
+    }
+    // Nothing on the pane is working, and the pane says why: the account's quota for this model
+    // is spent. The status is honestly Idle, but "no output for 4m" hides the cause, so name it.
+    if let Some(reason) = quota {
+        return (AgentStatus::Idle, Some(reason.to_string()));
     }
     // Nothing on the pane says "working". A base of Running that only a file's recency produced
     // (`ended_turn`, see the doc comment) is the one the pane is allowed to overrule.
@@ -8398,6 +8419,7 @@ mod tests {
             None,
             sub.as_deref(),
             spin.as_deref(),
+            None,
         );
         assert_eq!(status, AgentStatus::Running);
         assert!(
@@ -8424,6 +8446,7 @@ mod tests {
             None,
             sub.as_deref(),
             spin.as_deref(),
+            None,
         );
         assert_eq!(status, AgentStatus::Idle);
         assert_eq!(reason, None);
@@ -8439,6 +8462,7 @@ mod tests {
             None,
             None,
             Some("Thinking (2m 14s, esc to interrupt)"),
+            None,
         );
         assert_eq!(status, AgentStatus::Running);
         assert_eq!(
@@ -8464,6 +8488,7 @@ mod tests {
             None,
             sub.as_deref(),
             spin.as_deref(),
+            None,
         );
         assert_eq!(status, AgentStatus::Idle);
         // Never "no output for 1s": the file IS changing, the agent is not.
@@ -8478,7 +8503,8 @@ mod tests {
     /// redraws can miss its spinner; a frozen pane is the stall detector's job, not this one's.
     #[test]
     fn a_mid_tool_call_transcript_is_never_demoted_by_a_quiet_pane() {
-        let (status, reason) = status_from_pane(AgentStatus::Running, false, None, None, None);
+        let (status, reason) =
+            status_from_pane(AgentStatus::Running, false, None, None, None, None);
         assert_eq!(status, AgentStatus::Running);
         assert_eq!(reason, None);
     }
@@ -8492,6 +8518,7 @@ mod tests {
             None,
             None,
             Some("Thinking (12s, esc to interrupt)"),
+            None,
         );
         assert_eq!(status, AgentStatus::Running);
         // Base Running is not promotable, so the pane adds no phrase; the row stays running.
@@ -8513,6 +8540,7 @@ mod tests {
             None,
             sub.as_deref(),
             spin.as_deref(),
+            None,
         );
         assert_eq!(status, AgentStatus::Idle);
     }
@@ -8529,6 +8557,7 @@ mod tests {
             None,
             None,
             Some("Thinking\u{2026} (3s \u{00b7} esc to interrupt)"),
+            None,
         );
         assert_eq!(start, AgentStatus::Running);
         assert!(reason.unwrap().starts_with("spinner on screen:"));
@@ -8538,7 +8567,7 @@ mod tests {
             include_str!("../../repomon-core/src/agent/fixtures/claude_idle_done_spinner.txt");
         let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
         assert_eq!(spin, None);
-        let (end, _) = status_from_pane(AgentStatus::Idle, true, None, None, spin.as_deref());
+        let (end, _) = status_from_pane(AgentStatus::Idle, true, None, None, spin.as_deref(), None);
         assert_eq!(end, AgentStatus::Idle);
     }
 
@@ -8555,6 +8584,7 @@ mod tests {
             None,
             None,
             Some("\u{280b} Generating (4s)"),
+            None,
         );
         assert_eq!(start, AgentStatus::Running);
 
@@ -8569,6 +8599,7 @@ mod tests {
             None,
             sub.as_deref(),
             spin.as_deref(),
+            None,
         );
         assert_eq!(end, AgentStatus::Idle);
         assert_eq!(
@@ -8605,15 +8636,126 @@ mod tests {
             None,
             None,
             spin.as_deref(),
+            None,
         );
         assert_eq!(start, AgentStatus::Running);
 
         // And back: the composer with nothing streaming.
-        let (end, _) = status_from_pane(AgentStatus::Running, true, None, None, None);
+        let (end, _) = status_from_pane(AgentStatus::Running, true, None, None, None, None);
         assert_eq!(end, AgentStatus::Idle);
     }
 
     /// A pane asking a question is not working, whatever else is on screen.
+    /// The whole Antigravity mismatch, end to end, over the panes captured on 2026-09-04 while a
+    /// real `agy` agent worked in lane 48355417. The daemon reported `idle` for every one of these
+    /// frames; the pane said otherwise in three of the four.
+    #[test]
+    fn antigravity_pane_shapes_classify_the_way_the_operator_sees_them() {
+        let cases: [(&str, &str, AgentStatus); 5] = [
+            (
+                "working",
+                include_str!(
+                    "../../repomon-core/src/agent/fixtures/antigravity_working_spinner.txt"
+                ),
+                AgentStatus::Running,
+            ),
+            (
+                "permission dialog",
+                include_str!(
+                    "../../repomon-core/src/agent/fixtures/antigravity_permission_dialog.txt"
+                ),
+                AgentStatus::Waiting,
+            ),
+            (
+                "permission dialog at 80 columns",
+                include_str!(
+                    "../../repomon-core/src/agent/fixtures/antigravity_permission_dialog_80col.txt"
+                ),
+                AgentStatus::Waiting,
+            ),
+            (
+                "folder trust",
+                include_str!("../../repomon-core/src/agent/fixtures/antigravity_trust_dialog.txt"),
+                AgentStatus::Waiting,
+            ),
+            (
+                "turn finished",
+                include_str!(
+                    "../../repomon-core/src/agent/fixtures/antigravity_idle_after_turn.txt"
+                ),
+                AgentStatus::Idle,
+            ),
+        ];
+        for (name, pane, want) in cases {
+            let dialog = repomon_core::agent::prompt::detect_dialog(pane);
+            let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+            let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+            let quota = repomon_core::agent::prompt::detect_quota_exhausted(pane);
+            let (status, _) = status_from_pane(
+                AgentStatus::Idle,
+                true,
+                dialog.as_ref().map(|d| d.summary()).as_deref(),
+                sub.as_deref(),
+                spin.as_deref(),
+                quota.as_deref(),
+            );
+            assert_eq!(status, want, "{name} pane classified wrong");
+        }
+    }
+
+    /// A background shell task ticking in the footer keeps touching the conversation database, so
+    /// the mtime-only monitor calls the lane Running. The pane is at its composer and must win.
+    #[test]
+    fn antigravity_background_task_does_not_pin_the_row_to_running() {
+        let pane = include_str!(
+            "../../repomon-core/src/agent/fixtures/antigravity_idle_background_task.txt"
+        );
+        let sub = repomon_core::agent::prompt::detect_subagent_running(pane);
+        let spin = repomon_core::agent::prompt::detect_active_spinner(pane);
+        let quota = repomon_core::agent::prompt::detect_quota_exhausted(pane);
+        let (status, reason) = status_from_pane(
+            AgentStatus::Running,
+            true,
+            None,
+            sub.as_deref(),
+            spin.as_deref(),
+            quota.as_deref(),
+        );
+        assert_eq!(status, AgentStatus::Idle);
+        assert_eq!(
+            reason.as_deref(),
+            Some("background file activity only, pane at rest")
+        );
+    }
+
+    /// A quota wall stops the agent without ending anything, so the row is idle. Say why instead
+    /// of counting silence at it.
+    #[test]
+    fn a_quota_wall_reports_itself_instead_of_a_silence_timer() {
+        let pane =
+            include_str!("../../repomon-core/src/agent/fixtures/antigravity_quota_exhausted.txt");
+        let quota = repomon_core::agent::prompt::detect_quota_exhausted(pane);
+        let (status, reason) =
+            status_from_pane(AgentStatus::Idle, true, None, None, None, quota.as_deref());
+        assert_eq!(status, AgentStatus::Idle);
+        assert_eq!(reason.as_deref(), Some("quota exhausted, resets in 2h 15m"));
+    }
+
+    /// A pane that is visibly working outranks a quota message still sitting in its scrollback.
+    #[test]
+    fn a_spinner_outranks_a_stale_quota_message() {
+        let (status, reason) = status_from_pane(
+            AgentStatus::Idle,
+            true,
+            None,
+            None,
+            Some("Generating..."),
+            Some("quota exhausted"),
+        );
+        assert_eq!(status, AgentStatus::Running);
+        assert_eq!(reason.as_deref(), Some("spinner on screen: Generating..."));
+    }
+
     #[test]
     fn a_dialog_outranks_every_liveness_signal() {
         let (status, reason) = status_from_pane(
@@ -8622,6 +8764,7 @@ mod tests {
             Some("Bash: rm -rf build"),
             Some("subagent (3m)"),
             Some("Thinking"),
+            None,
         );
         assert_eq!(status, AgentStatus::Waiting);
         assert_eq!(
