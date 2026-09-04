@@ -66,6 +66,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         21,
         include_str!("../../migrations/0021_mcp_identity_process.sql"),
     ),
+    (22, include_str!("../../migrations/0022_lane_role.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -539,7 +540,8 @@ impl Store {
     pub async fn list_lane_meta(&self) -> Result<Vec<LaneMeta>> {
         self.call(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, repo_id, worktree_path, pinned, tmux_window, agent_kind FROM lanes",
+                "SELECT id, repo_id, worktree_path, pinned, tmux_window, agent_kind, role \
+                 FROM lanes",
             )?;
             let rows = stmt.query_map([], lane_meta_from_row)?;
             collect(rows)
@@ -554,6 +556,35 @@ impl Store {
                 params![lane_id, kind],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Set (or clear, with `None`) a lane's role. The only role R1 assigns is `"controller"`,
+    /// on the single lane of the repomind home repo.
+    pub async fn set_lane_role(&self, lane_id: LaneId, role: Option<String>) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE lanes SET role = ?2 WHERE id = ?1",
+                params![lane_id, role],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The lane marked `role = 'controller'`, if one exists. Ensure-home keeps exactly one, and
+    /// the lowest id wins if a hand-edited database ever holds several, so the answer is stable.
+    pub async fn controller_lane(&self) -> Result<Option<LaneId>> {
+        self.call(|c| {
+            let id = c
+                .query_row(
+                    "SELECT id FROM lanes WHERE role = 'controller' ORDER BY id LIMIT 1",
+                    [],
+                    |r| r.get::<_, LaneId>(0),
+                )
+                .optional()?;
+            Ok(id)
         })
         .await
     }
@@ -2187,6 +2218,7 @@ fn lane_meta_from_row(r: &Row) -> rusqlite::Result<LaneMeta> {
         pinned: r.get::<_, i64>(3)? != 0,
         tmux_window: r.get(4)?,
         agent_kind: r.get(5)?,
+        role: r.get(6)?,
     })
 }
 
@@ -2798,6 +2830,10 @@ mod tests {
         // target from the array index made `current < target` false here, so later migrations were
         // skipped silently and forever. That is how `repos.hidden` went missing and `repo.list`
         // started erroring with "no such column".
+        //
+        // The fixture stands in for main's schema at that point, so it carries the tables the
+        // migrations above 10 alter: `repos` (0011, 0019) and `lanes` (0022, in its post-0005
+        // AUTOINCREMENT shape).
         let mut c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE repos (
@@ -2806,6 +2842,16 @@ mod tests {
                  name                   TEXT NOT NULL,
                  added_at               TEXT NOT NULL,
                  worktree_root_template TEXT
+             );
+             CREATE TABLE lanes (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 repo_id       INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                 worktree_path TEXT NOT NULL,
+                 pinned        INTEGER NOT NULL DEFAULT 0,
+                 tmux_window   TEXT,
+                 created_at    TEXT NOT NULL,
+                 agent_kind    TEXT,
+                 UNIQUE(repo_id, worktree_path)
              );
              PRAGMA user_version = 10;",
         )
@@ -3772,6 +3818,78 @@ mod tests {
         assert_eq!(reply.reply_to.as_deref(), Some(inbound.id.as_str()));
         assert_eq!(reply.thread_id, inbound.thread_id);
         assert_eq!(reply.remaining_hops, MESSAGE_THREAD_HOPS);
+    }
+
+    /// A lane's role is nullable and settable both ways, and `controller_lane` finds the one
+    /// lane marked `controller`.
+    #[tokio::test]
+    async fn lane_role_round_trips_and_controller_lane_finds_it() {
+        let s = store().await;
+        let r = s
+            .add_repo(PathBuf::from("/code/repomind"), "repomind".into(), None)
+            .await
+            .unwrap();
+        let lane = s
+            .get_or_create_lane(r.id, "/code/repomind".into())
+            .await
+            .unwrap();
+        let other = s
+            .get_or_create_lane(r.id, "/code/repomind-wt/x".into())
+            .await
+            .unwrap();
+
+        assert_eq!(s.controller_lane().await.unwrap(), None);
+        let meta = s.list_lane_meta().await.unwrap();
+        assert!(meta.iter().all(|m| m.role.is_none()));
+
+        s.set_lane_role(lane, Some("controller".into()))
+            .await
+            .unwrap();
+        assert_eq!(s.controller_lane().await.unwrap(), Some(lane));
+        let meta = s.list_lane_meta().await.unwrap();
+        assert_eq!(
+            meta.iter().find(|m| m.id == lane).unwrap().role.as_deref(),
+            Some("controller")
+        );
+        assert!(meta.iter().find(|m| m.id == other).unwrap().role.is_none());
+
+        s.set_lane_role(lane, None).await.unwrap();
+        assert_eq!(s.controller_lane().await.unwrap(), None);
+    }
+
+    /// Migration 22 adds `lanes.role` to a database staged at 21, and a fresh database reaches
+    /// the newest version with the column present.
+    #[test]
+    fn migration_22_applies_fresh_and_from_21() {
+        let mut fresh = Connection::open_in_memory().unwrap();
+        init(&mut fresh).unwrap();
+        let newest = MIGRATIONS.iter().map(|(v, _)| *v).max().unwrap();
+        let version: i64 = fresh
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, newest);
+        assert!(newest >= 22);
+        assert!(has_lane_role(&fresh));
+
+        let mut c21 = Connection::open_in_memory().unwrap();
+        for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 21) {
+            let tx = c21.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", target).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(!has_lane_role(&c21));
+
+        run_migrations(&mut c21).unwrap();
+        let after: i64 = c21
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert!(after >= 22, "user_version must advance past 22, got {after}");
+        assert!(has_lane_role(&c21));
+    }
+
+    fn has_lane_role(c: &Connection) -> bool {
+        c.prepare("SELECT role FROM lanes LIMIT 1").is_ok()
     }
 
     #[test]

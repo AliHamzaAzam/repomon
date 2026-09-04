@@ -1928,6 +1928,7 @@ mod tests {
             branch: "b".into(),
             dirty: "clean".into(),
             pinned: false,
+            role: None,
             agent: Some(AgentDigest {
                 kind: "claude".into(),
                 status: status.into(),
@@ -1975,6 +1976,7 @@ mod tests {
             config_dir: None,
             custom_label: None,
             generated_label: None,
+            status_reason: None,
         }
     }
 

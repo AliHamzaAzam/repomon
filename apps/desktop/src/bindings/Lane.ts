@@ -11,4 +11,10 @@ export type Lane = { id: number, repo: Repo, worktree: Worktree, state: Worktree
 /**
  * Active sessions only.
  */
-agent_sessions: Array<AgentSession>, last_activity_at: string, pinned: boolean, };
+agent_sessions: Array<AgentSession>, last_activity_at: string, pinned: boolean, 
+/**
+ * The lane's role in the fleet. `None` is an ordinary work lane; `"controller"` marks the
+ * repomind home lane, whose agents get the full fleet catalog and which cannot be deleted
+ * or merged.
+ */
+role: string | null, };

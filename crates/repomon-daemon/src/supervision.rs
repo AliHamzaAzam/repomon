@@ -1132,6 +1132,7 @@ mod tests {
             agent_sessions: vec![session],
             last_activity_at: Utc::now(),
             pinned: false,
+            role: None,
         }
     }
 

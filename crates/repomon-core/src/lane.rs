@@ -333,11 +333,9 @@ impl Lanes {
                 state.prunable = true;
             }
 
-            let pinned = metas
-                .iter()
-                .find(|m| m.id == lane_id)
-                .map(|m| m.pinned)
-                .unwrap_or(false);
+            let meta = metas.iter().find(|m| m.id == lane_id);
+            let pinned = meta.map(|m| m.pinned).unwrap_or(false);
+            let role = meta.and_then(|m| m.role.clone());
             let last_activity_at = state.last_commit_at.unwrap_or(repo.added_at);
 
             lanes.push(Lane {
@@ -348,6 +346,7 @@ impl Lanes {
                 agent_sessions: Vec::new(),
                 last_activity_at,
                 pinned,
+                role,
             });
         }
 

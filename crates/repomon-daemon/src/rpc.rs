@@ -8957,6 +8957,7 @@ mod tests {
             agent_sessions,
             last_activity_at: now,
             pinned: false,
+            role: None,
         }
     }
 
@@ -9037,6 +9038,7 @@ mod tests {
             agent_sessions,
             last_activity_at: now,
             pinned: false,
+            role: None,
         }
     }
 
@@ -11350,6 +11352,7 @@ mod tests {
             repo_id: 7,
             worktree_path: PathBuf::from("/repo-7"),
             pinned: false,
+            role: None,
             tmux_window: Some("lane-7".into()),
             agent_kind: Some("claude-code".into()),
         }];

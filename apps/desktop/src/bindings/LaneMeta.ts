@@ -7,4 +7,8 @@ export type LaneMeta = { id: number, repo_id: number, worktree_path: string, pin
 /**
  * The agent kind repomon last spawned in this lane, if any.
  */
-agent_kind: string | null, };
+agent_kind: string | null, 
+/**
+ * The lane's role. See [`Lane::role`].
+ */
+role: string | null, };

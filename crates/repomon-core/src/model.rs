@@ -629,6 +629,11 @@ pub struct Lane {
     pub last_activity_at: DateTime<Utc>,
     #[serde(default)]
     pub pinned: bool,
+    /// The lane's role in the fleet. `None` is an ordinary work lane; `"controller"` marks the
+    /// repomind home lane, whose agents get the full fleet catalog and which cannot be deleted
+    /// or merged.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Persisted per-lane metadata not derivable from git (pin state, tmux window, agent kind).
@@ -645,6 +650,9 @@ pub struct LaneMeta {
     pub tmux_window: Option<String>,
     /// The agent kind repomon last spawned in this lane, if any.
     pub agent_kind: Option<String>,
+    /// The lane's role. See [`Lane::role`].
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Parameters for creating a new lane (and its worktree).

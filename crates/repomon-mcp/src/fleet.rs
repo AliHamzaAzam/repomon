@@ -64,6 +64,10 @@ pub struct LaneDigest {
     pub dirty: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// The lane's role, when it has one. `"controller"` is the repomind home lane: its agents
+    /// get the full fleet catalog, and it can be neither deleted nor merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentDigest>,
     /// How many additional agents share this lane beyond the primary (usually 0).
@@ -187,6 +191,7 @@ pub fn project_lane(lane: &Lane, now: DateTime<Utc>) -> LaneDigest {
             .unwrap_or_else(|| "(detached)".into()),
         dirty: fmt_dirty(&lane.state.dirty),
         pinned: lane.pinned,
+        role: lane.role.clone(),
         agent,
         extra_agents: extra,
         active_agents,
@@ -382,6 +387,7 @@ mod tests {
             config_dir: None,
             custom_label: None,
             generated_label: None,
+            status_reason: None,
         }
     }
 
@@ -424,6 +430,7 @@ mod tests {
                 locked: false,
                 prunable: false,
                 last_change_at: None,
+                merged: false,
             },
             agent_sessions: vec![
                 sess(AgentStatus::Running, None),
@@ -431,6 +438,7 @@ mod tests {
             ],
             last_activity_at: Utc::now(),
             pinned: false,
+            role: None,
         };
         let digest = project_lane(&lane, Utc::now());
         assert_eq!(digest.attention(), Attention::Permission);
@@ -475,10 +483,12 @@ mod tests {
                 locked: false,
                 prunable: false,
                 last_change_at: None,
+                merged: false,
             },
             agent_sessions: sessions,
             last_activity_at: Utc::now(),
             pinned: false,
+            role: None,
         }
     }
 
