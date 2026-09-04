@@ -374,6 +374,12 @@ pub fn read_file_raw(path: &Path) -> Result<FileReadRawResult, ReadError> {
 /// Returns `missing` for untracked or newly added files, `binary` by null-byte sniff (or image extension),
 /// and `text` for valid UTF-8, capped at READ_CAP_BYTES.
 pub fn diff_base(root: &Path, rel: &str) -> Result<FileDiffBaseResult, ReadError> {
+    diff_base_capped(root, rel, READ_CAP_BYTES)
+}
+
+/// Implements [`diff_base`] with the size cap threaded through explicitly, so a test can shrink
+/// it instead of committing an 8 MiB blob just to exercise the too-large path.
+fn diff_base_capped(root: &Path, rel: &str, cap: u64) -> Result<FileDiffBaseResult, ReadError> {
     let norm_rel = rel.trim_start_matches("./").trim_start_matches('/');
     if is_image_path(Path::new(norm_rel)) {
         return Ok(FileDiffBaseResult {
@@ -383,6 +389,33 @@ pub fn diff_base(root: &Path, rel: &str) -> Result<FileDiffBaseResult, ReadError
     }
 
     let arg = format!("HEAD:{norm_rel}");
+
+    // Check the blob's size before reading it: `git cat-file -s` doesn't materialize the object's
+    // content, so a path that resolves to a huge blob at HEAD gets rejected here without ever
+    // being fully read into memory the way `git show` below would. A non-zero exit here means the
+    // same thing it means for `git show` below - untracked or newly added, not an error.
+    let size_child = background_command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "-s", &arg])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let size_out = size_child.wait_with_output()?;
+    if !size_out.status.success() {
+        return Ok(FileDiffBaseResult {
+            content: None,
+            kind: "missing".to_string(),
+        });
+    }
+    let size: u64 = String::from_utf8_lossy(&size_out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    if size > cap {
+        return Err(ReadError::TooLarge(size));
+    }
+
     let child = background_command("git")
         .arg("-C")
         .arg(root)
@@ -401,7 +434,7 @@ pub fn diff_base(root: &Path, rel: &str) -> Result<FileDiffBaseResult, ReadError
 
     let bytes = out.stdout;
     let size = bytes.len() as u64;
-    if size > READ_CAP_BYTES {
+    if size > cap {
         return Err(ReadError::TooLarge(size));
     }
 
@@ -1057,5 +1090,46 @@ mod tests {
         let base_missing = diff_base(root, "new.txt").unwrap();
         assert_eq!(base_missing.kind, "missing");
         assert_eq!(base_missing.content, None);
+    }
+
+    #[test]
+    fn diff_base_rejects_over_cap_blob_via_cat_file_size_check() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let git_run = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@e.com")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@e.com")
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+
+        git_run(&["init", "-b", "main"]);
+
+        // A tiny blob under a tiny cap: diff_base_capped rejects it via the cat-file size check,
+        // before ever running `git show` to read its content.
+        std::fs::write(root.join("big.txt"), "0123456789").unwrap();
+        git_run(&["add", "big.txt"]);
+        git_run(&["commit", "-m", "add big.txt"]);
+
+        match diff_base_capped(root, "big.txt", 4) {
+            Err(ReadError::TooLarge(size)) => assert_eq!(size, 10),
+            other => panic!("expected TooLarge, got is_ok={}", other.is_ok()),
+        }
+
+        // The same file under a cap that fits it still reads normally.
+        let ok = diff_base_capped(root, "big.txt", 1024).unwrap();
+        assert_eq!(ok.kind, "text");
+        assert_eq!(ok.content, Some("0123456789".to_string()));
     }
 }
