@@ -26,6 +26,10 @@ export interface OpenFile {
   saving: boolean;
   saveError: TranslatedError | null;
   conflict: FileConflict | null;
+  /// Bumped on every successful save (saveFile or saveAsNew), never on a load or an external
+  /// sync. CodeEditor watches this to refresh the git-diff base after a save, no matter which UI
+  /// path triggered it (the Mod-s keymap or the rail Save button) - see FileEditorPanel.tsx.
+  saveVersion: number;
 }
 
 export interface FileConflict {
@@ -409,6 +413,7 @@ export function createEditorStore(fleet: FleetStore) {
       saving: false,
       saveError: null,
       conflict: null,
+      saveVersion: 0,
     };
     setOpenFiles((files) => [...files, placeholder]);
     setActivePathSignal(path);
@@ -495,6 +500,7 @@ export function createEditorStore(fleet: FleetStore) {
         saving: false,
         saveError: null,
         conflict: null,
+        saveVersion: f.saveVersion + 1,
       }));
     } catch (cause) {
       if (
@@ -572,6 +578,7 @@ export function createEditorStore(fleet: FleetStore) {
         mtimeMs: result.mtime_ms,
         saving: false,
         conflict: null,
+        saveVersion: f.saveVersion + 1,
       }));
     } catch (cause) {
       updateOpenFile(path, (f) => ({ ...f, saving: false, saveError: translateError(cause) }));
@@ -690,6 +697,7 @@ export function createEditorStore(fleet: FleetStore) {
       saving: false,
       saveError: null,
       conflict: null,
+      saveVersion: 0,
     }));
 
     setOpenFiles(initialOpenFiles);

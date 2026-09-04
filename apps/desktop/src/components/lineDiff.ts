@@ -22,6 +22,27 @@ export interface LineDiffResult {
   markers: Map<number, LineMarker>;
 }
 
+/// Returned by `computeLineDiff` in place of a `LineDiffResult` when the diff was too expensive
+/// to compute safely - see `MAX_TOTAL_LINES` and `MAX_EDIT_DISTANCE` below. Callers (CodeEditor)
+/// clear any gutter markers and show a muted status-line note until the next successful diff.
+export interface LineDiffTooLarge {
+  kind: "too-large";
+}
+
+export type LineDiffOutcome = LineDiffResult | LineDiffTooLarge;
+
+/// Hard cap on `lines_a + lines_b`. Past this, the diff is skipped entirely - the Myers search
+/// below is at worst O(D^2) time and space, and a document this size makes even a cheap per-line
+/// pass expensive enough to matter on every keystroke (the 300ms debounce in CodeEditor still
+/// runs this on the main thread).
+const MAX_TOTAL_LINES = 20000;
+
+/// Hard cap on the edit distance `d` explored by the Myers search. Bounds the O(D^2) time and
+/// space of the search itself even for documents under `MAX_TOTAL_LINES` - two versions of a
+/// mid-size file that share almost no lines (e.g. a full reformat) can still drive `d` well past
+/// what's worth computing on the UI thread.
+const MAX_EDIT_DISTANCE = 4000;
+
 export interface RevertChange {
   from: number;
   to: number;
@@ -35,9 +56,10 @@ interface EditOp {
 }
 
 /**
- * Computes shortest edit script using the Myers diff algorithm on lines.
+ * Computes shortest edit script using the Myers diff algorithm on lines. Returns `null` when the
+ * search's edit distance exceeds `MAX_EDIT_DISTANCE` - the caller maps that to `too-large`.
  */
-function myersDiff(a: string[], b: string[]): EditOp[] {
+function myersDiff(a: string[], b: string[]): EditOp[] | null {
   const n = a.length;
   const m = b.length;
 
@@ -82,16 +104,38 @@ function myersDiff(a: string[], b: string[]): EditOp[] {
       }
     } else {
       const max = sliceN + sliceM;
-      const vSize = 2 * max + 1;
-      const v = new Int32Array(vSize);
+      const v = new Int32Array(2 * max + 1);
       v[max + 1] = 0;
+
+      // Per-step search state: `trace[d]` holds only the (d + 1) new `x` values the forward pass
+      // computes at step `d` (for k = -d, -d + 2, ..., d), not a full copy of `v`. `v` itself
+      // still carries the cumulative state forward between steps (it must, to compute the next
+      // step's `x` values), but nothing snapshots the whole thing - each snapshot is O(d) instead
+      // of O(N), so total search-state memory is O(D^2) instead of O(D * N). Combined with the
+      // `MAX_EDIT_DISTANCE` cap below, this bounds the worst case rather than just shrinking its
+      // constant.
       const trace: Int32Array[] = [];
+      // Sentinel for the conceptual "step -1": Myers' bootstrap value v[1] = 0, addressed the same
+      // way as a real step (`levelValue(-1, 1)` below) so the backtrack loop needs no d === 0
+      // special case.
+      const sentinel = Int32Array.of(0);
+      const levelValue = (level: number, k: number): number => {
+        // Only ever queried at k === 1, mirroring the original algorithm's v[max + 1] = 0
+        // bootstrap - the initial diagonal for a hypothetical "step -1".
+        if (level < 0) return sentinel[0];
+        const idx = (k + level) / 2;
+        return trace[level][idx];
+      };
 
       let found = false;
+      let finalD = -1;
       for (let d = 0; d <= max; d++) {
-        const vCopy = new Int32Array(v);
-        trace.push(vCopy);
+        if (d > MAX_EDIT_DISTANCE) {
+          return null;
+        }
 
+        const stepXs = new Int32Array(d + 1);
+        let idx = 0;
         for (let k = -d; k <= d; k += 2) {
           let x: number;
           if (k === -d || (k !== d && v[max + k - 1] < v[max + k + 1])) {
@@ -107,13 +151,20 @@ function myersDiff(a: string[], b: string[]): EditOp[] {
           }
 
           v[max + k] = x;
+          stepXs[idx++] = x;
 
           if (x >= sliceN && y >= sliceM) {
             found = true;
+            finalD = d;
             break;
           }
         }
+        trace.push(stepXs);
         if (found) break;
+      }
+
+      if (!found) {
+        return null;
       }
 
       // Backtrack
@@ -121,17 +172,17 @@ function myersDiff(a: string[], b: string[]): EditOp[] {
       let x = sliceN;
       let y = sliceM;
 
-      for (let d = trace.length - 1; d >= 0; d--) {
-        const vD = trace[d];
+      for (let d = finalD; d >= 0; d--) {
+        const prevLevel = d - 1;
         const k = x - y;
         let prevK: number;
-        if (k === -d || (k !== d && vD[max + k - 1] < vD[max + k + 1])) {
+        if (k === -d || (k !== d && levelValue(prevLevel, k - 1) < levelValue(prevLevel, k + 1))) {
           prevK = k + 1;
         } else {
           prevK = k - 1;
         }
 
-        const prevX = vD[max + prevK];
+        const prevX = levelValue(prevLevel, prevK);
         const prevY = prevX - prevK;
 
         while (x > prevX && y > prevY) {
@@ -169,12 +220,14 @@ function myersDiff(a: string[], b: string[]): EditOp[] {
 
 /**
  * Computes line-level diff hunks and gutter marker positions comparing `baseContent` to `currentContent`.
- * If `baseContent` is null (file not in HEAD or binary), returns empty result.
+ * If `baseContent` is null (file not in HEAD or binary), returns empty result. Returns
+ * `{ kind: "too-large" }` instead when the document (or the search needed to diff it) exceeds
+ * `MAX_TOTAL_LINES` / `MAX_EDIT_DISTANCE` - see those constants above.
  */
 export function computeLineDiff(
   baseContent: string | null,
   currentContent: string,
-): LineDiffResult {
+): LineDiffOutcome {
   if (baseContent === null) {
     return { hunks: [], markers: new Map() };
   }
@@ -186,7 +239,14 @@ export function computeLineDiff(
     return { hunks: [], markers: new Map() };
   }
 
+  if (baseLines.length + currentLines.length > MAX_TOTAL_LINES) {
+    return { kind: "too-large" };
+  }
+
   const ops = myersDiff(baseLines, currentLines);
+  if (ops === null) {
+    return { kind: "too-large" };
+  }
   const hunks: DiffHunk[] = [];
 
   let opIndex = 0;

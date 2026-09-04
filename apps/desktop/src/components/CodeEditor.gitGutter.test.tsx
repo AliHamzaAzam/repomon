@@ -1,10 +1,29 @@
 import { cleanup, fireEvent, render, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import CodeEditor from "./CodeEditor";
 
-afterEach(cleanup);
+const diffBaseCallsMock = vi.hoisted(() => ({ list: [] as Array<{ lane_id: number; path: string }> }));
+
+vi.mock("../ipc/rpc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../ipc/rpc")>();
+  return {
+    ...actual,
+    daemonCall: (method: string, params?: unknown) => {
+      if (method === "file.diff_base") {
+        diffBaseCallsMock.list.push(params as { lane_id: number; path: string });
+        return Promise.resolve({ content: "line 1\n", kind: "text" });
+      }
+      return Promise.resolve({});
+    },
+  };
+});
+
+afterEach(() => {
+  cleanup();
+  diffBaseCallsMock.list = [];
+});
 
 describe("CodeEditor git gutter", () => {
   it("renders added, modified, and removed markers based on diffBase", async () => {
@@ -102,6 +121,51 @@ describe("CodeEditor git gutter", () => {
     await waitFor(() => {
       expect(container.querySelector("[role=dialog]")).toBeNull();
     });
+  });
+
+  it("refreshes the diff base exactly once when saveVersion changes, not just on mount", async () => {
+    const [saveVersion, setSaveVersion] = createSignal(0);
+
+    render(() => (
+      <CodeEditor value="line 1\n" path="src/app.ts" laneId={7} saveVersion={saveVersion()} />
+    ));
+
+    await waitFor(() => expect(diffBaseCallsMock.list.length).toBeGreaterThan(0));
+    const callsAfterMount = diffBaseCallsMock.list.length;
+
+    // Simulates what editor.ts's saveFile does on a successful save, regardless of whether it was
+    // triggered by CodeEditor's own Mod-s keymap or FileEditorPanel's rail Save button.
+    setSaveVersion(1);
+
+    await waitFor(() => expect(diffBaseCallsMock.list.length).toBe(callsAfterMount + 1));
+    expect(diffBaseCallsMock.list[diffBaseCallsMock.list.length - 1]).toEqual({
+      lane_id: 7,
+      path: "src/app.ts",
+    });
+
+    // A no-op re-render (saveVersion unchanged) must not trigger another refresh.
+    setSaveVersion(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(diffBaseCallsMock.list.length).toBe(callsAfterMount + 1);
+  });
+
+  it("clears markers and shows a muted note when the diff is too large", async () => {
+    // Over lineDiff's MAX_TOTAL_LINES (20000) cap, so computeLineDiff short-circuits to
+    // { kind: "too-large" } without running the Myers search at all.
+    const base = Array.from({ length: 11000 }, (_, i) => `base line ${i}`).join("\n");
+    const current = Array.from({ length: 11000 }, (_, i) => `current line ${i}`).join("\n");
+
+    const { container, getByRole } = render(() => (
+      <CodeEditor value={current} path="src/huge.ts" diffBase={base} />
+    ));
+
+    await waitFor(() => {
+      expect(getByRole("status")).toHaveTextContent("Diff markers off: change too large");
+    });
+
+    expect(container.querySelector(".cm-git-gutter-added")).toBeNull();
+    expect(container.querySelector(".cm-git-gutter-modified")).toBeNull();
+    expect(container.querySelector(".cm-git-gutter-removed")).toBeNull();
   });
 
   it("does not render git gutter markers when disableGitGutter is true", async () => {

@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { computeLineDiff, computeRevertChange, type DiffHunk } from "./lineDiff";
+import {
+  computeLineDiff as computeLineDiffRaw,
+  computeRevertChange,
+  type DiffHunk,
+  type LineDiffResult,
+} from "./lineDiff";
+
+/// Narrows `computeLineDiffRaw`'s `LineDiffOutcome` union down to the plain `LineDiffResult` shape
+/// every test below except the two too-large ones expects - those two call `computeLineDiffRaw`
+/// directly instead.
+function computeLineDiff(base: string | null, current: string): LineDiffResult {
+  const result = computeLineDiffRaw(base, current);
+  if ("kind" in result) {
+    throw new Error("expected an ok diff result, got too-large");
+  }
+  return result;
+}
 
 function makeDoc(text: string) {
   const lines = text.split("\n");
@@ -203,5 +219,40 @@ describe("lineDiff", () => {
       text = applyRevert(text, subDiff.hunks[i]);
     }
     expect(text).toBe(base);
+  });
+
+  it("diffs a 3000-line document with sweeping changes under 200ms and returns hunks", () => {
+    const lineCount = 3000;
+    const baseLines: string[] = [];
+    const currentLines: string[] = [];
+    for (let i = 0; i < lineCount; i++) {
+      baseLines.push(`const value${i} = ${i};`);
+      // Every other line is rewritten - a large, realistic "sweeping edit" rather than a
+      // maximally-disjoint rewrite (which would drive the Myers edit distance past the
+      // MAX_EDIT_DISTANCE cap on its own and legitimately return too-large - see the next test).
+      currentLines.push(i % 2 === 0 ? `const value${i} = ${i};` : `const value${i} = ${i} + 1;`);
+    }
+    const base = baseLines.join("\n");
+    const current = currentLines.join("\n");
+
+    const start = performance.now();
+    const result = computeLineDiffRaw(base, current);
+    const elapsedMs = performance.now() - start;
+
+    expect(elapsedMs).toBeLessThan(200);
+    if ("kind" in result) {
+      throw new Error("expected an ok diff result, got too-large");
+    }
+    expect(result.hunks.length).toBeGreaterThan(0);
+    expect(result.hunks.every((h) => h.type === "modified")).toBe(true);
+  });
+
+  it("returns too-large (and no markers) for a diff over the total-line cap", () => {
+    const base = Array.from({ length: 11000 }, (_, i) => `base line ${i}`).join("\n");
+    const current = Array.from({ length: 11000 }, (_, i) => `current line ${i}`).join("\n");
+
+    const result = computeLineDiffRaw(base, current);
+
+    expect(result).toEqual({ kind: "too-large" });
   });
 });

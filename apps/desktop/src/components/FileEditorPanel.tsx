@@ -531,6 +531,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                             whitespace={editor()?.whitespace()}
                             initialCursor={file().cursor}
                             initialScrollTop={file().scrollTop}
+                            saveVersion={file().saveVersion}
                             openAtTarget={editor()?.openAtTarget()?.path === file().path ? editor()?.openAtTarget() : null}
                             replaceRequest={activePath() === file().path ? replaceRequest() : null}
                             onCursorActivity={(cursor, scrollTop) => editor()?.updateCursor(file().path, cursor, scrollTop)}

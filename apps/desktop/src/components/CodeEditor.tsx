@@ -120,6 +120,12 @@ export interface CodeEditorProps {
   wrap?: boolean;
   whitespace?: boolean;
   languageOverride?: string;
+  /// Bumped by the caller (see FileEditorPanel's `file().saveVersion`) whenever this file's
+  /// content is successfully saved through the store, regardless of which UI path triggered the
+  /// save - the Mod-s keymap below and the rail Save button both end up going through
+  /// `editor.saveFile`. CodeEditor watches it to refresh the git-diff base after every save, not
+  /// just the ones it happens to trigger itself.
+  saveVersion?: number;
   onChange?: (value: string) => void;
   onSave?: () => void;
   onCursorActivity?: (cursor: number, scrollTop: number, selection: EditorSelectionInfo) => void;
@@ -739,6 +745,11 @@ export default function CodeEditor(props: CodeEditorProps) {
     left: number;
   } | null>(null);
 
+  // Set when the last diff attempt hit computeLineDiff's too-large cap (see lineDiff.ts). Drives
+  // the muted status-line note below and clears itself the moment a later diff succeeds - it is
+  // not reset eagerly on every keystroke, only on the next actual diff result.
+  const [diffTooLarge, setDiffTooLarge] = createSignal(false);
+
   let gitDiffRequestId = 0;
   let currentBaseContent: string | null = null;
   let currentDiffPath = props.path ?? "";
@@ -747,6 +758,12 @@ export default function CodeEditor(props: CodeEditorProps) {
   const updateGutterMarkers = (base: string | null, current: string) => {
     if (!view || props.disableGitGutter || props.large) return;
     const diff = computeLineDiff(base, current);
+    if ("kind" in diff) {
+      setDiffTooLarge(true);
+      view.dispatch({ effects: setGitMarkersEffect.of(RangeSet.empty) });
+      return;
+    }
+    setDiffTooLarge(false);
     const doc = view.state.doc;
     const builder = new RangeSetBuilder<GutterMarker>();
     const sortedLines = Array.from(diff.markers.keys()).sort((a, b) => a - b);
@@ -786,6 +803,7 @@ export default function CodeEditor(props: CodeEditorProps) {
 
     if (disabled) {
       currentBaseContent = null;
+      setDiffTooLarge(false);
       if (view) {
         view.dispatch({ effects: setGitMarkersEffect.of(RangeSet.empty) });
       }
@@ -820,8 +838,11 @@ export default function CodeEditor(props: CodeEditorProps) {
     key: "Mod-s",
     run: () => {
       if (props.large || props.readOnly) return true;
+      // Does not call refreshDiffBase itself - the store's saveFile bumps `saveVersion` on
+      // completion, and the effect below reacts to that. This way every save path (this keymap
+      // and the rail Save button in FileEditorPanel) refreshes the diff base exactly once,
+      // through the same code path, instead of only the keymap doing it.
       props.onSave?.();
-      void refreshDiffBase();
       return true;
     },
   };
@@ -1097,6 +1118,19 @@ export default function CodeEditor(props: CodeEditorProps) {
     void refreshDiffBase(path, laneId, diffBase, disabled);
   });
 
+  // Refreshes the diff base after every successful save, no matter which UI path triggered it -
+  // see the `saveVersion` prop doc comment and the Mod-s binding above. Seeded (not tracked) to
+  // the initial value so this does not also fire the moment the component mounts, duplicating the
+  // refresh the effect above and onMount already perform.
+  let lastSaveVersion = props.saveVersion ?? 0;
+  createEffect(() => {
+    const version = props.saveVersion ?? 0;
+    if (!view) return;
+    if (version === lastSaveVersion) return;
+    lastSaveVersion = version;
+    void refreshDiffBase();
+  });
+
   createEffect(() => {
     if (!hunkPopover()) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1246,6 +1280,14 @@ export default function CodeEditor(props: CodeEditorProps) {
       ref={containerRef}
       class={props.class ? `relative min-h-0 flex-1 overflow-hidden ${props.class}` : "relative min-h-0 flex-1 overflow-hidden"}
     >
+      <Show when={diffTooLarge()}>
+        <div
+          role="status"
+          class="pointer-events-none absolute inset-x-0 bottom-0 z-40 border-t border-line bg-surface/90 px-2 py-1 text-center font-mono text-[10px] text-muted backdrop-blur"
+        >
+          Diff markers off: change too large
+        </div>
+      </Show>
       <Show when={hunkPopover()}>
         {(popover) => {
           const hunk = popover().hunk;

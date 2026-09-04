@@ -308,6 +308,54 @@ describe("editor store", () => {
     });
   });
 
+  it("bumps saveVersion on a successful save but not on a conflict, so CodeEditor's diff-base refresh fires exactly once per save", async () => {
+    let returnConflict = false;
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "file.read") {
+        return { content: "initial", mtime_ms: 1000, size: 7, truncated: false };
+      }
+      if (method === "file.write") {
+        if (returnConflict) {
+          throw new DaemonRpcError({
+            code: -32011,
+            message: "conflict",
+            data: { expected_mtime_ms: 1000, actual_mtime_ms: 2000 },
+          });
+        }
+        return { mtime_ms: 1500, size: 7 };
+      }
+      return { entries: [], truncated: false };
+    });
+
+    await new Promise<void>((resolve) => {
+      createRoot(async (dispose) => {
+        const [selectedId] = createSignal<number | null>(7);
+        const store = createEditorStore(fleetStub(selectedId, [lane(7)]));
+
+        await store.openFile("test.txt");
+        expect(store.activeFile()?.saveVersion).toBe(0);
+
+        store.updateContent("test.txt", "new content");
+
+        returnConflict = true;
+        await store.saveFile("test.txt");
+        // A rejected (conflicting) save must not bump saveVersion - nothing was actually saved.
+        expect(store.activeFile()?.saveVersion).toBe(0);
+
+        returnConflict = false;
+        await store.saveFile("test.txt");
+        expect(store.activeFile()?.saveVersion).toBe(1);
+
+        store.updateContent("test.txt", "newer content");
+        await store.saveFile("test.txt");
+        expect(store.activeFile()?.saveVersion).toBe(2);
+
+        dispose();
+        resolve();
+      });
+    });
+  });
+
   it("marks large files and prevents updateContent and saveFile", async () => {
     daemonCallMock.mockImplementation(async (method: string) => {
       if (method === "file.read") {

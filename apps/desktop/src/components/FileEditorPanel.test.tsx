@@ -230,6 +230,45 @@ describe("FileEditorPanel open/edit/save", () => {
     expect(writeCall?.params).toEqual({ lane_id: 7, path: "a.ts", content: "abcd", expected_mtime_ms: 1000 });
   });
 
+  it("refreshes the git-diff base after a save triggered by the rail Save button, not just Mod-s", async () => {
+    mockRpc({
+      "file.list": () => ({ entries: [entry({ name: "a.ts", path: "a.ts", is_dir: false, size: 5 })], truncated: false }),
+      "file.read": () => ({ content: "abc", mtime_ms: 1000, size: 3, truncated: false }),
+      "file.write": (params) => {
+        expect(params).toEqual({ lane_id: 7, path: "a.ts", content: "abcd", expected_mtime_ms: 1000 });
+        return { mtime_ms: 2000, size: 4 };
+      },
+      "file.diff_base": () => ({ content: "abc", kind: "text" }),
+    });
+
+    const { container } = render(() => <FileEditorPanel fleet={fleetWith(lane())} />);
+    await openFileTab(container, "a.ts");
+
+    // Opening the file already triggers one refresh (CodeEditor's mount-time refreshDiffBase).
+    await waitFor(() => expect(calls.list.some((c) => c.method === "file.diff_base")).toBe(true));
+    const diffBaseCallsBeforeSave = calls.list.filter((c) => c.method === "file.diff_base").length;
+
+    const view = getView(container);
+    view.dispatch({ changes: { from: 3, insert: "d" } });
+    expect(await screen.findByTitle("Unsaved changes")).toBeInTheDocument();
+
+    // The rail Save button calls editor.saveFile directly - it never goes through CodeEditor's
+    // Mod-s keymap, which is the only place that used to call refreshDiffBase. This is an
+    // end-to-end sanity check that the wiring (saveVersion prop -> CodeEditor's effect) reaches
+    // all the way from a real Save-button click through the store to a fresh file.diff_base call;
+    // the exact call count isn't asserted here (CodeEditor's existing path/laneId-tracking effect
+    // already reruns on unrelated activeFile updates such as cursor moves, so the baseline count
+    // itself is noisy) - see the isolated, exact-count version of this behavior in
+    // CodeEditor.gitGutter.test.tsx.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByTitle("Unsaved changes")).not.toBeInTheDocument());
+
+    await waitFor(() => {
+      const diffBaseCallsAfterSave = calls.list.filter((c) => c.method === "file.diff_base").length;
+      expect(diffBaseCallsAfterSave).toBeGreaterThan(diffBaseCallsBeforeSave);
+    });
+  });
+
   it("keeps the same CodeEditor DOM node across edits and cursor moves (non-keyed Show)", async () => {
     mockRpc({
       "file.list": () => ({ entries: [entry({ name: "a.ts", path: "a.ts", is_dir: false, size: 5 })], truncated: false }),
