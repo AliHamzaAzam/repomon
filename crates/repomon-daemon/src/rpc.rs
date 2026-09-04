@@ -5003,14 +5003,33 @@ pub async fn dispatch(
                     .await
                     .map_err(internal)?
             };
-            Ok(json!({
-                "home": home.to_string_lossy(),
-                "exists": exists,
-                "repo_id": repo_id,
-                "lane_id": lane_id,
-                "window": window,
-                "max_controllers": max_controllers,
-            }))
+            // Export state and counts come off the home's own files, so a client sees the same
+            // truth an agent reading the directory would.
+            let pending = crate::repomind::export::pending(ctx).await;
+            let probe = home.clone();
+            let (export_state, counts) = tokio::task::spawn_blocking(move || {
+                (
+                    crate::repomind::export::load_state(&probe),
+                    crate::repomind::home_counts(&probe),
+                )
+            })
+            .await
+            .map_err(internal)?;
+
+            to_value(repomon_core::model::RepomindStatus {
+                home: home.to_string_lossy().into_owned(),
+                exists,
+                repo_id,
+                lane_id,
+                window,
+                max_controllers,
+                export: repomon_core::model::RepomindExportStatus {
+                    last_run: export_state.last_run,
+                    pending,
+                    last_error: export_state.last_error,
+                },
+                counts,
+            })
         }
         // Local-only (see `remote::remote_method_allowed`): it rewrites files in the home.
         // Runs the export immediately rather than waiting out the debounce, so a caller that

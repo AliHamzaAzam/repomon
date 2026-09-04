@@ -210,6 +210,32 @@ pub async fn ensure_home(ctx: &Ctx) -> repomon_core::Result<RepomindHome> {
     })
 }
 
+/// Count what the home holds, for `repomind.status`. Directories that do not exist count zero,
+/// and each directory's own `README.md` is the home's guide rather than a plan or a playbook.
+pub fn home_counts(home: &Path) -> repomon_core::model::RepomindCounts {
+    repomon_core::model::RepomindCounts {
+        active_plans: markdown_files(&home.join("plans").join("active")),
+        standing: markdown_files(&home.join("plans").join("standing")),
+        playbooks: markdown_files(&home.join("playbooks")),
+        drafts: markdown_files(&home.join("playbooks").join("drafts")),
+    }
+}
+
+/// Markdown files directly in `dir`, excluding its `README.md`. A missing directory is zero.
+fn markdown_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.ends_with(".md") && !name.eq_ignore_ascii_case("README.md")
+        })
+        .count()
+}
+
 /// One-time file-first migration, run once per daemon start right after [`ensure_home`]: records
 /// that only exist in the daemon's own storage are written into the home so an agent can read
 /// them as files. Nothing is ever deleted from the old location, so a rollback still finds it.
@@ -471,6 +497,40 @@ mod tests {
         assert!(
             playbooks::search(&home, "wip", 10).unwrap().is_empty(),
             "a migrated draft stays inert"
+        );
+    }
+
+    #[test]
+    fn home_counts_reads_the_plans_and_playbook_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        ensure_layout(&home).unwrap();
+        std::fs::write(home.join("plans/active/ship-r2.md"), "x").unwrap();
+        std::fs::write(home.join("plans/active/README.md"), "guide").unwrap();
+        std::fs::write(home.join("plans/standing/nightly.md"), "x").unwrap();
+        std::fs::write(home.join("playbooks/blessed.md"), "x").unwrap();
+        std::fs::write(home.join("playbooks/drafts/wip.md"), "x").unwrap();
+        std::fs::write(home.join("playbooks/drafts/notes.txt"), "x").unwrap();
+
+        let counts = home_counts(&home);
+
+        assert_eq!(
+            counts,
+            repomon_core::model::RepomindCounts {
+                active_plans: 1,
+                standing: 1,
+                playbooks: 1,
+                drafts: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn home_counts_are_zero_when_the_home_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            home_counts(&dir.path().join("nope")),
+            repomon_core::model::RepomindCounts::default()
         );
     }
 }

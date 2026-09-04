@@ -256,3 +256,56 @@ async fn a_playbook_draft_is_inert_until_approval_moves_the_file() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+/// `repomind.status` carries the export state and the home's counts, so the R4 panel can render
+/// them without a second round trip.
+#[tokio::test]
+async fn repomind_status_reports_the_export_state_and_home_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("repomind");
+    let mut config = Config::default();
+    config.repomind.home = home.to_string_lossy().into_owned();
+    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
+    std::fs::write(home.join("plans/active/ship-r2.md"), "goal\n").unwrap();
+
+    let sock = std::env::temp_dir().join(format!("repomon-rms-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    // A save leaves an export pending; nothing has run yet.
+    call(
+        &mut stream,
+        1,
+        "playbook.save",
+        Some(json!({ "name": "fleet-sweep", "content": "sweep\n" })),
+    )
+    .await;
+
+    let status = call(&mut stream, 2, "repomind.status", None).await;
+    assert!(status.error.is_none(), "{:?}", status.error);
+    let status = status.result.unwrap();
+    assert_eq!(status["exists"], json!(true));
+    assert_eq!(status["export"]["pending"], json!(true));
+    assert_eq!(status["export"]["last_run"], Value::Null);
+    assert_eq!(status["counts"]["active_plans"], json!(1));
+    assert_eq!(status["counts"]["drafts"], json!(1));
+    assert_eq!(status["counts"]["playbooks"], json!(0));
+    assert_eq!(status["counts"]["standing"], json!(0));
+
+    call(&mut stream, 3, "repomind.export", None).await;
+
+    let status = call(&mut stream, 4, "repomind.status", None).await;
+    let status = status.result.unwrap();
+    assert_eq!(status["export"]["pending"], json!(false));
+    assert!(status["export"]["last_run"].is_string(), "{status}");
+    assert_eq!(status["export"]["last_error"], Value::Null);
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

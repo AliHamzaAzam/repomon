@@ -1562,7 +1562,7 @@ async fn repo_notes_get_set_round_trip() {
     assert_eq!(got["repo_id"], json!(repo_id));
     assert_eq!(got["name"], json!(repo_name));
 
-    // Set → get round-trips and reports the path inside the repomind home.
+    // Set then get round-trips and reports the path inside the repomind home.
     let r = call(
         &mut stream,
         3,

@@ -177,7 +177,20 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `orchestrator.key` | `{ key, literal=false }` | `null` (**deprecated** alias for `agent.key`: one keystroke to repomind, literal char or key name) |
 | `orchestrator.watch` | `{ on }` | `null` (**deprecated** alias: gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
 | `orchestrator.resize` | `{ cols, rows }` | `null` (**deprecated** alias: size the controller window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
-| `repomind.status` | — | `{ home, exists, repo_id?, lane_id?, window?, max_controllers }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. Never creates anything) |
+| `repomind.status` | — | [`RepomindStatus`](../apps/desktop/src/bindings/RepomindStatus.ts): `{ home, exists, repo_id?, lane_id?, window?, max_controllers, export, counts }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. `export` is `{ last_run?, pending, last_error? }`: when the one-way export last ran, whether a write is waiting for its 5 s debounce, and the last failure. `counts` is `{ active_plans, standing, playbooks, drafts }`, read from `plans/active/`, `plans/standing/`, `playbooks/`, and `playbooks/drafts/` (each directory's own `README.md` never counts). Never creates anything) |
+| `repomind.export` | — | `{ files, kinds }` (**local-only**: run the one-way export now instead of waiting out the debounce. `files` are the home-relative paths written or removed, `kinds` the record kinds they belong to (`journal`, `schedules`, `approvals`, `notes`, `playbooks`), which also form the commit subject `chore(repomind): export <kinds>`. Empty when nothing changed. Silently a no-op when the home does not exist) |
+
+The daemon exports its own records into the home one way and commits each batch there as
+`Repomind <repomind@local>`: journal rows become `journal/YYYY-MM-DD.md` sections keyed by row id
+in an HTML comment, schedules become `plans/standing/<slug>.md`, and the approval rules become
+`profile/approvals.md`. Exports are debounced 5 s behind a journal, schedule, or approval-rule
+write, and commits are batched at most once a minute; nothing outside those targets is written,
+and a home that is not a git repo simply skips the commit. Repo notes (`fleet/<repo>/notes.md`)
+and playbooks (`playbooks/<name>.md`, drafts under `playbooks/drafts/`) are file-first: the
+`repo.notes.*` and `playbook.*` RPCs read and write those files directly, and approving a
+playbook moves its file up out of `drafts/`. A daemon start migrates anything that still only
+exists in SQLite or the app-support `repo-notes/` directory into the home, and never deletes the
+original.
 
 Repomind runs in the **controller lane**, the main worktree of the repomind home repo
 (`~/repomind` by default, `[repomind] home`). It is registered like any other repo, and its lane

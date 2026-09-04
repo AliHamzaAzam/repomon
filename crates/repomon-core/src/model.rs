@@ -386,6 +386,68 @@ pub struct ApprovalRule {
     pub created_at: DateTime<Utc>,
 }
 
+/// The read-only `repomind.status` payload: where the home lives, which lane and window carry
+/// the controller, how the one-way export is doing, and what the home holds. Assembled per call
+/// and never persisted.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepomindStatus {
+    /// The home repo path, tilde already expanded.
+    pub home: String,
+    /// Whether it is on disk yet. `repomind.status` never creates anything.
+    pub exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub repo_id: Option<RepoId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub lane_id: Option<LaneId>,
+    /// The controller lane's last recorded tmux window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// How many controllers may run in the lane at once (`[repomind] max_controllers`).
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub max_controllers: usize,
+    pub export: RepomindExportStatus,
+    pub counts: RepomindCounts,
+}
+
+/// How the daemon's one-way export into the home is doing.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RepomindExportStatus {
+    /// When the last export run finished, successfully or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<DateTime<Utc>>,
+    /// Whether a write is waiting for the debounced run.
+    pub pending: bool,
+    /// The last export failure, cleared by the next successful run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// What the home holds right now, counted from its directories. `README.md` in any of them is
+/// the home's own guide, never a plan or a playbook.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepomindCounts {
+    /// Goals in flight: `plans/active/*.md`.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub active_plans: usize,
+    /// Standing orchestrations mirrored from the schedules: `plans/standing/*.md`.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub standing: usize,
+    /// Approved playbooks: `playbooks/*.md`.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub playbooks: usize,
+    /// Drafts awaiting a human: `playbooks/drafts/*.md`.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub drafts: usize,
+}
+
 /// The kind of coding agent backing a session. An open enum from day one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AgentKind {
