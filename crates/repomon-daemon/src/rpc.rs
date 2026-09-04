@@ -4868,6 +4868,11 @@ pub async fn dispatch(
                     "REPOMON_MCP_MODE".into(),
                     repomon_mcp::MCP_MODE_ORCHESTRATOR.into(),
                 ),
+                // Blanked, not inherited: the controller window is an ordinary lane window and
+                // would otherwise pick up whatever identity the daemon's own environment carries
+                // (a daemon started from inside a managed agent's shell has one), letting the
+                // controller send fleet mail as that agent. An empty token reads as "no identity".
+                ("REPOMON_MCP_IDENTITY_TOKEN".into(), String::new()),
             ]);
             let tmux = ctx.backend.clone();
             let lane_id = home.lane_id;
@@ -4912,12 +4917,13 @@ pub async fn dispatch(
                 (cfg.repomind_home(), cfg.repomind.max_controllers)
             };
             let lane_id = ctx.store.controller_lane().await.map_err(internal)?;
-            let repo = ctx
-                .store
-                .find_repo_by_path(home.clone())
-                .await
-                .map_err(internal)?;
-            let window = ctx.controller_lane_window().await;
+            // Read the repo and window off the controller lane's own metadata rather than by
+            // matching the configured path: `repo.add` canonicalizes what it stores, so the two
+            // spellings differ whenever the configured home goes through a symlink.
+            let meta = ctx.store.list_lane_meta().await.map_err(internal)?;
+            let lane_meta = lane_id.and_then(|id| meta.into_iter().find(|m| m.id == id));
+            let repo_id = lane_meta.as_ref().map(|m| m.repo_id);
+            let window = lane_meta.and_then(|m| m.tmux_window);
             let exists = {
                 let probe = home.clone();
                 tokio::task::spawn_blocking(move || probe.exists())
@@ -4927,7 +4933,7 @@ pub async fn dispatch(
             Ok(json!({
                 "home": home.to_string_lossy(),
                 "exists": exists,
-                "repo_id": repo.map(|r| r.id),
+                "repo_id": repo_id,
                 "lane_id": lane_id,
                 "window": window,
                 "max_controllers": max_controllers,

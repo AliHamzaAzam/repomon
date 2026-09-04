@@ -524,7 +524,7 @@ impl Ctx {
 
     /// The window repomind is running in: the tracked session's when one is tracked, otherwise
     /// the controller lane's last recorded window, otherwise the legacy [`ORCHESTRATOR_WINDOW`].
-    /// Takes `self.orchestrator`, so never call it while that lock is held — use
+    /// Takes `self.orchestrator`, so never call it while that lock is held; use
     /// [`Ctx::controller_lane_window`] there instead.
     pub(crate) async fn controller_window(&self) -> String {
         if let Some(session) = self.orchestrator.lock().await.as_ref() {

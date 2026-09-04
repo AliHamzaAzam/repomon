@@ -2,7 +2,7 @@
 //!
 //! Repomind's memory lives in a git repo on disk (`~/repomind` by default, `[repomind] home` in
 //! the config) rather than only in the daemon's SQLite. This module makes sure that repo exists,
-//! is registered like any other repo, and has exactly one lane marked `role = "controller"` —
+//! is registered like any other repo, and has exactly one lane marked `role = "controller"`:
 //! the lane every controller agent runs in.
 //!
 //! Two rules shape everything here:
