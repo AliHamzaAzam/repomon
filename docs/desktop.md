@@ -87,7 +87,9 @@ Git, repomind, and the compact editor share one right-rail panel host: a resizab
 left edge) with one header button per tab. Pressing a tab's chord (or clicking its header button)
 opens the rail on that tab if it is closed, switches to that tab if the rail is open on another one,
 and closes the rail if it is already open on that tab. Each header button's active state is scoped
-to its own tab, so opening on Git does not light up the Repomind button.
+to its own tab, so opening on Git does not light up the Repomind button. The **Repomind** button
+also carries a small state dot, the counterpart to Repomail's unread badge: teal while a controller
+is running, amber (or red) when one wants you, and nothing at all when the home is off.
 
 ### Editor workspace
 
@@ -156,6 +158,19 @@ outgrow the visible height.
 A project header names its own count ("12 lanes") and carries an amber pip with the number of its
 agents that need you, so a collapsed project still reports. Hidden projects sit behind one
 disclosure at the bottom; expanding gives one dense line each, with an unhide button on hover.
+
+Above the projects sits one pinned **Repomind** row, in the same two-line anatomy. Its first line
+is the brain mark, the name, the needs-you pip, and the same one-word status pill every lane
+carries, reading "off" when no controller is running. Its second line is the home path and what
+the home holds: the number of controllers in the lane and the number of goals in `plans/active`.
+Clicking it focuses the controller lane's agents in the terminal bay exactly as clicking a lane
+row does; right-clicking offers **Start Repomind** (or **Stop Repomind**), **Open panel**, and
+**Open home in editor**. The row is the sidebar's first stop, so `j` / `k` and the arrow keys walk
+from it into the project groups.
+
+The repomind home is not one of those groups. It is registered like any other repo, but the
+sidebar files it under the pinned row instead, and its controllers are counted there rather than in
+the project headers or the "Needs you" and "Running" chips, so nothing is counted twice.
 
 A worktree lane whose branch is already contained in the repository's default branch is marked
 "merged": the work landed, and the worktree is bookkeeping. Right-clicking a lane row offers
@@ -369,13 +384,38 @@ The repomind panel is one tab of the right-rail panel host (alongside git and th
 and opens with `mod+5`. `mod+shift+5` blows it up to full screen, and Escape or **Exit** brings it
 back; going full screen opens the panel if it was closed, so it has somewhere to shrink back to.
 
-**Repomind lives in a lane now.** Starting repomind creates (once) a home repo at `~/repomind` -
-its memory: plans, playbooks, per-repo notes, a journal - registers it like any other repo, and
-runs the agent in that repo's lane, marked as the *controller lane*. Everything the app already
-does with a lane therefore works on it: the agent shows in the fleet list, the terminal bay
-renders its pane, and Multitasking and Supervision treat its agents like any others. That lane
-cannot be deleted or merged from the fleet tools, and a worker agent cannot spawn into it. A
-dedicated sidebar row and a panel rebuilt on the lane come later; for now the panel is unchanged.
+**Repomind lives in a lane.** Starting repomind creates (once) a home repo at `~/repomind` - its
+memory: plans, playbooks, per-repo notes, a journal - registers it like any other repo, and runs
+the agent in that repo's lane, marked as the *controller lane*. Everything the app already does
+with a lane therefore works on it: the terminal bay renders its pane, Multitasking lists its agents
+(under their own **Repomind** group in the pane picker rather than under a project), and Supervision
+edits its policy like any lane's. That lane cannot be deleted or merged from the fleet tools, and a
+worker agent cannot spawn into it. The one place it is treated differently is the fleet sidebar,
+which gives it the pinned row described above instead of a project group.
+
+**Supervision defaults.** The first time the home is ensured, the daemon seeds the controller lane
+with `hold` on the destructive dialog classes (deletion, push to a remote, credential access,
+install, device access): a controller holds the full fleet catalog, so a permission prompt in its
+lane is about the whole fleet rather than about one worktree. Supervision itself stays off until
+you turn it on, exactly as for any other lane, and the seed is written once - relax a class in
+**Settings > Supervision** and your choice survives every restart.
+
+**What the panel shows.** Its header states the controller lane in the fleet's own vocabulary, the
+number of controllers in it, and the lifecycle: **Start** or **Stop**, plus a **+** that spawns
+another controller into the lane up to the configured maximum. Below that, three views:
+
+- **Home** reads the home itself. *Active plans* lists one entry per file in `plans/active`, each
+  with its title and its next step; clicking one opens that file in the editor on the home lane.
+  *Journal* shows the last entries of today's `journal/` digest. *Boot context* says when the boot
+  document was last assembled, how big it came out, and what the token budget left out, with
+  **Regenerate** and **Open boot.md**. *Export* says when the daemon's one-way export last ran,
+  whether one is pending, and what failed if anything did, with **Export now**. *Controllers* lists
+  the agents in the lane with their status pill and the daemon's reason for it.
+- **Live Feed** and **Transcript** are the primary controller's own session, unchanged.
+
+The Home view reads the home through the ordinary lane file RPCs, because the home is an ordinary
+lane; it re-reads when the plan count moves, when an export lands, or when you switch back to it,
+not on every heartbeat.
 
 **What a fresh repomind already knows.** It does not start blank. Before every start, the daemon
 assembles a boot document from the home and hands it to the agent, so the first thing in its head
