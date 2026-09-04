@@ -37,6 +37,7 @@ import { createNotificationStore } from "./stores/notifications";
 import { createRepomindStore } from "./stores/repomind";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
+import { readOnboardingStep } from "./stores/onboarding";
 import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
 import EditorWorkspace from "./components/EditorWorkspace";
 import FileFinder from "./components/FileFinder";
@@ -136,7 +137,9 @@ function App(props: AppProps) {
     if (connection().phase === "connected" && fleet.synced()) {
       const repos = fleet.repos();
       const completed = readOnboardingCompleted();
-      if (!completed && repos.length === 0) {
+      // A fresh install has no repos; a wizard abandoned midway has a stored resume step, and
+      // usually a repo too, since adding one is step 3. Both cases reopen it.
+      if (!completed && (repos.length === 0 || readOnboardingStep() !== null)) {
         setOnboardingOpen(true);
       }
     }
@@ -810,6 +813,7 @@ function App(props: AppProps) {
         >
           <Onboarding
             actions={actions}
+            notifications={notifications}
             onComplete={() => {
               saveOnboardingCompleted(true);
               setOnboardingOpen(false);

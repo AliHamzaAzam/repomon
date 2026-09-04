@@ -240,6 +240,7 @@ describe("Repomon desktop shell", () => {
 
   it("mounts first-run onboarding wizard when repos=0 and onboarding not completed", async () => {
     localStorage.removeItem("repomon:onboarding-completed");
+    localStorage.removeItem("repomon:onboarding-step");
     const fleetSource: FleetSource = {
       load: async () => ({
         repos: [],
@@ -266,11 +267,11 @@ describe("Repomon desktop shell", () => {
 
     await waitFor(() => {
       expect(within(container).getByTestId("onboarding-wizard")).toBeInTheDocument();
-      expect(within(container).getByText(/Orchestrate coding agents across git worktrees/i)).toBeInTheDocument();
+      expect(within(container).getByText("Set up Repomon")).toBeInTheDocument();
     });
 
     // Skip setup sets the completed flag and closes the overlay
-    const skipBtn = within(container).getByRole("button", { name: "Skip setup wizard" });
+    const skipBtn = within(container).getByRole("button", { name: "Skip setup" });
     fireEvent.click(skipBtn);
 
     await waitFor(() => {
@@ -279,8 +280,57 @@ describe("Repomon desktop shell", () => {
     });
   });
 
+  // The two full-window headers (the shell's and the wizard's) are one component, so the macOS
+  // traffic-light inset and the brand treatment cannot drift apart between them. Before this,
+  // the wizard drew its own header and its mark sat under the traffic lights.
+  it("draws the same brand lockup in the shell header and the wizard header", async () => {
+    localStorage.removeItem("repomon:onboarding-completed");
+    localStorage.removeItem("repomon:onboarding-step");
+    const fleetSource: FleetSource = {
+      load: async () => ({
+        repos: [],
+        lanes: [],
+        usage: [],
+        terminals: [],
+        sortReposByActivity: null, sortMode: null, tabSortMode: null,
+      }),
+      refreshUsage: async () => undefined,
+      subscribe: async () => () => undefined,
+    };
+
+    const { container } = render(() => (
+      <App
+        connectionSource={sourceFor({
+          phase: "connected",
+          endpoint: "/tmp/repomon.sock",
+          message: null,
+          daemon: null,
+        })}
+        fleetSource={fleetSource}
+      />
+    ));
+
+    await waitFor(() => {
+      expect(within(container).getByTestId("onboarding-wizard")).toBeInTheDocument();
+    });
+
+    const headers = Array.from(container.querySelectorAll("[data-window-chrome]"));
+    expect(headers).toHaveLength(2);
+
+    const lockups = headers.map((header) => header.querySelector("[data-brand-lockup]"));
+    expect(lockups.every(Boolean)).toBe(true);
+    // navigator.platform is pinned to macOS for this file, so both must carry the inset.
+    for (const header of headers) expect(header.className).toContain("pl-[78px]");
+    // Same component, same mark: compare the drawn glyph rather than the wrapper, which differs
+    // by design (the shell's lockup opens Settings, the wizard's is inert).
+    const marks = lockups.map((lockup) => lockup!.querySelector("svg")!.outerHTML);
+    expect(marks[0]).toBe(marks[1]);
+    expect(lockups.map((lockup) => lockup!.textContent)).toEqual(["Repomon", "Repomon"]);
+  });
+
   it("does not mount onboarding wizard if user already has repositories", async () => {
     localStorage.removeItem("repomon:onboarding-completed");
+    localStorage.removeItem("repomon:onboarding-step");
     const fleetSource: FleetSource = {
       load: async () => ({
         repos: [{ id: 1, name: "repo-1", path: "/path/to/1", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null }],

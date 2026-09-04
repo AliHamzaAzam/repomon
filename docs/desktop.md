@@ -26,9 +26,16 @@ uses the built-in ConPTY host instead. If you launch the app from the Dock or Fi
 terminal, it resolves your login shell's `PATH` at startup, so tools installed in `~/.local/bin` or
 `/opt/homebrew/bin` are found.
 
-A **first-run setup wizard** walks a new install through a welcome screen, a system check (the
-same tmux/git/agent-CLI probes as Settings > System, below), adding your first repository, and a
-quick tour, so there is no empty window to figure out on first launch.
+A **first-run setup wizard** takes a new install through seven steps: a welcome screen that says
+what Repomon does and what a lane and a worktree are, a system check (the same tmux/git/agent-CLI
+probes as Settings > System, below, with install commands and a re-check button), adding your first
+repositories, choosing a default agent from the CLIs that were actually found, turning on desktop
+notifications and the needs-you alert, an introduction to the Repomind home at `~/repomind` with an
+option to start it when setup finishes, and a summary of what was set up. A rail across the top
+shows where you are and takes you back to any step you have already seen; Back and Continue sit in
+the footer, Enter continues, and Skip setup (or Esc) leaves for the app at any point. Each move is
+written to local storage, so quitting mid-way to install a CLI or clone a repo resumes on the same
+step rather than at the start. Settings > General > Replay Onboarding reopens it from the top.
 
 ## The app icon
 

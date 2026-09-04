@@ -690,9 +690,9 @@ export default function SettingsModal(props: SettingsModalProps) {
                 <p class="section-label">Onboarding & Setup</p>
                 <div class="flex items-center justify-between gap-3">
                   <div class="min-w-0">
-                    <p class="text-xs font-medium text-foreground">Welcome Guide</p>
+                    <p class="text-xs font-medium text-foreground">Setup wizard</p>
                     <p class="mt-0.5 text-[11px] text-muted leading-snug">
-                      Replay the first-run onboarding wizard to review system setup, add repositories, and explore Repomon workflows.
+                      Run first-run setup again from the top: system check, repositories, default agent, alerts, and Repomind.
                     </p>
                   </div>
                   <button

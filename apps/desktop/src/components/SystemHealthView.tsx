@@ -57,10 +57,15 @@ export function getAgentInstallInfo(kind: string, command: string): { command: s
 export interface SystemHealthViewProps {
   onConfigureCustomAgents?: () => void;
   showTitle?: boolean;
+  /// Draw the re-check control even when the title block is hidden. Settings gets it for free
+  /// inside the title row; the setup wizard hides that row but still needs the button, because
+  /// "install the CLI, then check again" is the whole point of the step.
+  showRefresh?: boolean;
 }
 
 export default function SystemHealthView(props: SystemHealthViewProps) {
   const showTitle = () => props.showTitle ?? true;
+  const showRefresh = () => props.showRefresh ?? showTitle();
   const [doctorResult, setDoctorResult] = createSignal<SystemDoctorResult | null>(null);
   const [doctorLoading, setDoctorLoading] = createSignal(false);
   const [doctorError, setDoctorError] = createSignal<string | null>(null);
@@ -95,6 +100,27 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
     }
   }
 
+  /// The re-check control. Declared once and placed twice: inside the title row for Settings,
+  /// and on its own for the setup wizard, which draws its own heading.
+  function RecheckButton() {
+    return (
+      <button
+        type="button"
+        class="focus-ring flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs font-medium text-foreground hover:bg-line/40 transition-colors disabled:opacity-60 cursor-pointer"
+        disabled={doctorLoading()}
+        onClick={() => void fetchDoctor()}
+        title="Refresh system dependency status"
+        aria-label="Refresh system health status"
+      >
+        <IconRefresh
+          size={13}
+          class={doctorLoading() ? "animate-spin text-accent" : "text-muted"}
+        />
+        <span>{doctorLoading() ? "Checking…" : "Check again"}</span>
+      </button>
+    );
+  }
+
   return (
     <section class="space-y-5">
       {/* Header with Title, Status & Refresh */}
@@ -106,20 +132,12 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
               Daemon runtime dependencies, terminal multiplexer, and detected agent CLI tools.
             </p>
           </div>
-          <button
-            type="button"
-            class="focus-ring flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs font-medium text-foreground hover:bg-line/40 transition-colors disabled:opacity-60 cursor-pointer"
-            disabled={doctorLoading()}
-            onClick={() => void fetchDoctor()}
-            title="Refresh system dependency status"
-            aria-label="Refresh system health status"
-          >
-            <IconRefresh
-              size={13}
-              class={doctorLoading() ? "animate-spin text-accent" : "text-muted"}
-            />
-            <span>{doctorLoading() ? "Checking…" : "Refresh"}</span>
-          </button>
+          <RecheckButton />
+        </div>
+      </Show>
+      <Show when={!showTitle() && showRefresh()}>
+        <div class="flex justify-end">
+          <RecheckButton />
         </div>
       </Show>
 

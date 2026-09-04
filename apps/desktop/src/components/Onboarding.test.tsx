@@ -1,243 +1,450 @@
-import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Repo } from "../bindings";
+import type { Repo, SystemDoctorResult } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
+import { ONBOARDING_STEPS, ONBOARDING_STEP_KEY, type OnboardingStepId } from "../stores/onboarding";
 import Onboarding from "./Onboarding";
 
-// Mock daemonCall for SystemHealthView
+const ALL_FOUND: SystemDoctorResult = {
+  tmux: { available: true, version: "tmux 3.4", source: "bundled", path: "/bundled/tmux" },
+  git: { available: true, version: "git 2.44.0", path: "/usr/bin/git" },
+  agents: [
+    { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
+    { kind: "codex", name: "Codex", command: "codex", detected: true },
+    { kind: "opencode", name: "OpenCode", command: "opencode", detected: false },
+  ],
+} as unknown as SystemDoctorResult;
+
+const NOTHING_FOUND: SystemDoctorResult = {
+  tmux: { available: false, version: null, source: null, path: null },
+  git: { available: false, version: null, path: null },
+  agents: [
+    { kind: "claude-code", name: "Claude Code", command: "claude", detected: false },
+    { kind: "codex", name: "Codex", command: "codex", detected: false },
+  ],
+} as unknown as SystemDoctorResult;
+
+const BASE_CONFIG = {
+  worktree_template: "",
+  default_agent: null,
+  notify_enabled: false,
+  notify_needs_you: false,
+};
+
+/// One stub daemon for the whole file: the wizard reads `system.doctor`, `config.get` and
+/// `repomind.status` on mount, and writes through `config.set` and `orchestrator.start`.
+const daemon = {
+  doctor: ALL_FOUND,
+  config: { ...BASE_CONFIG } as Record<string, unknown>,
+  repomind: { home: "/Users/dev/repomind", exists: true },
+  calls: [] as Array<{ method: string; params: unknown }>,
+  fail: null as string | null,
+};
+
 vi.mock("../ipc/rpc", () => ({
-  daemonCall: vi.fn().mockImplementation((method: string) => {
-    if (method === "system.doctor") {
-      return Promise.resolve({
-        tmux: { available: true, version: "tmux 3.4", source: "bundled", path: "/path/to/tmux" },
-        git: { available: true, version: "git 2.44.0", path: "/usr/bin/git" },
-        agents: [
-          { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
-        ],
-      });
+  daemonCall: vi.fn(async (method: string, params?: unknown) => {
+    daemon.calls.push({ method, params });
+    if (daemon.fail === method) throw new Error("daemon refused");
+    switch (method) {
+      case "system.doctor":
+        return daemon.doctor;
+      case "config.get":
+        return daemon.config;
+      case "config.set":
+        daemon.config = params as Record<string, unknown>;
+        return daemon.config;
+      case "repomind.status":
+        return daemon.repomind;
+      default:
+        return {};
     }
-    return Promise.resolve({});
   }),
 }));
 
 function createMockActions(repos: Repo[] = []): ActionsStore {
   return {
-    fleet: {
-      repos: () => repos,
-      visibleRepos: () => repos,
-      lanes: () => [],
-      unhiddenLanes: () => [],
-      selectedLaneId: () => null,
-      selectedLane: () => undefined,
-      selectedRepo: () => undefined,
-      setSelectedLaneId: vi.fn(),
-      setFocusedWindow: vi.fn(),
-      toggleRepoCollapsed: vi.fn(),
-      isRepoCollapsed: () => false,
-      toggleLaneHidden: vi.fn(),
-      toggleLanePinned: vi.fn(),
-      hideAllInactive: vi.fn(),
-      unhideAll: vi.fn(),
-      error: () => null,
-      dismissError: vi.fn(),
-      refresh: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn(),
-      stop: vi.fn(),
-    } as any,
-    settingsOpen: () => false,
-    settingsTab: () => "general",
-    openSettings: vi.fn(),
-    openSettingsTab: vi.fn(),
-    closeSettings: vi.fn(),
-    controlOpen: () => false,
-    openControl: vi.fn(),
-    closeControl: vi.fn(),
-    toggleControl: vi.fn(),
-    spawnLane: () => null,
-    spawn: vi.fn(),
-    closeSpawn: vi.fn(),
-    notesRepo: () => null,
-    openRepoNotes: vi.fn(),
-    closeRepoNotes: vi.fn(),
-    newLaneOpen: () => false,
-    newLaneRepoId: () => null,
-    newLane: vi.fn(),
-    closeNewLane: vi.fn(),
-    renameTarget: () => null,
-    rename: vi.fn(),
-    closeRename: vi.fn(),
-    confirmOptions: () => null,
-    confirm: vi.fn(),
-    closeConfirm: vi.fn(),
-    error: () => null,
-    dismissError: vi.fn(),
-    reportError: vi.fn(),
+    fleet: { repos: () => repos },
     addRepo: vi.fn().mockResolvedValue(undefined),
-    removeRepo: vi.fn(),
-    setRepoHidden: vi.fn().mockResolvedValue(undefined),
-    confirmPlaybookDelete: vi.fn(),
-    pinLane: vi.fn().mockResolvedValue(undefined),
-    mergeLane: vi.fn(),
-    deleteLane: vi.fn(),
-    stopAgent: vi.fn().mockResolvedValue(undefined),
-    adoptAgent: vi.fn().mockResolvedValue(undefined),
-    restoreAllAgents: vi.fn().mockResolvedValue(0),
+    openSettingsTab: vi.fn(),
   } as unknown as ActionsStore;
 }
 
-describe("Onboarding component", () => {
-  afterEach(cleanup);
-  it("renders Step 1 (Welcome) and walks through all 4 steps to completion", async () => {
-    const actions = createMockActions();
-    const onComplete = vi.fn();
-    const onSkip = vi.fn();
+function mountWizard(options: {
+  step?: OnboardingStepId;
+  repos?: Repo[];
+  notifications?: { nativeEnabled: () => boolean; enableNative: () => Promise<boolean> };
+} = {}) {
+  const actions = createMockActions(options.repos);
+  const onComplete = vi.fn();
+  const onSkip = vi.fn();
+  const result = render(() => (
+    <Onboarding
+      actions={actions}
+      initialStep={options.step}
+      notifications={options.notifications}
+      onComplete={onComplete}
+      onSkip={onSkip}
+    />
+  ));
+  return { ...result, actions, onComplete, onSkip };
+}
 
-    render(() => (
-      <Onboarding
-        actions={actions}
-        onComplete={onComplete}
-        onSkip={onSkip}
-      />
-    ));
+/// The most recent record sent to `config.set`.
+function lastConfigWrite(): Record<string, unknown> {
+  const writes = daemon.calls.filter((call) => call.method === "config.set");
+  return (writes[writes.length - 1]?.params ?? {}) as Record<string, unknown>;
+}
 
-    // STEP 1: Welcome
-    expect(screen.getByText(/Orchestrate coding agents across git worktrees/i)).toBeInTheDocument();
-    expect(screen.getByText("Isolated Worktrees")).toBeInTheDocument();
-    expect(screen.getByText("Multi-Agent Runtimes")).toBeInTheDocument();
+const stepBody = () => document.querySelector("[data-step-body]")?.getAttribute("data-step-body");
 
-    const getStartedBtn = screen.getByRole("button", { name: "Get started with setup" });
-    fireEvent.click(getStartedBtn);
+beforeEach(() => {
+  daemon.doctor = ALL_FOUND;
+  daemon.config = { ...BASE_CONFIG };
+  daemon.repomind = { home: "/Users/dev/repomind", exists: true };
+  daemon.calls = [];
+  daemon.fail = null;
+  localStorage.removeItem(ONBOARDING_STEP_KEY);
+});
 
-    // STEP 2: System Check
-    expect(await screen.findByText("System Health & Tooling")).toBeInTheDocument();
-    expect(screen.getByText("Repomon Built-in")).toBeInTheDocument();
+afterEach(cleanup);
 
-    // Click Back to verify backward navigation
-    const backBtn = screen.getByRole("button", { name: /Back/i });
-    fireEvent.click(backBtn);
-    expect(screen.getByText(/Orchestrate coding agents across git worktrees/i)).toBeInTheDocument();
+describe("setup wizard shell", () => {
+  it("keeps its header clear of the macOS traffic lights and draggable", () => {
+    Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+    const { container } = mountWizard();
+    const header = container.querySelector("[data-window-chrome]")!;
 
-    // Go forward again to Step 2
-    fireEvent.click(screen.getByRole("button", { name: "Get started with setup" }));
-    expect(await screen.findByText("System Health & Tooling")).toBeInTheDocument();
-
-    // Click Continue to Step 3
-    const continueBtn = screen.getByRole("button", { name: /Continue/i });
-    fireEvent.click(continueBtn);
-
-    // STEP 3: Repository (Empty state)
-    expect(screen.getByText("Add Your First Repository")).toBeInTheDocument();
-    expect(screen.getByText("No repository tracked yet")).toBeInTheDocument();
-
-    const chooseFolderBtn = screen.getByRole("button", { name: /Choose Folder…/i });
-    fireEvent.click(chooseFolderBtn);
-    expect(actions.addRepo).toHaveBeenCalledTimes(1);
-
-    // Continue to Step 4
-    const continueWithoutRepoBtn = screen.getByRole("button", { name: /Continue without repository/i });
-    fireEvent.click(continueWithoutRepoBtn);
-
-    // STEP 4: Ready / Done
-    expect(screen.getByText(/You're ready to orchestrate!/i)).toBeInTheDocument();
-    expect(screen.getByText("1. Sidebar & Lanes")).toBeInTheDocument();
-    expect(screen.getByText("2. Spawn Agent")).toBeInTheDocument();
-    expect(screen.getByText("3. Command Center")).toBeInTheDocument();
-
-    const finishBtn = screen.getByRole("button", { name: "Open Mission Control" });
-    fireEvent.click(finishBtn);
-
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(onSkip).not.toHaveBeenCalled();
+    expect(header.className).toContain("pl-[78px]");
+    expect(header.hasAttribute("data-tauri-drag-region")).toBe(true);
+    expect(header.querySelector("[data-brand-lockup]")).toBeInTheDocument();
   });
 
-  it("handles Skip setup button directly from any step", () => {
-    const actions = createMockActions();
-    const onComplete = vi.fn();
-    const onSkip = vi.fn();
+  it("uses ordinary padding on platforms with no overlay buttons", () => {
+    Object.defineProperty(navigator, "platform", { value: "Linux x86_64", configurable: true });
+    const { container } = mountWizard();
+    const header = container.querySelector("[data-window-chrome]")!;
 
-    render(() => (
-      <Onboarding
-        actions={actions}
-        onComplete={onComplete}
-        onSkip={onSkip}
-      />
-    ));
+    expect(header.className).toContain("px-3.5");
+    expect(header.className).not.toContain("pl-[78px]");
+    Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  });
 
-    const skipBtn = screen.getByRole("button", { name: "Skip setup wizard" });
-    fireEvent.click(skipBtn);
+  it("shows where you are in the sequence and offers Back, Continue and Skip", () => {
+    mountWizard({ step: "repos" });
+
+    const rail = screen.getByRole("navigation", { name: "Setup progress" });
+    expect(rail.querySelectorAll("li")).toHaveLength(ONBOARDING_STEPS.length);
+    expect(rail.querySelector('[aria-current="step"]')!.textContent).toContain("Repos");
+
+    expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Continue/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Skip setup" })).toBeInTheDocument();
+  });
+
+  it("has nowhere to go back to on the first step", () => {
+    mountWizard({ step: "welcome" });
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+  });
+
+  it("offers the rail as a way back, never as a way to skip ahead", () => {
+    mountWizard({ step: "repos" });
+    const rail = screen.getByRole("navigation", { name: "Setup progress" });
+    const buttons = Array.from(rail.querySelectorAll("button"));
+
+    expect(buttons[0]).toBeEnabled();
+    expect(buttons[1]).toBeEnabled();
+    expect(buttons[2]).toBeDisabled();
+    expect(buttons[3]).toBeDisabled();
+
+    fireEvent.click(buttons[0]!);
+    expect(stepBody()).toBe("welcome");
+  });
+});
+
+describe("setup wizard sequence", () => {
+  it("walks welcome to done and finishes", async () => {
+    const { onComplete } = mountWizard();
+    const seen: string[] = [];
+
+    for (let i = 0; i < ONBOARDING_STEPS.length; i += 1) {
+      seen.push(stepBody()!);
+      fireEvent.click(screen.getByRole("button", { name: /Continue|Open Repomon/ }));
+    }
+
+    expect(seen).toEqual(ONBOARDING_STEPS.map((step) => step.id));
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it("goes back the way it came", () => {
+    mountWizard({ step: "agent" });
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(stepBody()).toBe("repos");
+  });
+
+  it("labels the last step's action for what it does", () => {
+    mountWizard({ step: "done" });
+    expect(screen.getByRole("button", { name: /Open Repomon/ })).toBeInTheDocument();
+  });
+});
+
+describe("setup wizard resume", () => {
+  it("records the step on every move so quitting mid-way loses nothing", () => {
+    mountWizard();
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    expect(localStorage.getItem(ONBOARDING_STEP_KEY)).toBe("system");
+
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    expect(localStorage.getItem(ONBOARDING_STEP_KEY)).toBe("repos");
+  });
+
+  it("resumes where it left off", () => {
+    localStorage.setItem(ONBOARDING_STEP_KEY, "repomind");
+    mountWizard();
+    expect(stepBody()).toBe("repomind");
+  });
+
+  it("starts at the top when the stored step is not one this build has", () => {
+    localStorage.setItem(ONBOARDING_STEP_KEY, "quick-tour");
+    mountWizard();
+    expect(stepBody()).toBe("welcome");
+  });
+
+  it("clears the resume point on skip, so reopening from Settings starts fresh", () => {
+    localStorage.setItem(ONBOARDING_STEP_KEY, "agent");
+    const { onSkip } = mountWizard();
+    fireEvent.click(screen.getByRole("button", { name: "Skip setup" }));
 
     expect(onSkip).toHaveBeenCalledTimes(1);
-    expect(onComplete).not.toHaveBeenCalled();
+    expect(localStorage.getItem(ONBOARDING_STEP_KEY)).toBeNull();
   });
 
-  it("renders tracked repositories in Step 3 when repos exist", () => {
-    const mockRepo: Repo = {
+  it("clears the resume point on finish", async () => {
+    const { onComplete } = mountWizard({ step: "done" });
+    fireEvent.click(screen.getByRole("button", { name: /Open Repomon/ }));
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalled());
+    expect(localStorage.getItem(ONBOARDING_STEP_KEY)).toBeNull();
+  });
+});
+
+describe("setup wizard keyboard", () => {
+  it("continues on Enter", () => {
+    mountWizard();
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(stepBody()).toBe("system");
+  });
+
+  it("leaves Enter to a focused control rather than doing both", () => {
+    mountWizard({ step: "repos" });
+    screen.getByRole("button", { name: /Choose folder/ }).focus();
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(stepBody()).toBe("repos");
+  });
+
+  it("skips on Escape", () => {
+    const { onSkip } = mountWizard();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onSkip).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("setup wizard steps", () => {
+  it("explains what Repomon does, and what a lane and a worktree are", () => {
+    mountWizard({ step: "welcome" });
+    expect(screen.getByRole("heading", { name: "Set up Repomon" })).toBeInTheDocument();
+    expect(screen.getByText(/A lane is one task plus the git worktree/)).toBeInTheDocument();
+    expect(screen.getByText(/second checkout of the same repository/)).toBeInTheDocument();
+  });
+
+  it("reports the tools it found, with a way to check again", async () => {
+    mountWizard({ step: "system" });
+
+    expect(await screen.findByText("Repomon Built-in")).toBeInTheDocument();
+    expect(screen.getByText("git 2.44.0")).toBeInTheDocument();
+    expect(screen.getByText("2 / 3 detected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh system health status" })).toBeInTheDocument();
+  });
+
+  it("names what is missing and how to install it", async () => {
+    daemon.doctor = NOTHING_FOUND;
+    mountWizard({ step: "system" });
+
+    await waitFor(() => expect(screen.getAllByText("Missing")).toHaveLength(2));
+    expect(screen.getByText("brew install tmux")).toBeInTheDocument();
+    expect(screen.getByText("npm install -g @anthropic-ai/claude-code")).toBeInTheDocument();
+    expect(screen.getByText("0 / 2 detected")).toBeInTheDocument();
+  });
+
+  it("re-runs the probe when asked to check again", async () => {
+    mountWizard({ step: "system" });
+    await screen.findByText("Repomon Built-in");
+    const before = daemon.calls.filter((call) => call.method === "system.doctor").length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh system health status" }));
+
+    await waitFor(() => {
+      expect(daemon.calls.filter((call) => call.method === "system.doctor").length).toBe(before + 1);
+    });
+  });
+
+  it("invites a first repository, then lists what was added", () => {
+    const { actions, unmount } = mountWizard({ step: "repos" });
+    expect(screen.getByText("No repositories yet")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Choose folder/ }));
+    expect(actions.addRepo).toHaveBeenCalledTimes(1);
+    unmount();
+
+    const repo: Repo = {
       id: 1,
       name: "repomon",
       path: "/Users/dev/repomon",
       added_at: "2026-08-01T00:00:00Z",
       worktree_root_template: null,
-      hidden: false, position: null, label: null };
-    const actions = createMockActions([mockRepo]);
-    const onComplete = vi.fn();
-    const onSkip = vi.fn();
-
-    render(() => (
-      <Onboarding
-        actions={actions}
-        onComplete={onComplete}
-        onSkip={onSkip}
-      />
-    ));
-
-    // Move to step 3 by clicking through
-    fireEvent.click(screen.getByRole("button", { name: "Get started with setup" }));
-    fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
-
-    expect(screen.getByText("Add Your First Repository")).toBeInTheDocument();
+      hidden: false,
+      position: null,
+      label: null,
+    };
+    mountWizard({ step: "repos", repos: [repo] });
     expect(screen.getByText("repomon")).toBeInTheDocument();
     expect(screen.getByText("/Users/dev/repomon")).toBeInTheDocument();
-    expect(screen.getByText("1 repo added")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Add another repository/ })).toBeInTheDocument();
   });
 
-  it("does NOT dismiss on Escape key", () => {
-    const actions = createMockActions();
-    const onComplete = vi.fn();
-    const onSkip = vi.fn();
+  it("offers only the agents that were actually found", async () => {
+    mountWizard({ step: "agent" });
 
-    render(() => (
-      <Onboarding
-        actions={actions}
-        onComplete={onComplete}
-        onSkip={onSkip}
-      />
-    ));
+    const options = await screen.findAllByRole("radio");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Claude Codeclaude",
+      "Codexcodex",
+    ]);
+    expect(screen.queryByText("OpenCode")).not.toBeInTheDocument();
+  });
 
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(onSkip).not.toHaveBeenCalled();
+  it("saves the chosen agent as the default", async () => {
+    mountWizard({ step: "agent" });
+    const options = await screen.findAllByRole("radio");
+
+    fireEvent.click(options[1]!);
+    await waitFor(() => {
+      expect(lastConfigWrite().default_agent).toBe("codex");
+    });
+    expect(options[1]!.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("says what to do when no agent CLI is installed", async () => {
+    daemon.doctor = NOTHING_FOUND;
+    mountWizard({ step: "agent" });
+
+    expect(await screen.findByText("No agent CLIs found yet")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Back to the system check/ }));
+    expect(stepBody()).toBe("system");
+  });
+
+  it("asks for the system permission and turns on the needs-you alert", async () => {
+    let granted = false;
+    const notifications = {
+      nativeEnabled: () => granted,
+      enableNative: vi.fn(async () => {
+        granted = true;
+        return true;
+      }),
+    };
+    mountWizard({ step: "notifications", notifications });
+
+    fireEvent.click(screen.getByRole("button", { name: "Allow notifications" }));
+    expect(notifications.enableNative).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Send alerts from Repomon" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch", { name: "Send alerts from Repomon" }));
+    await waitFor(() => {
+      expect(lastConfigWrite().notify_enabled).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("switch", { name: "Tell me when an agent needs me" }));
+    await waitFor(() => {
+      expect(lastConfigWrite().notify_needs_you).toBe(true);
+    });
+  });
+
+  it("shows the real state of the repomind home", async () => {
+    mountWizard({ step: "repomind" });
+
+    expect(await screen.findByText("/Users/dev/repomind")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Start Repomind when setup finishes" })).toBeInTheDocument();
+  });
+
+  it("says so when the home is not there yet", async () => {
+    daemon.repomind = { home: "/Users/dev/repomind", exists: false };
+    mountWizard({ step: "repomind" });
+    expect(await screen.findByText("Not created yet")).toBeInTheDocument();
+  });
+
+  it("starts repomind after setup only when asked to", async () => {
+    const { onComplete, unmount } = mountWizard({ step: "repomind" });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Open Repomon/ }));
+    await waitFor(() => expect(onComplete).toHaveBeenCalled());
+    expect(daemon.calls.some((call) => call.method === "orchestrator.start")).toBe(false);
+    unmount();
+
+    const second = mountWizard({ step: "repomind" });
+    fireEvent.click(screen.getByRole("switch", { name: "Start Repomind when setup finishes" }));
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Open Repomon/ }));
+
+    await waitFor(() => expect(second.onComplete).toHaveBeenCalled());
+    expect(daemon.calls.some((call) => call.method === "orchestrator.start")).toBe(true);
+  });
+
+  it("keeps the wizard up and names the problem when the finishing call fails", async () => {
+    daemon.fail = "orchestrator.start";
+    const { onComplete } = mountWizard({ step: "repomind" });
+
+    fireEvent.click(screen.getByRole("switch", { name: "Start Repomind when setup finishes" }));
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Open Repomon/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("daemon refused");
     expect(onComplete).not.toHaveBeenCalled();
   });
 
-  it("advances with Enter key", () => {
-    const actions = createMockActions();
-    const onComplete = vi.fn();
-    const onSkip = vi.fn();
+  it("summarises what was set up and suggests three things to do next", async () => {
+    const repo: Repo = {
+      id: 1,
+      name: "repomon",
+      path: "/Users/dev/repomon",
+      added_at: "2026-08-01T00:00:00Z",
+      worktree_root_template: null,
+      hidden: false,
+      position: null,
+      label: null,
+    };
+    daemon.config = { ...BASE_CONFIG, default_agent: "codex", notify_enabled: true, notify_needs_you: true };
+    mountWizard({ step: "done", repos: [repo] });
 
-    render(() => (
-      <Onboarding
-        actions={actions}
-        onComplete={onComplete}
-        onSkip={onSkip}
-      />
-    ));
+    await waitFor(() => expect(screen.getByText("codex")).toBeInTheDocument());
+    expect(screen.getByText("1 added")).toBeInTheDocument();
+    expect(screen.getByText("On for agents that need you")).toBeInTheDocument();
+    expect(screen.getByText("Not started")).toBeInTheDocument();
 
-    // Step 1 -> Enter -> Step 2
-    fireEvent.keyDown(window, { key: "Enter" });
-    expect(screen.getByText("System Health & Tooling")).toBeInTheDocument();
+    expect(screen.getByText("Open a lane.")).toBeInTheDocument();
+    expect(screen.getByText("Find a file fast.")).toBeInTheDocument();
+    expect(screen.getByText("Start Repomind.")).toBeInTheDocument();
+  });
+});
 
-    // Step 2 -> Enter -> Step 3
-    fireEvent.keyDown(window, { key: "Enter" });
-    expect(screen.getByText("Add Your First Repository")).toBeInTheDocument();
+describe("setup wizard copy", () => {
+  // House rules: no emoji standing in for icons, and no em-dashes anywhere in product copy.
+  it("draws its icons and writes its dashes plainly", () => {
+    for (const step of ONBOARDING_STEPS) {
+      const { container, unmount } = mountWizard({ step: step.id });
+      const text = container.textContent ?? "";
+      expect(text).not.toMatch(/\p{Extended_Pictographic}/u);
+      expect(text).not.toContain("—");
+      unmount();
+    }
   });
 });
