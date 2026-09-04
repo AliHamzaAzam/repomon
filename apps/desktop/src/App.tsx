@@ -26,7 +26,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { isMac, matchChord, matchSidebarKey } from "./keymap";
+import { BINDINGS, formatChord, isMac, matchChord, matchSidebarKey } from "./keymap";
 import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
@@ -38,7 +38,14 @@ import { createRepomindStore } from "./stores/repomind";
 import { createMessageStore } from "./stores/messages";
 import { createWorkspaceStore } from "./stores/workspace";
 import { readOnboardingStep } from "./stores/onboarding";
-import { notifyLayoutChanged, readOnboardingCompleted, saveOnboardingCompleted } from "./stores/uiSettings";
+import {
+  notifyLayoutChanged,
+  readOnboardingCompleted,
+  readShortcutsHintLaunchCount,
+  recordShortcutsHintLaunch,
+  saveOnboardingCompleted,
+  SHORTCUTS_HINT_MAX_LAUNCHES,
+} from "./stores/uiSettings";
 import EditorWorkspace from "./components/EditorWorkspace";
 import FileFinder from "./components/FileFinder";
 import ShortcutsOverlay from "./components/ShortcutsOverlay";
@@ -104,6 +111,9 @@ function App(props: AppProps) {
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const [appVersion, setAppVersion] = createSignal("");
+  // Footer discoverability hint for the shortcuts guide, shown for a launch count decided once at
+  // mount (see onMount below) rather than recomputed on every render, so it cannot flip mid-session.
+  const [showShortcutsHint, setShowShortcutsHint] = createSignal(false);
   // E5: Debounced sustained-disconnect banner. The footer pill signals blips; this banner only
   // appears after the daemon has been unreachable for a continuous 5 seconds, so transient
   // reconnect cycles during daemon restart don't produce noise.
@@ -384,6 +394,8 @@ function App(props: AppProps) {
   onMount(() => {
     window.addEventListener("keydown", onShortcut);
     window.addEventListener("keydown", onBareHelpKey);
+    setShowShortcutsHint(readShortcutsHintLaunchCount() < SHORTCUTS_HINT_MAX_LAUNCHES);
+    recordShortcutsHintLaunch();
     void getVersion().then(setAppVersion).catch(() => undefined);
 
     void checkForUpdate()
@@ -819,6 +831,15 @@ function App(props: AppProps) {
         </div>
 
         <div class="flex items-center gap-4 text-muted shrink-0">
+          <Show when={showShortcutsHint()}>
+            <button
+              type="button"
+              class="focus-ring rounded px-1 -mx-1 text-signal hover:text-foreground transition-colors"
+              onClick={() => actions.openShortcutsGuide()}
+            >
+              {formatChord("mod+?")} for shortcuts
+            </button>
+          </Show>
           <span>
             {connection().daemon?.repos ?? 0} repos / {connection().daemon?.lanes ?? 0} lanes
           </span>

@@ -99,6 +99,38 @@ export function onOnboardingCompletedChanged(callback: (completed: boolean) => v
   return () => window.removeEventListener(ONBOARDING_COMPLETED_EVENT, handler);
 }
 
+export const SHORTCUTS_HINT_LAUNCH_COUNT_KEY = "repomon:shortcuts-hint-launches";
+/// The footer's "Cmd-/ for shortcuts" hint only earns its place for someone who has not
+/// discovered the guide yet - past this many launches it has done its job, and stays quiet.
+export const SHORTCUTS_HINT_MAX_LAUNCHES = 3;
+
+/**
+ * How many app launches have shown the shortcuts hint so far.
+ */
+export function readShortcutsHintLaunchCount(): number {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return 0;
+  }
+  const raw = localStorage.getItem(SHORTCUTS_HINT_LAUNCH_COUNT_KEY);
+  const parsed = raw === null ? 0 : Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/**
+ * Records that this launch showed the hint. Call at most once per app mount - the count is a
+ * launch tally, not a render tally.
+ */
+export function recordShortcutsHintLaunch(): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(SHORTCUTS_HINT_LAUNCH_COUNT_KEY, String(readShortcutsHintLaunchCount() + 1));
+  } catch {
+    // localStorage can throw (quota, private mode) — persistence is best-effort.
+  }
+}
+
 export const RIGHT_PANEL_ACTIVE_TAB_KEY = "repomon:right-panel-active-tab";
 
 /**

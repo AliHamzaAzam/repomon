@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
 import type { FleetSource } from "./stores/fleet";
+import { SHORTCUTS_HINT_LAUNCH_COUNT_KEY } from "./stores/uiSettings";
 
 function sourceFor(snapshot: ConnectionSnapshot): ConnectionSource {
   return {
@@ -432,5 +433,33 @@ describe("Repomon desktop shell", () => {
     const filterInput = within(container).getByPlaceholderText(/Filter/i);
     fireEvent.keyDown(filterInput, { key: "?" });
     expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+  });
+
+  it("shows the footer shortcuts hint for a fresh install and opens the overlay from it", async () => {
+    localStorage.removeItem(SHORTCUTS_HINT_LAUNCH_COUNT_KEY);
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const hint = within(container).getByRole("button", { name: /for shortcuts/i });
+    fireEvent.click(hint);
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    });
+  });
+
+  it("stops showing the footer shortcuts hint after the max launch count", () => {
+    localStorage.setItem(SHORTCUTS_HINT_LAUNCH_COUNT_KEY, "3");
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    expect(within(container).queryByRole("button", { name: /for shortcuts/i })).not.toBeInTheDocument();
   });
 });

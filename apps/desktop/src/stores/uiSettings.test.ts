@@ -8,6 +8,10 @@ import {
   readOnboardingCompleted,
   saveOnboardingCompleted,
   onOnboardingCompletedChanged,
+  readShortcutsHintLaunchCount,
+  recordShortcutsHintLaunch,
+  SHORTCUTS_HINT_LAUNCH_COUNT_KEY,
+  SHORTCUTS_HINT_MAX_LAUNCHES,
 } from "./uiSettings";
 
 describe("uiSettings layout and preferences", () => {
@@ -54,5 +58,18 @@ describe("uiSettings layout and preferences", () => {
     expect(listener).toHaveBeenCalledWith(false);
 
     unsub();
+  });
+
+  it("counts shortcuts-hint launches and stops mattering past the max", () => {
+    localStorage.removeItem(SHORTCUTS_HINT_LAUNCH_COUNT_KEY);
+    expect(readShortcutsHintLaunchCount()).toBe(0);
+
+    recordShortcutsHintLaunch();
+    expect(readShortcutsHintLaunchCount()).toBe(1);
+
+    recordShortcutsHintLaunch();
+    recordShortcutsHintLaunch();
+    expect(readShortcutsHintLaunchCount()).toBe(3);
+    expect(readShortcutsHintLaunchCount()).toBeGreaterThanOrEqual(SHORTCUTS_HINT_MAX_LAUNCHES);
   });
 });
