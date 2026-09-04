@@ -298,6 +298,10 @@ struct PlaybookName {
     name: String,
 }
 #[derive(Deserialize)]
+struct RepomindInstruct {
+    text: String,
+}
+#[derive(Deserialize)]
 struct Discover {
     root: String,
     #[serde(default = "default_depth")]
@@ -2005,6 +2009,35 @@ pub async fn dispatch(
             )
             .await;
             to_value(book)
+        }
+        // Local-only, like every other playbook arm: the approval gate is the human's, and this
+        // is the other half of it. A rejected draft is moved into `playbooks/rejected/`, never
+        // deleted, so the text stays in the home's git history.
+        "playbook.reject" => {
+            let p: PlaybookName = parse(params)?;
+            let home = ctx.config.read().await.repomind_home();
+            let name = p.name.clone();
+            let for_rel = home.clone();
+            let (rejected, paths) = tokio::task::spawn_blocking(move || {
+                let draft = crate::repomind::playbooks::draft_path(&home, &name);
+                crate::repomind::playbooks::reject(&home, &name)
+                    .map(|rejected| (rejected.clone(), vec![draft, rejected]))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            tracing::info!(playbook = %p.name, "playbook draft rejected");
+            let rel = crate::repomind::playbooks::rel_path(&for_rel, &rejected);
+            crate::repomind::export::request_files(
+                ctx,
+                "playbooks",
+                paths
+                    .iter()
+                    .map(|path| crate::repomind::playbooks::rel_path(&for_rel, path))
+                    .collect(),
+            )
+            .await;
+            to_value(json!({ "name": p.name, "path": rel, "status": "rejected" }))
         }
         "playbook.delete" => {
             let p: PlaybookName = parse(params)?;
@@ -5102,6 +5135,91 @@ pub async fn dispatch(
                 },
             })
         }
+        // Local-only (see `remote::remote_method_allowed`): it types into a live agent pane with
+        // the full fleet catalog behind it, which is a broader authority than the bridge's
+        // `agent.send_input` on one worker.
+        //
+        // Delivery goes through the same verified injection as fleet mail and the boot line, so
+        // it can never type over a busy composer, and it refuses outright when no controller is
+        // running rather than silently dropping the instruction on the floor.
+        "repomind.instruct" => {
+            let p: RepomindInstruct = parse(params)?;
+            let text = collapse_instruction(&p.text);
+            if text.is_empty() {
+                return Err(RpcError::invalid_params("the instruction is empty"));
+            }
+            let lane_id = ctx
+                .store
+                .controller_lane()
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    RpcError::invalid_params("the repomind home has no controller lane yet")
+                })?;
+            let primary = ctx.controller_window().await;
+            let lanes = ctx.lanes.list().await.map_err(internal)?;
+            let lane = lanes.iter().find(|l| l.id == lane_id);
+            // The primary controller is the session in the lane's recorded window; a lane whose
+            // window moved still gets the instruction through its first managed session rather
+            // than nothing.
+            let managed = |s: &&repomon_core::model::AgentSession| {
+                !s.external && !s.inferred && s.tmux_window.is_some()
+            };
+            let session = lane
+                .and_then(|l| {
+                    l.agent_sessions
+                        .iter()
+                        .find(|s| s.tmux_window.as_deref() == Some(primary.as_str()) && managed(s))
+                })
+                .or_else(|| lane.and_then(|l| l.agent_sessions.iter().find(managed)))
+                .ok_or_else(|| {
+                    RpcError::invalid_params("no controller is running in the repomind home")
+                })?;
+            let window = session.tmux_window.clone().unwrap_or(primary);
+            let seed = crate::inject::AuditSeed {
+                lane_id,
+                window: window.clone(),
+                session_id: session.session_id.clone(),
+                agent_kind: Some(session.agent.as_str().to_string()),
+                trigger: "repomind_instruct".to_string(),
+                dialog_class: None,
+                repo_scoped: None,
+                decision: "instruction".to_string(),
+                policy_source: None,
+                reason: Some("operator instruction from the repomind panel".to_string()),
+                subject: None,
+                pane_excerpt: None,
+            };
+            let outcome = crate::inject::verified_send(
+                ctx,
+                crate::inject::Expectation::IdleNoDialog,
+                crate::inject::Payload::VerifiedLine {
+                    text: format!("[REPOMIND] {text} {INSTRUCT_MARKER}"),
+                    marker: INSTRUCT_MARKER.to_string(),
+                },
+                seed,
+            )
+            .await;
+            match outcome {
+                crate::inject::SendOutcome::Sent { entry_id, .. } => to_value(json!({
+                    "outcome": "sent",
+                    "window": window,
+                    "entry_id": entry_id,
+                })),
+                crate::inject::SendOutcome::Skipped { reason, entry_id } => to_value(json!({
+                    "outcome": "skipped",
+                    "window": window,
+                    "entry_id": entry_id,
+                    "reason": reason.as_str(),
+                })),
+                crate::inject::SendOutcome::Failed { error, entry_id } => to_value(json!({
+                    "outcome": "failed",
+                    "window": window,
+                    "entry_id": entry_id,
+                    "reason": error,
+                })),
+            }
+        }
         // Local-only (see `remote::remote_method_allowed`): it rewrites the daemon-owned boot
         // document. Every spawn into the controller lane does this too; the RPC exists so a
         // client (and the operator) can see the exact context a controller would get right now.
@@ -6198,6 +6316,23 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
     // intermittent "sessions disappear after idle" report names its own cause in the log.
     diagnose_vanished_sessions(ctx, lanes, live.as_ref()).await;
+}
+
+/// The sentinel that closes an injected instruction. Delivery counts as sent once this has left
+/// the live composer, exactly as `[END REPOMAIL]` does for fleet mail: an instruction is a whole
+/// sentence, so the text itself is too long to watch for reliably.
+const INSTRUCT_MARKER: &str = "[END REPOMIND]";
+
+/// One instruction squashed onto a single line: control characters dropped and runs of
+/// whitespace collapsed, because the composer takes one line and a stray newline would submit
+/// half a sentence.
+fn collapse_instruction(text: &str) -> String {
+    text.chars()
+        .filter(|value| !value.is_control() || value.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Stamp every session with the attention word from the shared taxonomy: "none" while it is
@@ -9943,6 +10078,17 @@ mod tests {
             "lane-7-2",
             now
         ));
+    }
+
+    #[test]
+    fn an_instruction_is_squashed_onto_one_line_before_it_is_typed() {
+        // The composer takes one line: a newline mid-sentence would submit half an instruction.
+        assert_eq!(
+            collapse_instruction("New goal in plans/active/ship-r6.md:\n  Ship R6.\nPick it up."),
+            "New goal in plans/active/ship-r6.md: Ship R6. Pick it up."
+        );
+        assert_eq!(collapse_instruction("  spaced  out  "), "spaced out");
+        assert_eq!(collapse_instruction("   \n  "), "");
     }
 
     #[test]

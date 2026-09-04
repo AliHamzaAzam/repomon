@@ -678,6 +678,7 @@ mod tests {
             "playbook.search",
             "playbook.list",
             "playbook.approve",
+            "playbook.reject",
             "playbook.delete",
             // The fleet-mail RPC surface stays
             // local-only: the sending identity derives from the Unix-socket caller's registered
@@ -725,6 +726,9 @@ mod tests {
             // read-only `repomind.status` above is on the bridge.
             "repomind.export",
             "repomind.boot",
+            // repomind.instruct types into a controller pane holding the full fleet catalog:
+            // broader authority than the bridge's agent.send_input on one worker.
+            "repomind.instruct",
             // supervision.set grants standing auto-approval authority — strictly local-only.
             "supervision.set",
             // upcoming local-only credential-minting RPCs (task A2) — must never be reachable
