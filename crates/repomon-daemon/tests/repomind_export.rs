@@ -104,3 +104,84 @@ async fn journal_append_then_repomind_export_writes_the_day_file_and_commits() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
 }
+
+/// Repo notes are file-first: `repo.notes.set` writes `fleet/<repo>/notes.md` in the home, and
+/// `repo.notes.get` reads it back. The app-support `repo-notes/` directory is no longer written.
+#[tokio::test]
+async fn repo_notes_are_written_to_and_read_from_the_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("repomind");
+    let legacy = dir.path().join("repo-notes");
+    std::fs::create_dir_all(&legacy).unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&work)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    let mut config = Config::default();
+    config.repomind.home = home.to_string_lossy().into_owned();
+    let ctx = Ctx::new_with_paths(
+        Store::open_in_memory().unwrap(),
+        config,
+        None,
+        dir.path().join("config.toml"),
+        legacy.clone(),
+    );
+    repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
+    let repo = ctx.registry.add(&work).await.unwrap();
+
+    let sock = std::env::temp_dir().join(format!("repomon-rmn-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let set = call(
+        &mut stream,
+        1,
+        "repo.notes.set",
+        Some(json!({ "repo_id": repo.id, "content": "Run bun test before merging.\n" })),
+    )
+    .await;
+    assert!(set.error.is_none(), "{:?}", set.error);
+
+    let home_file = home.join("fleet/work/notes.md");
+    assert!(
+        home_file.is_file(),
+        "notes should live in the home, not only in {}",
+        legacy.display()
+    );
+    assert!(
+        std::fs::read_to_string(&home_file)
+            .unwrap()
+            .contains("Run bun test before merging.")
+    );
+    assert!(
+        std::fs::read_dir(&legacy).unwrap().next().is_none(),
+        "the app-support directory must no longer be written"
+    );
+
+    let got = call(
+        &mut stream,
+        2,
+        "repo.notes.get",
+        Some(json!({ "repo_id": repo.id })),
+    )
+    .await;
+    let got = got.result.unwrap();
+    assert_eq!(got["exists"], json!(true));
+    assert_eq!(got["content"], json!("Run bun test before merging.\n"));
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+}

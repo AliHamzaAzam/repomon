@@ -1675,11 +1675,14 @@ pub async fn dispatch(
                 .await
                 .map_err(|_| RpcError::invalid_params(format!("no repo {}", p.repo_id)))?;
             let all = ctx.registry.list().await.map_err(internal)?;
-            let dir = ctx.notes_dir.clone();
+            // File-first since R2: the home's `fleet/<repo>/notes.md`, not the app-support
+            // `repo-notes/` directory (which start-up migration copied across and then left
+            // alone).
+            let home = ctx.config.read().await.repomind_home();
             let repo_name = repo.name.clone();
             let (content, path) = tokio::task::spawn_blocking(move || {
-                let path = repomon_core::notes::notes_path(&dir, &repo, &all);
-                repomon_core::notes::read(&dir, &repo, &all).map(|c| (c, path))
+                let path = crate::repomind::notes::notes_path(&home, &repo, &all);
+                crate::repomind::notes::read(&home, &repo, &all).map(|c| (c, path))
             })
             .await
             .map_err(internal)?
@@ -1708,19 +1711,27 @@ pub async fn dispatch(
                 .await
                 .map_err(|_| RpcError::invalid_params(format!("no repo {}", p.repo_id)))?;
             let all = ctx.registry.list().await.map_err(internal)?;
-            let dir = ctx.notes_dir.clone();
+            let home = ctx.config.read().await.repomind_home();
             let repo_name = repo.name.clone();
             let content = p.content.clone();
+            let for_rel = home.clone();
             let (old_bytes, path) = tokio::task::spawn_blocking(move || {
-                let old = repomon_core::notes::read(&dir, &repo, &all)
+                let old = crate::repomind::notes::read(&home, &repo, &all)
                     .ok()
                     .flatten()
                     .map(|s| s.len());
-                repomon_core::notes::write(&dir, &repo, &all, &content).map(|p| (old, p))
+                crate::repomind::notes::write(&home, &repo, &all, &content).map(|p| (old, p))
             })
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            // The notes file is the daemon's own write, so it rides the next export commit.
+            crate::repomind::export::request_files(
+                ctx,
+                "notes",
+                vec![crate::repomind::notes::rel_path(&for_rel, &path)],
+            )
+            .await;
             tracing::info!(
                 repo = %repo_name,
                 repo_id = p.repo_id,

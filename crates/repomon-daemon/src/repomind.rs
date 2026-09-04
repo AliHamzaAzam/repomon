@@ -13,8 +13,10 @@
 //! - **Idempotent.** It runs on every daemon start and on every `orchestrator.start`, and a
 //!   second run does nothing and logs nothing.
 
+pub mod basic_memory;
 pub mod export;
 pub mod md;
+pub mod notes;
 
 use std::path::{Path, PathBuf};
 
@@ -207,6 +209,34 @@ pub async fn ensure_home(ctx: &Ctx) -> repomon_core::Result<RepomindHome> {
     })
 }
 
+/// One-time file-first migration, run once per daemon start right after [`ensure_home`]: records
+/// that only exist in the daemon's own storage are written into the home so an agent can read
+/// them as files. Nothing is ever deleted from the old location, so a rollback still finds it.
+/// Idempotent: a repo or playbook already present in the home is left exactly as it is.
+pub async fn migrate_records(ctx: &Ctx) -> repomon_core::Result<Vec<String>> {
+    let home = ctx.config.read().await.repomind_home();
+    if !home.is_dir() {
+        return Ok(Vec::new());
+    }
+    let repos = ctx.registry.list().await?;
+    let legacy = ctx.notes_dir.clone();
+
+    let for_fs = home.clone();
+    let written = tokio::task::spawn_blocking(move || notes::migrate(&for_fs, &legacy, &repos))
+        .await
+        .map_err(|e| repomon_core::Error::Other(e.to_string()))??;
+
+    let rel: Vec<String> = written
+        .iter()
+        .map(|p| notes::rel_path(&home, p))
+        .collect();
+    for path in &rel {
+        tracing::info!("repomind home: migrated repo notes into {path}");
+    }
+    export::request_files(ctx, "notes", rel.clone()).await;
+    Ok(rel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +387,46 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(home.join("REPOMIND.md")).unwrap(),
             "hand written persona\n"
+        );
+    }
+
+    /// Repo notes that only exist in the app-support directory are copied into the home on the
+    /// first start after R2, and the old file is left where it was.
+    #[tokio::test]
+    async fn migrate_records_copies_legacy_repo_notes_into_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("repomind");
+        let legacy = dir.path().join("repo-notes");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let mut config = Config::default();
+        config.repomind.home = home.to_string_lossy().into_owned();
+        let ctx = Ctx::new_with_paths(
+            store,
+            config,
+            None,
+            dir.path().join("config.toml"),
+            legacy.clone(),
+        );
+        ensure_home(&ctx).await.unwrap();
+
+        let repos = ctx.registry.list().await.unwrap();
+        let legacy_file = repomon_core::notes::notes_path(&legacy, &repos[0], &repos);
+        std::fs::write(&legacy_file, "old knowledge\n").unwrap();
+
+        let written = migrate_records(&ctx).await.unwrap();
+
+        assert_eq!(written, vec!["fleet/repomind/notes.md".to_string()]);
+        assert!(
+            std::fs::read_to_string(home.join("fleet/repomind/notes.md"))
+                .unwrap()
+                .contains("old knowledge")
+        );
+        assert!(legacy_file.exists(), "the old file must survive");
+        assert!(
+            migrate_records(&ctx).await.unwrap().is_empty(),
+            "a second start migrates nothing"
         );
     }
 }
