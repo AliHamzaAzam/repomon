@@ -4,8 +4,8 @@ import type { AgentSession, TranscriptItem } from "../bindings";
 import { stripAnsi, trimBlankEdges } from "./ansi";
 import { daemonCall, subscribeDaemon, type OrchestratorStatus } from "../ipc/rpc";
 import {
-  agentState,
   agentStateReason,
+  controllerAgentState,
   stateIndicator,
   type ControllerSummary,
   type FleetStore,
@@ -536,7 +536,7 @@ export default function RepomindPanel(props: RepomindPanelProps) {
                 <ul class="space-y-0.5">
                   <For each={controllers()}>
                     {(session: AgentSession) => {
-                      const state = () => stateIndicator(agentState(session));
+                      const state = () => stateIndicator(controllerAgentState(session));
                       return (
                         <li
                           class="flex items-center gap-1.5 rounded-md px-1.5 py-1"

@@ -75,6 +75,7 @@ impl TranscriptSummary {
             stalled_since: None,
             subagent_running: None,
             status_reason: None,
+            attention_kind: None,
             ended_turn: self.ended_turn,
             gate: None,
             config_dir: self.config_dir,

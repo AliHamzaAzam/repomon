@@ -854,6 +854,7 @@ mod tests {
             stale: false,
             stalled_since: None,
             status_reason: None,
+            attention_kind: None,
             ended_turn: false,
             gate: None,
             config_dir: None,

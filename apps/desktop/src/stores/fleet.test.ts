@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import {
   agentState,
+  controllerAgentState,
   controllerSummary,
   createFleetStore,
   fleetCounts,
@@ -282,6 +283,52 @@ describe("fleet presentation", () => {
     expect(agentState(agent({ status: "ended" }))).toBe("exited");
     // A stalled external session is not "stalled": the daemon never watches its pane.
     expect(agentState(agent({ status: "running", stale: true, external: true }))).toBe("external");
+  });
+
+  it("reads a controller that just ended its turn as idle, not as needing you", () => {
+    // A controller is a standing coordinator: it sits at end-of-turn between instructions, and
+    // the operator does not owe it an answer for that. A worker in a project lane still does.
+    const ended = agent({ status: "waiting", attention_kind: "end_of_turn" });
+    expect(controllerAgentState(ended)).toBe("idle");
+    expect(agentState(ended)).toBe("needs-you");
+
+    const controllerLane = lane({ id: 90, role: "controller", agent_sessions: [ended] });
+    expect(laneIndicator(controllerLane)).toEqual({ label: "idle", tone: "muted", urgent: false });
+    expect(controllerSummary([controllerLane])).toMatchObject({ state: "idle", urgent: 0 });
+    expect(fleetCounts([controllerLane])).toEqual({ urgent: 0, running: 0, idle: 1 });
+  });
+
+  it("keeps needs you for a controller sitting on a dialog or an explicit question", () => {
+    const dialog = agent({
+      status: "waiting",
+      attention_kind: "permission",
+      pending_prompt: "Bash: rm -rf build",
+      pending_dialog: { question: "Run?", body: [], options: [], selected: null },
+    });
+    expect(controllerAgentState(dialog)).toBe("decision");
+
+    const question = agent({
+      status: "waiting",
+      attention_kind: "decision",
+      pending_prompt: "Which auth method should we use?",
+    });
+    expect(controllerAgentState(question)).toBe("needs-you");
+
+    const controllerLane = lane({ id: 90, role: "controller", agent_sessions: [question] });
+    expect(controllerSummary([controllerLane])).toMatchObject({ state: "needs-you", urgent: 1 });
+  });
+
+  it("leaves a worker's mapping untouched, whatever the attention word says", () => {
+    // Same payload, an ordinary lane: an ended turn there means work is waiting to be picked up.
+    const ended = agent({ status: "waiting", attention_kind: "end_of_turn" });
+    const workerLane = lane({ agent_sessions: [ended] });
+    expect(laneIndicator(workerLane).label).toBe("needs you");
+    expect(fleetCounts([workerLane])).toEqual({ urgent: 1, running: 0, idle: 0 });
+  });
+
+  it("keeps a controller on needs you when the daemon sent no attention word", () => {
+    // An older daemon says nothing about why the session waits, so the reading does not soften.
+    expect(controllerAgentState(agent({ status: "waiting" }))).toBe("needs-you");
   });
 
   it("marks an ended session exited rather than idle, with its own pill", () => {

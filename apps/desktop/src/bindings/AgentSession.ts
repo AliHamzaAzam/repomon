@@ -80,6 +80,16 @@ subagent_running?: string | null,
  */
 status_reason?: string | null, 
 /**
+ * What this session wants from a human, in the shared attention taxonomy
+ * (`crate::agent::attention::Attention::as_str`): "none", "end_of_turn", "permission",
+ * "decision". Overlaid at list time and never persisted.
+ *
+ * It exists so a client can tell the two halves of `Waiting` apart without re-deriving
+ * them: an agent that merely ended its turn wants nothing in particular, while one sitting
+ * on a dialog or an explicit question wants the operator now.
+ */
+attention_kind?: string | null, 
+/**
  * The latest dxkit stop-gate verdict from the worktree's `.dxkit/loop/ledger.jsonl`,
  * when the lane uses dxkit. Overlaid at list time; not persisted. A fresh `allowed`
  * grants done-candidate, a fresh block vetoes it (see `agent_attention_in`).

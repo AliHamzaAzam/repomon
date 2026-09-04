@@ -5841,6 +5841,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     stalled_since: None,
                     subagent_running: None,
                     status_reason: None,
+                    attention_kind: None,
                     ended_turn: false,
                     gate: None,
                     config_dir: None,
@@ -6177,7 +6178,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     }
 
     // Every session leaves with a reason, sniffed or not, so a status the operator disbelieves
-    // can be reported instead of merely doubted.
+    // can be reported instead of merely doubted, and with the attention word that splits
+    // `Waiting` into "ended its turn" and "is asking you something". Both run after the dialog,
+    // rate-limit and stall overlays, so they describe the final public state.
     {
         let now_utc = chrono::Utc::now();
         for s in lanes.iter_mut().flat_map(|l| l.agent_sessions.iter_mut()) {
@@ -6185,6 +6188,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 s.status_reason = Some(transcript_status_reason(s, now_utc));
             }
         }
+        stamp_attention_kind(lanes);
     }
 
     // A managed pane becoming idle is the event-driven retry edge for durable mail. This runs
@@ -6194,6 +6198,23 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     // Diagnostic: attribute any session that vanished since the previous overlay tick, so the
     // intermittent "sessions disappear after idle" report names its own cause in the log.
     diagnose_vanished_sessions(ctx, lanes, live.as_ref()).await;
+}
+
+/// Stamp every session with the attention word from the shared taxonomy: "none" while it is
+/// working, "end_of_turn" once it has stopped with nothing open, "permission" or "decision" when
+/// it is sitting on a dialog.
+///
+/// Clients switch on this to tell the two halves of `Waiting` apart. Deriving it here, after the
+/// dialog and stall overlays, is what keeps the desktop and the TUI from each re-deriving it from
+/// a payload that has already moved on.
+fn stamp_attention_kind(lanes: &mut [Lane]) {
+    for s in lanes.iter_mut().flat_map(|l| l.agent_sessions.iter_mut()) {
+        s.attention_kind = Some(
+            repomon_core::agent::attention::agent_attention(s)
+                .as_str()
+                .to_string(),
+        );
+    }
 }
 
 /// The status a sniffed pane reports, given the transcript-derived `base`, plus the phrase that
@@ -7281,6 +7302,7 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
         stalled_since: None,
         subagent_running: None,
         status_reason: None,
+        attention_kind: None,
         ended_turn: true,
         gate: None,
         config_dir: None,
@@ -9288,6 +9310,7 @@ mod tests {
             stalled_since: None,
             subagent_running: None,
             status_reason: None,
+            attention_kind: None,
             ended_turn: true,
             gate: None,
             config_dir: None,
@@ -9453,6 +9476,7 @@ mod tests {
                 stalled_since: None,
                 subagent_running: None,
                 status_reason: None,
+                attention_kind: None,
                 ended_turn: true,
                 gate: None,
                 config_dir: None,
@@ -9534,6 +9558,7 @@ mod tests {
                 stalled_since: None,
                 subagent_running: None,
                 status_reason: None,
+                attention_kind: None,
                 ended_turn: true,
                 gate: None,
                 config_dir: None,
@@ -9918,6 +9943,32 @@ mod tests {
             "lane-7-2",
             now
         ));
+    }
+
+    #[test]
+    fn attention_kind_splits_waiting_into_end_of_turn_and_dialog() {
+        // Two sessions in one lane, both `Waiting`: one simply stopped talking, the other is
+        // sitting on a question. Clients read the word, so the overlay has to tell them apart.
+        let mut lane = mail_lane(1, &[Some("ended"), Some("asking")]);
+        lane.agent_sessions[1].pending_prompt = Some("Which auth method should we use?".into());
+        let mut running = mail_lane(2, &[Some("working")]);
+        running.agent_sessions[0].status = AgentStatus::Running;
+        let mut lanes = vec![lane, running];
+
+        stamp_attention_kind(&mut lanes);
+
+        assert_eq!(
+            lanes[0].agent_sessions[0].attention_kind.as_deref(),
+            Some("end_of_turn")
+        );
+        assert_eq!(
+            lanes[0].agent_sessions[1].attention_kind.as_deref(),
+            Some("decision")
+        );
+        assert_eq!(
+            lanes[1].agent_sessions[0].attention_kind.as_deref(),
+            Some("none")
+        );
     }
 
     #[test]
@@ -10565,6 +10616,7 @@ mod tests {
             stalled_since: None,
             subagent_running: None,
             status_reason: None,
+            attention_kind: None,
             ended_turn: true,
             gate: None,
             config_dir: None,

@@ -115,17 +115,43 @@ const STATE_PRIORITY: readonly AgentState[] = [
   "exited",
 ];
 
-export function agentState(agent: AgentSession): AgentState {
+/// Attention words (the daemon's `Attention::as_str`) that mean "this turn is over", as opposed
+/// to "answer me". A session carrying one of these is waiting for its next instruction, not for
+/// the operator.
+const ENDED_TURN_ATTENTION: ReadonlySet<string> = new Set(["end_of_turn", "done_candidate"]);
+
+/// Whether a `waiting` session is waiting only because its turn ended: nothing is open on screen
+/// and the daemon classified it as an end of turn rather than a dialog or a question.
+///
+/// A payload with no `attention_kind` (an older daemon) says nothing, so it is not treated as an
+/// ended turn: the conservative reading keeps the operator looking rather than not.
+function endedItsTurn(agent: AgentSession): boolean {
+  if (agent.pending_dialog || agent.pending_prompt) return false;
+  return ENDED_TURN_ATTENTION.has(agent.attention_kind ?? "");
+}
+
+/// `controller` marks an agent in the repomind home lane. A controller is a standing coordinator
+/// rather than a task a human handed out: its turn ending is the normal resting state, so it
+/// reads IDLE, and NEEDS YOU is kept for a pending dialog or an explicit question. A worker in a
+/// project lane keeps the old reading, where an ended turn means work is waiting to be picked up.
+export function agentState(agent: AgentSession, controller = false): AgentState {
   if (agent.pending_dialog) return "decision";
   const managed = !agent.external && !agent.inferred;
   if (managed && agent.status === "running" && agent.stale) return "stalled";
   if (agent.status === "rate-limited") return "limited";
-  if (managed && agent.status === "waiting") return "needs-you";
+  if (managed && agent.status === "waiting" && !(controller && endedItsTurn(agent)))
+    return "needs-you";
   if (agent.external) return "external";
   if (!agent.inferred && agent.status === "running") return "running";
   if (agent.inferred) return "inferred";
   if (agent.status === "ended") return "exited";
   return "idle";
+}
+
+/// [`agentState`] for an agent known to be a controller. The one entry point the pinned row, the
+/// toolbar dot and the panel share, so the three can never word the same controller differently.
+export function controllerAgentState(agent: AgentSession): AgentState {
+  return agentState(agent, true);
 }
 
 /// States that put a lane in the "Needs you" filter, and so in its count.
@@ -140,16 +166,22 @@ export function isUrgentState(state: AgentState): boolean {
   return URGENT_STATES.has(state);
 }
 
+/// One agent's state read in its own lane's terms: the controller reading inside the repomind
+/// home, the ordinary one everywhere else.
+export function agentStateIn(lane: Pick<Lane, "role">, agent: AgentSession): AgentState {
+  return agentState(agent, isControllerLane(lane));
+}
+
 /// The most urgent state among a lane's agents, or null for a lane with no agents.
 export function laneState(lane: Lane): AgentState | null {
-  const states = new Set(lane.agent_sessions.map(agentState));
+  const states = new Set(lane.agent_sessions.map((agent) => agentStateIn(lane, agent)));
   return STATE_PRIORITY.find((state) => states.has(state)) ?? null;
 }
 
 /// How many of a lane's agents share the lane's headline state, so the pill can say "2 running"
 /// truthfully rather than counting the whole roster.
 export function laneStateCount(lane: Lane, state: AgentState): number {
-  return lane.agent_sessions.filter((agent) => agentState(agent) === state).length;
+  return lane.agent_sessions.filter((agent) => agentStateIn(lane, agent) === state).length;
 }
 
 const STATE_TONE: Record<AgentState, LaneTone> = {
@@ -212,7 +244,9 @@ export function agentStateReason(agent: AgentSession): string | null {
 function laneIndicatorDetail(lane: Lane, state: AgentState): string | null {
   if (state === "running") {
     const count = laneStateCount(lane, "running");
-    const running = lane.agent_sessions.filter((agent) => agentState(agent) === "running");
+    const running = lane.agent_sessions.filter(
+      (agent) => agentStateIn(lane, agent) === "running",
+    );
     const onlySubagents = running.every((agent) => Boolean(agent.subagent_running));
     if (onlySubagents && count === 1) return "subagent running";
     if (count > 1) return `${count} running`;
@@ -231,7 +265,7 @@ export function laneIndicatorTitle(lane: Lane): string | undefined {
   if (state === null) return undefined;
   const detail = laneIndicatorDetail(lane, state);
   const reasons = lane.agent_sessions
-    .filter((agent) => agentState(agent) === state)
+    .filter((agent) => agentStateIn(lane, agent) === state)
     .map((agent) => agentStateReason(agent))
     .filter((reason): reason is string => Boolean(reason));
   const lines = detail ? [detail, ...reasons] : reasons;
@@ -254,7 +288,7 @@ export function fleetCounts(lanes: Lane[]): FleetCounts {
   const counts: FleetCounts = { urgent: 0, running: 0, idle: 0 };
   for (const lane of lanes) {
     for (const agent of lane.agent_sessions) {
-      const state = agentState(agent);
+      const state = agentStateIn(lane, agent);
       if (isUrgentState(state)) counts.urgent += 1;
       else if (state === "running") counts.running += 1;
       else if (state === "idle") counts.idle += 1;
@@ -279,12 +313,12 @@ export interface ControllerSummary {
 export function controllerSummary(lanes: Lane[]): ControllerSummary {
   const controllers = lanes.filter(isControllerLane);
   const sessions = controllers.flatMap((lane) => lane.agent_sessions);
-  const states = new Set(sessions.map(agentState));
+  const states = new Set(sessions.map(controllerAgentState));
   return {
     lane: controllers[0] ?? null,
     agents: sessions.length,
     state: STATE_PRIORITY.find((state) => states.has(state)) ?? null,
-    urgent: sessions.filter((session) => isUrgentState(agentState(session))).length,
+    urgent: sessions.filter((session) => isUrgentState(controllerAgentState(session))).length,
   };
 }
 

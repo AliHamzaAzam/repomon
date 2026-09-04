@@ -671,6 +671,15 @@ pub struct AgentSession {
     /// rather than merely disbelieved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+    /// What this session wants from a human, in the shared attention taxonomy
+    /// (`crate::agent::attention::Attention::as_str`): "none", "end_of_turn", "permission",
+    /// "decision". Overlaid at list time and never persisted.
+    ///
+    /// It exists so a client can tell the two halves of `Waiting` apart without re-deriving
+    /// them: an agent that merely ended its turn wants nothing in particular, while one sitting
+    /// on a dialog or an explicit question wants the operator now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_kind: Option<String>,
     /// Whether the transcript's last entry is the agent speaking with no tool call — i.e. it
     /// finished its turn — independent of the Idle time-decay that hides this in `status`.
     /// Daemon-internal (feeds the stall detector); never serialized.

@@ -181,6 +181,7 @@ mod tests {
             stalled_since: None,
             subagent_running: None,
             status_reason: None,
+            attention_kind: None,
             ended_turn: false,
             gate: None,
             tmux_window: Some("lane-1".into()),
@@ -378,6 +379,18 @@ mod tests {
             )),
             Attention::Decision
         );
+    }
+
+    #[test]
+    fn attention_words_are_the_wire_contract_clients_switch_on() {
+        // These strings ride out on `AgentSession.attention_kind`, and the desktop reads them to
+        // decide whether a waiting controller reads "idle" or "needs you". Renaming one here
+        // silently reclassifies every controller pill, so they are pinned.
+        assert_eq!(Attention::None.as_str(), "none");
+        assert_eq!(Attention::EndOfTurn.as_str(), "end_of_turn");
+        assert_eq!(Attention::DoneCandidate.as_str(), "done_candidate");
+        assert_eq!(Attention::Permission.as_str(), "permission");
+        assert_eq!(Attention::Decision.as_str(), "decision");
     }
 
     #[test]
