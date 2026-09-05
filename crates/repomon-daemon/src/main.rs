@@ -236,6 +236,10 @@ async fn run() {
     // `[usage_probe]` and a local UI being active, so it costs nothing until enabled and watched.
     tokio::spawn(repomon_daemon::usage_watch::usage_watcher(ctx.clone()));
 
+    // Ingest agent transcripts into the usage ledger. Self-gates per pass on `[usage] enabled`,
+    // reads only files that already exist, and bounds its work per tick.
+    tokio::spawn(repomon_daemon::usage_ingest::ingest_watch(ctx.clone()));
+
     // Reap orphaned `lane-<id>` windows whose id no longer maps to the worktree they claim —
     // leftovers from a re-registered worktree or a store reset the long-lived tmux server
     // outlived. Sweeps immediately on startup, then slowly, so phantom "exited" sessions

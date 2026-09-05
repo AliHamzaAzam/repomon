@@ -37,6 +37,8 @@ pub mod topic {
     pub const SUPERVISION_ACTED: &str = "event.supervision.acted";
     /// A supervision policy was updated.
     pub const SUPERVISION_CHANGED: &str = "event.supervision.changed";
+    /// The usage ledger gained events, so an open Usage view should refetch.
+    pub const USAGE_CHANGED: &str = "event.usage.changed";
 }
 
 pub const SUPERVISION_ACTED: &str = topic::SUPERVISION_ACTED;

@@ -69,6 +69,10 @@ fn remote_method_allowed(method: &str) -> bool {
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
         | "agent.capture" | "agent.transcript" | "agent.transcript_page"
         | "usage.get" | "usage.refresh" | "daemon.status"
+        // Ledger reads. `usage.ingest_now` and `usage.export` stay local-only: one drives host
+        // disk scans on demand, the other writes a file to the host's data directory.
+        | "usage.summary" | "usage.timeline" | "usage.sessions" | "usage.findings"
+        | "usage.status"
         // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
         | "terminal.list_all"
         // event stream + per-client streaming hint
@@ -583,6 +587,22 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secrex"));
         assert!(!constant_time_eq(b"secret", b"secret1"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn remote_allowlist_permits_the_ledger_reads_and_blocks_its_host_side_actions() {
+        for m in [
+            "usage.summary",
+            "usage.timeline",
+            "usage.sessions",
+            "usage.findings",
+            "usage.status",
+        ] {
+            assert!(remote_method_allowed(m), "{m} must be allowed");
+        }
+        for m in ["usage.ingest_now", "usage.export"] {
+            assert!(!remote_method_allowed(m), "{m} must be blocked");
+        }
     }
 
     #[test]

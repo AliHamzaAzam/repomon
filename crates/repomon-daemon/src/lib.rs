@@ -22,6 +22,8 @@ pub mod rpc;
 pub mod socket;
 pub mod standing;
 pub mod supervision;
+pub mod usage_ingest;
+pub mod usage_query;
 pub mod usage_watch;
 pub mod worktree_watch;
 
@@ -280,6 +282,11 @@ pub struct Ctx {
     /// Wakes the usage watcher for a user-requested refresh, bypassing the normal five-minute
     /// cadence while preserving its active-kind and local-UI gates.
     pub usage_refresh: Notify,
+    /// Wakes the usage-ledger ingest loop for an immediate pass.
+    pub usage_ingest_wake: Notify,
+    /// Held for the duration of an ingest pass, so `usage.ingest_now` reports honestly and two
+    /// passes never read the same file at once.
+    pub usage_ingest_lock: Mutex<()>,
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
     /// The filesystem watcher (set once the background task brings it up). Held here so `repo.add`
@@ -495,6 +502,8 @@ impl Ctx {
             rate_limits: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             usage_refresh: Notify::new(),
+            usage_ingest_wake: Notify::new(),
+            usage_ingest_lock: Mutex::new(()),
             auto_continue_off: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
             local_watcher_seen: Mutex::new(None),
@@ -535,7 +544,6 @@ impl Ctx {
             .find(|m| m.id == lane)
             .and_then(|m| m.tmux_window)
     }
-
 
     /// Reconcile worktree watchers so exactly the lanes currently present in some connection's
     /// viewport have a live watcher running.

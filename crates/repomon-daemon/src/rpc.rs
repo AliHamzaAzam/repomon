@@ -1544,6 +1544,59 @@ async fn resize_agent_grid(
     Ok(())
 }
 
+/// Shared shape of the ledger's read RPCs: a named range, or `custom` with explicit bounds.
+#[derive(Deserialize, Default)]
+struct UsageWindowParams {
+    #[serde(default)]
+    range: repomon_core::usage_ledger::Range,
+    #[serde(default)]
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl UsageWindowParams {
+    fn window(&self) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+        crate::usage_query::resolve_window(self.range, self.since, self.until, chrono::Utc::now())
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct UsageSummaryParams {
+    #[serde(flatten)]
+    window: UsageWindowParams,
+    #[serde(default)]
+    group_by: repomon_core::usage_ledger::GroupBy,
+}
+
+#[derive(Deserialize, Default)]
+struct UsageTimelineParams {
+    #[serde(flatten)]
+    window: UsageWindowParams,
+    #[serde(default)]
+    group_by: repomon_core::usage_ledger::GroupBy,
+    #[serde(default)]
+    bucket: repomon_core::usage_ledger::Bucket,
+}
+
+#[derive(Deserialize, Default)]
+struct UsageSessionsParams {
+    #[serde(flatten)]
+    window: UsageWindowParams,
+    #[serde(default)]
+    lane_id: Option<repomon_core::model::LaneId>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+struct UsageExportParams {
+    #[serde(flatten)]
+    window: UsageWindowParams,
+    #[serde(default)]
+    format: crate::usage_query::ExportFormat,
+}
+
 /// Dispatch a single request to its handler.
 pub async fn dispatch(
     // The `Arc` (rather than a bare `&Ctx`) so a handler can hand an owned context to a
@@ -1977,10 +2030,11 @@ pub async fn dispatch(
         }
         "playbook.list" => {
             let home = ctx.config.read().await.repomind_home();
-            let books = tokio::task::spawn_blocking(move || crate::repomind::playbooks::list(&home))
-                .await
-                .map_err(internal)?
-                .map_err(internal)?;
+            let books =
+                tokio::task::spawn_blocking(move || crate::repomind::playbooks::list(&home))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
             to_value(json!({ "playbooks": books }))
         }
         "playbook.approve" => {
@@ -3479,8 +3533,8 @@ pub async fn dispatch(
             let p: AgentSpawn = parse(params)?;
             // Spawning into the controller lane makes a controller: the full fleet catalog, a cap
             // of its own, and only the operator or another controller may ask for one.
-            let is_controller = ctx.store.controller_lane().await.map_err(internal)?
-                == Some(p.lane_id);
+            let is_controller =
+                ctx.store.controller_lane().await.map_err(internal)? == Some(p.lane_id);
             if is_controller {
                 let caller_lane = match &p.identity_token {
                     Some(token) => Some(
@@ -4753,6 +4807,68 @@ pub async fn dispatch(
             out.sort_by(|a, b| a.key.cmp(&b.key));
             to_value(out)
         }
+        // The ledger: token counts per turn, priced at query time. Reads are cheap and safe;
+        // `usage.ingest_now` is the only one that touches the disk on demand.
+        "usage.summary" => {
+            let p: UsageSummaryParams = parse_opt(params)?;
+            to_value(
+                crate::usage_query::summary(ctx, p.window.window(), p.group_by)
+                    .await
+                    .map_err(internal)?,
+            )
+        }
+        "usage.timeline" => {
+            let p: UsageTimelineParams = parse_opt(params)?;
+            to_value(
+                crate::usage_query::timeline(ctx, p.window.window(), p.bucket, p.group_by)
+                    .await
+                    .map_err(internal)?,
+            )
+        }
+        "usage.sessions" => {
+            let p: UsageSessionsParams = parse_opt(params)?;
+            to_value(
+                crate::usage_query::sessions(
+                    ctx,
+                    p.window.window(),
+                    p.lane_id,
+                    p.limit.unwrap_or(50),
+                )
+                .await
+                .map_err(internal)?,
+            )
+        }
+        "usage.findings" => {
+            let p: UsageWindowParams = parse_opt(params)?;
+            to_value(
+                crate::usage_query::findings(ctx, p.window())
+                    .await
+                    .map_err(internal)?,
+            )
+        }
+        "usage.export" => {
+            let p: UsageExportParams = parse_opt(params)?;
+            to_value(
+                crate::usage_query::export(ctx, p.window.window(), p.format)
+                    .await
+                    .map_err(internal)?,
+            )
+        }
+        "usage.status" => to_value(crate::usage_query::status(ctx).await.map_err(internal)?),
+        "usage.ingest_now" => {
+            let report = crate::usage_ingest::ingest_once(ctx)
+                .await
+                .map_err(internal)?;
+            if report.events > 0 {
+                ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, json!({}));
+            }
+            Ok(json!({
+                "listed": report.listed,
+                "scanned": report.scanned,
+                "events": report.events,
+                "failed": report.failed,
+            }))
+        }
         "usage.refresh" => {
             // The watcher owns probe IO and its active-kind/local-TUI gates. Wake it now so the
             // next pass bypasses only the five-minute freshness cooldown.
@@ -5246,7 +5362,9 @@ pub async fn dispatch(
         // document. Every spawn into the controller lane does this too; the RPC exists so a
         // client (and the operator) can see the exact context a controller would get right now.
         "repomind.boot" => {
-            let run = crate::repomind::boot::regenerate(ctx).await.map_err(internal)?;
+            let run = crate::repomind::boot::regenerate(ctx)
+                .await
+                .map_err(internal)?;
             to_value(json!({
                 "path": run.path.to_string_lossy(),
                 "bytes": run.bytes,
@@ -5258,7 +5376,9 @@ pub async fn dispatch(
         // Runs the export immediately rather than waiting out the debounce, so a caller that
         // just wrote a row can read the file back.
         "repomind.export" => {
-            let run = crate::repomind::export::run_now(ctx).await.map_err(internal)?;
+            let run = crate::repomind::export::run_now(ctx)
+                .await
+                .map_err(internal)?;
             to_value(json!({
                 "files": run.batch.touched,
                 "kinds": run.batch.kinds,
@@ -8924,8 +9044,7 @@ fn build_opencode_orchestrator_command(
         env_var_names.push("REPOMON_MCP_MAX_AGENTS");
     }
     let raw_existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
-    let config_json =
-        build_opencode_config_content(raw_existing.as_deref(), &env_var_names, boot)?;
+    let config_json = build_opencode_config_content(raw_existing.as_deref(), &env_var_names, boot)?;
 
     let mut env_parts = vec![
         format!("OPENCODE_CONFIG_CONTENT={}", shell_quote(&config_json)),
@@ -11534,7 +11653,12 @@ mod tests {
             std::env::set_var("REPOMON_CURSOR_MCP_CONFIG", &cursor_cfg);
         }
         let mut spec2 = SpawnSpec::new("cursor-agent --approve-mcps", dir.path());
-        configure_backend_mcp(&AgentKind::Other("my-cursor-wrapper".into()), &mut spec2, None).unwrap();
+        configure_backend_mcp(
+            &AgentKind::Other("my-cursor-wrapper".into()),
+            &mut spec2,
+            None,
+        )
+        .unwrap();
         assert!(
             cursor_cfg.exists(),
             "Cursor mcp.json must be created for cursor-agent wrapper"
@@ -11859,11 +11983,17 @@ mod tests {
             cmd.contains("--append-system-prompt-file '/home/me/repomind/.repomind/boot.md'"),
             "{cmd}"
         );
-        assert!(cmd.contains("--append-system-prompt "), "the persona must survive: {cmd}");
+        assert!(
+            cmd.contains("--append-system-prompt "),
+            "the persona must survive: {cmd}"
+        );
 
         // No boot file (the home could not be assembled): the command is exactly what it was.
         let without = build_claude_orchestrator_command("claude", &path, &None, &None, sid, None);
-        assert!(!without.contains("--append-system-prompt-file"), "{without}");
+        assert!(
+            !without.contains("--append-system-prompt-file"),
+            "{without}"
+        );
     }
 
     /// OpenCode has its own documented "additional instruction files" list, so the boot document
@@ -11884,7 +12014,8 @@ mod tests {
         assert_eq!(parsed["mcp"]["repomon"]["type"], json!("local"));
 
         // An operator's own instructions list is preserved, and the boot file is not duplicated.
-        let existing = r#"{"instructions":["/home/me/RULES.md","/home/me/repomind/.repomind/boot.md"]}"#;
+        let existing =
+            r#"{"instructions":["/home/me/RULES.md","/home/me/repomind/.repomind/boot.md"]}"#;
         let merged =
             build_opencode_config_content(Some(existing), &[], Some(&boot)).expect("merged");
         let parsed: Value = serde_json::from_str(&merged).unwrap();
@@ -11945,8 +12076,14 @@ mod tests {
         assert!(cmd.contains(&format!("--session-id '{sid}'")));
 
         // An empty prompt is dropped (not quoted as an empty arg).
-        let cmd =
-            build_claude_orchestrator_command("claude", &path, &None, &Some(String::new()), sid, None);
+        let cmd = build_claude_orchestrator_command(
+            "claude",
+            &path,
+            &None,
+            &Some(String::new()),
+            sid,
+            None,
+        );
         assert!(!cmd.trim_end().ends_with("''"));
     }
 
