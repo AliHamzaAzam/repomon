@@ -9,7 +9,6 @@ import { formatUsd } from "./usageMetrics";
 import {
   readAutoCollapseEmptyLanes,
   readSidebarShowTodayCost,
-  saveSidebarShowTodayCost,
   onSidebarShowTodayCostChanged,
   onAutoCollapseChanged,
   notifyLayoutChanged,
@@ -25,7 +24,6 @@ import RepoExtMenu from "./RepoExtMenu";
 import RepomindRow, { RepomindRowMenu, type RepomindMenuAction } from "./RepomindRow";
 import {
   AgentIcon,
-  IconEye,
   IconArrowDown,
   IconArrowUp,
   IconBolt,
@@ -578,7 +576,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   // `fleet.loading()`, which also flips on every 1.2s poll tick and would make the icon flicker
   // continuously instead of spinning only for the click the user actually made.
   const [showTodayCost, setShowTodayCost] = createSignal(readSidebarShowTodayCost());
-  onMount(() => onCleanup(onSidebarShowTodayCostChanged(setShowTodayCost)));
+  onMount(() => onCleanup(onSidebarShowTodayCostChanged((value) => {
+    setShowTodayCost(value);
+    notifyLayoutChanged();
+  })));
   const [usageRefreshing, setUsageRefreshing] = createSignal(false);
   const [usageNotice, setUsageNotice] = createSignal<string | null>(null);
   let usageRequest = 0;
@@ -1115,16 +1116,6 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
                     {usage().age_secs < 60 ? "just now" : `${Math.floor(usage().age_secs / 60)}m ago`}
                   </span>
-                  <button
-                    type="button"
-                    class="focus-ring flex shrink-0 items-center justify-center rounded p-0.5 text-muted hover:bg-raised transition-colors"
-                    title={showTodayCost() ? "Hide today's cost in the sidebar" : "Show today's cost in the sidebar"}
-                    aria-label={showTodayCost() ? "Hide today's cost in the sidebar" : "Show today's cost in the sidebar"}
-                    aria-pressed={showTodayCost()}
-                    onClick={() => { const next = !showTodayCost(); setShowTodayCost(next); saveSidebarShowTodayCost(next); notifyLayoutChanged(); }}
-                  >
-                    <IconEye size={11} off={!showTodayCost()} />
-                  </button>
                   <button
                     type="button"
                     class="focus-ring ml-0.5 flex items-center justify-center rounded p-0.5 text-muted/50 hover:bg-raised hover:text-muted transition-colors disabled:opacity-40"

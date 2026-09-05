@@ -5,6 +5,7 @@ import { createSignal } from "solid-js";
 import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import { controllerSummary, isControllerRepo, type FleetStore } from "../stores/fleet";
+import { saveSidebarShowTodayCost } from "../stores/uiSettings";
 import type { RepomindStore } from "../stores/repomind";
 import FleetSidebar, {
   FILTER_ROW_COMPACT_THRESHOLD_PX,
@@ -737,12 +738,15 @@ describe("sidebar cost visibility", () => {
     fleet.costToday = () => 12;
     const first = render(() => <FleetSidebar fleet={fleet} actions={actions} />);
     expect(screen.getByText("Today")).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Hide today's cost in the sidebar"));
+    expect(screen.queryByLabelText("Hide today's cost in the sidebar")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Refresh rate limit data")).toBeInTheDocument();
+    expect(screen.getByText("just now")).toBeInTheDocument();
+    saveSidebarShowTodayCost(false);
     expect(screen.queryByText("Today")).not.toBeInTheDocument();
     first.unmount();
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
     expect(screen.queryByText("Today")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Show today's cost in the sidebar"));
+    saveSidebarShowTodayCost(true);
     expect(screen.getByText("Today")).toBeInTheDocument();
     localStorage.removeItem("repomon:sidebar-show-today-cost");
   });

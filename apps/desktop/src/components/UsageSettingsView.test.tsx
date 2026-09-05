@@ -3,6 +3,7 @@ import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelRateRow, RatesStatus } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
+import { readSidebarShowTodayCost, saveSidebarShowTodayCost, SIDEBAR_COST_STORAGE_KEY } from "../stores/uiSettings";
 import Modal from "./Modal";
 import UsageSettingsView from "./UsageSettingsView";
 
@@ -43,6 +44,27 @@ function models() {
   return screen.getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent);
 }
 describe("UsageSettingsView", () => {
+  it("defaults sidebar cost on and persists the switch across remounts", async () => {
+    localStorage.removeItem(SIDEBAR_COST_STORAGE_KEY);
+    const first = await mount();
+    const toggle = () => screen.getByRole("switch", { name: "Show today's cost in the sidebar" });
+    expect(toggle()).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-checked", "false");
+    expect(readSidebarShowTodayCost()).toBe(false);
+    expect(rpc.mock.calls.some(([method]) => method === "config.set")).toBe(false);
+    first.unmount();
+    await mount();
+    expect(toggle()).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(toggle());
+    expect(readSidebarShowTodayCost()).toBe(true);
+    expect(toggle()).toHaveAttribute("aria-checked", "true");
+    saveSidebarShowTodayCost(false);
+    expect(toggle()).toHaveAttribute("aria-checked", "false");
+    saveSidebarShowTodayCost(true);
+    localStorage.removeItem(SIDEBAR_COST_STORAGE_KEY);
+  });
+
   it("puts unpriced rows first, sorts each column, and filters models", async () => {
     await mount();
     expect(screen.getByText("Unpriced")).toBeTruthy();

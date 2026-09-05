@@ -685,6 +685,10 @@ The `[usage]` table in `~/.config/repomon/config.toml`:
 `repomon usage today|week|month`, `repomon usage report`, `repomon usage ingest` and
 `repomon usage status` answer the same questions from a terminal, with `--group-by` and `--csv`.
 
+The sidebar Rate limits card keeps its refresh control and reading age. To hide or show its
+Today cost row, use **Settings > Usage > Show today's cost in the sidebar**. This preference
+is on by default, applies immediately, and persists with the other sidebar preferences.
+
 ### Model rates in Settings
 
 Open **Settings > Usage** to turn tracking or daily price refresh on and off, inspect price

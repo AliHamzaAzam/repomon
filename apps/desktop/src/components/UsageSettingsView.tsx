@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX 
 
 import type { ModelRateRow, RatesStatus } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
+import { readSidebarShowTodayCost, saveSidebarShowTodayCost, onSidebarShowTodayCostChanged } from "../stores/uiSettings";
 import Switch from "./controls/Switch";
 import {
   IconArrowDown,
@@ -62,6 +63,8 @@ function lastSeenLabel(iso: string | null): string {
  * the table, so the two surfaces never disagree about where a number came from.
  */
 export default function UsageSettingsView(props: UsageSettingsViewProps) {
+  const [showTodayCost, setShowTodayCost] = createSignal(readSidebarShowTodayCost());
+  onCleanup(onSidebarShowTodayCostChanged(setShowTodayCost));
   const [rates, setRates] = createSignal<RatesStatus | null>(null);
   const [rows, setRows] = createSignal<ModelRateRow[]>([]);
   const [loading, setLoading] = createSignal(true);
@@ -359,6 +362,11 @@ export default function UsageSettingsView(props: UsageSettingsViewProps) {
         <p class="text-[11px] text-muted">
           Reads agent transcripts already on disk into the local ledger. Nothing is sent anywhere.
         </p>
+        <Switch
+          label="Show today's cost in the sidebar"
+          checked={showTodayCost()}
+          onChange={saveSidebarShowTodayCost}
+        />
         <Switch
           label="Refresh prices from LiteLLM daily"
           checked={props.settings.usage_refresh_prices}
