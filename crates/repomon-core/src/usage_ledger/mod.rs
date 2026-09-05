@@ -20,7 +20,7 @@ use crate::pricing::{PriceTable, TokenCounts};
 
 pub mod scan;
 
-pub use scan::UNTITLED_SESSION;
+pub use scan::{HEADLINE_VERSION, UNTITLED_SESSION};
 
 /// One stored ledger row.
 #[derive(Debug, Clone, PartialEq)]
@@ -913,6 +913,10 @@ pub struct UsageSessionMeta {
     pub headline: Option<String>,
     /// The turn the headline was read from, before injected blocks were stripped.
     pub headline_raw: Option<String>,
+    /// Which revision of [`scan::HEADLINE_VERSION`] computed `headline`. A row written by an
+    /// older revision is stale even when its content still looks fine, and ingest re-digests it
+    /// from `source_path` until this catches up.
+    pub headline_version: u32,
     pub cwd: Option<String>,
     pub repo_id: Option<RepoId>,
     pub lane_id: Option<LaneId>,

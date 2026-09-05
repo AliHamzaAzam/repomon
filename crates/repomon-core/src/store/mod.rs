@@ -72,6 +72,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         24,
         include_str!("../../migrations/0024_usage_headline_raw.sql"),
     ),
+    (
+        25,
+        include_str!("../../migrations/0025_usage_headline_version.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -2035,6 +2039,12 @@ impl Store {
     }
 
     /// Write session digests, replacing any row for the same agent kind and session id.
+    ///
+    /// `headline_version` only advances when this pass actually produced a headline: an
+    /// incremental read that saw no new user or assistant text carries `headline: None` and
+    /// leaves both the stored headline and its version alone, so a session already flagged stale
+    /// stays eligible for [`Store::usage_sessions_needing_headline_upgrade`] rather than being
+    /// waved through on a pass that never looked at its old text again.
     pub async fn upsert_usage_sessions(
         &self,
         rows: Vec<crate::usage_ledger::UsageSessionMeta>,
@@ -2044,12 +2054,14 @@ impl Store {
             {
                 let mut stmt = tx.prepare(
                     "INSERT INTO usage_sessions(agent_kind, session_id, headline, headline_raw,
-                        cwd, repo_id, lane_id, started_at, ended_at, turns, tool_calls, retries,
-                        external, source_path)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                        headline_version, cwd, repo_id, lane_id, started_at, ended_at, turns,
+                        tool_calls, retries, external, source_path)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                      ON CONFLICT(agent_kind, session_id) DO UPDATE SET
                         headline = COALESCE(excluded.headline, headline),
                         headline_raw = COALESCE(excluded.headline_raw, headline_raw),
+                        headline_version = CASE WHEN excluded.headline IS NOT NULL
+                            THEN excluded.headline_version ELSE headline_version END,
                         cwd = COALESCE(excluded.cwd, cwd),
                         repo_id = COALESCE(excluded.repo_id, repo_id),
                         lane_id = COALESCE(excluded.lane_id, lane_id),
@@ -2067,6 +2079,7 @@ impl Store {
                         r.session_id,
                         r.headline,
                         r.headline_raw,
+                        r.headline_version as i64,
                         r.cwd,
                         r.repo_id,
                         r.lane_id,
@@ -2081,6 +2094,74 @@ impl Store {
                 }
             }
             tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Up to `limit` sessions whose stored `headline_version` is older than `current_version`,
+    /// each as `(agent_kind, session_id, source_path)` so the caller can re-read the file and
+    /// recompute. Sessions with no recorded source are included too, since a caller with nothing
+    /// to re-read can still mark them current rather than checking forever.
+    pub async fn usage_sessions_needing_headline_upgrade(
+        &self,
+        current_version: u32,
+        limit: usize,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT agent_kind, session_id, source_path FROM usage_sessions
+                 WHERE headline_version < ?1
+                 ORDER BY agent_kind, session_id
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![current_version as i64, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Overwrite one session's headline with a freshly recomputed value, unconditionally (unlike
+    /// [`Store::upsert_usage_sessions`], which never clobbers a headline with `None`): a full
+    /// re-read of the source is authoritative, so a session that turns out to have no real
+    /// headline at all must be allowed to lose a stale, injected one.
+    pub async fn update_usage_session_headline(
+        &self,
+        agent_kind: String,
+        session_id: String,
+        headline: Option<String>,
+        headline_raw: Option<String>,
+        version: u32,
+    ) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE usage_sessions SET headline = ?1, headline_raw = ?2, headline_version = ?3
+                 WHERE agent_kind = ?4 AND session_id = ?5",
+                params![headline, headline_raw, version as i64, agent_kind, session_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Mark one session's headline current without touching its content: the source could not be
+    /// re-read this pass (missing, or the session never resurfaced in a fresh scan), so trying
+    /// again would only starve the rest of the backlog out of its bounded batch. A later
+    /// incremental ingest pass still corrects the headline for real if the source changes again.
+    pub async fn mark_usage_session_headline_current(
+        &self,
+        agent_kind: String,
+        session_id: String,
+        version: u32,
+    ) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE usage_sessions SET headline_version = ?1
+                 WHERE agent_kind = ?2 AND session_id = ?3",
+                params![version as i64, agent_kind, session_id],
+            )?;
             Ok(())
         })
         .await
@@ -4827,6 +4908,7 @@ mod tests {
             agent_kind: "claude-code".to_string(),
             headline: Some("Wire up the ledger".to_string()),
             headline_raw: Some("Wire up the ledger, please".to_string()),
+            headline_version: crate::usage_ledger::HEADLINE_VERSION,
             cwd: Some("/repos/demo".to_string()),
             repo_id: Some(1),
             lane_id: Some(3),
