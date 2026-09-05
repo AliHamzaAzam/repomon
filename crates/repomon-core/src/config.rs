@@ -315,9 +315,11 @@ pub struct UsageConfig {
     pub scan_interval_secs: u64,
     /// How many source files one pass reads, bounding the work per tick.
     pub max_files_per_scan: usize,
-    /// Whether to refresh prices from [`DEFAULT_USAGE_PRICE_URL`] once a day. Off by default:
-    /// the ledger works entirely offline, and the built-in table is what it uses until told
-    /// otherwise.
+    /// Whether to refresh prices from [`DEFAULT_USAGE_PRICE_URL`] once a day. On by default: a
+    /// stale built-in rate card is a worse default than one GET a day to a static GitHub file,
+    /// and a config-blind operator should get current prices without editing anything. Set this
+    /// to `false` to keep the ledger fully offline; the built-in table is always the floor either
+    /// way, and `[usage.price_overrides]` always wins over both.
     pub refresh_prices: bool,
     /// Where to refresh prices from, when `refresh_prices` is on.
     pub price_url: Option<String>,
@@ -331,7 +333,7 @@ impl Default for UsageConfig {
             enabled: true,
             scan_interval_secs: DEFAULT_USAGE_SCAN_INTERVAL_SECS,
             max_files_per_scan: DEFAULT_USAGE_MAX_FILES_PER_SCAN,
-            refresh_prices: false,
+            refresh_prices: true,
             price_url: None,
             price_overrides: HashMap::new(),
         }
@@ -1130,13 +1132,23 @@ mod tests {
         );
     }
     #[test]
-    fn usage_defaults_are_on_with_price_refresh_off() {
+    fn usage_defaults_are_on_including_the_daily_price_refresh() {
         let c = Config::default();
         assert!(c.usage.enabled, "the ledger reads files that already exist");
-        assert!(!c.usage.refresh_prices, "no network calls unless asked");
+        assert!(
+            c.usage.refresh_prices,
+            "a daily GET to a static file is a reasonable default; set refresh_prices = false to opt out"
+        );
         assert!(c.usage.price_overrides.is_empty());
         assert!(c.usage.scan_interval_secs >= 60);
         assert!(c.usage.max_files_per_scan > 0);
+    }
+
+    #[test]
+    fn refresh_prices_can_be_turned_off_from_toml() {
+        let toml = "[usage]\nrefresh_prices = false\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.usage.refresh_prices);
     }
 
     #[test]

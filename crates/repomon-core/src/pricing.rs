@@ -29,6 +29,31 @@ pub struct TokenCounts {
     pub cache_write: u64,
 }
 
+/// Where a resolved rate came from. Config overrides win over a LiteLLM snapshot, which wins over
+/// the built-in table — the built-in table is the floor every model can fall back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum RateSource {
+    /// Shipped with repomon, dated the day it was last checked against a published price list.
+    Builtin,
+    /// Parsed from a cached LiteLLM `model_prices_and_context_window.json` snapshot.
+    Litellm,
+    /// An operator correction from `[usage.price_overrides]`.
+    Override,
+}
+
+impl std::fmt::Display for RateSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RateSource::Builtin => "builtin",
+            RateSource::Litellm => "litellm",
+            RateSource::Override => "override",
+        })
+    }
+}
+
 /// One model's rates, in dollars per million tokens, from `effective_from` onward.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPrice {
@@ -40,6 +65,8 @@ pub struct ModelPrice {
     pub cache_write_per_mtok: f64,
     /// The instant this row starts applying. Events before it fall to an older row, or to nothing.
     pub effective_from: DateTime<Utc>,
+    /// Where this row came from, so a resolved price carries its own provenance.
+    pub source: RateSource,
 }
 
 /// A `[usage.price_overrides."model"]` entry. Every field is optional: a partial override edits
@@ -123,6 +150,7 @@ impl PriceTable {
                 cache_read_per_mtok: *cache_read,
                 cache_write_per_mtok: *cache_write,
                 effective_from: from,
+                source: RateSource::Builtin,
             });
         }
         // GPT-6 has no published rate card yet. This copies the GPT-5 row as a best-effort
@@ -136,6 +164,7 @@ impl PriceTable {
             cache_read_per_mtok: 0.125,
             cache_write_per_mtok: 1.25,
             effective_from: today_utc_midnight(),
+            source: RateSource::Builtin,
         });
         table
     }
@@ -191,6 +220,7 @@ impl PriceTable {
                     .or(base.as_ref().map(|b| b.cache_write_per_mtok))
                     .unwrap_or(0.0),
                 effective_from,
+                source: RateSource::Override,
             };
             // An override at the same instant replaces the row it overrides rather than racing it.
             self.rows
@@ -199,21 +229,48 @@ impl PriceTable {
         }
     }
 
-    /// The rates for `model` as of `at`: the newest row not after `at`, matching the model id
-    /// exactly if possible and otherwise by its longest family prefix.
+    /// The rates for `model` as of `at`.
+    ///
+    /// Three steps, in order, and the first that hits wins:
+    /// 1. An exact row for `model` itself (newest one not after `at`).
+    /// 2. `model`'s alias (see [`resolve_alias`]), matched the same way (exact, then that alias's
+    ///    own longest family prefix). This runs before step 3 on purpose: an alias exists
+    ///    precisely because `model`'s own name is not what LiteLLM published it under, so its
+    ///    resolved row is a better rate than falling through to a generic family prefix of
+    ///    `model`'s own (unaliased) name.
+    /// 3. `model`'s longest family prefix among the table's own rows.
     pub fn lookup(&self, model: &str, at: DateTime<Utc>) -> Option<&ModelPrice> {
+        if let Some(hit) = self.exact_match(model, at) {
+            return Some(hit);
+        }
+        if let Some(alias) = resolve_alias(model) {
+            // Guard against a self-mapped alias (kept for a couple of entries as a documented,
+            // pinned no-op — see `ALIASES`): re-running the exact match on the same string would
+            // just repeat step 1's miss, so only take the alias branch when it names somewhere new.
+            if alias != model {
+                if let Some(hit) = self.exact_match(alias, at).or_else(|| self.prefix_match(alias, at)) {
+                    return Some(hit);
+                }
+            }
+        }
+        self.prefix_match(model, at)
+    }
+
+    /// The newest row not after `at` whose model id is exactly `model`.
+    fn exact_match(&self, model: &str, at: DateTime<Utc>) -> Option<&ModelPrice> {
+        self.rows
+            .iter()
+            .filter(|r| r.effective_from <= at && r.model == model)
+            .max_by_key(|r| r.effective_from)
+    }
+
+    /// The row whose model id is the longest prefix of `model`, among rows not after `at`. Ties
+    /// on length go to the newer row.
+    fn prefix_match(&self, model: &str, at: DateTime<Utc>) -> Option<&ModelPrice> {
         let mut best: Option<&ModelPrice> = None;
         let mut best_len = 0usize;
         for row in &self.rows {
-            if row.effective_from > at {
-                continue;
-            }
-            let matched = if row.model == model {
-                true
-            } else {
-                model.starts_with(&row.model)
-            };
-            if !matched {
+            if row.effective_from > at || !model.starts_with(&row.model) {
                 continue;
             }
             let len = row.model.len();
@@ -229,6 +286,33 @@ impl PriceTable {
             }
         }
         best
+    }
+
+    /// The count of distinct model rows currently priced by each source, keyed by model id: for
+    /// each name in the table, whichever row is newest as of now decides that model's source. An
+    /// override always wins its model's slot the moment it's applied, since `apply_overrides`
+    /// dates it at or after the row it replaces.
+    pub fn source_counts(&self) -> RateSourceCounts {
+        let mut newest: HashMap<&str, &ModelPrice> = HashMap::new();
+        for row in &self.rows {
+            newest
+                .entry(row.model.as_str())
+                .and_modify(|cur| {
+                    if row.effective_from >= cur.effective_from {
+                        *cur = row;
+                    }
+                })
+                .or_insert(row);
+        }
+        let mut counts = RateSourceCounts::default();
+        for row in newest.values() {
+            match row.source {
+                RateSource::Builtin => counts.builtin += 1,
+                RateSource::Litellm => counts.litellm += 1,
+                RateSource::Override => counts.overrides += 1,
+            }
+        }
+        counts
     }
 
     /// What `tokens` cost on `model` at `at`, in dollars. `None` when the model has no price.
@@ -257,6 +341,136 @@ impl PriceTable {
 /// "no published rate" warning stays about models that really would cost money.
 pub fn is_free_tier(model: &str) -> bool {
     model.ends_with("-free")
+}
+
+/// Model ids a CLI logs that do not (or might not) match a LiteLLM key by name or family prefix,
+/// mapped to the closest LiteLLM key to price them off instead.
+///
+/// This is a name fix, not a rate invention: every target here is a real LiteLLM entry. When
+/// LiteLLM renames or drops one of these, the alias just stops matching and the model falls back
+/// to the family-prefix rule, then to the built-in table, then to unpriced — it never fabricates
+/// a number.
+const ALIASES: &[(&str, &str)] = &[
+    // The mythos-5-1 codename has no LiteLLM entry of its own yet; its family's current release
+    // (mythos-5) is the closest published rate.
+    ("claude-mythos-5-1", "claude-mythos-5"),
+    // The Codex CLI's auto-review model id is internal; it shares the Codex rate card.
+    ("codex-auto-review", "gpt-5-codex"),
+    // The tiered-pricing label the desktop reads from Antigravity has no LiteLLM entry itself;
+    // the underlying model does.
+    ("gemini-3.8-flash-tiered", "gemini-3.8-flash"),
+    // Pinned rather than left to an exact-match coincidence: the target is the id this codebase
+    // already expects LiteLLM to publish for it.
+    ("claude-fable-5-1", "claude-fable-5-1"),
+    ("gpt-5.6-sol", "gpt-5.6-sol"),
+    ("gpt-5.6-luna", "gpt-5.6-luna"),
+];
+
+/// The LiteLLM key `model` should price off when neither its exact id nor its family prefix is in
+/// the table, or `None` when `model` has no known alias.
+pub fn resolve_alias(model: &str) -> Option<&'static str> {
+    ALIASES
+        .iter()
+        .find(|(from, _)| *from == model)
+        .map(|(_, to)| *to)
+}
+
+/// How many of the table's priced models come from each source, for the pricing footnote and
+/// `usage.rates`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct RateSourceCounts {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub builtin: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub litellm: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub overrides: u64,
+}
+
+impl RateSourceCounts {
+    /// Every priced model the table currently resolves, across all three sources.
+    pub fn total(&self) -> u64 {
+        self.builtin + self.litellm + self.overrides
+    }
+}
+
+/// What the ledger knows about its price rates: where they came from, how fresh the LiteLLM
+/// snapshot is, and whether the last fetch failed. Read by `usage.rates` and printed by
+/// `repomon usage rates` and the Usage view's pricing footnote.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct RatesStatus {
+    pub source_counts: RateSourceCounts,
+    /// When the cached LiteLLM snapshot was last fetched (a 304 counts as a fetch: it confirmed
+    /// the cache is current). `None` until the first successful fetch.
+    pub fetched_at: Option<DateTime<Utc>>,
+    /// The cached snapshot's ETag, so a repeat fetch can ask LiteLLM for only what changed.
+    pub etag: Option<String>,
+    /// When the daily refresh next runs, given `fetched_at` and the 24h cadence. `None` when
+    /// refreshing is off or nothing has been fetched yet.
+    pub next_refresh_at: Option<DateTime<Utc>>,
+    /// The last fetch's error, if it failed. Cleared by the next successful fetch.
+    pub last_error: Option<String>,
+    /// Whether `[usage] refresh_prices` is on. Off means the counts above are builtin/override
+    /// only, and `fetched_at`/`next_refresh_at` stay `None`.
+    pub enabled: bool,
+}
+
+/// The Usage view's pricing footnote and the CLI's `repomon usage rates` summary line: one string
+/// stating where rates came from, so both surfaces agree on the wording.
+///
+/// `now` is threaded through rather than read internally so the "updated Nh ago" phrasing is
+/// deterministic in tests.
+pub fn format_rates_footnote(status: &RatesStatus, now: DateTime<Utc>) -> String {
+    if !status.enabled {
+        return format!(
+            "Rates: built-in only ({} models). LiteLLM refresh is off ([usage] refresh_prices).",
+            status.source_counts.total()
+        );
+    }
+    if let Some(err) = &status.last_error {
+        return format!(
+            "Rates: LiteLLM fetch failed ({err}); using {} cached/built-in model(s).",
+            status.source_counts.total()
+        );
+    }
+    let mut line = match status.fetched_at {
+        Some(at) => {
+            let age = (now - at).max(chrono::Duration::zero());
+            format!(
+                "Rates: LiteLLM, updated {} ({} models)",
+                humanize_age(age),
+                status.source_counts.litellm
+            )
+        }
+        None => "Rates: LiteLLM not fetched yet".to_string(),
+    };
+    if status.source_counts.overrides > 0 {
+        line.push_str(&format!(", {} from overrides", status.source_counts.overrides));
+    }
+    if status.source_counts.builtin > 0 {
+        line.push_str(&format!(", {} built-in", status.source_counts.builtin));
+    }
+    line
+}
+
+/// A short "3h ago" / "2d ago" / "just now" phrase for a non-negative duration.
+fn humanize_age(age: chrono::Duration) -> String {
+    let mins = age.num_minutes();
+    if mins < 1 {
+        return "just now".to_string();
+    }
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = age.num_hours();
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", age.num_days())
 }
 
 /// Parse a LiteLLM `model_prices_and_context_window.json` snapshot into price rows.
@@ -288,6 +502,7 @@ pub fn parse_litellm_snapshot(
             cache_read_per_mtok: num("cache_read_input_token_cost").unwrap_or(0.0) * PER,
             cache_write_per_mtok: num("cache_creation_input_token_cost").unwrap_or(input) * PER,
             effective_from,
+            source: RateSource::Litellm,
         });
     }
     if out.is_empty() {
@@ -379,6 +594,7 @@ mod tests {
             cache_read_per_mtok: 0.0,
             cache_write_per_mtok: 0.0,
             effective_from: at(2026, 1, 1),
+            source: RateSource::Builtin,
         });
         table.insert(ModelPrice {
             model: "m".into(),
@@ -387,6 +603,7 @@ mod tests {
             cache_read_per_mtok: 0.0,
             cache_write_per_mtok: 0.0,
             effective_from: at(2026, 6, 1),
+            source: RateSource::Builtin,
         });
         assert_eq!(
             table.lookup("m", at(2026, 3, 1)).unwrap().input_per_mtok,
@@ -482,5 +699,147 @@ mod tests {
         assert!((m.cache_read_per_mtok - 0.3).abs() < 1e-9);
         assert!((m.cache_write_per_mtok - 3.75).abs() < 1e-9);
         assert!(rows.iter().all(|r| r.model != "sample-embedding"));
+    }
+
+    #[test]
+    fn an_alias_prices_a_model_that_has_no_row_of_its_own() {
+        let mut table = PriceTable::empty();
+        table.insert(ModelPrice {
+            model: "claude-mythos-5".into(),
+            input_per_mtok: 4.0,
+            output_per_mtok: 20.0,
+            cache_read_per_mtok: 0.4,
+            cache_write_per_mtok: 5.0,
+            effective_from: at(2026, 8, 1),
+            source: RateSource::Litellm,
+        });
+        // "claude-mythos-5-1" has no row of its own here, and is not a prefix match for
+        // "claude-mythos-5" (prefix matching only runs the other direction: the table's row must
+        // prefix the query, not the reverse) — only the alias resolves it.
+        let price = table.lookup("claude-mythos-5-1", at(2026, 9, 1)).unwrap();
+        assert_eq!(price.source, RateSource::Litellm);
+        assert_eq!(price.input_per_mtok, 4.0);
+    }
+
+    #[test]
+    fn an_alias_beats_a_generic_family_prefix_on_the_unaliased_name() {
+        // The built-in table prices anything starting with "codex-" off the generic GPT-5 rate
+        // card. "codex-auto-review" also has a specific LiteLLM entry via its alias
+        // ("gpt-5-codex") — that should win over the generic built-in prefix.
+        let mut table = PriceTable::builtin();
+        table.insert(ModelPrice {
+            model: "gpt-5-codex".into(),
+            input_per_mtok: 9.0,
+            output_per_mtok: 90.0,
+            cache_read_per_mtok: 0.9,
+            cache_write_per_mtok: 9.0,
+            effective_from: at(2026, 8, 1),
+            source: RateSource::Litellm,
+        });
+        let price = table.lookup("codex-auto-review", at(2026, 9, 1)).unwrap();
+        assert_eq!(price.source, RateSource::Litellm);
+        assert_eq!(price.input_per_mtok, 9.0);
+    }
+
+    #[test]
+    fn a_self_mapped_alias_does_not_infinite_loop_or_change_the_result() {
+        // "gpt-5.6-sol" aliases to itself (pinned defensively). With no matching row anywhere it
+        // must still terminate and report unpriced, not loop.
+        let table = PriceTable::empty();
+        assert!(table.lookup("gpt-5.6-sol", at(2026, 9, 1)).is_none());
+    }
+
+    #[test]
+    fn an_unaliased_unmatched_model_stays_unpriced() {
+        let table = PriceTable::builtin();
+        assert!(table.lookup("some-unknown-model-9000", at(2026, 9, 1)).is_none());
+    }
+
+    #[test]
+    fn source_counts_report_the_active_row_per_model() {
+        let mut table = PriceTable::empty();
+        table.insert(ModelPrice {
+            model: "a".into(),
+            input_per_mtok: 1.0,
+            output_per_mtok: 1.0,
+            cache_read_per_mtok: 0.0,
+            cache_write_per_mtok: 0.0,
+            effective_from: at(2026, 1, 1),
+            source: RateSource::Builtin,
+        });
+        table.insert(ModelPrice {
+            model: "b".into(),
+            input_per_mtok: 2.0,
+            output_per_mtok: 2.0,
+            cache_read_per_mtok: 0.0,
+            cache_write_per_mtok: 0.0,
+            effective_from: at(2026, 1, 1),
+            source: RateSource::Litellm,
+        });
+        table.apply_overrides([(
+            "a".to_string(),
+            PriceOverride {
+                input_per_mtok: Some(9.0),
+                ..Default::default()
+            },
+        )]);
+        let counts = table.source_counts();
+        assert_eq!(counts.overrides, 1, "the override replaces \"a\"'s slot");
+        assert_eq!(counts.litellm, 1);
+        assert_eq!(counts.builtin, 0);
+        assert_eq!(counts.total(), 2);
+    }
+
+    #[test]
+    fn footnote_reports_litellm_freshness_and_the_other_sources() {
+        let status = RatesStatus {
+            source_counts: RateSourceCounts {
+                builtin: 4,
+                litellm: 12,
+                overrides: 2,
+            },
+            fetched_at: Some(at(2026, 9, 1) - chrono::Duration::hours(3)),
+            etag: Some("etag-1".into()),
+            next_refresh_at: Some(at(2026, 9, 2)),
+            last_error: None,
+            enabled: true,
+        };
+        let line = format_rates_footnote(&status, at(2026, 9, 1));
+        assert!(line.contains("LiteLLM"), "{line}");
+        assert!(line.contains("3h"), "{line}");
+        assert!(line.contains("12 models"), "{line}");
+        assert!(line.contains("2 from overrides"), "{line}");
+        assert!(line.contains("4 built-in"), "{line}");
+    }
+
+    #[test]
+    fn footnote_surfaces_a_failed_fetch_rather_than_hiding_it() {
+        let status = RatesStatus {
+            source_counts: RateSourceCounts::default(),
+            fetched_at: None,
+            etag: None,
+            next_refresh_at: None,
+            last_error: Some("connection timed out".into()),
+            enabled: true,
+        };
+        let line = format_rates_footnote(&status, at(2026, 9, 1));
+        assert!(line.contains("failed"), "{line}");
+        assert!(line.contains("connection timed out"), "{line}");
+    }
+
+    #[test]
+    fn footnote_says_refresh_is_off_when_it_is() {
+        let status = RatesStatus {
+            source_counts: RateSourceCounts {
+                builtin: 20,
+                litellm: 0,
+                overrides: 0,
+            },
+            enabled: false,
+            ..Default::default()
+        };
+        let line = format_rates_footnote(&status, at(2026, 9, 1));
+        assert!(line.contains("off"), "{line}");
+        assert!(line.contains("built-in"), "{line}");
     }
 }
