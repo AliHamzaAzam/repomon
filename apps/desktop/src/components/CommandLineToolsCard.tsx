@@ -1,4 +1,4 @@
-import { Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onMount } from "solid-js";
 
 import { hasTauriBridge } from "../ipc/boot";
 import { cliInstall, cliStatus, cliUninstall, type CliStatus } from "../ipc/cli";
@@ -114,7 +114,7 @@ export default function CommandLineToolsCard(props: CommandLineToolsCardProps) {
                   when={status()?.on_path}
                   fallback={
                     <span class="rounded border border-attention/30 bg-attention/10 px-2 py-0.5 text-[10.5px] font-medium text-attention">
-                      Installed, not on PATH
+                      {status()?.on_path === null ? "Installed, PATH unknown" : "Installed, not on PATH"}
                     </span>
                   }
                 >
@@ -154,7 +154,7 @@ export default function CommandLineToolsCard(props: CommandLineToolsCardProps) {
             {(hint) => (
               <div class="space-y-2 rounded-lg border border-attention/20 bg-attention/5 p-2.5">
                 <p class="text-[11px] leading-relaxed text-foreground">
-                  Installed, but your shell cannot see it yet.
+                  {status()?.on_path === null ? "Check your shell PATH before using the command line." : "Installed, but your shell cannot see it yet."}
                 </p>
                 <div class="flex items-center gap-2">
                   <code class="min-w-0 flex-1 select-all truncate rounded border border-line bg-surface px-2 py-0.5 font-mono text-[10.5px] text-foreground">
@@ -175,6 +175,10 @@ export default function CommandLineToolsCard(props: CommandLineToolsCardProps) {
               </div>
             )}
           </Show>
+
+          <For each={status()?.notes}>
+            {(note) => <p class="text-[11px] leading-relaxed text-muted">{note}</p>}
+          </For>
 
           <Show when={error()}>
             {(message) => (

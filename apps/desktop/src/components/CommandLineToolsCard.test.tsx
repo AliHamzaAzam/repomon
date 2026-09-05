@@ -15,6 +15,7 @@ function notInstalled(): CliStatus {
     on_path: true,
     version: null,
     tools: [],
+    notes: [],
     missing: ["repomon", "repomond"],
     path_hint: null,
   };
@@ -27,6 +28,7 @@ function installedAndOnPath(): CliStatus {
     on_path: true,
     version: "repomon 0.8.1",
     tools: ["repomon", "repomond"],
+    notes: [],
     missing: [],
     path_hint: null,
   };
@@ -39,6 +41,7 @@ function installedButUnreachable(): CliStatus {
     on_path: false,
     version: "repomon 0.8.1",
     tools: ["repomon", "repomond"],
+    notes: [],
     missing: [],
     path_hint: 'Add this line to your shell rc (~/.zshrc or ~/.bashrc): export PATH="/Users/pat/.local/bin:$PATH"',
   };
@@ -122,6 +125,15 @@ describe("the command-line tools card", () => {
     expect(
       await screen.findByText("this build does not carry repomon next to the app"),
     ).toBeInTheDocument();
+  });
+
+  it("reports an unknown shell PATH without claiming it is missing", async () => {
+    render(() => <CommandLineToolsCard read={async () => ({
+      ...installedAndOnPath(), on_path: null, notes: ["could not read your shell PATH"],
+    })} />);
+    expect(await screen.findByText("Installed, PATH unknown")).toBeInTheDocument();
+    expect(screen.getByText("could not read your shell PATH")).toBeInTheDocument();
+    expect(screen.queryByText("Installed, not on PATH")).not.toBeInTheDocument();
   });
 
   it("renders nothing outside the Tauri shell", () => {

@@ -137,7 +137,7 @@ fn probe_daemon_binary() -> DaemonBootCheck {
 
 /// `child.wait_with_output()` with a ceiling. A daemon binary that hangs on start (a blocked
 /// loader, a filesystem filter driver mid-scan) would otherwise wedge the onboarding row forever.
-fn wait_with_timeout(
+pub(crate) fn wait_with_timeout(
     mut child: std::process::Child,
     timeout: Duration,
 ) -> Result<std::process::Output, String> {

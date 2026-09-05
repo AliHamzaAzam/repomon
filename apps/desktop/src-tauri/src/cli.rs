@@ -122,7 +122,7 @@ pub struct CliStatus {
     pub dir: String,
     /// Whether a terminal would find that directory. On unix this is the login shell's PATH, not
     /// the app's, because an app launched from the Dock has a stripped one.
-    pub on_path: bool,
+    pub on_path: Option<bool>,
     /// `repomon --version` from the installed copy. The verification that it works, not just that
     /// a file of the right name exists.
     pub version: Option<String>,
@@ -133,6 +133,8 @@ pub struct CliStatus {
     /// The exact line to add to a shell rc, or the note about signing out on Windows. `None` when
     /// the directory is already on PATH.
     pub path_hint: Option<String>,
+    /// Warnings and changes to existing tools reported by the card.
+    pub notes: Vec<String>,
 }
 
 /// Where the bundled executables live: next to the running app binary. Tauri drops the target
@@ -166,22 +168,34 @@ pub fn install_dir() -> Result<PathBuf, String> {
 /// "is `~/.local/bin` on your PATH" from this process's own environment would tell almost every
 /// user "no" whether or not it is true. Ask the login shell instead, the way the daemon's own
 /// PATH repair does, and fall back to this process's PATH when there is no shell to ask.
-fn user_path() -> String {
+const SHELL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(not(windows))]
+fn probe_shell_path(shell: &std::ffi::OsStr) -> Option<String> {
+    let child = std::process::Command::new(shell)
+        .args(["-ilc", "printf %s \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let output = crate::boot::wait_with_timeout(child, SHELL_PROBE_TIMEOUT).ok()?;
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !path.is_empty()).then_some(path)
+}
+
+fn user_path() -> (String, bool) {
     #[cfg(not(windows))]
-    if let Some(shell) = std::env::var_os("SHELL") {
-        let output = std::process::Command::new(shell)
-            .args(["-ilc", "printf %s \"$PATH\""])
-            .output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return path;
-                }
-            }
+    {
+        if let Some(path) = std::env::var_os("SHELL").and_then(|shell| probe_shell_path(&shell)) {
+            return (path, true);
         }
+        (std::env::var("PATH").unwrap_or_default(), false)
     }
-    std::env::var("PATH").unwrap_or_default()
+    #[cfg(windows)]
+    {
+        (std::env::var("PATH").unwrap_or_default(), true)
+    }
 }
 
 fn path_separator() -> char {
@@ -198,10 +212,14 @@ fn installed_version(dir: &Path) -> Option<String> {
     if !exe.exists() {
         return None;
     }
-    let output = repomon_core::process::background_command(&exe)
+    let child = repomon_core::process::background_command(&exe)
         .arg("--version")
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
+    let output = crate::boot::wait_with_timeout(child, SHELL_PROBE_TIMEOUT).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -221,7 +239,8 @@ fn read_status(dir: &Path) -> CliStatus {
         }
     }
     let installed = missing.is_empty();
-    let on_path = path_lists_dir(&user_path(), dir, path_separator());
+    let (path, known) = user_path();
+    let on_path = known.then(|| path_lists_dir(&path, dir, path_separator()));
     CliStatus {
         installed,
         dir: dir.display().to_string(),
@@ -229,7 +248,12 @@ fn read_status(dir: &Path) -> CliStatus {
         version: installed.then(|| installed_version(dir)).flatten(),
         tools: present,
         missing,
-        path_hint: (!on_path).then(|| path_hint(dir)),
+        path_hint: (on_path != Some(true)).then(|| path_hint(dir)),
+        notes: if known {
+            vec![]
+        } else {
+            vec!["could not read your shell PATH".into()]
+        },
     }
 }
 
@@ -255,12 +279,20 @@ fn path_hint(dir: &Path) -> String {
 pub const WINDOWS_PATH_HINT: &str = "Open a new terminal to pick up the updated PATH. Windows keeps the old environment in windows that were already open.";
 
 #[tauri::command]
-pub fn cli_status() -> Result<CliStatus, String> {
-    Ok(read_status(&install_dir()?))
+pub async fn cli_status() -> Result<CliStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| Ok(read_status(&install_dir()?)))
+        .await
+        .map_err(|e| format!("could not check command-line tools: {e}"))?
 }
 
 #[tauri::command]
-pub fn cli_install() -> Result<CliStatus, String> {
+pub async fn cli_install() -> Result<CliStatus, String> {
+    tauri::async_runtime::spawn_blocking(install_tools)
+        .await
+        .map_err(|e| format!("could not install command-line tools: {e}"))?
+}
+
+fn install_tools() -> Result<CliStatus, String> {
     let dir = install_dir()?;
     let source = bundled_dir()?;
 
@@ -299,7 +331,13 @@ pub fn cli_install() -> Result<CliStatus, String> {
 }
 
 #[tauri::command]
-pub fn cli_uninstall() -> Result<CliStatus, String> {
+pub async fn cli_uninstall() -> Result<CliStatus, String> {
+    tauri::async_runtime::spawn_blocking(uninstall_tools)
+        .await
+        .map_err(|e| format!("could not uninstall command-line tools: {e}"))?
+}
+
+fn uninstall_tools() -> Result<CliStatus, String> {
     let dir = install_dir()?;
     for tool in tools() {
         let path = dir.join(tool);
@@ -448,6 +486,18 @@ mod windows_path {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn sleeping_shell_path_probe_is_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("shell");
+        std::fs::write(&shell, "#!/bin/sh\nexec sleep 10\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = std::time::Instant::now();
+        assert!(super::probe_shell_path(shell.as_os_str()).is_none());
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
     use super::*;
 
     #[test]

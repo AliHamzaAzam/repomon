@@ -5,11 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 export interface CliStatus {
   installed: boolean;
   dir: string;
-  on_path: boolean;
+  on_path: boolean | null;
   version: string | null;
   tools: string[];
   missing: string[];
   path_hint: string | null;
+  notes: string[];
 }
 
 export function cliStatus(): Promise<CliStatus> {
