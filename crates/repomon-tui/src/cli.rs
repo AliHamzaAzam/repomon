@@ -447,7 +447,7 @@ async fn print_usage(
 
 /// Render a summary as an aligned table.
 fn render_usage_table(s: &repomon_core::usage_ledger::UsageSummary) -> String {
-    use repomon_core::usage_ledger::money;
+    use repomon_core::usage_ledger::{money, tokens};
     if s.totals.events == 0 {
         return format!(
             "no usage recorded between {} and {}\n",
@@ -471,18 +471,18 @@ fn render_usage_table(s: &repomon_core::usage_ledger::UsageSummary) -> String {
         out.push_str(&format!(
             "{:<width$}  {:>12}  {:>12}  {:>12}  {:>10}\n",
             g.label,
-            g.totals.input_tokens,
-            g.totals.output_tokens,
-            g.totals.cache_read_tokens,
+            tokens(g.totals.input_tokens),
+            tokens(g.totals.output_tokens),
+            tokens(g.totals.cache_read_tokens),
             money(g.totals.cost_usd),
         ));
     }
     out.push_str(&format!(
         "{:<width$}  {:>12}  {:>12}  {:>12}  {:>10}\n",
         "TOTAL",
-        s.totals.input_tokens,
-        s.totals.output_tokens,
-        s.totals.cache_read_tokens,
+        tokens(s.totals.input_tokens),
+        tokens(s.totals.output_tokens),
+        tokens(s.totals.cache_read_tokens),
         money(s.totals.cost_usd),
     ));
     out.push_str(&format!(
@@ -493,7 +493,8 @@ fn render_usage_table(s: &repomon_core::usage_ledger::UsageSummary) -> String {
     ));
     if !s.unpriced_models.is_empty() {
         out.push_str(&format!(
-            "no price for: {}  (set [usage.price_overrides] to include them in the cost)\n",
+            "no published rate for: {}. Tokens are counted; cost shows as $0 until you set a \
+             price in [usage.price_overrides].\n",
             s.unpriced_models.join(", ")
         ));
     }
@@ -2547,6 +2548,20 @@ mod tests {
     fn the_usage_table_names_models_it_could_not_price() {
         let out = super::render_usage_table(&summary());
         assert!(out.contains("local-model"));
+        assert!(
+            out.contains("no published rate for"),
+            "the warning says what it means for the number"
+        );
+    }
+
+    #[test]
+    fn the_usage_table_abbreviates_token_counts_and_dollars() {
+        let mut s = summary();
+        s.totals.input_tokens = 12_580_000_000;
+        s.totals.cost_usd = 12_580.4;
+        let out = super::render_usage_table(&s);
+        assert!(out.contains("12.6B"), "got {out}");
+        assert!(out.contains("$12,580"), "got {out}");
     }
 
     #[test]
