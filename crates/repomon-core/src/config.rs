@@ -195,6 +195,10 @@ pub struct Config {
     /// the emitted TOML stays valid.
     #[serde(default)]
     pub repomind: RepomindConfig,
+    /// The `[usage]` table: the token ledger, its scan cadence and its price corrections.
+    /// Serialized after [`RepomindConfig`] for the same reason: TOML wants every scalar first.
+    #[serde(default)]
+    pub usage: UsageConfig,
 }
 
 impl Default for Config {
@@ -249,6 +253,7 @@ impl Default for Config {
             triage_after_mins: None,
             supervision: crate::agent::supervision::SupervisionConfig::default(),
             repomind: RepomindConfig::default(),
+            usage: UsageConfig::default(),
         }
     }
 }
@@ -286,6 +291,49 @@ impl Default for RepomindConfig {
             max_controllers: DEFAULT_MAX_CONTROLLERS,
             basic_memory_config: None,
             boot_budget_tokens: DEFAULT_BOOT_BUDGET_TOKENS,
+        }
+    }
+}
+
+/// How often a full ingest scan runs when nothing has changed on disk.
+pub const DEFAULT_USAGE_SCAN_INTERVAL_SECS: u64 = 600;
+/// How many source files one ingest pass reads, so a first run over years of transcripts does
+/// not hold the store thread for minutes.
+pub const DEFAULT_USAGE_MAX_FILES_PER_SCAN: usize = 200;
+/// Where LiteLLM publishes its price snapshot.
+pub const DEFAULT_USAGE_PRICE_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+/// The `[usage]` table: the token ledger's switches, cadence and price corrections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageConfig {
+    /// Whether the daemon ingests agent transcripts into the ledger at all.
+    pub enabled: bool,
+    /// Seconds between full scans. Watchers still pick up changes as they happen; this is the
+    /// floor that catches anything a watcher missed.
+    pub scan_interval_secs: u64,
+    /// How many source files one pass reads, bounding the work per tick.
+    pub max_files_per_scan: usize,
+    /// Whether to refresh prices from [`DEFAULT_USAGE_PRICE_URL`] once a day. Off by default:
+    /// the ledger works entirely offline, and the built-in table is what it uses until told
+    /// otherwise.
+    pub refresh_prices: bool,
+    /// Where to refresh prices from, when `refresh_prices` is on.
+    pub price_url: Option<String>,
+    /// Per-model corrections to the built-in rates, keyed by model id or family prefix.
+    pub price_overrides: HashMap<String, crate::pricing::PriceOverride>,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        UsageConfig {
+            enabled: true,
+            scan_interval_secs: DEFAULT_USAGE_SCAN_INTERVAL_SECS,
+            max_files_per_scan: DEFAULT_USAGE_MAX_FILES_PER_SCAN,
+            refresh_prices: false,
+            price_url: None,
+            price_overrides: HashMap::new(),
         }
     }
 }
@@ -1079,6 +1127,50 @@ mod tests {
         assert_eq!(
             Config::load_from(&path).unwrap().repomind.basic_memory_config,
             Some("/srv/bm/config.json".to_string())
+        );
+    }
+    #[test]
+    fn usage_defaults_are_on_with_price_refresh_off() {
+        let c = Config::default();
+        assert!(c.usage.enabled, "the ledger reads files that already exist");
+        assert!(!c.usage.refresh_prices, "no network calls unless asked");
+        assert!(c.usage.price_overrides.is_empty());
+        assert!(c.usage.scan_interval_secs >= 60);
+        assert!(c.usage.max_files_per_scan > 0);
+    }
+
+    #[test]
+    fn a_usage_price_override_round_trips_through_toml() {
+        let toml = r#"
+[usage]
+enabled = true
+
+[usage.price_overrides."claude-sonnet-5"]
+input_per_mtok = 1.5
+output_per_mtok = 7.5
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        let over = c.usage.price_overrides.get("claude-sonnet-5").unwrap();
+        assert_eq!(over.input_per_mtok, Some(1.5));
+        assert_eq!(over.output_per_mtok, Some(7.5));
+        assert_eq!(over.cache_read_per_mtok, None);
+    }
+
+    #[test]
+    fn a_config_carrying_usage_tables_still_serializes_to_valid_toml() {
+        let mut c = Config::default();
+        c.usage.price_overrides.insert(
+            "claude-opus-5".to_string(),
+            crate::pricing::PriceOverride {
+                input_per_mtok: Some(4.0),
+                ..Default::default()
+            },
+        );
+        let text = toml::to_string(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.usage.price_overrides["claude-opus-5"].input_per_mtok,
+            Some(4.0)
         );
     }
 }

@@ -32,6 +32,7 @@ pub mod session;
 pub mod store;
 pub mod traits;
 pub mod transport;
+pub mod usage_ledger;
 pub mod watch;
 
 #[cfg(windows)]

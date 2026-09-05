@@ -67,6 +67,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0021_mcp_identity_process.sql"),
     ),
     (22, include_str!("../../migrations/0022_lane_role.sql")),
+    (23, include_str!("../../migrations/0023_usage_ledger.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -1835,6 +1836,344 @@ impl Store {
         })
         .await
     }
+
+    // ---- usage ledger ----
+
+    /// Insert ledger events, ignoring any whose `(source_path, source_offset)` is already stored,
+    /// and fold the rows that were new into [`usage_daily`]. Returns how many rows were inserted.
+    ///
+    /// The whole call is one transaction, so a rollup can never drift from the events it
+    /// summarizes: either both land or neither does.
+    pub async fn record_usage_events(
+        &self,
+        events: Vec<crate::usage_ledger::UsageEvent>,
+    ) -> Result<usize> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            let mut inserted = Vec::with_capacity(events.len());
+            {
+                let mut stmt = tx.prepare(&format!(
+                    "INSERT OR IGNORE INTO usage_events({USAGE_EVENT_COLS})
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
+                ))?;
+                for e in events {
+                    let n = stmt.execute(params![
+                        to_iso(&e.at),
+                        e.agent_kind,
+                        e.model,
+                        e.account,
+                        e.lane_id,
+                        e.repo_id,
+                        e.session_id,
+                        e.cwd,
+                        e.window,
+                        e.input_tokens as i64,
+                        e.output_tokens as i64,
+                        e.cache_read_tokens as i64,
+                        e.cache_write_tokens as i64,
+                        e.thinking_tokens as i64,
+                        e.estimated as i64,
+                        e.external as i64,
+                        e.source_path,
+                        e.source_offset,
+                    ])?;
+                    if n > 0 {
+                        inserted.push(e);
+                    }
+                }
+            }
+            let count = inserted.len();
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO usage_daily(day, agent_kind, model, account, repo_id, lane_id,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                        thinking_tokens, estimated_tokens, events)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(day, agent_kind, model, account, repo_id, lane_id) DO UPDATE SET
+                        input_tokens = input_tokens + excluded.input_tokens,
+                        output_tokens = output_tokens + excluded.output_tokens,
+                        cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                        cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+                        thinking_tokens = thinking_tokens + excluded.thinking_tokens,
+                        estimated_tokens = estimated_tokens + excluded.estimated_tokens,
+                        events = events + excluded.events",
+                )?;
+                for r in crate::usage_ledger::rollup(&inserted) {
+                    stmt.execute(params![
+                        r.day,
+                        r.agent_kind,
+                        r.model,
+                        r.account,
+                        r.repo_id.unwrap_or(0),
+                        r.lane_id.unwrap_or(0),
+                        r.input_tokens as i64,
+                        r.output_tokens as i64,
+                        r.cache_read_tokens as i64,
+                        r.cache_write_tokens as i64,
+                        r.thinking_tokens as i64,
+                        r.estimated_tokens as i64,
+                        r.events as i64,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+            Ok(count)
+        })
+        .await
+    }
+
+    /// Every ledger event in `[from, to)`, oldest first.
+    pub async fn usage_events_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<crate::usage_ledger::UsageEvent>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {USAGE_EVENT_COLS} FROM usage_events
+                 WHERE at >= ?1 AND at < ?2 ORDER BY at ASC, id ASC"
+            ))?;
+            let rows = stmt.query_map(params![to_iso(&from), to_iso(&to)], usage_event_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// The daily rollups for the inclusive day range `[from_day, to_day]`, both `YYYY-MM-DD`.
+    pub async fn usage_daily_between(
+        &self,
+        from_day: String,
+        to_day: String,
+    ) -> Result<Vec<crate::usage_ledger::UsageDailyRow>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT day, agent_kind, model, account, repo_id, lane_id, input_tokens,
+                        output_tokens, cache_read_tokens, cache_write_tokens, thinking_tokens,
+                        estimated_tokens, events
+                 FROM usage_daily WHERE day >= ?1 AND day <= ?2
+                 ORDER BY day ASC, agent_kind ASC, model ASC",
+            )?;
+            let rows = stmt.query_map(params![from_day, to_day], |row| {
+                let repo_id: i64 = row.get(4)?;
+                let lane_id: i64 = row.get(5)?;
+                Ok(crate::usage_ledger::UsageDailyRow {
+                    day: row.get(0)?,
+                    agent_kind: row.get(1)?,
+                    model: row.get(2)?,
+                    account: row.get(3)?,
+                    repo_id: (repo_id != 0).then_some(repo_id),
+                    lane_id: (lane_id != 0).then_some(lane_id),
+                    input_tokens: row.get::<_, i64>(6)?.max(0) as u64,
+                    output_tokens: row.get::<_, i64>(7)?.max(0) as u64,
+                    cache_read_tokens: row.get::<_, i64>(8)?.max(0) as u64,
+                    cache_write_tokens: row.get::<_, i64>(9)?.max(0) as u64,
+                    thinking_tokens: row.get::<_, i64>(10)?.max(0) as u64,
+                    estimated_tokens: row.get::<_, i64>(11)?.max(0) as u64,
+                    events: row.get::<_, i64>(12)?.max(0) as u64,
+                })
+            })?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Where one source was last read up to.
+    pub async fn usage_cursor(
+        &self,
+        source_path: String,
+    ) -> Result<Option<crate::usage_ledger::UsageCursor>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {USAGE_CURSOR_COLS} FROM usage_ingest_cursors WHERE source_path = ?1"
+            ))?;
+            let mut rows = stmt.query_map(params![source_path], usage_cursor_from_row)?;
+            match rows.next() {
+                Some(r) => Ok(Some(r?)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    /// Every ingest cursor, newest scan first.
+    pub async fn usage_cursors(&self) -> Result<Vec<crate::usage_ledger::UsageCursor>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {USAGE_CURSOR_COLS} FROM usage_ingest_cursors ORDER BY scanned_at DESC"
+            ))?;
+            let rows = stmt.query_map([], usage_cursor_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Record where a source was read up to, and whether reading it failed.
+    pub async fn set_usage_cursor(
+        &self,
+        source_path: String,
+        offset: u64,
+        mtime: i64,
+        error: Option<String>,
+    ) -> Result<()> {
+        let now = to_iso(&Utc::now());
+        self.call(move |c| {
+            c.execute(
+                "INSERT INTO usage_ingest_cursors(source_path, offset, mtime, scanned_at, error)
+                 VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(source_path) DO UPDATE SET
+                    offset = excluded.offset, mtime = excluded.mtime,
+                    scanned_at = excluded.scanned_at, error = excluded.error",
+                params![source_path, offset as i64, mtime, now, error],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Write session digests, replacing any row for the same agent kind and session id.
+    pub async fn upsert_usage_sessions(
+        &self,
+        rows: Vec<crate::usage_ledger::UsageSessionMeta>,
+    ) -> Result<()> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO usage_sessions(agent_kind, session_id, headline, cwd, repo_id,
+                        lane_id, started_at, ended_at, turns, tool_calls, retries, external,
+                        source_path)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(agent_kind, session_id) DO UPDATE SET
+                        headline = COALESCE(excluded.headline, headline),
+                        cwd = COALESCE(excluded.cwd, cwd),
+                        repo_id = COALESCE(excluded.repo_id, repo_id),
+                        lane_id = COALESCE(excluded.lane_id, lane_id),
+                        started_at = COALESCE(started_at, excluded.started_at),
+                        ended_at = COALESCE(excluded.ended_at, ended_at),
+                        turns = turns + excluded.turns,
+                        tool_calls = tool_calls + excluded.tool_calls,
+                        retries = retries + excluded.retries,
+                        external = excluded.external,
+                        source_path = COALESCE(excluded.source_path, source_path)",
+                )?;
+                for r in rows {
+                    stmt.execute(params![
+                        r.agent_kind,
+                        r.session_id,
+                        r.headline,
+                        r.cwd,
+                        r.repo_id,
+                        r.lane_id,
+                        r.started_at.as_ref().map(to_iso),
+                        r.ended_at.as_ref().map(to_iso),
+                        r.turns as i64,
+                        r.tool_calls as i64,
+                        r.retries as i64,
+                        r.external as i64,
+                        r.source_path,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Sessions with events in `[from, to)`, newest activity first. Rows come back unpriced;
+    /// [`crate::usage_ledger::price_sessions`] fills in the cost.
+    pub async fn usage_sessions_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        lane_id: Option<LaneId>,
+        limit: usize,
+    ) -> Result<Vec<crate::usage_ledger::UsageSessionRow>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT e.agent_kind, e.session_id,
+                        SUM(e.input_tokens), SUM(e.output_tokens), SUM(e.cache_read_tokens),
+                        SUM(e.cache_write_tokens), SUM(e.thinking_tokens),
+                        SUM(CASE WHEN e.estimated = 1 THEN e.input_tokens + e.output_tokens
+                                 + e.cache_read_tokens + e.cache_write_tokens ELSE 0 END),
+                        COUNT(*), MIN(e.at), MAX(e.at), MAX(e.estimated), MAX(e.external),
+                        MAX(e.repo_id), MAX(e.lane_id), MAX(e.cwd),
+                        (SELECT x.model FROM usage_events x
+                          WHERE x.agent_kind = e.agent_kind AND x.session_id = e.session_id
+                          GROUP BY x.model
+                          ORDER BY SUM(x.input_tokens + x.output_tokens) DESC LIMIT 1),
+                        s.headline, s.turns, s.tool_calls, s.retries
+                 FROM usage_events e
+                 LEFT JOIN usage_sessions s
+                   ON s.agent_kind = e.agent_kind AND s.session_id = e.session_id
+                 WHERE e.at >= ?1 AND e.at < ?2 AND e.session_id IS NOT NULL
+                   AND (?3 IS NULL OR e.lane_id = ?3)
+                 GROUP BY e.agent_kind, e.session_id
+                 ORDER BY MAX(e.at) DESC
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![to_iso(&from), to_iso(&to), lane_id, limit as i64],
+                |row| {
+                    let totals = crate::usage_ledger::UsageTotals {
+                        input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                        output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                        cache_read_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                        cache_write_tokens: row.get::<_, i64>(5)?.max(0) as u64,
+                        thinking_tokens: row.get::<_, i64>(6)?.max(0) as u64,
+                        estimated_tokens: row.get::<_, i64>(7)?.max(0) as u64,
+                        total_tokens: (row.get::<_, i64>(2)?
+                            + row.get::<_, i64>(3)?
+                            + row.get::<_, i64>(4)?
+                            + row.get::<_, i64>(5)?)
+                        .max(0) as u64,
+                        cost_usd: 0.0,
+                        events: row.get::<_, i64>(8)?.max(0) as u64,
+                    };
+                    Ok(crate::usage_ledger::UsageSessionRow {
+                        agent_kind: row.get(0)?,
+                        session_id: row.get(1)?,
+                        started_at: opt_dt_col(row, 9)?,
+                        ended_at: opt_dt_col(row, 10)?,
+                        estimated: row.get::<_, i64>(11)? != 0,
+                        external: row.get::<_, i64>(12)? != 0,
+                        repo_id: row.get(13)?,
+                        lane_id: row.get(14)?,
+                        cwd: row.get(15)?,
+                        model: row.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                        headline: row.get(17)?,
+                        turns: row.get::<_, Option<i64>>(18)?.unwrap_or(0).max(0) as u32,
+                        tool_calls: row.get::<_, Option<i64>>(19)?.unwrap_or(0).max(0) as u32,
+                        retries: row.get::<_, Option<i64>>(20)?.unwrap_or(0).max(0) as u32,
+                        totals,
+                    })
+                },
+            )?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// How many events the ledger holds, and the window they span.
+    pub async fn usage_extent(
+        &self,
+    ) -> Result<(u64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> {
+        self.call(move |c| {
+            let mut stmt = c.prepare("SELECT COUNT(*), MIN(at), MAX(at) FROM usage_events")?;
+            let mut rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?.max(0) as u64,
+                    opt_dt_col(row, 1)?,
+                    opt_dt_col(row, 2)?,
+                ))
+            })?;
+            match rows.next() {
+                Some(r) => Ok(r?),
+                None => Ok((0, None, None)),
+            }
+        })
+        .await
+    }
 }
 
 // ---- connection init + migrations --------------------------------------------
@@ -2132,6 +2471,47 @@ fn sweep_expired_playbook_drafts(c: &Connection) -> Result<()> {
 }
 
 /// Column list shared by every journal SELECT so `journal_from_row` indexes stay in sync.
+/// The `usage_events` columns, in the order [`usage_event_from_row`] reads them.
+const USAGE_EVENT_COLS: &str = "at, agent_kind, model, account, lane_id, repo_id, session_id, cwd, \
+     window, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, thinking_tokens, \
+     estimated, external, source_path, source_offset";
+
+fn usage_event_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::UsageEvent> {
+    Ok(crate::usage_ledger::UsageEvent {
+        at: dt_col(row, 0)?,
+        agent_kind: row.get(1)?,
+        model: row.get(2)?,
+        account: row.get(3)?,
+        lane_id: row.get(4)?,
+        repo_id: row.get(5)?,
+        session_id: row.get(6)?,
+        cwd: row.get(7)?,
+        window: row.get(8)?,
+        input_tokens: row.get::<_, i64>(9)?.max(0) as u64,
+        output_tokens: row.get::<_, i64>(10)?.max(0) as u64,
+        cache_read_tokens: row.get::<_, i64>(11)?.max(0) as u64,
+        cache_write_tokens: row.get::<_, i64>(12)?.max(0) as u64,
+        thinking_tokens: row.get::<_, i64>(13)?.max(0) as u64,
+        estimated: row.get::<_, i64>(14)? != 0,
+        external: row.get::<_, i64>(15)? != 0,
+        source_path: row.get(16)?,
+        source_offset: row.get(17)?,
+    })
+}
+
+/// The `usage_ingest_cursors` columns, in the order [`usage_cursor_from_row`] reads them.
+const USAGE_CURSOR_COLS: &str = "source_path, offset, mtime, scanned_at, error";
+
+fn usage_cursor_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::UsageCursor> {
+    Ok(crate::usage_ledger::UsageCursor {
+        source_path: row.get(0)?,
+        offset: row.get::<_, i64>(1)?.max(0) as u64,
+        mtime: row.get(2)?,
+        scanned_at: dt_col(row, 3)?,
+        error: row.get(4)?,
+    })
+}
+
 const JOURNAL_COLS: &str = "id, at, session, action, lane_id, repo, params, outcome, detail";
 
 fn journal_from_row(row: &Row) -> rusqlite::Result<JournalEntry> {
@@ -4261,5 +4641,285 @@ mod tests {
         let stored_unicode = fetched2.pane_excerpt.unwrap();
         assert_eq!(stored_unicode.chars().count(), 800);
         assert_eq!(stored_unicode, "🦀".repeat(800));
+    }
+    // ---- usage ledger ----
+
+    fn usage_event(offset: i64, model: &str, at: &str) -> crate::usage_ledger::UsageEvent {
+        crate::usage_ledger::UsageEvent {
+            at: chrono::DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            agent_kind: "claude-code".to_string(),
+            model: model.to_string(),
+            account: "default".to_string(),
+            lane_id: Some(3),
+            repo_id: Some(1),
+            session_id: Some("sess-1".to_string()),
+            window: None,
+            cwd: Some("/repos/demo".to_string()),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+            thinking_tokens: 5,
+            estimated: false,
+            external: false,
+            source_path: "/t/s.jsonl".to_string(),
+            source_offset: offset,
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_events_round_trip_through_the_ledger() {
+        let s = store().await;
+        let n = s
+            .record_usage_events(vec![usage_event(
+                0,
+                "claude-sonnet-5",
+                "2026-09-01T10:00:00Z",
+            )])
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let to = from + chrono::Duration::days(1);
+        let rows = s.usage_events_between(from, to).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "claude-sonnet-5");
+        assert_eq!(rows[0].cache_write_tokens, 40);
+        assert_eq!(rows[0].lane_id, Some(3));
+        assert_eq!(rows[0].cwd.as_deref(), Some("/repos/demo"));
+    }
+
+    #[tokio::test]
+    async fn recording_the_same_source_offset_twice_inserts_once() {
+        let s = store().await;
+        let e = usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z");
+        assert_eq!(s.record_usage_events(vec![e.clone()]).await.unwrap(), 1);
+        assert_eq!(s.record_usage_events(vec![e]).await.unwrap(), 0);
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            s.usage_events_between(from, from + chrono::Duration::days(1))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_source_does_not_double_the_daily_rollup() {
+        let s = store().await;
+        let e = usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z");
+        s.record_usage_events(vec![e.clone()]).await.unwrap();
+        s.record_usage_events(vec![e]).await.unwrap();
+        let rows = s
+            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].events, 1);
+        assert_eq!(rows[0].input_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn the_daily_rollup_accumulates_across_ingest_passes() {
+        let s = store().await;
+        s.record_usage_events(vec![usage_event(
+            0,
+            "claude-sonnet-5",
+            "2026-09-01T10:00:00Z",
+        )])
+        .await
+        .unwrap();
+        s.record_usage_events(vec![usage_event(
+            200,
+            "claude-sonnet-5",
+            "2026-09-01T11:00:00Z",
+        )])
+        .await
+        .unwrap();
+        let rows = s
+            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].events, 2);
+        assert_eq!(rows[0].output_tokens, 40);
+    }
+
+    #[tokio::test]
+    async fn the_daily_rollup_matches_a_rollup_of_the_events_it_summarizes() {
+        let s = store().await;
+        s.record_usage_events(vec![
+            usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z"),
+            usage_event(200, "claude-opus-5", "2026-09-01T11:00:00Z"),
+        ])
+        .await
+        .unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let events = s
+            .usage_events_between(from, from + chrono::Duration::days(1))
+            .await
+            .unwrap();
+        let expected = crate::usage_ledger::rollup(&events);
+        let stored = s
+            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), expected.len());
+        for want in &expected {
+            let got = stored
+                .iter()
+                .find(|r| r.model == want.model)
+                .expect("a stored row per model");
+            assert_eq!(got.input_tokens, want.input_tokens);
+            assert_eq!(got.events, want.events);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ingest_cursor_survives_a_round_trip_and_records_an_error() {
+        let s = store().await;
+        assert!(s.usage_cursor("/t/s.jsonl".into()).await.unwrap().is_none());
+        s.set_usage_cursor("/t/s.jsonl".into(), 512, 99, None)
+            .await
+            .unwrap();
+        let c = s.usage_cursor("/t/s.jsonl".into()).await.unwrap().unwrap();
+        assert_eq!(c.offset, 512);
+        assert_eq!(c.mtime, 99);
+        assert!(c.error.is_none());
+        s.set_usage_cursor("/t/s.jsonl".into(), 512, 99, Some("unreadable".into()))
+            .await
+            .unwrap();
+        let c = s.usage_cursor("/t/s.jsonl".into()).await.unwrap().unwrap();
+        assert_eq!(c.error.as_deref(), Some("unreadable"));
+        assert_eq!(s.usage_cursors().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_rows_carry_the_headline_and_totals_of_their_events() {
+        let s = store().await;
+        s.record_usage_events(vec![usage_event(
+            0,
+            "claude-sonnet-5",
+            "2026-09-01T10:00:00Z",
+        )])
+        .await
+        .unwrap();
+        s.upsert_usage_sessions(vec![crate::usage_ledger::UsageSessionMeta {
+            session_id: "sess-1".to_string(),
+            agent_kind: "claude-code".to_string(),
+            headline: Some("Wire up the ledger".to_string()),
+            cwd: Some("/repos/demo".to_string()),
+            repo_id: Some(1),
+            lane_id: Some(3),
+            started_at: None,
+            ended_at: None,
+            turns: 4,
+            tool_calls: 2,
+            retries: 1,
+            external: false,
+            source_path: Some("/t/s.jsonl".to_string()),
+        }])
+        .await
+        .unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = s
+            .usage_sessions_between(from, from + chrono::Duration::days(1), None, 50)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].headline.as_deref(), Some("Wire up the ledger"));
+        assert_eq!(rows[0].retries, 1);
+        assert_eq!(rows[0].model, "claude-sonnet-5");
+        assert_eq!(rows[0].totals.input_tokens, 10);
+        assert_eq!(rows[0].totals.events, 1);
+    }
+
+    #[tokio::test]
+    async fn session_rows_can_be_filtered_to_one_lane() {
+        let s = store().await;
+        let mut other = usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z");
+        other.lane_id = Some(9);
+        other.session_id = Some("sess-9".to_string());
+        s.record_usage_events(vec![
+            usage_event(200, "claude-sonnet-5", "2026-09-01T10:00:00Z"),
+            other,
+        ])
+        .await
+        .unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = s
+            .usage_sessions_between(from, from + chrono::Duration::days(1), Some(9), 50)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "sess-9");
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_stored_digest_still_appears_from_its_events() {
+        let s = store().await;
+        s.record_usage_events(vec![usage_event(
+            0,
+            "claude-sonnet-5",
+            "2026-09-01T10:00:00Z",
+        )])
+        .await
+        .unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = s
+            .usage_sessions_between(from, from + chrono::Duration::days(1), None, 50)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].headline.is_none());
+        assert_eq!(rows[0].turns, 0);
+    }
+
+    #[tokio::test]
+    async fn migration_23_applies_fresh_and_from_22() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fresh = Connection::open(dir.path().join("fresh.db")).unwrap();
+        init(&mut fresh).unwrap();
+        let v: i64 = fresh
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert!(v >= 23);
+
+        let mut staged = Connection::open(dir.path().join("staged.db")).unwrap();
+        for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 22) {
+            let tx = staged.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", target).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(
+            staged
+                .prepare("SELECT 1 FROM usage_events LIMIT 1")
+                .is_err(),
+            "usage_events must not exist before migration 23"
+        );
+        run_migrations(&mut staged).unwrap();
+        staged
+            .prepare("SELECT 1 FROM usage_events LIMIT 1")
+            .expect("usage_events exists after migration 23");
+        let v: i64 = staged
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert!(v >= 23);
     }
 }
