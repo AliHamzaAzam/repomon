@@ -14,7 +14,51 @@ permissions:
   contents: write
 
 jobs:
+  # Build and smoke Windows without release metadata before any publishing job starts.
+  # A draft flag cannot protect an already-public moving release. This prerequisite also
+  # leaves the publishing matrix's serialized latest.json updates unchanged.
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add x86_64-pc-windows-msvc
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Prepare sidecars
+        working-directory: apps/desktop
+        env:
+          TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
+          CI: "true"
+        run: bun run sidecar:prepare
+      - name: Prepare updater configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        run: >-
+          jq --arg key "$TAURI_SIGNING_PUBLIC_KEY"
+          '.plugins.updater.pubkey = $key'
+          apps/desktop/src-tauri/tauri.release.win.conf.json
+          > apps/desktop/src-tauri/tauri.signed.conf.json
+      - name: Build Windows installer without publishing
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          args: --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.signed.conf.json
+      - name: Windows smoke test
+        timeout-minutes: 5
+        shell: pwsh
+        run: .github/scripts/windows-smoke.ps1 -Triple "x86_64-pc-windows-msvc"
+
   desktop:
+    needs: windows-smoke
     strategy:
       fail-fast: false
       matrix:
@@ -91,8 +135,3 @@ jobs:
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.signed.conf.json
-      # Same four checks the preview lane runs; see .github/scripts/windows-smoke.ps1.
-      - name: Windows smoke test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"

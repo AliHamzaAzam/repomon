@@ -16,11 +16,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Build and smoke Windows without release metadata before any publishing job starts.
+  # A draft flag cannot protect an already-public moving release. This prerequisite also
+  # leaves the publishing matrix's serialized latest.json updates unchanged.
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add x86_64-pc-windows-msvc
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Prepare sidecars
+        working-directory: apps/desktop
+        env:
+          TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
+          CI: "true"
+        run: bun run sidecar:prepare
+      - name: Build Windows installer without publishing
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          args: --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.preview.win.conf.json
+      - name: Windows smoke test
+        timeout-minutes: 5
+        shell: pwsh
+        run: .github/scripts/windows-smoke.ps1 -Triple "x86_64-pc-windows-msvc"
+
   # Reset the moving release so the matrix rebuilds every asset + latest.json from scratch. Without
   # this the version-less .app.tar.gz is not reliably replaced and latest.json's per-platform
   # signatures go stale — which cryptographically breaks the macOS updater (a fresh artifact served
   # against a stale signature). Runs before the (now serialized) matrix.
   reset:
+    needs: windows-smoke
     runs-on: ubuntu-latest
     steps:
       - name: Delete the stale desktop-preview release + tag
@@ -29,7 +64,7 @@ jobs:
         run: gh release delete desktop-preview -R ${{ github.repository }} --cleanup-tag --yes || true
 
   preview:
-    needs: reset
+    needs: [reset, windows-smoke]
     strategy:
       fail-fast: false
       # Serialize the platforms: each job read-modify-writes the SAME latest.json on the moving
@@ -182,15 +217,6 @@ jobs:
           prerelease: true
           includeUpdaterJson: true
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config ${{ matrix.config }}
-      # The one thing CI could not tell us before: whether the Windows binaries actually run on a
-      # machine that is not a developer's. It checks that repomond.exe starts (a missing C runtime
-      # kills it in the loader, exit 0xC0000135, with nothing written to any log), that the CLI
-      # reaches it over a throwaway named pipe with a throwaway data directory, that it shuts down
-      # when asked, and that the installer leaves the three executables in one directory.
-      - name: Windows smoke test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"
 
   cleanup:
     needs: preview
