@@ -380,7 +380,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
 
   return (
     <div class="relative grid h-full min-h-0 grid-rows-[2.5rem_minmax(0,1fr)] bg-background">
-      <div class="flex h-10 shrink-0 min-w-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
+      <div class="panel-header backdrop-blur">
         <Show when={multitasking()}>
           <div class="flex min-w-0 flex-1 items-center gap-3">
             <div class="flex min-w-0 items-center gap-2">

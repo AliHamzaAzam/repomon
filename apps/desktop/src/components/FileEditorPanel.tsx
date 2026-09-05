@@ -273,8 +273,8 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
 
   return (
     <div class="flex h-full flex-col bg-surface">
-      <div class="flex h-10 min-w-0 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5 backdrop-blur">
-        <div class="flex min-w-0 items-center gap-2">
+      <div class="panel-header backdrop-blur">
+        <div class="panel-header-lead">
           <span class="text-xs font-semibold text-foreground">Editor</span>
           <Show when={lane()} keyed>
             {(l) => (

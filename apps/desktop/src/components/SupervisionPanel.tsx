@@ -328,8 +328,8 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
   return (
     <div class="flex h-full flex-col bg-surface">
       {/* 1. Header row */}
-      <div class="flex h-10 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5">
-        <div class="flex min-w-0 items-center gap-2">
+      <div class="panel-header">
+        <div class="panel-header-lead">
           <div class="flex items-center gap-1.5">
             <IconShield size={14} class="shrink-0 text-foreground" />
             <span class="text-xs font-semibold text-foreground">Supervision</span>
