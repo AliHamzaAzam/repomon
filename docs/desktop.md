@@ -304,6 +304,25 @@ same check the first-run wizard runs and the footer connection pill opens when i
 flag. It also holds the daemon's self-service controls: stop, start, or reset the daemon, and
 bulk-restore agent sessions left orphaned by a crash or an update.
 
+Two rows at the top of that tab do not go through the daemon, because they are what you need when
+the daemon is the thing that is broken:
+
+- **Bundled Daemon** runs `repomond --version` from the copy inside this bundle and reports the
+  exact result. A daemon that cannot start at all (on Windows, a missing Visual C++ runtime kills
+  it in the loader with `0xC0000135` before a single line reaches its log) shows up here as "Does
+  not start", with the failure, the one line that fixes it, and a **Show log** button. Every other
+  row on this tab goes blank in exactly that situation, which is why this one asks the binary
+  directly.
+- **Command-line tools** installs the `repomon` CLI out of the bundle. macOS and Linux get symlinks
+  to `repomon` and `repomond` in `~/.local/bin`, so an app update carries through without
+  reinstalling; Windows gets copies of `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe`
+  in `%LOCALAPPDATA%\repomon\bin` plus that directory on the **user** PATH in
+  `HKCU\Environment` (the machine PATH is never touched, so no elevation is needed). The card
+  reports the installed version by running it, says whether a terminal can find the directory (it
+  asks your login shell, not the app's own stripped `PATH`), and gives you the exact `export PATH`
+  line to paste when it cannot. **Remove** takes the entries back out, and the PATH entry with
+  them on Windows. The last step of the setup wizard offers the same card.
+
 **Agents** lets you add or remove custom agent CLIs (a name plus the launch command) and set the
 default agent, without hand-editing `config.toml`. See `docs/agents.md` for the underlying
 `agent.add`/`agent.remove`/`agent.set_default` mechanism, which this tab is a UI over.
@@ -343,6 +362,30 @@ Nothing saves until you press **Save**.
 
 If the daemon connection drops for more than a few seconds, a banner appears rather than letting
 the UI sit silently stale; it clears as soon as the connection is restored.
+
+## When the daemon will not start
+
+The app spawns `repomond` detached and windowless, so a spawn that fails or a daemon that exits at
+once used to show up as a connection pill saying "Retrying" and nothing else. It now watches the
+child for its first three seconds and reports what actually happened:
+
+- **The binary is not there.** A broken or partial install; the pill names the path it looked at.
+- **The OS refused to start it.** The pill carries the spawn error.
+- **It started and exited immediately.** The pill carries the exit code (in hex too, since that is
+  the form every Microsoft page uses), and the tail of the daemon log goes into the diagnostics
+  block.
+- **It is running but nothing answers the endpoint.** The pill carries the connect error and the
+  endpoint as the platform names it, which on Windows is the pipe name, not a file path.
+
+Two Windows causes get a plain sentence instead of a status code. `0xC0000135`
+(`STATUS_DLL_NOT_FOUND`, a missing Visual C++ runtime) and `0xC000007B`
+(`STATUS_INVALID_IMAGE_FORMAT`, a wrong-architecture one) both resolve to "install the x64
+redistributable", with the link. A named pipe another session already owns (access denied, or all
+pipe instances busy) resolves to "end the stale `repomond.exe` in Task Manager".
+
+The retrying rail offers **Show log**, which opens `repomond.out.log` in the system's text viewer,
+and **Copy diagnostics**, which puts the app version, the OS, the endpoint, the last error, the
+resolved daemon path, the log path, and the log tail on the clipboard in one block.
 
 ## Hiding projects
 

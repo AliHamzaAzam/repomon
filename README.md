@@ -94,7 +94,7 @@ at once. Five crates, plus the desktop app:
 
 ## Install
 
-### Desktop app (recommended)
+### Desktop app (includes the daemon)
 
 **macOS**
 1. Download `Repomon_<version>_universal.dmg` from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest) (one build, Apple silicon and Intel)
@@ -111,13 +111,22 @@ at once. Five crates, plus the desktop app:
 2. AppImage: `chmod +x` it and run. Deb: `sudo apt install ./Repomon_<version>_amd64.deb`
 3. Add a repo, go
 
-The bundle carries its own daemon and its own portable `tmux`. Nothing else to install first. It
-updates itself after the first download (**Settings > General > Check for updates**). See
-[docs/desktop.md](docs/desktop.md).
+The bundle carries its own daemon, its own portable `tmux` (macOS and Linux; Windows uses the
+built-in ConPTY host instead), and the `repomon` command line. Nothing else to install first, and
+on Windows nothing to install alongside: the binaries link the C runtime statically, so no Visual
+C++ redistributable is needed. The app updates itself after the first download (**Settings >
+General > Check for updates**). See [docs/desktop.md](docs/desktop.md).
 
 ### Command line (TUI + headless `repomon`)
 
-macOS / Linux:
+**From the app** (nothing to download): **Settings > System > Command-line tools > Install**, or
+the last step of the first-run setup wizard. On macOS and Linux this links `repomon` and
+`repomond` into `~/.local/bin`; on Windows it copies `repomon.exe`, `repomond.exe`, and
+`repomon-agent-host.exe` into `%LOCALAPPDATA%\repomon\bin` and puts that directory on your user
+PATH (never the machine PATH). The card reports the installed version, whether your shell can find
+it, and the exact line to add to your shell rc when it cannot.
+
+**From GitHub**, macOS / Linux:
 
 ```sh
 curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
@@ -142,7 +151,7 @@ Enable cd-on-exit (optional): add to `~/.zshrc` or `~/.bashrc`:
 eval "$(repomon shell-init zsh)"   # bash: repomon shell-init bash · fish: repomon shell-init fish
 ```
 
-**Windows CLI**, PowerShell:
+**From GitHub, Windows CLI**, PowerShell:
 
 ```powershell
 irm https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.ps1 | iex
@@ -192,8 +201,14 @@ On Linux this writes `~/.config/systemd/user/repomon.service`; run
   for Windows.
 - **Keep the three CLI exes together.** `repomon.exe`, `repomond.exe`, and
   `repomon-agent-host.exe` must live in the **same directory**; the daemon spawns the host by
-  looking next to itself. `install.ps1` and the release zip already place all three together.
-  (The desktop bundle carries its own copies and doesn't need this.)
+  looking next to itself. `install.ps1`, the release zip, and **Settings > System >
+  Command-line tools** already place all three together. (The desktop bundle carries its own
+  copies and doesn't need this.)
+- **No Visual C++ redistributable required.** The Windows binaries link the C runtime statically.
+  Older builds did not, and on a machine without the redistributable `repomond.exe` died in the
+  loader with `0xC0000135` before writing anything to its log, leaving the app's connection pill
+  stuck on "Retrying". If you are on such a build, **Settings > System > Bundled Daemon** names
+  the cause and links the fix.
 
 ## Usage
 

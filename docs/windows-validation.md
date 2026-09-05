@@ -15,6 +15,18 @@ Run it against a build from `release/windows-preview` (`cargo build --release`, 
 once a preview zip exists). Keep `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe` in
 the same directory.
 
+## What CI now covers
+
+`.github/scripts/windows-smoke.ps1` runs on the `windows-latest` job of both desktop workflows,
+after the bundle step, and fails the job on any of four checks: `repomond.exe --version` runs (the
+one that catches a loader failure such as `0xC0000135`), the daemon binds a throwaway named pipe
+with a throwaway `REPOMON_DATA_DIR` and `repomon.exe` reads from it, the daemon shuts down when
+asked, and the NSIS installer run with `/S` leaves the three executables in one directory. It
+touches no real data directory, no real pipe name, and no process it did not start itself.
+
+That covers "can these binaries run and talk to each other at all" on a clean runner. It does not
+cover anything in the checklist below, which is interactive, durable, and multi-process by nature.
+
 ## Self-contained binaries (no Visual C++ redistributable)
 
 `repomond.exe`, `repomon-agent-host.exe`, and `repomon.exe` are linked against a **static** C
@@ -51,6 +63,17 @@ freshly imaged Windows install with no redistributable.
 - [ ] **No VC redistributable needed.** On a Windows image that has never had a Visual C++
       redistributable installed, `repomond.exe --version` prints a version (see "Self-contained
       binaries" above).
+- [ ] **Boot diagnostics.** With the daemon deliberately broken (rename `repomond.exe`, or point
+      the app at a build without a static CRT on a machine with no redistributable), the
+      connection rail's retrying state names the cause, **Show log** opens `repomond.out.log`, and
+      **Copy diagnostics** produces a block with the pipe name, the daemon path, and the log tail.
+      **Settings > System > Bundled Daemon** reports "Does not start" with the same cause.
+- [ ] **CLI install from the app.** **Settings > System > Command-line tools > Install** copies the
+      three exes into `%LOCALAPPDATA%\repomon\bin`, adds that directory to `HKCU\Environment`'s
+      `Path` (and **not** to the machine PATH), and the card reports the version it read back. A
+      **newly opened** terminal runs `repomon --version`. **Remove** takes both the files and the
+      PATH entry away. Check that a `Path` containing `%USERPROFILE%` still expands afterwards
+      (the value must stay `REG_EXPAND_SZ`).
 - [ ] **Install / boot.** `install.ps1` (or a from-source build on PATH) → `repomon` launches,
       the daemon auto-spawns over the named pipe, the Fleet view renders. Repo/lane CRUD works
       with no agents yet.
