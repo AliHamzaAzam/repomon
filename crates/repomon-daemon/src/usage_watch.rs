@@ -217,13 +217,23 @@ async fn publish_round(
 async fn finish_round(ctx: &Ctx, request: u64, reason: agent::UsageRefreshReason) {
     let mut inflight = ctx.usage_refresh_inflight.lock().await;
     if request > 0 && *inflight == Some(request) {
-        let (reason, detail) = if reason == agent::UsageRefreshReason::Ok {
-            (agent::UsageRefreshedReason::Ok, None)
-        } else {
-            (
-                agent::UsageRefreshedReason::Error,
-                Some("Usage probe failed; try again".into()),
-            )
+        use agent::{UsageRefreshReason as Outcome, UsageRefreshedReason as Event};
+        let (reason, detail) = match reason {
+            Outcome::Ok => (Event::Ok, None),
+            Outcome::NoActiveKind => (
+                Event::NoActiveKind,
+                Some("No agent running to probe".into()),
+            ),
+            Outcome::ProbeDisabled => (
+                Event::ProbeDisabled,
+                Some("Usage probe is off in Settings".into()),
+            ),
+            Outcome::Timeout => (
+                Event::Timeout,
+                Some("Usage probe timed out; try again".into()),
+            ),
+            Outcome::Error => (Event::Error, Some("Usage probe failed; try again".into())),
+            Outcome::Pending | Outcome::Cooldown => return,
         };
         publish_round(ctx, request, reason, detail).await;
         *inflight = None;

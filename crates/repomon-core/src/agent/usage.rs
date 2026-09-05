@@ -99,13 +99,15 @@ pub struct UsageRefreshResult {
     pub snapshot: Vec<AccountUsage>,
 }
 
-/// A manual probe notification. Timeout means the round is still running.
+/// A manual probe notification. Detail distinguishes a still-running round from a final timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum UsageRefreshedReason {
     Ok,
+    ProbeDisabled,
+    NoActiveKind,
     Timeout,
     Error,
 }

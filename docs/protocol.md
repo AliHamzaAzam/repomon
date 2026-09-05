@@ -366,7 +366,7 @@ five-minute freshness cooldown and wake ledger ingest. No probe IO or completion
 wait happens in the connection's serial RPC dispatcher.
 
 Subscribe before requesting refresh. `event.usage.refreshed` carries
-`{ request_id, reason: "ok" | "timeout" | "error", detail, snapshot }`.
+`{ request_id, reason: "ok" | "probe_disabled" | "no_active_kind" | "timeout" | "error", detail, snapshot }`.
 The watcher sends completion, or a `timeout` notification after 15 seconds while
 it continues probing. That notification does not release the round's single-flight
 guard; final completion can arrive later on the same ticket. A hard ceiling of
@@ -376,9 +376,12 @@ if the watcher stops. Old timers cannot release a newer ticket. `snapshot` match
 arrives before the RPC response. Desktop waits for the event locally, with a
 20-second ceiling, then re-snapshots quota and today's cost and shows an inline
 notice when appropriate. Late completion still refreshes the displayed numbers.
+Completion preserves disabled/no-active gates and final timeouts instead of calling
+every non-success an error. Clients show the supplied detail to distinguish a final
+timeout from the earlier still-probing notification.
 
-A deadline notification means work is continuing, including later accounts in a
-round. Desktop renders `timeout` as "Still probing, this can take a moment",
+A soft deadline notification means work is continuing, including later accounts in a
+round. Desktop renders that notice as "Still probing, this can take a moment",
 including its own 20-second ceiling. Only `error` uses failure wording. Fleet
 polling continues during the round, so accounts already probed can update before
 the final completion.

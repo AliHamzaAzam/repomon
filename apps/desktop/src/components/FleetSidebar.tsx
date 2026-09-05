@@ -622,7 +622,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           timeout: "Still probing, this can take a moment",
           error: "Usage probe failed; try again",
         };
-        setUsageNotice(notices[result.reason]);
+        setUsageNotice(result.detail ?? notices[result.reason]);
       }
     } catch {
       if (token === usageRequest) setUsageNotice("Usage refresh failed; try again");

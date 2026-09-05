@@ -135,6 +135,42 @@ async fn old_hard_deadline_cannot_release_a_replacement_round() {
 }
 
 #[tokio::test]
+async fn completion_preserves_gate_timeout_and_error_outcomes() {
+    for (outcome, reason, detail) in [
+        (
+            agent::UsageRefreshReason::NoActiveKind,
+            "no_active_kind",
+            "No agent running to probe",
+        ),
+        (
+            agent::UsageRefreshReason::ProbeDisabled,
+            "probe_disabled",
+            "Usage probe is off in Settings",
+        ),
+        (
+            agent::UsageRefreshReason::Timeout,
+            "timeout",
+            "Usage probe timed out; try again",
+        ),
+        (
+            agent::UsageRefreshReason::Error,
+            "error",
+            "Usage probe failed; try again",
+        ),
+    ] {
+        let (_dir, ctx, _) = fixture();
+        let mut events = ctx.events.subscribe();
+        let request = refresh(&ctx).await.request_id.unwrap();
+        finish_round(&ctx, request, outcome).await;
+        let event = events.recv().await.unwrap();
+        assert_eq!(event["params"]["reason"], reason);
+        assert_eq!(event["params"]["detail"], detail);
+        assert_eq!(event["params"]["request_id"], request);
+        assert!(ctx.usage_refresh_inflight.lock().await.is_none());
+    }
+}
+
+#[tokio::test]
 async fn two_account_round_reports_progress_then_success_without_false_failure() {
     let (_dir, ctx, _) = fixture();
     let mut events = ctx.events.subscribe();

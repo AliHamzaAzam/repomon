@@ -751,12 +751,14 @@ describe("sidebar cost visibility", () => {
 
 describe("long probe feedback", () => {
   it.each([
-    ["timeout", "Still probing, this can take a moment"],
-    ["error", "Usage probe failed; try again"],
-  ])("uses accurate copy for a %s event", async (reason, notice) => {
+    ["timeout", "Still probing, this can take a moment", null],
+    ["error", "Usage probe failed; try again", null],
+    ["no_active_kind", "No agent running to probe", "No agent running to probe"],
+    ["timeout", "Usage probe timed out; try again", "Usage probe timed out; try again"],
+  ])("uses accurate copy for a %s event", async (reason, notice, detail) => {
     const { fleet, actions } = stubs([], []);
     fleet.focusedUsage = () => ({ key: "default", label: "main", age_secs: 0, report: { windows: [] } });
-    fleet.refreshUsage = vi.fn().mockResolvedValue({ refreshed: false, reason, detail: null, snapshot: [] });
+    fleet.refreshUsage = vi.fn().mockResolvedValue({ refreshed: false, reason, detail, snapshot: [] });
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
     fireEvent.click(screen.getByLabelText("Refresh rate limit data"));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(notice));
