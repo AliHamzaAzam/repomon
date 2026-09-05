@@ -306,6 +306,31 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
 
+    /// `REPOMON_DATA_DIR` is process-global, so every test that points it at its own tempdir
+    /// (or that must not see the operator's real price cache) takes this lock first.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DataDirGuard {
+        _dir: tempfile::TempDir,
+        _held: std::sync::MutexGuard<'static, ()>,
+    }
+
+    /// Point the data dir at a fresh tempdir for the guard's lifetime.
+    fn isolated_data_dir() -> DataDirGuard {
+        let held = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by ENV_LOCK, so no other test reads or writes the variable while
+        // this guard lives.
+        unsafe { std::env::set_var("REPOMON_DATA_DIR", dir.path()) };
+        DataDirGuard { _dir: dir, _held: held }
+    }
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            // SAFETY: still serialized by the lock this guard holds.
+            }
+    }
+
     fn at(y: i32, m: u32, d: u32, h: u32) -> DateTime<Utc> {
         use chrono::TimeZone;
         chrono::Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
@@ -492,6 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_reports_disabled_with_no_fetch_timestamps() {
+        let _data_dir = isolated_data_dir();
         let ctx = test_ctx();
         ctx.config.write().await.usage.refresh_prices = false;
         let status = status(&ctx).await;
@@ -505,13 +531,7 @@ mod tests {
     async fn status_reports_a_forced_refresh_against_a_local_server() {
         let ctx = test_ctx();
         ctx.config.write().await.usage.refresh_prices = true;
-        // REPOMON_DATA_DIR isn't touched here: run_refresh writes under the process's real data
-        // dir via `config::data_dir()`. Isolate it so this test never touches the operator's
-        // actual price cache.
-        let dir = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded within this test's lifetime as far as this env var goes; other
-        // tests in this file don't read REPOMON_DATA_DIR.
-        unsafe { std::env::set_var("REPOMON_DATA_DIR", dir.path()) };
+        let _data_dir = isolated_data_dir();
 
         let (url, _rx) = spawn_http(vec![(
             200,
@@ -533,14 +553,12 @@ mod tests {
             status.source_counts
         );
 
-        unsafe { std::env::remove_var("REPOMON_DATA_DIR") };
     }
 
     #[tokio::test]
     async fn a_failed_refresh_is_surfaced_as_last_error() {
         let ctx = test_ctx();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("REPOMON_DATA_DIR", dir.path()) };
+        let _data_dir = isolated_data_dir();
         ctx.config.write().await.usage.refresh_prices = true;
         // Nothing listens on this port.
         ctx.config.write().await.usage.price_url = Some("http://127.0.0.1:1".to_string());
@@ -550,6 +568,5 @@ mod tests {
         assert!(status.last_error.is_some());
         assert!(status.fetched_at.is_none());
 
-        unsafe { std::env::remove_var("REPOMON_DATA_DIR") };
     }
 }
