@@ -6092,7 +6092,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "repomon-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6125,7 +6125,7 @@ dependencies = [
 
 [[package]]
 name = "repomon-daemon"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "a2",
  "base64 0.22.1",
@@ -6152,7 +6152,7 @@ dependencies = [
 
 [[package]]
 name = "repomon-desktop"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6174,7 +6174,7 @@ dependencies = [
 
 [[package]]
 name = "repomon-host"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6192,7 +6192,7 @@ dependencies = [
 
 [[package]]
 name = "repomon-mcp"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6206,7 +6206,7 @@ dependencies = [
 
 [[package]]
 name = "repomon-tui"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
