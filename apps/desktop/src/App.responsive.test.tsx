@@ -32,7 +32,7 @@ afterEach(cleanup);
 describe("header toolbar at the medium breakpoint", () => {
   it("wraps every toolbar word as a collapsible label inside one toolbar", () => {
     const { container } = render(() => <App connectionSource={sourceFor(starting)} />);
-    const toolbar = within(container).getByRole("toolbar", { name: "Panels" });
+    const toolbar = within(container).getByRole("group", { name: "Panels" });
     expect(toolbar.className).toContain("header-toolbar");
 
     const labels = [...toolbar.querySelectorAll(".toolbar-label")].map((el) => el.textContent);
@@ -41,7 +41,7 @@ describe("header toolbar at the medium breakpoint", () => {
 
   it("names every toolbar button independently of its visible label", () => {
     const { container } = render(() => <App connectionSource={sourceFor(starting)} />);
-    const toolbar = within(container).getByRole("toolbar", { name: "Panels" });
+    const toolbar = within(container).getByRole("group", { name: "Panels" });
     for (const name of TOOLBAR) {
       const button = within(toolbar).getByRole("button", { name: name === "Control" ? "Command Palette" : name });
       expect(button.getAttribute("aria-label")).toBeTruthy();
@@ -51,7 +51,7 @@ describe("header toolbar at the medium breakpoint", () => {
 
   it("keeps the toolbar itself shrinkable so the lockup and the settings button never overlap", () => {
     const { container } = render(() => <App connectionSource={sourceFor(starting)} />);
-    const toolbar = within(container).getByRole("toolbar", { name: "Panels" });
+    const toolbar = within(container).getByRole("group", { name: "Panels" });
     expect(toolbar.className).toContain("min-w-0");
   });
 });
