@@ -81,6 +81,60 @@ async fn manual_timeout_event_keeps_round_inflight_until_final_completion() {
 }
 
 #[tokio::test]
+async fn hard_deadline_releases_a_dead_watchers_ticket_without_clearing_a_new_round() {
+    assert_eq!(round_ceiling(0), PROBE_TIMEOUT);
+    assert_eq!(round_ceiling(2), PROBE_TIMEOUT * 2);
+    let (_dir, ctx, _) = fixture();
+    let request = refresh(&ctx).await.request_id.unwrap();
+    refresh_deadlines(
+        &ctx,
+        request,
+        tokio::time::Instant::now(),
+        Duration::from_millis(1),
+        Duration::from_millis(5),
+    )
+    .await;
+    let next = refresh(&ctx).await;
+    assert_eq!(next.reason, agent::UsageRefreshReason::Pending);
+    assert_ne!(next.request_id, Some(request));
+    finish_round(&ctx, request, agent::UsageRefreshReason::Ok).await;
+    refresh_deadlines(
+        &ctx,
+        request,
+        tokio::time::Instant::now(),
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await;
+    assert_eq!(*ctx.usage_refresh_inflight.lock().await, next.request_id);
+}
+
+#[tokio::test]
+async fn old_hard_deadline_cannot_release_a_replacement_round() {
+    let (_dir, ctx, _) = fixture();
+    let mut events = ctx.events.subscribe();
+    let request = refresh(&ctx).await.request_id.unwrap();
+    let timer = tokio::spawn({
+        let ctx = ctx.clone();
+        async move {
+            refresh_deadlines(
+                &ctx,
+                request,
+                tokio::time::Instant::now(),
+                Duration::ZERO,
+                Duration::from_millis(30),
+            )
+            .await;
+        }
+    });
+    events.recv().await.unwrap();
+    finish_round(&ctx, request, agent::UsageRefreshReason::Ok).await;
+    let next = refresh(&ctx).await.request_id;
+    timer.await.unwrap();
+    assert_eq!(*ctx.usage_refresh_inflight.lock().await, next);
+}
+
+#[tokio::test]
 async fn two_account_round_reports_progress_then_success_without_false_failure() {
     let (_dir, ctx, _) = fixture();
     let mut events = ctx.events.subscribe();

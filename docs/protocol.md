@@ -369,7 +369,9 @@ Subscribe before requesting refresh. `event.usage.refreshed` carries
 `{ request_id, reason: "ok" | "timeout" | "error", detail, snapshot }`.
 The watcher sends completion, or a `timeout` notification after 15 seconds while
 it continues probing. That notification does not release the round's single-flight
-guard; final completion can arrive later on the same ticket. `snapshot` matches
+guard; final completion can arrive later on the same ticket. A hard ceiling of
+75 seconds per installed account (at least one account) releases the guard even
+if the watcher stops. Old timers cannot release a newer ticket. `snapshot` matches
 `usage.get`. Only a matching ticket settles a client's wait, even if its event
 arrives before the RPC response. Desktop waits for the event locally, with a
 20-second ceiling, then re-snapshots quota and today's cost and shows an inline

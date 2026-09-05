@@ -142,18 +142,13 @@ async fn refresh_with_deadline(ctx: &Arc<Ctx>, deadline: Duration) -> agent::Usa
         request_id = Some(request);
         ctx.usage_refresh.notify_one();
         let ctx = ctx.clone();
+        let started = tokio::time::Instant::now();
         tokio::spawn(async move {
-            tokio::time::sleep(deadline).await;
-            let inflight = ctx.usage_refresh_inflight.lock().await;
-            if *inflight == Some(request) {
-                publish_round(
-                    &ctx,
-                    request,
-                    agent::UsageRefreshedReason::Timeout,
-                    Some("Still probing, this can take a moment".into()),
-                )
-                .await;
-            }
+            // Account discovery does filesystem IO, so keep it outside the RPC dispatcher.
+            let count = tokio::task::spawn_blocking(|| accounts().len())
+                .await
+                .unwrap_or(1);
+            refresh_deadlines(&ctx, request, started, deadline, round_ceiling(count)).await;
         });
         (Reason::Pending, None)
     };
@@ -163,6 +158,41 @@ async fn refresh_with_deadline(ctx: &Arc<Ctx>, deadline: Duration) -> agent::Usa
         reason,
         detail,
         snapshot: snapshot(ctx).await,
+    }
+}
+
+/// Even an empty or undiscoverable account list gets a bounded opportunity to finish gating.
+fn round_ceiling(account_count: usize) -> Duration {
+    PROBE_TIMEOUT.saturating_mul(account_count.max(1).try_into().unwrap_or(u32::MAX))
+}
+
+async fn refresh_deadlines(
+    ctx: &Ctx,
+    request: u64,
+    started: tokio::time::Instant,
+    notice: Duration,
+    hard_ceiling: Duration,
+) {
+    tokio::time::sleep_until(started + notice).await;
+    {
+        let inflight = ctx.usage_refresh_inflight.lock().await;
+        if *inflight != Some(request) {
+            return;
+        }
+        publish_round(
+            ctx,
+            request,
+            agent::UsageRefreshedReason::Timeout,
+            Some("Still probing, this can take a moment".into()),
+        )
+        .await;
+    }
+    tokio::time::sleep_until(started + hard_ceiling).await;
+    let mut inflight = ctx.usage_refresh_inflight.lock().await;
+    // A dead watcher cannot call finish_round. Release only this ticket; an old timer must
+    // never clear a newer manual refresh that was accepted after this round completed.
+    if *inflight == Some(request) {
+        *inflight = None;
     }
 }
 
