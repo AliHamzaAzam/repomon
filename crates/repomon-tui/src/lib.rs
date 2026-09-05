@@ -19,7 +19,9 @@ use clap::Parser;
 use client::DaemonClient;
 use repomon_core::{Config, config};
 
-pub use repomon_core::launch::{DaemonLaunchError, connect_with_retry, ensure_daemon, spawn_daemon};
+pub use repomon_core::launch::{
+    DaemonLaunchError, connect_with_retry, ensure_daemon, spawn_daemon,
+};
 
 #[derive(Parser)]
 #[command(

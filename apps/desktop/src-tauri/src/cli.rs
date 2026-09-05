@@ -147,8 +147,8 @@ pub fn install_dir() -> Result<PathBuf, String> {
     }
     #[cfg(not(windows))]
     {
-        let home =
-            std::env::var_os("HOME").ok_or_else(|| "HOME is not set for this session".to_string())?;
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| "HOME is not set for this session".to_string())?;
         Ok(unix_install_dir(Path::new(&home)))
     }
 }
@@ -244,8 +244,7 @@ fn path_hint(dir: &Path) -> String {
 
 /// Windows updates the user PATH in the registry and broadcasts the change, but a console that is
 /// already open keeps the environment it was started with.
-pub const WINDOWS_PATH_HINT: &str =
-    "Open a new terminal to pick up the updated PATH. Windows keeps the old environment in windows that were already open.";
+pub const WINDOWS_PATH_HINT: &str = "Open a new terminal to pick up the updated PATH. Windows keeps the old environment in windows that were already open.";
 
 #[tauri::command]
 pub fn cli_status() -> Result<CliStatus, String> {
@@ -270,7 +269,8 @@ pub fn cli_install() -> Result<CliStatus, String> {
         ));
     }
 
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
 
     for tool in tools() {
         let from = source.join(tool);

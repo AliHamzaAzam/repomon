@@ -81,7 +81,9 @@ impl DaemonLaunchError {
                 path.display()
             )),
             Self::SpawnFailed { source, .. } => launch_hint(&source.to_string()),
-            Self::DaemonExited { code, log_tail, .. } => launch_hint(&format!("{code}\n{log_tail}")),
+            Self::DaemonExited { code, log_tail, .. } => {
+                launch_hint(&format!("{code}\n{log_tail}"))
+            }
             Self::NotReachable {
                 endpoint, detail, ..
             } => connect_hint(endpoint, detail),
@@ -553,7 +555,13 @@ mod diagnostics_tests {
 
     #[test]
     fn a_pipe_that_is_merely_not_up_yet_gets_no_hint() {
-        assert!(connect_hint(PIPE, "The system cannot find the file specified. (os error 2)").is_none());
+        assert!(
+            connect_hint(
+                PIPE,
+                "The system cannot find the file specified. (os error 2)"
+            )
+            .is_none()
+        );
     }
 
     #[test]

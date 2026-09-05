@@ -175,7 +175,8 @@ pub fn open_daemon_log(app: AppHandle) -> Result<(), String> {
         let _ = std::fs::create_dir_all(parent);
     }
     if !path.exists() {
-        std::fs::write(&path, "").map_err(|e| format!("could not create {}: {e}", path.display()))?;
+        std::fs::write(&path, "")
+            .map_err(|e| format!("could not create {}: {e}", path.display()))?;
     }
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
