@@ -36,6 +36,7 @@ notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 globset = { workspace = true }
 regex = { workspace = true }
+ureq = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

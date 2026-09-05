@@ -6147,6 +6147,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

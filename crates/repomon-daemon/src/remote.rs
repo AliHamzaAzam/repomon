@@ -69,10 +69,11 @@ fn remote_method_allowed(method: &str) -> bool {
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
         | "agent.capture" | "agent.transcript" | "agent.transcript_page"
         | "usage.get" | "usage.refresh" | "daemon.status"
-        // Ledger reads. `usage.ingest_now` and `usage.export` stay local-only: one drives host
-        // disk scans on demand, the other writes a file to the host's data directory.
+        // Ledger reads. `usage.ingest_now`, `usage.export`, and `usage.refresh_rates` stay
+        // local-only: each drives an on-demand host action (a disk scan, a file write, a network
+        // fetch) rather than just reading what the daemon already has.
         | "usage.summary" | "usage.timeline" | "usage.sessions" | "usage.findings"
-        | "usage.status"
+        | "usage.status" | "usage.rates"
         // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
         | "terminal.list_all"
         // event stream + per-client streaming hint
@@ -597,10 +598,11 @@ mod tests {
             "usage.sessions",
             "usage.findings",
             "usage.status",
+            "usage.rates",
         ] {
             assert!(remote_method_allowed(m), "{m} must be allowed");
         }
-        for m in ["usage.ingest_now", "usage.export"] {
+        for m in ["usage.ingest_now", "usage.export", "usage.refresh_rates"] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
         }
     }

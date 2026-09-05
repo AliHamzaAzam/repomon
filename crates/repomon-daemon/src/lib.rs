@@ -24,6 +24,7 @@ pub mod standing;
 pub mod supervision;
 pub mod usage_ingest;
 pub mod usage_query;
+pub mod usage_rates;
 pub mod usage_watch;
 pub mod worktree_watch;
 
@@ -292,6 +293,9 @@ pub struct Ctx {
     /// Held for the duration of an ingest pass, so `usage.ingest_now` reports honestly and two
     /// passes never read the same file at once.
     pub usage_ingest_lock: Mutex<()>,
+    /// The daily LiteLLM price-refresh state: cached fetch metadata plus the unpriced-model retry
+    /// tracker. See [`usage_rates`].
+    pub usage_rates: Mutex<usage_rates::RatesRuntime>,
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
     /// The filesystem watcher (set once the background task brings it up). Held here so `repo.add`
@@ -510,6 +514,7 @@ impl Ctx {
             usage_refresh: Notify::new(),
             usage_ingest_wake: Notify::new(),
             usage_ingest_lock: Mutex::new(()),
+            usage_rates: Mutex::new(usage_rates::RatesRuntime::new()),
             auto_continue_off: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
             local_watcher_seen: Mutex::new(None),

@@ -240,6 +240,10 @@ async fn run() {
     // reads only files that already exist, and bounds its work per tick.
     tokio::spawn(repomon_daemon::usage_ingest::ingest_watch(ctx.clone()));
 
+    // Daily LiteLLM price refresh. Self-gates on `[usage] refresh_prices` (on by default); the
+    // cache starts stale, so this also covers "fetch at daemon start when older than 24h".
+    repomon_daemon::usage_rates::spawn_daily_task(ctx.clone());
+
     // Reap orphaned `lane-<id>` windows whose id no longer maps to the worktree they claim —
     // leftovers from a re-registered worktree or a store reset the long-lived tmux server
     // outlived. Sweeps immediately on startup, then slowly, so phantom "exited" sessions

@@ -58,6 +58,12 @@ tokio = { version = "1", features = [
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-tungstenite = "0.29"
 httparse = "1"
+# Rustls-backed HTTP client for the daily LiteLLM price refresh (crates/repomon-daemon/src/usage_rates.rs).
+# `hf-hub` already pulls ureq transitively with its default "tls" (rustls) feature on, so this adds
+# no new crate to the dependency graph — it only names an existing one as a direct dependency.
+# native-tls is dropped explicitly: the daemon never needs it and default-features would pull it in
+# from ureq's own defaults on some platforms.
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip", "json"] }
 a2 = { version = "0.10", default-features = false, features = ["ring"] }
 futures = "0.3"
 plist = "1"
