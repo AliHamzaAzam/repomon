@@ -63,6 +63,8 @@ const session: UsageSessionRow = {
   agent_kind: "claude-code",
   model: "claude-sonnet-5",
   headline: "Wire up the ledger",
+  headline_raw: "<local-command-caveat>ran /status</local-command-caveat>\nWire up the ledger",
+  lane_label: "demo/main",
   repo_id: 1,
   lane_id: 3,
   cwd: "/repos/demo",
@@ -93,8 +95,10 @@ function source(overrides: Partial<UsageSource> = {}): UsageSource {
         kind: "cost_driver",
         subject: "claude-opus-5",
         headline: "claude-opus-5 is 74 percent of the bill",
-        detail: "88 turns, 1070000 tokens, $4.75.",
+        detail: "88 turns, 1.1M tokens, $4.75.",
         cost_usd: 4.75,
+        session_id: null,
+        count: 1,
       },
     ]),
     status: vi.fn().mockResolvedValue({
@@ -197,6 +201,127 @@ describe("UsageView", () => {
     mount(source({ summary: vi.fn().mockRejectedValue(new Error("daemon is down")) }), fleet());
     await flush();
     expect(screen.getByText("daemon is down")).toBeTruthy();
+  });
+
+  it("names a session with no task text rather than showing its identifier", async () => {
+    mount(
+      source({
+        sessions: vi
+          .fn()
+          .mockResolvedValue([{ ...session, headline: null, headline_raw: null }]),
+      }),
+      fleet(),
+    );
+    await flush();
+    expect(screen.getByText("Untitled session")).toBeTruthy();
+    expect(screen.queryByText("sess-1")).toBeNull();
+  });
+
+  it("shows the lane a session ran in even when the lane is gone", async () => {
+    mount(
+      source({
+        sessions: vi
+          .fn()
+          .mockResolvedValue([{ ...session, lane_id: 404, lane_label: "demo (lane removed)" }]),
+      }),
+      fleet([{ id: 3, repo: "demo", worktree: "main" }]),
+    );
+    await flush();
+    expect(screen.getByText("demo (lane removed)")).toBeTruthy();
+  });
+
+  it("links a finding to the session row it is about", async () => {
+    mount(
+      source({
+        findings: vi.fn().mockResolvedValue([
+          {
+            kind: "retries",
+            subject: "sess-1",
+            headline: "Wire up the ledger retried 2 of 12 turns",
+            detail: "claude-sonnet-5, $4.75.",
+            cost_usd: 4.75,
+            session_id: "sess-1",
+            count: 1,
+          },
+        ]),
+      }),
+      fleet(),
+    );
+    await flush();
+    fireEvent.click(screen.getByText("Wire up the ledger retried 2 of 12 turns"));
+    await flush();
+    const search = screen.getByPlaceholderText("Filter by task, model or path") as HTMLInputElement;
+    expect(search.value).toBe("sess-1");
+  });
+
+  it("counts the sessions a folded finding stands for", async () => {
+    mount(
+      source({
+        findings: vi.fn().mockResolvedValue([
+          {
+            kind: "model_choice",
+            subject: "claude-opus-5",
+            headline: "3 sessions did light work on claude-opus-5",
+            detail: "4.2k output tokens and $1.20 between them.",
+            cost_usd: 1.2,
+            session_id: null,
+            count: 3,
+          },
+        ]),
+      }),
+      fleet(),
+    );
+    await flush();
+    expect(screen.getByText("3 sessions did light work on claude-opus-5")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+  });
+
+  it("opens a session row to the breakdown behind it", async () => {
+    mount(source(), fleet());
+    await flush();
+    expect(screen.queryByText("Cache read")).toBeNull();
+    fireEvent.click(screen.getByText("Wire up the ledger"));
+    await flush();
+    expect(screen.getByText("Cache read")).toBeTruthy();
+    expect(screen.getByText("Session")).toBeTruthy();
+  });
+
+  it("reorders the sessions table from a column heading", async () => {
+    const s = source();
+    mount(s, fleet());
+    await flush();
+    const heading = screen
+      .getAllByText("Cost")
+      .find((node) => node.hasAttribute("aria-sort")) as HTMLElement;
+    fireEvent.click(heading);
+    await flush();
+    expect(heading.getAttribute("aria-sort")).toBe("descending");
+  });
+
+  it("asks the daemon for an explicit window when a month preset is picked", async () => {
+    const s = source();
+    mount(s, fleet());
+    await flush();
+    fireEvent.click(screen.getByText("Custom"));
+    await flush();
+    fireEvent.click(screen.getByText("This month"));
+    await flush();
+    const calls = (s.summary as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const last = calls[calls.length - 1]?.[0] as {
+      range: string;
+      since?: string;
+      until?: string;
+    };
+    expect(last.range).toBe("custom");
+    expect(last.since).toBeTruthy();
+    expect(last.until).toBeTruthy();
+  });
+
+  it("shows the dates the window resolves to", async () => {
+    mount(source(), fleet());
+    await flush();
+    expect(screen.getAllByText("7 days").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/ to /).length).toBeGreaterThan(0);
   });
 
   it("opens the lane a session ran in", async () => {

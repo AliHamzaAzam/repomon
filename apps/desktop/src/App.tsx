@@ -781,6 +781,7 @@ function App(props: AppProps) {
                   fleet.setSelectedLaneId(laneId);
                   setUsageOpen(false);
                 }}
+                onOpenSettings={() => actions.openSettingsTab("system")}
               />
             </div>
           </Show>
