@@ -271,8 +271,11 @@ export default function Onboarding(props: OnboardingProps) {
           <span>Back</span>
         </button>
 
-        <p class="truncate font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
-          Enter continues, Esc skips
+        <p class="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-muted">
+          <kbd class="rounded border border-line bg-surface px-1 py-0.5 font-mono text-[10px] text-foreground">Enter</kbd>
+          <span>continues</span>
+          <kbd class="ml-2 rounded border border-line bg-surface px-1 py-0.5 font-mono text-[10px] text-foreground">Esc</kbd>
+          <span>skips</span>
         </p>
 
         <button
@@ -443,7 +446,7 @@ function ReposStep(props: {
                   <span class="shrink-0 text-signal"><IconGitBranch size={14} /></span>
                   <span class="min-w-0">
                     <span class="block truncate text-xs font-medium text-foreground">{repo.name}</span>
-                    <span class="block truncate font-mono text-[10.5px] text-muted" title={repo.path}>
+                    <span class="truncate-start block font-mono text-[10.5px] text-muted" title={repo.path}>
                       {repo.path}
                     </span>
                   </span>
@@ -625,7 +628,7 @@ function RepomindStep(props: {
         <div class="flex items-center justify-between gap-4 rounded-lg border border-line bg-surface/60 px-3.5 py-2.5">
           <span class="min-w-0">
             <span class="block text-xs font-medium text-foreground">Home</span>
-            <span class="block truncate font-mono text-[10.5px] text-muted">
+            <span class="truncate-start block font-mono text-[10.5px] text-muted" title={props.home?.path}>
               {props.home?.path ?? "~/repomind"}
             </span>
           </span>
@@ -723,7 +726,7 @@ function DoneStep(props: {
             <span class="text-xs font-medium text-foreground">Find a file fast.</span>{" "}
             Press{" "}
             <kbd class="rounded border border-line bg-surface px-1 py-0.5 font-mono text-[10px] text-foreground">
-              Cmd P
+              {chordFor("finder.open")}
             </kbd>{" "}
             in the editor to jump to any file in the lane.
           </p>

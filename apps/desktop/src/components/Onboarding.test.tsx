@@ -5,6 +5,7 @@ import type { Repo, SystemDoctorResult } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import { ONBOARDING_STEPS, ONBOARDING_STEP_KEY, type OnboardingStepId } from "../stores/onboarding";
 import Onboarding from "./Onboarding";
+import * as keymap from "../keymap";
 
 const ALL_FOUND: SystemDoctorResult = {
   tmux: { available: true, version: "tmux 3.4", source: "bundled", path: "/bundled/tmux" },
@@ -464,5 +465,27 @@ describe("setup wizard copy", () => {
       expect(text).not.toContain("—");
       unmount();
     }
+  });
+});
+
+describe("Onboarding chords and paths", () => {
+  it("quotes the real file finder chord on the Done step, never a hand-typed one", () => {
+    const { formatChord, BINDINGS } = keymap;
+    const finder = BINDINGS.find((binding) => binding.id === "finder.open");
+    render(() => <Onboarding actions={createMockActions()} initialStep="done" onComplete={vi.fn()} onSkip={vi.fn()} />);
+    expect(screen.getByText(formatChord(finder!.chord), { selector: "kbd" })).toBeInTheDocument();
+    expect(screen.queryByText("Cmd P")).not.toBeInTheDocument();
+  });
+
+  it("names Enter and Esc as keys in the footer, in the same kbd grammar as the Done step", () => {
+    render(() => <Onboarding actions={createMockActions()} initialStep="welcome" onComplete={vi.fn()} onSkip={vi.fn()} />);
+    expect(screen.getByText("Enter", { selector: "kbd" })).toBeInTheDocument();
+    expect(screen.getByText("Esc", { selector: "kbd" })).toBeInTheDocument();
+  });
+
+  it("keeps the tail of a long repository path on screen", () => {
+    const repo = { id: 1, name: "avenith-ar", path: "/Users/dev/very/deep/tree/avenith-ar" } as Repo;
+    render(() => <Onboarding actions={createMockActions([repo])} initialStep="repos" onComplete={vi.fn()} onSkip={vi.fn()} />);
+    expect(screen.getByText(repo.path).className).toContain("truncate-start");
   });
 });
