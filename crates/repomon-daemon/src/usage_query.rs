@@ -458,6 +458,7 @@ mod tests {
             cache_write_tokens: 0,
             thinking_tokens: 0,
             estimated: false,
+            subagent: false,
             external: true,
             source_path: "t.jsonl".to_string(),
             source_offset: 0,
