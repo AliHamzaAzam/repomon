@@ -15,8 +15,42 @@ Run it against a build from `release/windows-preview` (`cargo build --release`, 
 once a preview zip exists). Keep `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe` in
 the same directory.
 
+## Self-contained binaries (no Visual C++ redistributable)
+
+`repomond.exe`, `repomon-agent-host.exe`, and `repomon.exe` are linked against a **static** C
+runtime. `.cargo/config.toml` sets
+
+```toml
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+```
+
+Without it every MSVC binary loads `VCRUNTIME140.dll` at process start. On a machine that has
+never had a Visual Studio redistributable installed that load fails before `main` runs and the
+process exits with `STATUS_DLL_NOT_FOUND` (`0xC0000135`). The desktop app spawns the daemon
+detached and windowless, so the only visible symptom was a connection pill stuck on "Retrying".
+
+Two things to know about the flag:
+
+- **The Tauri app exe builds with it too.** `repomon-desktop` is compiled for the same triple, so
+  the whole bundle (app plus the three sidecars) carries its own CRT.
+- **Always build with an explicit `--target`.** Flags under `[target.<triple>]` also reach build
+  scripts and proc-macro dylibs when the build is not explicitly targeted, and a proc macro
+  cannot be linked with a static CRT. Both CI workflows and `apps/desktop/scripts/prepare-sidecar.ts`
+  pass `--target`, so the only way to hit this is a bare `cargo build` on a Windows host.
+
+Verify on the VM after installing a bundle: `dumpbin /dependents repomond.exe` must not list
+`VCRUNTIME140.dll` or `MSVCP140.dll`, and `repomond.exe --version` must print a version on a
+freshly imaged Windows install with no redistributable.
+
 ## Checklist
 
+- [ ] **No VC redistributable needed.** On a Windows image that has never had a Visual C++
+      redistributable installed, `repomond.exe --version` prints a version (see "Self-contained
+      binaries" above).
 - [ ] **Install / boot.** `install.ps1` (or a from-source build on PATH) → `repomon` launches,
       the daemon auto-spawns over the named pipe, the Fleet view renders. Repo/lane CRUD works
       with no agents yet.
