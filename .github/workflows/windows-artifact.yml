@@ -1,0 +1,53 @@
+name: windows artifact
+
+# A manual Windows-only build for testing on a VM before a preview or release tag. It builds the
+# same sidecars and NSIS installer as the preview lane, runs the Windows smoke test, and uploads
+# the installer as a workflow artifact. It never touches a release or the updater feed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-artifact-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add ${{ env.TARGET }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Build daemon, CLI, and agent-host sidecars
+        shell: bash
+        run: |
+          mkdir -p apps/desktop/src-tauri/binaries
+          cargo build --release --locked -p repomon-daemon -p repomon-tui -p repomon-host --target "$TARGET"
+          for bin in repomond repomon repomon-agent-host; do
+            cp "target/$TARGET/release/$bin.exe" "apps/desktop/src-tauri/binaries/$bin-$TARGET.exe"
+          done
+      - name: Build the installer
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun tauri build --target ${{ env.TARGET }} --bundles nsis --config src-tauri/tauri.preview.win.conf.json
+      - name: Windows smoke test
+        shell: pwsh
+        run: .github/scripts/windows-smoke.ps1 -Triple "${{ env.TARGET }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repomon-windows-installer
+          path: target/${{ env.TARGET }}/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
