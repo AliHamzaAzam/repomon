@@ -39,7 +39,7 @@ use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
 use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
 use conn::{ConnKind, ConnSession};
 
@@ -290,12 +290,8 @@ pub struct Ctx {
     pub usage_refresh: Notify,
     /// Monotonic ticket for manual requests, including those whose bounded wait expired.
     pub usage_refresh_request: AtomicU64,
-    /// Last completed manual pass, tagged so a late result cannot satisfy a newer request.
-    pub usage_refresh_watch: watch::Sender<usage_watch::UsageRefreshRound>,
-    /// Held for the duration of a manual `usage.refresh` RPC's wait. A second manual request
-    /// arriving while one is already in flight fails to acquire this and reports `Cooldown`
-    /// immediately instead of queuing another wait.
-    pub usage_refresh_inflight: Mutex<()>,
+    /// Ticket of the queued or running manual pass. Held only for state changes, never probe IO.
+    pub usage_refresh_inflight: Mutex<Option<u64>>,
     /// Wakes the usage-ledger ingest loop for an immediate pass.
     pub usage_ingest_wake: Notify,
     /// The newest-first ingest walk's rotation offset (see `usage_ingest::rotated_window`).
@@ -526,8 +522,7 @@ impl Ctx {
             usage: Mutex::new(HashMap::new()),
             usage_refresh: Notify::new(),
             usage_refresh_request: AtomicU64::new(0),
-            usage_refresh_watch: watch::channel(usage_watch::UsageRefreshRound::default()).0,
-            usage_refresh_inflight: Mutex::new(()),
+            usage_refresh_inflight: Mutex::new(None),
             usage_ingest_wake: Notify::new(),
             usage_scan_rotation: AtomicUsize::new(0),
             usage_ingest_lock: Mutex::new(()),

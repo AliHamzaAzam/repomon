@@ -68,7 +68,8 @@ fn remote_method_allowed(method: &str) -> bool {
         | "repo.list" | "lane.list" | "lane.get"
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
         | "agent.capture" | "agent.transcript" | "agent.transcript_page"
-        | "usage.get" | "usage.refresh" | "daemon.status"
+        | "usage.get" | "daemon.status"
+        // Manual `usage.refresh` is local-only because it starts a host probe.
         // Ledger reads. `usage.ingest_now`, `usage.export`, and `usage.refresh_rates` stay
         // local-only: each drives an on-demand host action (a disk scan, a file write, a network
         // fetch) rather than just reading what the daemon already has.
@@ -603,7 +604,7 @@ mod tests {
         ] {
             assert!(remote_method_allowed(m), "{m} must be allowed");
         }
-        for m in ["usage.ingest_now", "usage.export", "usage.refresh_rates"] {
+        for m in ["usage.refresh", "usage.ingest_now", "usage.export", "usage.refresh_rates"] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
         }
     }

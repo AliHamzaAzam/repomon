@@ -82,12 +82,6 @@ pub struct UsageEntry {
     pub fetched_at: Instant,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct UsageRefreshRound {
-    pub request: u64,
-    pub reason: Option<agent::UsageRefreshReason>,
-}
-
 pub async fn snapshot(ctx: &Ctx) -> Vec<agent::AccountUsage> {
     let usage = ctx.usage.lock().await;
     let mut out: Vec<_> = usage
@@ -103,58 +97,106 @@ pub async fn snapshot(ctx: &Ctx) -> Vec<agent::AccountUsage> {
     out
 }
 
-pub async fn refresh(ctx: &Ctx) -> agent::UsageRefreshResult {
-    refresh_with_timeout(ctx, Duration::from_secs(15)).await
+pub async fn refresh(ctx: &Arc<Ctx>) -> agent::UsageRefreshResult {
+    refresh_with_deadline(ctx, Duration::from_secs(15)).await
 }
 
-async fn refresh_with_timeout(ctx: &Ctx, timeout: Duration) -> agent::UsageRefreshResult {
+async fn refresh_with_deadline(ctx: &Arc<Ctx>, deadline: Duration) -> agent::UsageRefreshResult {
     use agent::UsageRefreshReason as Reason;
     ctx.usage_ingest_wake.notify_one();
-    let reason = if !ctx.config.read().await.usage_probe {
-        Reason::ProbeDisabled
-    } else if let Ok(_held) = ctx.usage_refresh_inflight.try_lock() {
-        let mut rounds = ctx.usage_refresh_watch.subscribe();
-        let request = ctx.usage_refresh_request.fetch_add(1, Ordering::Relaxed) + 1;
-        ctx.usage_refresh.notify_one();
-        match tokio::time::timeout(timeout, async {
-            loop {
-                rounds.changed().await.map_err(|_| ())?;
-                let round = rounds.borrow_and_update().clone();
-                if round.request >= request {
-                    return round.reason.ok_or(());
-                }
-            }
+    // Only cached state is read here. Backend enumeration and probing must never occupy the
+    // connection's serial dispatcher, which also carries terminal keystrokes.
+    let enabled = ctx.config.read().await.usage_probe;
+    let has_active_kind = {
+        let cache = ctx.overlay_cache.lock().await;
+        cache.entry().is_none_or(|(_, lanes)| {
+            lanes.iter().flat_map(|l| &l.agent_sessions).any(|s| {
+                s.ended_at.is_none()
+                    && matches!(
+                        s.agent,
+                        AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::Antigravity
+                    )
+            })
         })
-        .await
-        {
-            Ok(Ok(reason)) => reason,
-            Ok(Err(())) => Reason::Error,
-            Err(_) => Reason::Timeout,
-        }
+    };
+    let mut inflight = ctx.usage_refresh_inflight.lock().await;
+    let mut request_id = None;
+    let (reason, detail) = if !enabled {
+        (
+            Reason::ProbeDisabled,
+            Some("Usage probe is off in Settings".into()),
+        )
+    } else if inflight.is_some() {
+        (
+            Reason::Cooldown,
+            Some("A usage refresh is already running".into()),
+        )
+    } else if !has_active_kind {
+        (
+            Reason::NoActiveKind,
+            Some("No agent running to probe".into()),
+        )
     } else {
-        Reason::Cooldown
+        let request = ctx.usage_refresh_request.fetch_add(1, Ordering::Relaxed) + 1;
+        *inflight = Some(request);
+        request_id = Some(request);
+        ctx.usage_refresh.notify_one();
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(deadline).await;
+            let inflight = ctx.usage_refresh_inflight.lock().await;
+            if *inflight == Some(request) {
+                publish_round(
+                    &ctx,
+                    request,
+                    agent::UsageRefreshedReason::Timeout,
+                    Some("Probe timed out".into()),
+                )
+                .await;
+            }
+        });
+        (Reason::Pending, None)
     };
     agent::UsageRefreshResult {
-        refreshed: reason == Reason::Ok,
+        refreshed: false,
+        request_id,
         reason,
-        detail: match reason {
-            Reason::Ok => None,
-            Reason::ProbeDisabled => Some("Usage probe is off in Settings".into()),
-            Reason::NoActiveKind => Some("No agent running to probe".into()),
-            Reason::Cooldown => Some("A usage refresh is already running".into()),
-            Reason::Timeout => Some("Probe timed out".into()),
-            Reason::Error => Some("Usage probe failed; try again".into()),
-        },
+        detail,
         snapshot: snapshot(ctx).await,
     }
 }
 
-fn finish_round(ctx: &Ctx, request: u64, reason: agent::UsageRefreshReason) {
-    if request > 0 {
-        ctx.usage_refresh_watch.send_replace(UsageRefreshRound {
-            request,
-            reason: Some(reason),
-        });
+async fn publish_round(
+    ctx: &Ctx,
+    request_id: u64,
+    reason: agent::UsageRefreshedReason,
+    detail: Option<String>,
+) {
+    let event = agent::UsageRefreshed {
+        request_id,
+        reason,
+        detail,
+        snapshot: snapshot(ctx).await,
+    };
+    ctx.broadcast(
+        crate::pubsub::topic::USAGE_REFRESHED,
+        serde_json::to_value(event).expect("usage event"),
+    );
+}
+
+async fn finish_round(ctx: &Ctx, request: u64, reason: agent::UsageRefreshReason) {
+    let mut inflight = ctx.usage_refresh_inflight.lock().await;
+    if request > 0 && *inflight == Some(request) {
+        let (reason, detail) = if reason == agent::UsageRefreshReason::Ok {
+            (agent::UsageRefreshedReason::Ok, None)
+        } else {
+            (
+                agent::UsageRefreshedReason::Error,
+                Some("Usage probe failed; try again".into()),
+            )
+        };
+        publish_round(ctx, request, reason, detail).await;
+        *inflight = None;
     }
 }
 
@@ -177,7 +219,7 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
         if !ctx.config.read().await.usage_probe {
             ctx.usage.lock().await.clear();
             last_round = None;
-            finish_round(&ctx, request, agent::UsageRefreshReason::ProbeDisabled);
+            finish_round(&ctx, request, agent::UsageRefreshReason::ProbeDisabled).await;
             continue;
         }
         let ui_active =
@@ -299,7 +341,8 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
             } else {
                 agent::UsageRefreshReason::Error
             },
-        );
+        )
+        .await;
     }
 }
 
@@ -656,63 +699,6 @@ fn trust_accept_keys(pane: &str) -> &'static [&'static str] {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn manual_refresh_reports_each_completed_reason_and_snapshot() {
-        for reason in [
-            agent::UsageRefreshReason::Ok,
-            agent::UsageRefreshReason::NoActiveKind,
-            agent::UsageRefreshReason::Error,
-            agent::UsageRefreshReason::ProbeDisabled,
-        ] {
-            let mut config = repomon_core::Config::default();
-            config.usage_probe = true;
-            let ctx = Ctx::new(repomon_core::Store::open_in_memory().unwrap(), config, None);
-            ctx.usage.lock().await.insert(
-                "codex".into(),
-                UsageEntry {
-                    report: parse_codex_status("5h limit: 90% left")
-                        .unwrap_or(UsageReport { windows: vec![] }),
-                    label: "codex".into(),
-                    fetched_at: Instant::now(),
-                },
-            );
-            let complete = async {
-                ctx.usage_refresh.notified().await;
-                finish_round(
-                    &ctx,
-                    ctx.usage_refresh_request.load(Ordering::Relaxed),
-                    reason,
-                );
-            };
-            let (result, ()) =
-                tokio::join!(refresh_with_timeout(&ctx, Duration::from_secs(1)), complete);
-            assert_eq!(result.reason, reason);
-            assert_eq!(result.refreshed, reason == agent::UsageRefreshReason::Ok);
-            assert_eq!(result.snapshot[0].key, "codex");
-            assert_eq!(result.snapshot[0].age_secs, 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn manual_refresh_is_bounded_and_rejects_a_late_previous_round() {
-        let mut config = repomon_core::Config::default();
-        config.usage_probe = true;
-        let ctx = Ctx::new(repomon_core::Store::open_in_memory().unwrap(), config, None);
-        let result = refresh_with_timeout(&ctx, Duration::from_millis(5)).await;
-        assert_eq!(result.reason, agent::UsageRefreshReason::Timeout);
-        let late = async {
-            ctx.usage_refresh.notified().await;
-            finish_round(&ctx, 1, agent::UsageRefreshReason::Ok);
-        };
-        let (result, ()) =
-            tokio::join!(refresh_with_timeout(&ctx, Duration::from_millis(10)), late);
-        assert_eq!(result.reason, agent::UsageRefreshReason::Timeout);
-        let _held = ctx.usage_refresh_inflight.lock().await;
-        let result = refresh(&ctx).await;
-        assert_eq!(result.reason, agent::UsageRefreshReason::Cooldown);
-        assert!(!result.refreshed);
-    }
-
     /// Build a [`WindowMeta`] for the gating tests below - only `name` and `agent_kind` matter
     /// to [`active_kinds`].
     fn wm(name: &str, agent_kind: Option<&str>) -> WindowMeta {
@@ -909,3 +895,7 @@ mod tests {
         assert!(!r.windows.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "usage_refresh_tests.rs"]
+mod refresh_tests;

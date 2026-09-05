@@ -1,7 +1,7 @@
 import { createRoot } from "solid-js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
+import type { AccountUsage, AgentSession, Lane, Repo, UsageRefreshResult } from "../bindings";
 import {
   agentState,
   controllerAgentState,
@@ -610,5 +610,54 @@ describe("manual usage refresh", () => {
       expect(fleet.focusedUsage()?.age_secs).toBe(0);
       expect(fleet.costToday()).toBe(12);
     } finally { teardown(); }
+  });
+});
+
+
+describe("ticketed manual refresh events", () => {
+  function fixture() {
+    let event!: Parameters<FleetSource["subscribe"]>[0];
+    let acknowledge!: (result: UsageRefreshResult) => void;
+    const ack = new Promise<UsageRefreshResult>((resolve) => { acknowledge = resolve; });
+    const source: FleetSource = {
+      load: async () => ({ repos: [], lanes: [], terminals: [], usage: [], sortMode: null, tabSortMode: null, sortReposByActivity: null }),
+      refreshUsage: () => ack,
+      subscribe: async (next) => { event = next; return () => {}; },
+    };
+    const view = createRoot((dispose) => {
+      const fleet = createFleetStore(source); fleet.start();
+      return { fleet, stop: () => { fleet.stop(); dispose(); } };
+    });
+    return { ...view, acknowledge, emit: (request_id: number) => event({ jsonrpc: "2.0", method: "event.usage.refreshed", params: { request_id, reason: "ok", detail: null, snapshot: [] } }) };
+  }
+
+  it.each([false, true])("waits for the matching event, including before the ack (%s)", async (early) => {
+    const f = fixture();
+    try {
+      await f.fleet.refresh();
+      let settled = false;
+      const result = f.fleet.refreshUsage().then((r) => { settled = true; return r; });
+      f.emit(41);
+      if (early) f.emit(42);
+      f.acknowledge({ refreshed: false, reason: "pending", request_id: 42, detail: null, snapshot: [] });
+      await Promise.resolve(); await Promise.resolve();
+      if (!early) { expect(settled).toBe(false); f.emit(42); }
+      expect((await result)?.reason).toBe("ok");
+    } finally { f.stop(); }
+  });
+
+  it("stops waiting at the 20-second client ceiling if no completion arrives", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    try {
+      await f.fleet.refresh();
+      let settled = false;
+      const result = f.fleet.refreshUsage().then((r) => { settled = true; return r; });
+      f.acknowledge({ refreshed: false, reason: "pending", request_id: 42, detail: null, snapshot: [] });
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await result)?.reason).toBe("timeout");
+    } finally { f.stop(); vi.useRealTimers(); }
   });
 });

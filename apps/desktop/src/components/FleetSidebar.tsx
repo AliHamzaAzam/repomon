@@ -615,6 +615,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
       if (token !== usageRequest) return;
       if (result && result.reason !== "ok") {
         const notices = {
+          pending: "Usage refresh queued",
           probe_disabled: "Usage probe is off in Settings",
           no_active_kind: "No agent running to probe",
           cooldown: "A usage refresh is already running",

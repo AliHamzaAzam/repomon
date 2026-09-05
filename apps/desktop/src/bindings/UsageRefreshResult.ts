@@ -9,7 +9,11 @@ export type UsageRefreshResult = {
 /**
  * Whether this call's probe round actually refreshed at least one account.
  */
-refreshed: boolean, reason: UsageRefreshReason, 
+refreshed: boolean, 
+/**
+ * Correlates a pending response with its completion event.
+ */
+request_id?: number, reason: UsageRefreshReason, 
 /**
  * A short, human-readable elaboration, set for the non-`ok` reasons that benefit from one.
  */

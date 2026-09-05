@@ -1,7 +1,7 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
-import type { AccountUsage, UsageRefreshResult, AgentSession, Lane, Repo } from "../bindings";
+import type { AccountUsage, UsageRefreshResult, UsageRefreshed, AgentSession, Lane, Repo } from "../bindings";
 import { daemonCall, subscribeDaemon, type DaemonEvent } from "../ipc/rpc";
 
 export interface FleetSnapshot {
@@ -569,9 +569,72 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     }
   }
 
+  let subscriptionReady: Promise<void> = Promise.resolve();
+  type UsageWait = {
+    requestId?: number;
+    early: Map<number, UsageRefreshed>;
+    complete: (result: UsageRefreshResult | void) => void;
+    fail: (cause: unknown) => void;
+    promise: Promise<UsageRefreshResult | void>;
+    timer?: ReturnType<typeof setTimeout>;
+  };
+  let usageWait: UsageWait | undefined;
+
+  function settleUsage(wait: UsageWait, result: UsageRefreshResult | void) {
+    if (usageWait !== wait) return;
+    clearTimeout(wait.timer);
+    usageWait = undefined;
+    wait.complete(result);
+  }
+
+  function usageEvent(event: DaemonEvent) {
+    if (event.method === "event.usage.refreshed") {
+      const result = event.params as UsageRefreshed | undefined;
+      if (result && Number.isFinite(result.request_id) && Array.isArray(result.snapshot)
+        && ["ok", "timeout", "error"].includes(result.reason)) {
+        const wait = usageWait;
+        if (wait) {
+          if (wait.requestId === undefined) wait.early.set(result.request_id, result);
+          else if (wait.requestId === result.request_id) {
+            settleUsage(wait, { ...result, refreshed: result.reason === "ok" });
+          }
+        }
+      }
+    }
+    queueRefresh();
+  }
+
   async function refreshUsage() {
     if (!active) return;
-    const result = await source.refreshUsage();
+    if (usageWait) return usageWait.promise;
+    let complete!: UsageWait["complete"];
+    let fail!: UsageWait["fail"];
+    const promise = new Promise<UsageRefreshResult | void>((resolve, reject) => { complete = resolve; fail = reject; });
+    const wait: UsageWait = { early: new Map(), complete, fail, promise };
+    usageWait = wait;
+    wait.timer = setTimeout(() => settleUsage(wait, {
+      refreshed: false, request_id: wait.requestId, reason: "timeout", detail: "Probe timed out", snapshot: usage(),
+    }), 20_000);
+    // Subscribe before requesting the probe. A fast completion may precede the RPC response;
+    // buffer it until the response identifies the ticket, then ignore every other round.
+    void (async () => {
+      await subscriptionReady;
+      if (usageWait !== wait) return;
+      const result = await source.refreshUsage();
+      if (usageWait !== wait) return;
+      if (result?.reason === "pending") {
+        wait.requestId = result.request_id;
+        const early = result.request_id === undefined ? undefined : wait.early.get(result.request_id);
+        wait.early.clear();
+        if (early) settleUsage(wait, { ...early, refreshed: early.reason === "ok" });
+      } else settleUsage(wait, result);
+    })().catch((cause) => {
+      if (usageWait !== wait) return;
+      clearTimeout(wait.timer);
+      usageWait = undefined;
+      wait.fail(cause);
+    });
+    const result = await promise;
     await refresh();
     return result;
   }
@@ -591,8 +654,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     void refresh();
     // Heartbeat poll at 1.2s cadence to ensure fast UI updates without excessive overhead.
     interval = setInterval(() => void refresh(), 1200);
-    void source
-      .subscribe(queueRefresh)
+    subscriptionReady = source
+      .subscribe(usageEvent)
       .then((stop) => {
         if (active) unsubscribe = stop;
         else stop();
@@ -602,6 +665,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   function stop() {
     active = false;
+    if (usageWait) settleUsage(usageWait, undefined);
     if (interval) clearInterval(interval);
     interval = undefined;
     unsubscribe?.();

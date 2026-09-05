@@ -87,3 +87,6 @@ export type { WorkSession } from "./WorkSession";
 
 export type { UsageRefreshResult } from "./UsageRefreshResult";
 export type { UsageRefreshReason } from "./UsageRefreshReason";
+
+export type { UsageRefreshed } from "./UsageRefreshed";
+export type { UsageRefreshedReason } from "./UsageRefreshedReason";

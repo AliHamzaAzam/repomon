@@ -64,6 +64,8 @@ pub struct AccountUsage {
 #[cfg_attr(feature = "ts", ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum UsageRefreshReason {
+    /// A manual round was queued; completion arrives on `event.usage.refreshed`.
+    Pending,
     /// At least one account's usage was freshly probed.
     Ok,
     /// `[usage_probe]` is off in Settings.
@@ -72,7 +74,7 @@ pub enum UsageRefreshReason {
     NoActiveKind,
     /// A refresh was already in flight; this request did not start another probe round.
     Cooldown,
-    /// The probe round did not finish inside the RPC's bounded wait; it may still be running.
+    /// The round is still running after the notification deadline.
     Timeout,
     /// Every eligible account's probe failed.
     Error,
@@ -85,11 +87,37 @@ pub enum UsageRefreshReason {
 pub struct UsageRefreshResult {
     /// Whether this call's probe round actually refreshed at least one account.
     pub refreshed: bool,
+    /// Correlates a pending response with its completion event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, type = "number"))]
+    pub request_id: Option<u64>,
     pub reason: UsageRefreshReason,
     /// A short, human-readable elaboration, set for the non-`ok` reasons that benefit from one.
     pub detail: Option<String>,
     /// The usage snapshot after the round, same shape as `usage.get`. Present even when
     /// `refreshed` is false, so a client can always re-render from the response.
+    pub snapshot: Vec<AccountUsage>,
+}
+
+/// A manual probe notification. Timeout means the round is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum UsageRefreshedReason {
+    Ok,
+    Timeout,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct UsageRefreshed {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub request_id: u64,
+    pub reason: UsageRefreshedReason,
+    pub detail: Option<String>,
     pub snapshot: Vec<AccountUsage>,
 }
 

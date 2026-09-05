@@ -357,12 +357,20 @@ as well as `event.config.changed` so open views reload their costs.
 
 ### Manual usage refresh
 
-`usage.refresh` (no params) wakes ledger ingest and waits up to 15 seconds for one
-manual probe pass. Manual probes bypass the five-minute freshness cooldown. The
-result is `{ refreshed, reason, detail, snapshot }`, where `snapshot` has the same
-shape as `usage.get`. `reason` is `ok`, `probe_disabled`, `no_active_kind`,
-`cooldown` (another manual request is waiting), `timeout`, or `error`. `detail`
-is a short explanation or null. A timed-out probe can finish in the background;
-request IDs prevent its late completion from satisfying a newer request.
-Clients keep their refresh indicator active until the response, then re-read the
-fleet and today's ledger cost, displaying a brief inline notice for non-ok results.
+`usage.refresh` (no params, local only) reads cached gates and immediately returns
+`{ refreshed: false, reason, detail, snapshot, request_id? }`. The reason is
+`pending`, `probe_disabled`, `no_active_kind`, or `cooldown` (a manual round is
+already queued/running). An unknown fleet cache accepts a pending request; a
+known cache with no supported active kind skips it. Manual requests bypass the
+five-minute freshness cooldown and wake ledger ingest. No probe IO or completion
+wait happens in the connection's serial RPC dispatcher.
+
+Subscribe before requesting refresh. `event.usage.refreshed` carries
+`{ request_id, reason: "ok" | "timeout" | "error", detail, snapshot }`.
+The watcher sends completion, or a `timeout` notification after 15 seconds while
+it continues probing. That notification does not release the round's single-flight
+guard; final completion can arrive later on the same ticket. `snapshot` matches
+`usage.get`. Only a matching ticket settles a client's wait, even if its event
+arrives before the RPC response. Desktop waits for the event locally, with a
+20-second ceiling, then re-snapshots quota and today's cost and shows an inline
+notice when appropriate. Late completion still refreshes the displayed numbers.

@@ -6,4 +6,4 @@
  * `Cooldown` here instead means a refresh was already in flight when this one arrived, so it was
  * skipped rather than starting a second one.
  */
-export type UsageRefreshReason = "ok" | "probe_disabled" | "no_active_kind" | "cooldown" | "timeout" | "error";
+export type UsageRefreshReason = "pending" | "ok" | "probe_disabled" | "no_active_kind" | "cooldown" | "timeout" | "error";

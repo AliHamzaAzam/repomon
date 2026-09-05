@@ -38,6 +38,8 @@ pub mod topic {
     /// A supervision policy was updated.
     pub const SUPERVISION_CHANGED: &str = "event.supervision.changed";
     /// The usage ledger gained events, so an open Usage view should refetch.
+    /// Completion or still-running notification for a ticketed manual quota probe.
+    pub const USAGE_REFRESHED: &str = "event.usage.refreshed";
     pub const USAGE_CHANGED: &str = "event.usage.changed";
 }
 
