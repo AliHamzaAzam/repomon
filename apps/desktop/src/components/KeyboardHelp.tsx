@@ -104,9 +104,14 @@ export default function KeyboardHelp(props: KeyboardHelpProps) {
           });
           return (
             <Show when={rows().length > 0}>
-              <section class="space-y-1">
+              <section class="space-y-1.5">
                 <p class="section-label text-signal">{section}</p>
-                <For each={rows()}>{(binding) => <ShortcutRow binding={binding} activeScope={props.activeScope} />}</For>
+                {/* One bordered list per section with hairline dividers, instead of a bordered
+                    box per row: fifteen boxes in a column read as fifteen cards, and the eye
+                    has to re-find the chord column in each one. */}
+                <div class="divide-y divide-line/70 overflow-hidden rounded-lg border border-line">
+                  <For each={rows()}>{(binding) => <ShortcutRow binding={binding} activeScope={props.activeScope} />}</For>
+                </div>
               </section>
             </Show>
           );
@@ -129,11 +134,13 @@ export default function KeyboardHelp(props: KeyboardHelpProps) {
 
 function ShortcutRow(props: { binding: Binding; activeScope?: KeymapScope }) {
   const scope = () => props.binding.scope ?? "global";
-  const active = () => props.activeScope && props.activeScope === scope();
+  // Only a focused editor or terminal earns the highlight: global chords work everywhere, so
+  // lighting every one of them up when nothing special has focus would say nothing.
+  const active = () => scope() !== "global" && props.activeScope === scope();
   return (
     <div
-      class={`flex items-center justify-between gap-3 rounded border px-3 py-1.5 text-xs transition-colors ${
-        active() ? "border-signal/50 bg-signal/10" : "border-line"
+      class={`flex items-center justify-between gap-3 px-3 py-1.5 text-xs transition-colors ${
+        active() ? "border-signal/50 bg-signal/10" : ""
       }`}
       title={props.binding.platform}
     >

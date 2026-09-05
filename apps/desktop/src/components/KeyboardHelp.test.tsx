@@ -83,4 +83,19 @@ describe("KeyboardHelp activeScope", () => {
     expect(editorRow?.className).toContain("border-signal/50");
     expect(globalRow?.className).not.toContain("border-signal/50");
   });
+
+  it("highlights nothing when only the global scope is active, since every global chord applies", () => {
+    render(() => <KeyboardHelp activeScope="global" />);
+    const globalRow = screen.getByText("Merge lane (asks first)").closest("div");
+    expect(globalRow?.className).not.toContain("border-signal/50");
+    expect(document.querySelectorAll(".border-signal\\/50").length).toBe(0);
+  });
+
+  it("draws each section as one divided list rather than a bordered box per row", () => {
+    render(() => <KeyboardHelp />);
+    const row = screen.getByText("Merge lane (asks first)").closest("div");
+    expect(row?.className).not.toMatch(/\bborder\b/);
+    expect(row?.parentElement?.className).toContain("divide-y");
+    expect(row?.parentElement?.className).toContain("border-line");
+  });
 });
