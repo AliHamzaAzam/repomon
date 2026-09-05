@@ -307,11 +307,12 @@ pub async fn price_table(ctx: &Arc<Ctx>) -> PriceTable {
     let mut table = PriceTable::builtin();
     if config.refresh_prices {
         if let Ok(text) = std::fs::read_to_string(price_cache_path()) {
-            // A snapshot describes today's rates, so it takes effect from the epoch onward only
-            // where it beats the built-in row; the longest-prefix match still prefers an exact
-            // model id, which is what a snapshot always carries.
+            // A stable floor after the built-in date lets the snapshot beat built-in rows
+            // while pricing stored events, independently of when this table is constructed.
             if let Ok(rows) =
-                repomon_core::pricing::parse_litellm_snapshot(&text, chrono::Utc::now())
+                repomon_core::pricing::parse_litellm_snapshot(
+                    &text, repomon_core::pricing::snapshot_effective_from(),
+                )
             {
                 for row in rows {
                     table.insert(row);

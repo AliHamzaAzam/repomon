@@ -97,6 +97,11 @@ fn builtin_effective_from() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
 }
 
+/// Stable snapshot floor: newer than built-in rates, without dating historical prices at fetch time.
+pub fn snapshot_effective_from() -> DateTime<Utc> {
+    builtin_effective_from() + chrono::Duration::seconds(1)
+}
+
 /// UTC midnight on the day the table is built, so a placeholder rate dated "today" still applies
 /// to every event from earlier today rather than only ones after this exact instant.
 fn today_utc_midnight() -> DateTime<Utc> {
@@ -193,16 +198,16 @@ impl PriceTable {
         I: IntoIterator<Item = (String, PriceOverride)>,
     {
         for (model, over) in overrides {
-            let base = self
+            let exact = self
                 .rows
                 .iter()
                 .filter(|r| r.model == model)
                 .max_by_key(|r| r.effective_from)
-                .or_else(|| self.lookup(&model, Utc::now()))
                 .cloned();
+            let base = exact.clone().or_else(|| self.lookup(&model, Utc::now()).cloned());
             let effective_from = over
                 .effective_from
-                .or_else(|| base.as_ref().map(|b| b.effective_from))
+                .or_else(|| exact.as_ref().map(|b| b.effective_from))
                 .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now));
             let row = ModelPrice {
                 model: model.clone(),
@@ -1043,6 +1048,24 @@ mod tests {
         let over = row.price_override.as_ref().unwrap();
         assert_eq!(over.output_per_mtok, Some(9.0));
         assert_eq!(over.input_per_mtok, None);
+    }
+
+    #[test]
+    fn inherited_override_rates_do_not_inherit_a_family_or_alias_date() {
+        let now = Utc::now();
+        let mut table = PriceTable::empty();
+        table.insert(ModelPrice {
+            model: "claude-sonnet-5".into(), input_per_mtok: 4.0, output_per_mtok: 20.0,
+            cache_read_per_mtok: 0.4, cache_write_per_mtok: 5.0,
+            effective_from: now, source: RateSource::Litellm,
+        });
+        table.apply_overrides([("claude-sonnet-5-20260901".into(), PriceOverride {
+            output_per_mtok: Some(8.0), ..Default::default()
+        })]);
+        let row = table.lookup("claude-sonnet-5-20260901", at(2026, 9, 1)).unwrap();
+        assert_eq!(row.effective_from, Utc.timestamp_opt(0, 0).unwrap());
+        assert_eq!(row.input_per_mtok, 4.0);
+        assert_eq!(row.output_per_mtok, 8.0);
     }
 
     #[test]
