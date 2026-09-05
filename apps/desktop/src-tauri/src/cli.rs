@@ -3,7 +3,8 @@
 //! The bundle already carries every executable the CLI needs: the app, the daemon, and (on
 //! Windows) the per-agent host all ship side by side, and this module publishes the two or three
 //! a terminal cares about into a directory the user's shell can see. macOS and Linux get symlinks
-//! into `~/.local/bin`, so an app update is picked up without reinstalling. Windows gets copies in
+//! into `~/.local/bin`, so an app update is picked up without reinstalling. Linux AppImage tools
+//! are copied out of the temporary mount and need reinstalling after updates. Windows gets copies in
 //! `%LOCALAPPDATA%\repomon\bin` (a symlink there needs developer mode or an elevated prompt) plus
 //! that directory on the *user* PATH. The machine PATH is never touched.
 //!

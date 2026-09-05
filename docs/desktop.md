@@ -315,13 +315,17 @@ the daemon is the thing that is broken:
   directly.
 - **Command-line tools** installs the `repomon` CLI out of the bundle. macOS and Linux get symlinks
   to `repomon` and `repomond` in `~/.local/bin`, so an app update carries through without
-  reinstalling; Windows gets copies of `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe`
+  reinstalling. Linux AppImage installs use copies instead because their mount disappears on
+  exit; remove and install these tools again after app updates. Windows gets copies of `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe`
   in `%LOCALAPPDATA%\repomon\bin` plus that directory on the **user** PATH in
   `HKCU\Environment` (the machine PATH is never touched, so no elevation is needed). The card
   reports the installed version by running it, says whether a terminal can find the directory (it
   asks your login shell, not the app's own stripped `PATH`), and gives you the exact `export PATH`
-  line to paste when it cannot. **Remove** takes the entries back out, and the PATH entry with
-  them on Windows. The last step of the setup wizard offers the same card.
+  line to paste when it cannot. Shell probes run in the background with a two-second limit; a
+  failed probe shows "could not read your shell PATH" and leaves PATH status unknown. Existing
+  regular binaries in `~/.local/bin` move to `<name>.bak`, and an existing backup is preserved.
+  **Remove** restores these backups after removing the app-installed links or copies, and removes
+  the PATH entry on Windows. The last step of the setup wizard offers the same card.
 
 **Agents** lets you add or remove custom agent CLIs (a name plus the launch command) and set the
 default agent, without hand-editing `config.toml`. See `docs/agents.md` for the underlying

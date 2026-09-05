@@ -121,10 +121,13 @@ General > Check for updates**). See [docs/desktop.md](docs/desktop.md).
 
 **From the app** (nothing to download): **Settings > System > Command-line tools > Install**, or
 the last step of the first-run setup wizard. On macOS and Linux this links `repomon` and
-`repomond` into `~/.local/bin`; on Windows it copies `repomon.exe`, `repomond.exe`, and
+`repomond` into `~/.local/bin` (Linux AppImage installs copy them out of the temporary mount
+instead, so reinstall the tools after app updates); on Windows it copies `repomon.exe`, `repomond.exe`, and
 `repomon-agent-host.exe` into `%LOCALAPPDATA%\repomon\bin` and puts that directory on your user
 PATH (never the machine PATH). The card reports the installed version, whether your shell can find
-it, and the exact line to add to your shell rc when it cannot.
+it, and the exact line to add to your shell rc when it cannot. A shell PATH probe that takes more
+than two seconds is reported as unknown. Existing regular binaries in `~/.local/bin` are backed
+up as `<name>.bak` and restored when you remove the app-installed tools.
 
 **From GitHub**, macOS / Linux:
 
