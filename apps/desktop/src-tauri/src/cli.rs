@@ -352,6 +352,7 @@ fn uninstall_tools() -> Result<CliStatus, String> {
     Ok(read_status(&dir))
 }
 
+#[cfg(unix)]
 fn backup_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".bak");
@@ -531,6 +532,16 @@ fn uninstall_tool(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Only a missing registry value is an empty PATH. Other read failures must stop writes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn registry_path_or_empty<T>(read: std::io::Result<T>) -> Result<Option<T>, String> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("could not read HKCU\\Environment\\Path: {error}")),
+    }
+}
+
 /// The user PATH in `HKEY_CURRENT_USER\Environment`. Never `HKEY_LOCAL_MACHINE`: this install is
 /// for one user, needs no elevation, and must not change what other accounts on the machine see.
 #[cfg(windows)]
@@ -540,7 +551,7 @@ mod windows_path {
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, RegType};
 
-    use super::{path_with_dir, path_without_dir};
+    use super::{path_with_dir, path_without_dir, registry_path_or_empty};
 
     const ENVIRONMENT: &str = "Environment";
     const PATH_VALUE: &str = "Path";
@@ -554,15 +565,15 @@ mod windows_path {
     /// The current user PATH and the registry type to write it back as. The value is normally
     /// `REG_EXPAND_SZ` (it can contain `%USERPROFILE%`), and rewriting it as a plain `REG_SZ`
     /// would silently stop those references from expanding.
-    fn read(key: &RegKey) -> (String, RegType) {
-        match key.get_raw_value(PATH_VALUE) {
-            Ok(value) => {
+    fn read(key: &RegKey) -> Result<(String, RegType), String> {
+        match registry_path_or_empty(key.get_raw_value(PATH_VALUE))? {
+            Some(value) => {
                 let text = String::from_utf16_lossy(&to_u16(&value.bytes))
                     .trim_end_matches('\0')
                     .to_string();
-                (text, value.vtype)
+                Ok((text, value.vtype))
             }
-            Err(_) => (String::new(), RegType::REG_EXPAND_SZ),
+            None => Ok((String::new(), RegType::REG_EXPAND_SZ)),
         }
     }
 
@@ -587,7 +598,7 @@ mod windows_path {
 
     pub fn add_to_user_path(dir: &Path) -> Result<(), String> {
         let key = open()?;
-        let (current, vtype) = read(&key);
+        let (current, vtype) = read(&key)?;
         match path_with_dir(&current, dir) {
             Some(updated) => write(&key, &updated, vtype),
             None => Ok(()),
@@ -596,7 +607,7 @@ mod windows_path {
 
     pub fn remove_from_user_path(dir: &Path) -> Result<(), String> {
         let key = open()?;
-        let (current, vtype) = read(&key);
+        let (current, vtype) = read(&key)?;
         match path_without_dir(&current, dir) {
             Some(updated) => write(&key, &updated, vtype),
             None => Ok(()),
@@ -634,6 +645,28 @@ mod windows_path {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn registry_path_read_only_treats_not_found_as_empty() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            super::registry_path_or_empty(Ok("preserved PATH")).unwrap(),
+            Some("preserved PATH")
+        );
+        assert_eq!(
+            super::registry_path_or_empty::<String>(Err(ErrorKind::NotFound.into())).unwrap(),
+            None
+        );
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::Other,
+        ] {
+            let error =
+                super::registry_path_or_empty::<String>(Err(Error::from(kind))).unwrap_err();
+            assert!(error.contains("could not read HKCU"));
+        }
+    }
+
     #[test]
     fn appimage_paths_copy_but_native_linux_packages_link() {
         use std::ffi::OsStr;
