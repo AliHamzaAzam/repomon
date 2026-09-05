@@ -64,6 +64,8 @@ pub struct IngestReport {
     /// newest-walk and the independent stale-cursor selection combined. Equal to
     /// [`REINGEST_BATCH`] means the batch was full and stale sources may remain.
     pub reingested: usize,
+    /// Stale cursors attempted, including failures and retired sources.
+    pub recount_attempts: usize,
     /// Sources still waiting for the current reader after this pass.
     pub stale_remaining: u64,
 }
@@ -263,40 +265,85 @@ fn discover_all_sources() -> Vec<(SystemTime, Source)> {
     out
 }
 
+/// A file that disappeared permanently is different from a transient metadata/read error.
+async fn source_missing(path: &Path) -> repomon_core::Result<bool> {
+    let path = path.to_path_buf();
+    let exists = tokio::task::spawn_blocking(move || path.try_exists())
+        .await
+        .map_err(|e| repomon_core::Error::Other(e.to_string()))?;
+    Ok(matches!(exists, Ok(false)))
+}
+
+async fn retire_cursor(
+    ctx: &Ctx,
+    cursor: repomon_core::usage_ledger::UsageCursor,
+) -> repomon_core::Result<()> {
+    ctx.store
+        .set_usage_cursor(
+            cursor.source_path,
+            cursor.offset,
+            cursor.mtime,
+            cursor.error,
+            INGEST_VERSION,
+        )
+        .await
+}
+
 /// Select cursor paths first. Discovery supplies metadata only, never eligibility or order.
-async fn stale_batch(ctx: &Ctx, all: &[(SystemTime, Source)]) -> repomon_core::Result<Vec<Source>> {
+/// Retired cursors consume this batch's attempt budget just like a source we can still read.
+async fn stale_batch(
+    ctx: &Ctx,
+    all: &[(SystemTime, Source)],
+) -> repomon_core::Result<(Vec<Source>, usize)> {
     let by_path: HashMap<_, _> = all.iter().map(|(_, s)| (s.path.clone(), s)).collect();
     let mut sources = Vec::new();
+    let mut retired = 0;
     for cursor in ctx
         .store
         .stale_usage_cursors(INGEST_VERSION, REINGEST_BATCH)
         .await?
     {
         let path = PathBuf::from(&cursor.source_path);
+        if source_missing(&path).await? {
+            retire_cursor(ctx, cursor).await?;
+            retired += 1;
+            continue;
+        }
         if let Some(source) = by_path.get(&path) {
             sources.push((*source).clone());
             continue;
         }
-        // A tracked file may no longer be under an installed account's discovery root.
-        // Its stored event retains the reader and attribution needed to recount it directly.
-        if let Some(event) = ctx.store.usage_source_event(cursor.source_path).await? {
+        // Stored event metadata can recover a reader outside current discovery roots.
+        let event = ctx
+            .store
+            .usage_source_event(cursor.source_path.clone())
+            .await?;
+        let source = event.and_then(|event| {
             let kind = match event.agent_kind.as_str() {
                 "claude-code" => SourceKind::Claude,
                 "codex" => SourceKind::Codex,
                 "antigravity" => SourceKind::Antigravity,
                 "opencode" => SourceKind::OpenCode,
-                _ => continue,
+                _ => return None,
             };
-            sources.push(Source {
+            Some(Source {
                 path,
                 kind,
                 account: event.account,
                 cwd_hint: event.cwd,
                 model_hint: event.model,
-            });
+            })
+        });
+        if let Some(source) = source {
+            sources.push(source);
+        } else {
+            // No supported reader can recount this source. Keep its events and prior error,
+            // but do not leave the entire ledger permanently in a recount state.
+            retire_cursor(ctx, cursor).await?;
+            retired += 1;
         }
     }
-    Ok(sources)
+    Ok((sources, retired))
 }
 
 /// One rotated window of `window` sources out of `sorted` (already newest-first), starting at
@@ -519,7 +566,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
         .store(next_rotation, std::sync::atomic::Ordering::Relaxed);
 
     // Recount directly from the cursor table before spending the ordinary walk's budget.
-    let stale_extra = stale_batch(ctx, &all).await?;
+    let (stale_extra, retired) = stale_batch(ctx, &all).await?;
     let mut seen: std::collections::HashSet<PathBuf> =
         stale_extra.iter().map(|s| s.path.clone()).collect();
     let mut sources = stale_extra;
@@ -536,7 +583,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
         ..Default::default()
     };
     let mut reingested = 0usize;
-    let mut recount_attempts = 0usize;
+    let mut recount_attempts = retired;
     for source in sources {
         let path = source.path.to_string_lossy().to_string();
         let cursor = ctx.store.usage_cursor(path.clone()).await?;
@@ -586,6 +633,11 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
             Ok(s) => s,
             Err(e) => {
                 report.failed += 1;
+                let version = if stale && source_missing(&source.path).await? {
+                    INGEST_VERSION
+                } else {
+                    version
+                };
                 ctx.store
                     .set_usage_cursor(path, offset, print, Some(e.to_string()), version)
                     .await?;
@@ -639,6 +691,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
             .await?;
     }
     report.reingested = reingested;
+    report.recount_attempts = recount_attempts;
     report.stale_remaining = ctx
         .store
         .usage_sources_below_ingest_version(INGEST_VERSION)
@@ -737,7 +790,7 @@ fn rescan_headline(
 }
 
 fn next_ingest_delay(report: &IngestReport, interval: Duration) -> Duration {
-    if report.reingested == REINGEST_BATCH && report.stale_remaining > 0 {
+    if report.recount_attempts == REINGEST_BATCH && report.stale_remaining > 0 {
         Duration::from_secs(1)
     } else {
         interval
@@ -760,7 +813,7 @@ pub async fn ingest_watch(ctx: Arc<Ctx>) {
                     scanned = report.scanned,
                     "usage ingest pass"
                 );
-                changed = report.events > 0 || report.reingested > 0;
+                changed = report.events > 0 || report.recount_attempts > 0;
                 interval = next_ingest_delay(&report, interval);
             }
             Err(e) => tracing::warn!(error = %e, "usage ingest pass failed"),
@@ -1118,7 +1171,7 @@ mod tests {
     #[test]
     fn recount_uses_short_sleep_only_for_full_batch_with_stale_left() {
         let long = Duration::from_secs(600);
-        for (reingested, stale_remaining, expected) in [
+        for (recount_attempts, stale_remaining, expected) in [
             (25, 1, Duration::from_secs(1)),
             (25, 0, long),
             (24, 1, long),
@@ -1127,7 +1180,7 @@ mod tests {
             assert_eq!(
                 next_ingest_delay(
                     &IngestReport {
-                        reingested,
+                        recount_attempts,
                         stale_remaining,
                         ..Default::default()
                     },
@@ -1239,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_recount_keeps_previous_events_and_stale_version() {
+    async fn deleted_stale_source_is_retired_without_losing_events_or_error() {
         let dir = tempfile::tempdir().unwrap();
         let _env = with_seeded_sources(dir.path());
         let ctx = seeded_ctx(dir.path()).await;
@@ -1253,12 +1306,13 @@ mod tests {
             .await
             .unwrap();
         ctx.store
-            .set_usage_cursor(path.clone(), 4096, 1, None, 0)
+            .set_usage_cursor(path.clone(), 4096, 1, Some("last read failed".into()), 0)
             .await
             .unwrap();
         let report = ingest_once(&ctx).await.unwrap();
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.stale_remaining, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.recount_attempts, 1);
+        assert_eq!(report.stale_remaining, 0);
         assert!(
             ctx.store
                 .usage_source_event(path.clone())
@@ -1267,8 +1321,99 @@ mod tests {
                 .is_some()
         );
         let cursor = ctx.store.usage_cursor(path).await.unwrap().unwrap();
-        assert_eq!(cursor.ingest_version, 0);
-        assert!(cursor.error.is_some());
+        assert_eq!(cursor.ingest_version, INGEST_VERSION);
+        assert_eq!(cursor.error.as_deref(), Some("last read failed"));
+    }
+
+    #[tokio::test]
+    async fn unknown_and_unresolvable_stale_sources_are_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        for name in ["unknown", "no-event"] {
+            let path = dir.path().join(name).to_string_lossy().to_string();
+            fs::write(&path, "{}\n").unwrap();
+            if name == "unknown" {
+                let mut event = stale_claude_event(&path, 4096);
+                event.agent_kind = "unsupported-agent".into();
+                ctx.store.record_usage_events(vec![event]).await.unwrap();
+            }
+            ctx.store
+                .set_usage_cursor(path, 4096, 1, Some("old error".into()), 0)
+                .await
+                .unwrap();
+        }
+        let report = ingest_once(&ctx).await.unwrap();
+        assert_eq!(report.stale_remaining, 0);
+        assert_eq!(report.recount_attempts, 2);
+        assert!(
+            ctx.store
+                .usage_source_event(dir.path().join("unknown").to_string_lossy().to_string())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_source_in_full_batch_keeps_fast_cadence_and_old_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        ingest_once(&ctx).await.unwrap();
+        let archive = dir.path().join("archive");
+        fs::create_dir_all(&archive).unwrap();
+        for i in 0..26 {
+            let path = archive.join(format!("source-{i}"));
+            // An existing directory deterministically fails a transcript read on every OS,
+            // including when the tests run with permissions that could bypass a mode bit.
+            if i == 25 {
+                fs::create_dir(&path).unwrap();
+            } else {
+                fs::write(
+                    &path,
+                    include_str!(
+                        "../../repomon-core/src/usage_ledger/fixtures/claude_usage_v0.jsonl"
+                    ),
+                )
+                .unwrap();
+            }
+            let path = path.to_string_lossy().to_string();
+            ctx.store
+                .record_usage_events(vec![stale_claude_event(&path, 4096)])
+                .await
+                .unwrap();
+            ctx.store
+                .set_usage_cursor(path, 99999, i, None, 0)
+                .await
+                .unwrap();
+        }
+        let report = ingest_once(&ctx).await.unwrap();
+        assert_eq!(report.recount_attempts, 25);
+        assert_eq!(report.reingested, 24);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.stale_remaining, 2);
+        assert_eq!(
+            next_ingest_delay(&report, Duration::from_secs(600)),
+            Duration::from_secs(1)
+        );
+        let unreadable = archive.join("source-25").to_string_lossy().to_string();
+        assert_eq!(
+            ctx.store
+                .usage_cursor(unreadable.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .ingest_version,
+            0
+        );
+        assert!(
+            ctx.store
+                .usage_source_event(unreadable)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

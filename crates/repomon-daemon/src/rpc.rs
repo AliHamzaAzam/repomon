@@ -4947,7 +4947,7 @@ pub async fn dispatch(
             let redigested = crate::usage_ingest::redigest_stale_headlines(ctx)
                 .await
                 .map_err(internal)?;
-            if report.events > 0 || report.reingested > 0 || redigested > 0 {
+            if report.events > 0 || report.recount_attempts > 0 || redigested > 0 {
                 ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, json!({}));
             }
             Ok(json!({
