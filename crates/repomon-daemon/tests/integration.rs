@@ -868,6 +868,23 @@ async fn system_doctor_reports_machine_health_and_agents() {
         assert!(tmux["path"].as_str().is_some());
     }
 
+    // platform + agent_host: this suite runs on the CI/dev machine's real OS, so assert the
+    // pairing rather than a fixed platform. Windows is not_applicable for tmux and carries an
+    // agent_host entry instead; every other platform is the reverse.
+    let platform = res["platform"].as_str().expect("platform string");
+    assert!(["macos", "linux", "windows"].contains(&platform));
+    if platform == "windows" {
+        assert_eq!(tmux["not_applicable"], json!(true));
+        assert!(
+            res["agent_host"].is_object(),
+            "windows must carry agent_host"
+        );
+        assert!(res["agent_host"]["source"].is_string());
+    } else {
+        assert_eq!(tmux["not_applicable"], json!(false));
+        assert_eq!(res["agent_host"], json!(null));
+    }
+
     // agents probe
     let agents = res["agents"].as_array().expect("agents array");
     let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();

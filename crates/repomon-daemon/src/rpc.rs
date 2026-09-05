@@ -4857,8 +4857,14 @@ pub async fn dispatch(
         // ---- system / machine health ----
         "system.doctor" => {
             let cfg = ctx.config.read().await;
-            let tmux = repomon_core::agent::tmux::TmuxRuntime::probe();
+            let platform = repomon_core::model::DoctorPlatform::current();
+            let tmux = repomon_core::agent::tmux_doctor_for_platform(
+                platform,
+                repomon_core::agent::tmux::TmuxRuntime::probe(),
+            );
             let git = repomon_core::git::probe();
+            let agent_host = (platform == repomon_core::model::DoctorPlatform::Windows)
+                .then(repomon_core::agent::windows::agent_host_doctor);
             let agents: Vec<AgentDoctorInfo> = detect_all_agents(&cfg)
                 .into_iter()
                 .map(|a| AgentDoctorInfo {
@@ -4868,7 +4874,13 @@ pub async fn dispatch(
                     detected: a.detected,
                 })
                 .collect();
-            to_value(SystemDoctorResult { tmux, git, agents })
+            to_value(SystemDoctorResult {
+                platform,
+                tmux,
+                git,
+                agent_host,
+                agents,
+            })
         }
 
         // ---- usage ----

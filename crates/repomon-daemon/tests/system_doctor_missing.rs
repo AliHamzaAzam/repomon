@@ -78,6 +78,17 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
     assert_eq!(res["git"]["version"], json!(null));
     assert_eq!(res["git"]["path"], json!(null));
 
+    // Platform-dependent shape: off Windows tmux is applicable (and here, missing) with no
+    // agent_host; on Windows tmux is not_applicable and agent_host carries the ConPTY host probe.
+    let platform = res["platform"].as_str().expect("platform string");
+    if platform == "windows" {
+        assert_eq!(res["tmux"]["not_applicable"], json!(true));
+        assert!(res["agent_host"].is_object());
+    } else {
+        assert_eq!(res["tmux"]["not_applicable"], json!(false));
+        assert_eq!(res["agent_host"], json!(null));
+    }
+
     // Every agent should have detected: false
     let agents = res["agents"].as_array().expect("agents array");
     assert!(!agents.is_empty());
