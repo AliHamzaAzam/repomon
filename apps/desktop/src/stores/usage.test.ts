@@ -77,7 +77,9 @@ function source(overrides: Partial<UsageSource> = {}): UsageSource {
       ingesting: false,
     }),
     exportRows: vi.fn().mockResolvedValue({ path: "/data/usage.csv", events: 3, bytes: 120 }),
-    ingestNow: vi.fn().mockResolvedValue({ listed: 4, scanned: 1, events: 3, failed: 0 }),
+    ingestNow: vi
+      .fn()
+      .mockResolvedValue({ listed: 4, scanned: 1, events: 3, failed: 0, redigested: 0 }),
     ...overrides,
   };
 }
@@ -280,13 +282,31 @@ describe("usage store", () => {
   it("does not reload when a scan found nothing new", async () => {
     await createRoot(async (dispose) => {
       const s = source({
-        ingestNow: vi.fn().mockResolvedValue({ listed: 4, scanned: 0, events: 0, failed: 0 }),
+        ingestNow: vi
+          .fn()
+          .mockResolvedValue({ listed: 4, scanned: 0, events: 0, failed: 0, redigested: 0 }),
       });
       const store = createUsageStore(s);
       await store.refresh();
       await store.ingestNow();
       await flush();
       expect(s.summary).toHaveBeenCalledTimes(1);
+      dispose();
+    });
+  });
+
+  it("reloads after a scan redigests headlines even with no new events", async () => {
+    await createRoot(async (dispose) => {
+      const s = source({
+        ingestNow: vi
+          .fn()
+          .mockResolvedValue({ listed: 4, scanned: 1, events: 0, failed: 0, redigested: 2 }),
+      });
+      const store = createUsageStore(s);
+      await store.refresh();
+      await store.ingestNow();
+      await flush();
+      expect(s.summary).toHaveBeenCalledTimes(2);
       dispose();
     });
   });

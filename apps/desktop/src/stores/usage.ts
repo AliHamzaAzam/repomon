@@ -37,6 +37,8 @@ export interface UsageIngestReport {
   scanned: number;
   events: number;
   failed: number;
+  /** Session headlines rewritten because their stored digest predated the current extractor. */
+  redigested: number;
 }
 
 /** The window a read covers: a named range, or `custom` with both bounds spelled out. */
@@ -316,7 +318,8 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
       setError(null);
       try {
         const report = await source.ingestNow();
-        if (report.events > 0) await refresh();
+        // A redigest-only pass adds no events but can still rewrite headlines the table shows.
+        if (report.events > 0 || report.redigested > 0) await refresh();
         else setStatus(await source.status().catch(() => status()));
         return report;
       } catch (cause) {

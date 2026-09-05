@@ -379,7 +379,13 @@ interface RpcMap {
   };
   "usage.ingest_now": {
     params: undefined;
-    result: { listed: number; scanned: number; events: number; failed: number };
+    result: {
+      listed: number;
+      scanned: number;
+      events: number;
+      failed: number;
+      redigested: number;
+    };
   };
   "orchestrator.status": { params: undefined; result: OrchestratorStatus };
   "orchestrator.transcript": { params: { limit?: number }; result: TranscriptItem[] };
