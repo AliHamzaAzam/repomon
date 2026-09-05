@@ -63,8 +63,10 @@ pub struct ScannedEvent {
 pub struct ScannedSession {
     pub session_id: String,
     pub agent_kind: String,
-    /// The first user prompt, trimmed to one line.
+    /// The session's task in one line: the first real user sentence, or the first assistant one.
     pub headline: Option<String>,
+    /// The turn `headline` was read from, before injected blocks were stripped, for a tooltip.
+    pub headline_raw: Option<String>,
     pub cwd: Option<String>,
     pub turns: u32,
     pub tool_calls: u32,
@@ -140,19 +142,17 @@ pub fn scan_claude_transcript(
     let account = account.unwrap_or("default").to_string();
     let mut events = Vec::new();
     let mut session: Option<ScannedSession> = None;
-    let mut headline: Option<String> = None;
+    let mut pick = HeadlinePick::default();
 
     let next_offset = for_each_line(path, from_offset, |v, offset| {
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
         let cwd = str_at(v, "cwd");
         let session_id = str_at(v, "sessionId").or_else(|| str_at(v, "session_id"));
         let at = parse_at(v, "timestamp");
-        if kind == "user" && headline.is_none() {
-            headline = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_str)
-                .map(first_line);
+        if kind == "user" {
+            if let Some(text) = v.get("message").and_then(message_text) {
+                pick.offer_user(&text);
+            }
         }
         if kind != "assistant" {
             return;
@@ -167,6 +167,12 @@ pub fn scan_claude_transcript(
             .unwrap_or("")
             .to_string();
         let synthetic = model.is_empty() || model == "<synthetic>";
+        // A synthetic turn is the CLI reporting an API error, so its text never names the task.
+        if !synthetic {
+            if let Some(text) = message_text(message) {
+                pick.offer_assistant(&text);
+            }
+        }
         let tool_calls = message
             .get("content")
             .and_then(Value::as_array)
@@ -183,6 +189,7 @@ pub fn scan_claude_transcript(
                 session_id: id,
                 agent_kind: "claude-code".to_string(),
                 headline: None,
+                headline_raw: None,
                 cwd: cwd.clone(),
                 turns: 0,
                 tool_calls: 0,
@@ -235,7 +242,9 @@ pub fn scan_claude_transcript(
     })?;
 
     if let Some(s) = session.as_mut() {
+        let (headline, raw) = pick.resolve();
         s.headline = headline;
+        s.headline_raw = raw;
     }
     Ok(SourceScan {
         events,
@@ -251,7 +260,7 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
     let mut session_id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut model = String::new();
-    let mut headline: Option<String> = None;
+    let mut pick = HeadlinePick::default();
     let mut turns = 0u32;
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut last_at: Option<DateTime<Utc>> = None;
@@ -282,8 +291,15 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
                     None => return,
                 };
                 match p.get("type").and_then(Value::as_str).unwrap_or("") {
-                    "user_message" if headline.is_none() => {
-                        headline = p.get("message").and_then(Value::as_str).map(first_line);
+                    "user_message" => {
+                        if let Some(text) = p.get("message").and_then(Value::as_str) {
+                            pick.offer_user(text);
+                        }
+                    }
+                    "agent_message" => {
+                        if let Some(text) = p.get("message").and_then(Value::as_str) {
+                            pick.offer_assistant(text);
+                        }
                     }
                     "token_count" => {
                         let last = match p.get("info").and_then(|i| i.get("last_token_usage")) {
@@ -331,11 +347,13 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
         }
     })?;
 
+    let (headline, headline_raw) = pick.resolve();
     let sessions = session_id
         .map(|id| ScannedSession {
             session_id: id,
             agent_kind: "codex".to_string(),
             headline,
+            headline_raw,
             cwd,
             turns,
             // The rollout logs no tool-call or retry events the ledger can count.
@@ -368,7 +386,7 @@ pub fn scan_antigravity_transcript(
         .and_then(Path::file_name)
         .map(|s| s.to_string_lossy().to_string());
     let mut events = Vec::new();
-    let mut headline: Option<String> = None;
+    let mut pick = HeadlinePick::default();
     let mut turns = 0u32;
     let mut tool_calls = 0u32;
     let mut first_at: Option<DateTime<Utc>> = None;
@@ -394,8 +412,10 @@ pub fn scan_antigravity_transcript(
             return;
         }
         let estimate = chars / CHARS_PER_TOKEN;
-        if !from_model && headline.is_none() {
-            headline = Some(first_line(content));
+        if from_model {
+            pick.offer_assistant(content);
+        } else {
+            pick.offer_user(content);
         }
         if from_model {
             turns += 1;
@@ -424,11 +444,13 @@ pub fn scan_antigravity_transcript(
         });
     })?;
 
+    let (headline, headline_raw) = pick.resolve();
     let sessions = session_id
         .map(|id| ScannedSession {
             session_id: id,
             agent_kind: "antigravity".to_string(),
             headline,
+            headline_raw,
             cwd: cwd.map(str::to_string),
             turns,
             tool_calls,
@@ -503,7 +525,8 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
                 .or_insert_with(|| ScannedSession {
                     session_id: id,
                     agent_kind: "opencode".to_string(),
-                    headline: title,
+                    headline: title.as_deref().and_then(headline_from_text),
+                    headline_raw: title.map(|t| raw_excerpt(&t)),
                     cwd: cwd.clone(),
                     turns: 0,
                     tool_calls: 0,
@@ -545,18 +568,170 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
     })
 }
 
-/// The first non-empty line of `s`, trimmed and capped so a headline stays one line.
-fn first_line(s: &str) -> String {
-    let line = s
+/// Tags the CLIs wrap around text they injected into a turn. Whatever sits between an opening tag
+/// and its closing tag is the tool talking to the agent, never the operator, so a headline is read
+/// from what is left once these are gone.
+const INJECTED_TAGS: &[&str] = &[
+    "local-command-caveat",
+    "system-reminder",
+    "USER_REQUEST",
+    "task-notification",
+    "agent-message",
+];
+
+/// How many characters a headline keeps, ellipsis included.
+const HEADLINE_MAX_CHARS: usize = 80;
+
+/// Below this many characters a sentence terminator is read as an abbreviation's full stop
+/// rather than the end of a sentence, so a headline never collapses to two letters.
+const MIN_SENTENCE_CHARS: usize = 12;
+
+/// How much of the original turn is kept for the tooltip that shows what was really written.
+const HEADLINE_RAW_MAX_CHARS: usize = 400;
+
+/// What a session with no text an operator wrote is called.
+pub const UNTITLED_SESSION: &str = "untitled session";
+
+/// Remove every injected block from `raw`. An opening tag with no closing tag swallows the rest of
+/// the text: a truncated injection is still an injection.
+fn strip_injected_blocks(raw: &str) -> String {
+    let mut text = raw.to_string();
+    loop {
+        let mut cut: Option<(usize, usize)> = None;
+        for tag in INJECTED_TAGS {
+            let open = format!("<{tag}");
+            let Some(start) = text.find(&open) else {
+                continue;
+            };
+            let close = format!("</{tag}>");
+            let end = match text[start..].find(&close) {
+                Some(rel) => start + rel + close.len(),
+                None => text.len(),
+            };
+            if cut.is_none_or(|(previous, _)| start < previous) {
+                cut = Some((start, end));
+            }
+        }
+        match cut {
+            Some((start, end)) => text.replace_range(start..end, " "),
+            None => return text,
+        }
+    }
+}
+
+/// The first sentence of `line`: everything up to a full stop, question mark or exclamation mark
+/// that ends the line, or that is followed by a space and a capital letter. The terminator is
+/// dropped, since a headline is a label rather than prose.
+///
+/// The capital-letter rule is what keeps an abbreviation ("e.g. the ledger test") from cutting a
+/// sentence in half.
+fn first_sentence(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if !matches!(byte, b'.' | b'!' | b'?') {
+            continue;
+        }
+        let ends_here = match (bytes.get(index + 1), bytes.get(index + 2)) {
+            (None, _) => true,
+            (Some(space), next) if space.is_ascii_whitespace() => {
+                next.is_none_or(|c| c.is_ascii_uppercase())
+            }
+            _ => false,
+        };
+        if !ends_here {
+            continue;
+        }
+        let head = &line[..index];
+        if head.chars().count() < MIN_SENTENCE_CHARS {
+            continue;
+        }
+        return head;
+    }
+    line
+}
+
+/// Cap `text` at `max` characters, ending on an ellipsis at a word boundary where there is one.
+fn cap_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max.saturating_sub(3)).collect();
+    let head = match head.rsplit_once(char::is_whitespace) {
+        Some((left, _)) if left.chars().count() >= max / 2 => left.to_string(),
+        _ => head,
+    };
+    format!("{}...", head.trim_end())
+}
+
+/// A headline for one turn's text, or `None` when nothing an operator wrote survives.
+///
+/// The order is: drop injected blocks, drop slash commands and blank lines, take the first
+/// sentence of the first line that is left, cap it at [`HEADLINE_MAX_CHARS`].
+pub fn headline_from_text(raw: &str) -> Option<String> {
+    let stripped = strip_injected_blocks(raw);
+    let line = stripped
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-        .to_string();
-    if line.chars().count() > 160 {
-        line.chars().take(157).collect::<String>() + "..."
+        .find(|line| !line.is_empty() && !line.starts_with('/'))?;
+    let sentence = first_sentence(line).trim();
+    if sentence.is_empty() {
+        return None;
+    }
+    Some(cap_chars(sentence, HEADLINE_MAX_CHARS))
+}
+
+/// The first usable user text of a session, with the first assistant text as a fallback. Whichever
+/// wins also supplies the raw text a tooltip shows, so the operator can see what was cleaned away.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct HeadlinePick {
+    user: Option<(String, String)>,
+    assistant: Option<(String, String)>,
+}
+
+impl HeadlinePick {
+    fn offer_user(&mut self, raw: &str) {
+        if self.user.is_none() {
+            self.user = headline_from_text(raw).map(|head| (head, raw_excerpt(raw)));
+        }
+    }
+
+    fn offer_assistant(&mut self, raw: &str) {
+        if self.assistant.is_none() {
+            self.assistant = headline_from_text(raw).map(|head| (head, raw_excerpt(raw)));
+        }
+    }
+
+    /// The headline and the raw text behind it. Both are `None` when the session had neither, so
+    /// an incremental re-scan that saw no text keeps whatever an earlier scan already stored.
+    fn resolve(self) -> (Option<String>, Option<String>) {
+        match self.user.or(self.assistant) {
+            Some((head, raw)) => (Some(head), Some(raw)),
+            None => (None, None),
+        }
+    }
+}
+
+fn raw_excerpt(raw: &str) -> String {
+    cap_chars(raw.trim(), HEADLINE_RAW_MAX_CHARS)
+}
+
+/// The text of a Claude message body, which is either a plain string or a list of content blocks.
+fn message_text(message: &Value) -> Option<String> {
+    let content = message.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let blocks = content.as_array()?;
+    let joined = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if joined.trim().is_empty() {
+        None
     } else {
-        line
+        Some(joined)
     }
 }
 
@@ -627,6 +802,85 @@ mod tests {
             "the synthetic API error turn counts as a retry"
         );
         assert_eq!(s.turns, 3);
+    }
+
+    #[test]
+    fn a_headline_skips_the_blocks_the_cli_injected_and_the_slash_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            "s.jsonl",
+            include_str!("fixtures/claude_injected_headline_v0.jsonl"),
+        );
+        let scan = scan_claude_transcript(&p, 0, None).unwrap();
+        let s = scan.sessions.first().expect("one session");
+        assert_eq!(
+            s.headline.as_deref(),
+            Some("Rebuild the usage view so it reads at a glance")
+        );
+        assert!(
+            s.headline_raw
+                .as_deref()
+                .expect("the raw turn is kept for the tooltip")
+                .starts_with("<local-command-caveat>"),
+            "the tooltip shows what was really written"
+        );
+    }
+
+    #[test]
+    fn a_headline_falls_back_to_the_first_assistant_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            "s.jsonl",
+            include_str!("fixtures/claude_headline_fallback_v0.jsonl"),
+        );
+        let scan = scan_claude_transcript(&p, 0, None).unwrap();
+        let s = scan.sessions.first().expect("one session");
+        assert_eq!(
+            s.headline.as_deref(),
+            Some("I compacted the transcript and kept the plan"),
+            "the synthetic error turn is not a headline"
+        );
+    }
+
+    #[test]
+    fn every_injected_block_is_skipped_on_its_own() {
+        for tag in INJECTED_TAGS {
+            let raw = format!("<{tag}>noise the tool wrote</{tag}>\nShip the ledger view");
+            assert_eq!(
+                headline_from_text(&raw).as_deref(),
+                Some("Ship the ledger view"),
+                "the {tag} block must not become a headline"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclosed_injected_block_swallows_the_rest_of_the_turn() {
+        assert_eq!(headline_from_text("<system-reminder>truncated noise"), None);
+    }
+
+    #[test]
+    fn a_turn_that_is_only_slash_commands_has_no_headline() {
+        assert_eq!(headline_from_text("/clear\n/compact"), None);
+    }
+
+    #[test]
+    fn a_long_headline_is_capped_at_eighty_characters() {
+        let raw = "Rewrite the ledger so that every bucket in the range is drawn even when it is \
+                   empty and the bars never stretch";
+        let headline = headline_from_text(raw).expect("a headline");
+        assert!(headline.chars().count() <= 80, "got {headline:?}");
+        assert!(headline.ends_with("..."));
+    }
+
+    #[test]
+    fn an_abbreviation_does_not_end_the_sentence() {
+        assert_eq!(
+            headline_from_text("Fix the flake, e.g. the ledger test").as_deref(),
+            Some("Fix the flake, e.g. the ledger test")
+        );
     }
 
     #[test]

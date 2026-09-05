@@ -20,6 +20,8 @@ use crate::pricing::{PriceTable, TokenCounts};
 
 pub mod scan;
 
+pub use scan::UNTITLED_SESSION;
+
 /// One stored ledger row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageEvent {
@@ -377,7 +379,11 @@ pub fn summarize(events: &[UsageEvent], group_by: GroupBy, table: &PriceTable) -
     for e in events {
         totals.add(e, table);
         groups.entry(group_by.key_of(e)).or_default().add(e, table);
-        if table.lookup(&e.model, e.at).is_none() && !e.model.is_empty() {
+        // A free-tier id prices at zero, so it belongs in the totals and not in the warning.
+        if table.lookup(&e.model, e.at).is_none()
+            && !e.model.is_empty()
+            && !crate::pricing::is_free_tier(&e.model)
+        {
             unpriced.insert(e.model.clone(), ());
         }
     }
@@ -534,6 +540,12 @@ pub struct UsageSessionRow {
     /// The model the session spent the most tokens on.
     pub model: String,
     pub headline: Option<String>,
+    /// What the headline was read from, before injected blocks were stripped. Shown as a tooltip
+    /// so the operator can see the text the ledger cleaned up.
+    pub headline_raw: Option<String>,
+    /// Where the session ran, named the way the fleet sidebar names it (`repo/lane`). The daemon
+    /// fills this in; a lane that has since been removed still reads as its repo.
+    pub lane_label: Option<String>,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub repo_id: Option<RepoId>,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
@@ -580,6 +592,24 @@ pub struct UsageFinding {
     pub detail: String,
     /// The dollars this finding concerns, so the panel can order by what is worth reading.
     pub cost_usd: f64,
+    /// The session this finding points at, so the panel can link to its row. `None` when the
+    /// finding is about a model, or folds several sessions into one line.
+    pub session_id: Option<String>,
+    /// How many sessions were folded into this line. One for a finding about a single session.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub count: u32,
+}
+
+/// What to call a session in a finding: its task headline, or the fact that it has none and where
+/// it ran, so no line is ever addressed to a bare identifier.
+pub fn session_name(row: &UsageSessionRow) -> String {
+    match row.headline.as_deref().map(str::trim) {
+        Some(headline) if !headline.is_empty() => headline.to_string(),
+        _ => match row.lane_label.as_deref() {
+            Some(lane) => format!("{UNTITLED_SESSION} in {lane}"),
+            None => UNTITLED_SESSION.to_string(),
+        },
+    }
 }
 
 /// Below this cache hit rate a read-heavy workload is worth looking at.
@@ -619,10 +649,12 @@ pub fn findings(
                 detail: format!(
                     "{} turns, {} tokens, {}.",
                     row.totals.events,
-                    row.totals.total_tokens,
+                    tokens(row.totals.total_tokens),
                     money(row.totals.cost_usd)
                 ),
                 cost_usd: row.totals.cost_usd,
+                session_id: None,
+                count: 1,
             });
         }
         for row in by_model.groups.iter() {
@@ -640,48 +672,125 @@ pub fn findings(
                 headline: format!("{} reads at a {:.0} percent cache hit rate", row.key, hit * 100.0),
                 detail: format!(
                     "{} uncached input tokens against {} cached. A stable prompt prefix is what moves this.",
-                    row.totals.input_tokens, row.totals.cache_read_tokens
+                    tokens(row.totals.input_tokens),
+                    tokens(row.totals.cache_read_tokens)
                 ),
                 cost_usd: row.totals.cost_usd,
+                session_id: None,
+                count: 1,
             });
         }
     }
+    // Session findings fold by shape: every session that hit the same rule on the same model
+    // becomes one line with a count and a total, rather than the same sentence twenty times.
+    let mut retried: BTreeMap<&str, Vec<&UsageSessionRow>> = BTreeMap::new();
+    let mut light: BTreeMap<&str, Vec<&UsageSessionRow>> = BTreeMap::new();
     for s in sessions {
-        if s.turns >= RETRY_MIN_TURNS {
-            let share = s.retries as f64 / s.turns as f64;
-            if share >= RETRY_SHARE_FLOOR {
-                out.push(UsageFinding {
-                    kind: FindingKind::Retries,
-                    subject: s.session_id.clone(),
-                    headline: format!("{} of {} turns were retries", s.retries, s.turns),
-                    detail: s
-                        .headline
-                        .clone()
-                        .unwrap_or_else(|| "This session retried often.".to_string()),
-                    cost_usd: s.totals.cost_usd,
-                });
-            }
+        if s.turns >= RETRY_MIN_TURNS && s.retries as f64 / s.turns as f64 >= RETRY_SHARE_FLOOR {
+            retried.entry(s.model.as_str()).or_default().push(s);
         }
-        if let Some(cheaper) = cheaper_sibling(&s.model) {
-            if s.totals.output_tokens > 0
-                && s.totals.output_tokens < LIGHT_SESSION_OUTPUT_TOKENS
-                && s.tool_calls <= 2
-            {
-                out.push(UsageFinding {
-                    kind: FindingKind::ModelChoice,
-                    subject: s.session_id.clone(),
-                    headline: format!("{} did light work on {}", s.session_id, s.model),
-                    detail: format!(
-                        "{} output tokens and {} tool calls. {cheaper} handles this shape of task.",
-                        s.totals.output_tokens, s.tool_calls
-                    ),
-                    cost_usd: s.totals.cost_usd,
-                });
-            }
+        if cheaper_sibling(&s.model).is_some()
+            && s.totals.output_tokens > 0
+            && s.totals.output_tokens < LIGHT_SESSION_OUTPUT_TOKENS
+            && s.tool_calls <= 2
+        {
+            light.entry(s.model.as_str()).or_default().push(s);
         }
+    }
+    for (model, rows) in retried {
+        out.push(retry_finding(model, &rows));
+    }
+    for (model, rows) in light {
+        out.push(model_choice_finding(model, &rows));
     }
     out.sort_by(|a, b| b.cost_usd.total_cmp(&a.cost_usd));
     out
+}
+
+/// The dearest session of a group, which is the one worth naming when a line folds several.
+fn dearest<'a>(rows: &[&'a UsageSessionRow]) -> &'a UsageSessionRow {
+    rows.iter()
+        .copied()
+        .max_by(|a, b| a.totals.cost_usd.total_cmp(&b.totals.cost_usd))
+        .expect("a finding group is never empty")
+}
+
+fn group_cost(rows: &[&UsageSessionRow]) -> f64 {
+    rows.iter().map(|r| r.totals.cost_usd).sum()
+}
+
+/// One line for the sessions that spent turns recovering from errors on `model`.
+fn retry_finding(model: &str, rows: &[&UsageSessionRow]) -> UsageFinding {
+    let cost = group_cost(rows);
+    let retries: u32 = rows.iter().map(|r| r.retries).sum();
+    let turns: u32 = rows.iter().map(|r| r.turns).sum();
+    if let [only] = rows {
+        return UsageFinding {
+            kind: FindingKind::Retries,
+            subject: only.session_id.clone(),
+            headline: format!(
+                "{} retried {} of {} turns",
+                session_name(only),
+                only.retries,
+                only.turns
+            ),
+            detail: format!("{model}, {}.", money(cost)),
+            cost_usd: cost,
+            session_id: Some(only.session_id.clone()),
+            count: 1,
+        };
+    }
+    UsageFinding {
+        kind: FindingKind::Retries,
+        subject: model.to_string(),
+        headline: format!(
+            "{} sessions retried {retries} of {turns} turns on {model}",
+            rows.len()
+        ),
+        detail: format!(
+            "{} in total. The dearest is \"{}\".",
+            money(cost),
+            session_name(dearest(rows))
+        ),
+        cost_usd: cost,
+        session_id: None,
+        count: rows.len() as u32,
+    }
+}
+
+/// One line for the sessions that did little work on a model with a cheaper sibling.
+fn model_choice_finding(model: &str, rows: &[&UsageSessionRow]) -> UsageFinding {
+    let cheaper = cheaper_sibling(model).unwrap_or(model);
+    let cost = group_cost(rows);
+    let output: u64 = rows.iter().map(|r| r.totals.output_tokens).sum();
+    if let [only] = rows {
+        return UsageFinding {
+            kind: FindingKind::ModelChoice,
+            subject: only.session_id.clone(),
+            headline: format!("{} did light work on {model}", session_name(only)),
+            detail: format!(
+                "{} output tokens and {} tool calls. {cheaper} handles this shape of task.",
+                tokens(only.totals.output_tokens),
+                only.tool_calls
+            ),
+            cost_usd: cost,
+            session_id: Some(only.session_id.clone()),
+            count: 1,
+        };
+    }
+    UsageFinding {
+        kind: FindingKind::ModelChoice,
+        subject: model.to_string(),
+        headline: format!("{} sessions did light work on {model}", rows.len()),
+        detail: format!(
+            "{} output tokens and {} between them. {cheaper} handles this shape of task.",
+            tokens(output),
+            money(cost)
+        ),
+        cost_usd: cost,
+        session_id: None,
+        count: rows.len() as u32,
+    }
 }
 
 /// The cheaper model in the same family, when there is an obvious one.
@@ -697,13 +806,60 @@ fn cheaper_sibling(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Format dollars for prose, with enough places that a cent-scale figure is still readable.
+/// Format dollars for prose and tables: whole dollars above a thousand, cents below a hundred,
+/// and enough places below a cent that a fraction of one still reads as a number.
 pub fn money(usd: f64) -> String {
-    if usd >= 1.0 {
-        format!("${usd:.2}")
-    } else {
-        format!("${usd:.4}")
+    if usd == 0.0 {
+        return "$0".to_string();
     }
+    let sign = if usd < 0.0 { "-" } else { "" };
+    let size = usd.abs();
+    if size >= 1000.0 {
+        return format!("{sign}${}", group_thousands(size.round() as u64));
+    }
+    if size >= 100.0 {
+        return format!("{sign}${size:.1}");
+    }
+    if size >= 0.01 {
+        return format!("{sign}${size:.2}");
+    }
+    format!("{sign}${size:.4}")
+}
+
+/// Format a token count the way an axis label or a table cell wants it: k, M or B with one
+/// decimal, and no trailing ".0" left behind.
+pub fn tokens(count: u64) -> String {
+    const SUFFIXES: [&str; 4] = ["", "k", "M", "B"];
+    let mut value = count as f64;
+    let mut unit = 0usize;
+    // 999.95 rather than 1000: a value that would render as "1000.0k" belongs one unit up.
+    while value >= 999.95 && unit + 1 < SUFFIXES.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        return count.to_string();
+    }
+    format!("{}{}", one_decimal(value), SUFFIXES[unit])
+}
+
+/// One decimal place, with a trailing ".0" dropped so "3.0k" reads "3k".
+fn one_decimal(value: f64) -> String {
+    let text = format!("{value:.1}");
+    text.strip_suffix(".0").map(str::to_string).unwrap_or(text)
+}
+
+/// Digits in groups of three, so a four-figure sum is read at a glance.
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// The export header, in the order [`to_csv`] writes fields.
@@ -755,6 +911,8 @@ pub struct UsageSessionMeta {
     pub session_id: String,
     pub agent_kind: String,
     pub headline: Option<String>,
+    /// The turn the headline was read from, before injected blocks were stripped.
+    pub headline_raw: Option<String>,
     pub cwd: Option<String>,
     pub repo_id: Option<RepoId>,
     pub lane_id: Option<LaneId>,
@@ -1046,6 +1204,8 @@ mod tests {
             agent_kind: "claude-code".to_string(),
             model: "claude-sonnet-5".to_string(),
             headline: Some("Fix the flake".to_string()),
+            headline_raw: Some("Fix the flake".to_string()),
+            lane_label: Some("demo/flake".to_string()),
             repo_id: Some(7),
             lane_id: Some(11),
             cwd: Some("/repos/demo".to_string()),
@@ -1063,6 +1223,110 @@ mod tests {
             f.iter()
                 .any(|x| x.kind == FindingKind::Retries && x.subject == "s1")
         );
+    }
+
+    fn session(id: &str, model: &str, headline: Option<&str>, cost: f64) -> UsageSessionRow {
+        UsageSessionRow {
+            session_id: id.to_string(),
+            agent_kind: "claude-code".to_string(),
+            model: model.to_string(),
+            headline: headline.map(str::to_string),
+            headline_raw: headline.map(str::to_string),
+            lane_label: Some("demo/flake".to_string()),
+            repo_id: Some(7),
+            lane_id: Some(11),
+            cwd: Some("/repos/demo".to_string()),
+            started_at: Some(at(1, 0)),
+            ended_at: Some(at(2, 0)),
+            turns: 40,
+            tool_calls: 12,
+            retries: 9,
+            totals: UsageTotals {
+                cost_usd: cost,
+                ..Default::default()
+            },
+            estimated: false,
+            external: false,
+        }
+    }
+
+    #[test]
+    fn a_finding_names_a_session_by_its_task_not_its_identifier() {
+        let sessions = vec![session("0f3a-uuid", "claude-sonnet-5", Some("Fix the flake"), 1.0)];
+        let f = findings(&[], &sessions, &PriceTable::builtin());
+        let retry = f
+            .iter()
+            .find(|x| x.kind == FindingKind::Retries)
+            .expect("a retry finding");
+        assert_eq!(retry.headline, "Fix the flake retried 9 of 40 turns");
+        assert_eq!(retry.session_id.as_deref(), Some("0f3a-uuid"));
+        assert_eq!(retry.count, 1);
+    }
+
+    #[test]
+    fn a_session_with_no_task_text_is_named_by_its_lane() {
+        let sessions = vec![session("0f3a-uuid", "claude-sonnet-5", None, 1.0)];
+        let f = findings(&[], &sessions, &PriceTable::builtin());
+        assert!(
+            f[0].headline
+                .starts_with("untitled session in demo/flake retried"),
+            "got {:?}",
+            f[0].headline
+        );
+    }
+
+    #[test]
+    fn findings_of_the_same_shape_fold_into_one_line_with_a_count_and_a_total() {
+        let sessions = vec![
+            session("a", "claude-sonnet-5", Some("One"), 1.0),
+            session("b", "claude-sonnet-5", Some("Two"), 2.0),
+            session("c", "claude-sonnet-5", Some("Three"), 3.0),
+        ];
+        let f = findings(&[], &sessions, &PriceTable::builtin());
+        let retry = f
+            .iter()
+            .find(|x| x.kind == FindingKind::Retries)
+            .expect("a retry finding");
+        assert_eq!(
+            retry.headline,
+            "3 sessions retried 27 of 120 turns on claude-sonnet-5"
+        );
+        assert_eq!(retry.count, 3);
+        assert_eq!(retry.cost_usd, 6.0);
+        assert!(retry.session_id.is_none(), "a folded line links to nothing");
+        assert!(retry.detail.contains("\"Three\""), "got {:?}", retry.detail);
+    }
+
+    #[test]
+    fn money_is_whole_dollars_above_a_thousand_and_cents_below_a_hundred() {
+        assert_eq!(money(0.0), "$0");
+        assert_eq!(money(0.0042), "$0.0042");
+        assert_eq!(money(0.42), "$0.42");
+        assert_eq!(money(12.5), "$12.50");
+        assert_eq!(money(523.45), "$523.5");
+        assert_eq!(money(12_580.4), "$12,580");
+    }
+
+    #[test]
+    fn token_counts_read_as_k_m_and_b_without_a_trailing_zero() {
+        assert_eq!(tokens(0), "0");
+        assert_eq!(tokens(999), "999");
+        assert_eq!(tokens(1_000), "1k");
+        assert_eq!(tokens(1_500), "1.5k");
+        assert_eq!(tokens(1_000_000), "1M");
+        assert_eq!(tokens(12_580_000_000), "12.6B");
+    }
+
+    #[test]
+    fn a_free_tier_model_prices_at_zero_without_a_warning() {
+        let events = vec![row("opencode", "kimi-k2-free", 1, 0, 1_000, 2_000, 0)];
+        let s = summarize(&events, GroupBy::Model, &PriceTable::builtin());
+        assert!(
+            s.unpriced_models.is_empty(),
+            "a free tier has a published rate, and it is zero"
+        );
+        assert_eq!(s.totals.cost_usd, 0.0);
+        assert!(s.totals.total_tokens > 0, "its tokens still count");
     }
 
     #[test]

@@ -95,6 +95,22 @@ impl Labels {
         }
     }
 
+    /// Where a session ran, named the way the fleet sidebar names it. A lane the operator has
+    /// since removed still reads as its repo, so the row says where the work happened rather than
+    /// falling back to a bare path.
+    pub fn session_label(&self, repo_id: Option<i64>, lane_id: Option<i64>) -> Option<String> {
+        if let Some(id) = lane_id {
+            if let Some(name) = self.lanes.get(&id) {
+                return Some(name.clone());
+            }
+            return Some(match repo_id.and_then(|r| self.repos.get(&r)) {
+                Some(repo) => format!("{repo} (lane removed)"),
+                None => "lane removed".to_string(),
+            });
+        }
+        repo_id.and_then(|r| self.repos.get(&r)).cloned()
+    }
+
     fn label_for(&self, group_by: GroupBy, key: &str) -> String {
         if key.is_empty() {
             return "unattributed".to_string();
@@ -160,6 +176,10 @@ pub async fn sessions(
         .await?;
     let table = crate::usage_ingest::price_table(ctx).await;
     price_sessions(&mut rows, &table);
+    let labels = Labels::load(ctx).await;
+    for row in rows.iter_mut() {
+        row.lane_label = labels.session_label(row.repo_id, row.lane_id);
+    }
     Ok(rows)
 }
 
@@ -348,6 +368,25 @@ mod tests {
         labels.apply(GroupBy::Lane, &mut rows[1..]);
         assert_eq!(rows[0].label, "demo");
         assert_eq!(rows[1].label, "demo/feature");
+    }
+
+    #[tokio::test]
+    async fn a_session_lane_reads_as_repo_slash_lane_and_says_when_the_lane_is_gone() {
+        let (ctx, repo_id, lane_id) = ctx_with_repo().await;
+        let labels = Labels::load(&ctx).await;
+        assert_eq!(
+            labels.session_label(Some(repo_id), Some(lane_id)).as_deref(),
+            Some("demo/feature")
+        );
+        assert_eq!(
+            labels.session_label(Some(repo_id), Some(9_999)).as_deref(),
+            Some("demo (lane removed)")
+        );
+        assert_eq!(
+            labels.session_label(Some(repo_id), None).as_deref(),
+            Some("demo")
+        );
+        assert_eq!(labels.session_label(None, None), None);
     }
 
     #[tokio::test]

@@ -211,8 +211,15 @@ impl PriceTable {
     }
 
     /// What `tokens` cost on `model` at `at`, in dollars. `None` when the model has no price.
+    ///
+    /// A free-tier model id costs zero rather than nothing-known: it has a published rate, and
+    /// that rate is zero, so it is priced instead of being reported as a gap in the table.
     pub fn cost(&self, model: &str, at: DateTime<Utc>, tokens: &TokenCounts) -> Option<f64> {
-        let p = self.lookup(model, at)?;
+        let p = match self.lookup(model, at) {
+            Some(p) => p,
+            None if is_free_tier(model) => return Some(0.0),
+            None => return None,
+        };
         const PER: f64 = 1_000_000.0;
         Some(
             tokens.input as f64 / PER * p.input_per_mtok
@@ -221,6 +228,14 @@ impl PriceTable {
                 + tokens.cache_write as f64 / PER * p.cache_write_per_mtok,
         )
     }
+}
+
+/// Whether `model` is a provider's free tier, whose published rate is zero.
+///
+/// OpenCode names these `<model>-free`. They are priced rather than reported as unpriced, so the
+/// "no published rate" warning stays about models that really would cost money.
+pub fn is_free_tier(model: &str) -> bool {
+    model.ends_with("-free")
 }
 
 /// Parse a LiteLLM `model_prices_and_context_window.json` snapshot into price rows.
@@ -397,6 +412,27 @@ mod tests {
             )
             .unwrap();
         assert!(write > input);
+    }
+
+    #[test]
+    fn a_free_tier_id_costs_zero_rather_than_nothing_known() {
+        let table = PriceTable::builtin();
+        let tokens = TokenCounts {
+            input: 1_000,
+            output: 2_000,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        assert!(is_free_tier("kimi-k2-thinking-free"));
+        assert_eq!(
+            table.cost("kimi-k2-thinking-free", at(2026, 9, 1), &tokens),
+            Some(0.0)
+        );
+        assert_eq!(
+            table.cost("kimi-k2-thinking", at(2026, 9, 1), &tokens),
+            None,
+            "a paid model with no row is still a gap in the table"
+        );
     }
 
     #[test]

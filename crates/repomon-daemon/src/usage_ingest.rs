@@ -446,6 +446,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                     session_id: s.session_id,
                     agent_kind: s.agent_kind,
                     headline: s.headline,
+                    headline_raw: s.headline_raw,
                     cwd: s.cwd,
                     repo_id: a.repo_id,
                     lane_id: a.lane_id,

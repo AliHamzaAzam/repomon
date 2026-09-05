@@ -12,4 +12,13 @@ subject: string, headline: string, detail: string,
 /**
  * The dollars this finding concerns, so the panel can order by what is worth reading.
  */
-cost_usd: number, };
+cost_usd: number, 
+/**
+ * The session this finding points at, so the panel can link to its row. `None` when the
+ * finding is about a model, or folds several sessions into one line.
+ */
+session_id: string | null, 
+/**
+ * How many sessions were folded into this line. One for a finding about a single session.
+ */
+count: number, };

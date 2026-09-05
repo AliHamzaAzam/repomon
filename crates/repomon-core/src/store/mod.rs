@@ -68,6 +68,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (22, include_str!("../../migrations/0022_lane_role.sql")),
     (23, include_str!("../../migrations/0023_usage_ledger.sql")),
+    (
+        24,
+        include_str!("../../migrations/0024_usage_headline_raw.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -2039,12 +2043,13 @@ impl Store {
             let tx = c.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO usage_sessions(agent_kind, session_id, headline, cwd, repo_id,
-                        lane_id, started_at, ended_at, turns, tool_calls, retries, external,
-                        source_path)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    "INSERT INTO usage_sessions(agent_kind, session_id, headline, headline_raw,
+                        cwd, repo_id, lane_id, started_at, ended_at, turns, tool_calls, retries,
+                        external, source_path)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                      ON CONFLICT(agent_kind, session_id) DO UPDATE SET
                         headline = COALESCE(excluded.headline, headline),
+                        headline_raw = COALESCE(excluded.headline_raw, headline_raw),
                         cwd = COALESCE(excluded.cwd, cwd),
                         repo_id = COALESCE(excluded.repo_id, repo_id),
                         lane_id = COALESCE(excluded.lane_id, lane_id),
@@ -2061,6 +2066,7 @@ impl Store {
                         r.agent_kind,
                         r.session_id,
                         r.headline,
+                        r.headline_raw,
                         r.cwd,
                         r.repo_id,
                         r.lane_id,
@@ -2102,7 +2108,7 @@ impl Store {
                           WHERE x.agent_kind = e.agent_kind AND x.session_id = e.session_id
                           GROUP BY x.model
                           ORDER BY SUM(x.input_tokens + x.output_tokens) DESC LIMIT 1),
-                        s.headline, s.turns, s.tool_calls, s.retries
+                        s.headline, s.turns, s.tool_calls, s.retries, s.headline_raw
                  FROM usage_events e
                  LEFT JOIN usage_sessions s
                    ON s.agent_kind = e.agent_kind AND s.session_id = e.session_id
@@ -2145,6 +2151,9 @@ impl Store {
                         turns: row.get::<_, Option<i64>>(18)?.unwrap_or(0).max(0) as u32,
                         tool_calls: row.get::<_, Option<i64>>(19)?.unwrap_or(0).max(0) as u32,
                         retries: row.get::<_, Option<i64>>(20)?.unwrap_or(0).max(0) as u32,
+                        headline_raw: row.get(21)?,
+                        // The store knows ids, not names: `usage_query::Labels` fills this in.
+                        lane_label: None,
                         totals,
                     })
                 },
@@ -4817,6 +4826,7 @@ mod tests {
             session_id: "sess-1".to_string(),
             agent_kind: "claude-code".to_string(),
             headline: Some("Wire up the ledger".to_string()),
+            headline_raw: Some("Wire up the ledger, please".to_string()),
             cwd: Some("/repos/demo".to_string()),
             repo_id: Some(1),
             lane_id: Some(3),

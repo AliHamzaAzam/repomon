@@ -8,4 +8,14 @@ export type UsageSessionRow = { session_id: string, agent_kind: string,
 /**
  * The model the session spent the most tokens on.
  */
-model: string, headline: string | null, repo_id: number | null, lane_id: number | null, cwd: string | null, started_at: string | null, ended_at: string | null, turns: number, tool_calls: number, retries: number, totals: UsageTotals, estimated: boolean, external: boolean, };
+model: string, headline: string | null, 
+/**
+ * What the headline was read from, before injected blocks were stripped. Shown as a tooltip
+ * so the operator can see the text the ledger cleaned up.
+ */
+headline_raw: string | null, 
+/**
+ * Where the session ran, named the way the fleet sidebar names it (`repo/lane`). The daemon
+ * fills this in; a lane that has since been removed still reads as its repo.
+ */
+lane_label: string | null, repo_id: number | null, lane_id: number | null, cwd: string | null, started_at: string | null, ended_at: string | null, turns: number, tool_calls: number, retries: number, totals: UsageTotals, estimated: boolean, external: boolean, };
