@@ -212,6 +212,14 @@ export function isMac(platform?: string): boolean {
   return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 }
 
+/// isMac's sibling: the single source of truth for "are we on Windows" in the desktop UI.
+/// Components must call this rather than sniffing `navigator.platform` themselves, so every
+/// platform branch (install hints, which System Health rows to draw) reads the same signal.
+export function isWindows(platform?: string): boolean {
+  if (platform) return platform === "windows";
+  return typeof navigator !== "undefined" && /Win/.test(navigator.platform);
+}
+
 /// Normalize an event to a chord string, or null when the platform modifier is not held. Mod is
 /// Cmd on macOS and Ctrl elsewhere; the two are never interchangeable. A focused terminal
 /// forwards Ctrl chords straight to the agent (EOF, text navigation, and so on), so on macOS a

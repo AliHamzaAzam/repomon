@@ -6,6 +6,8 @@ import {
   findConflicts,
   formatChord,
   fromCodeMirrorKey,
+  isMac,
+  isWindows,
   keyCapParts,
   matchChord,
   matchSidebarKey,
@@ -333,5 +335,22 @@ describe("formatChord", () => {
     expect(formatChord("mod+?", "other")).toBe("Ctrl+?");
     expect(formatChord("mod+/", "mac")).toBe("⌘/");
     expect(formatChord("mod+/", "other")).toBe("Ctrl+/");
+  });
+});
+
+describe("isMac / isWindows", () => {
+  it("trust an injected platform over navigator sniffing", () => {
+    expect(isMac("mac")).toBe(true);
+    expect(isMac("windows")).toBe(false);
+    expect(isMac("other")).toBe(false);
+    expect(isWindows("windows")).toBe(true);
+    expect(isWindows("mac")).toBe(false);
+    expect(isWindows("other")).toBe(false);
+  });
+
+  it("are mutually exclusive for every injected platform", () => {
+    for (const platform of ["mac", "windows", "other"]) {
+      expect(isMac(platform) && isWindows(platform)).toBe(false);
+    }
   });
 });
