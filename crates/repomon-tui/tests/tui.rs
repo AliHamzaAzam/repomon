@@ -56,6 +56,7 @@ fn fake_session(
         stalled_since: None,
         subagent_running: None,
         status_reason: None,
+        attention_kind: None,
         ended_turn: false,
         gate: None,
         config_dir: None,
