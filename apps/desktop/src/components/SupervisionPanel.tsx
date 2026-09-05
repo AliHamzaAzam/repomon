@@ -429,7 +429,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
                   <button
                     type="button"
                     class="focus-ring shrink-0 rounded-lg border border-attention/40 bg-surface px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-attention/20"
-                    onClick={() => props.actions?.openSettingsTab("automation")}
+                    onClick={() => props.actions?.openSettingsTab("policies", "supervision")}
                   >
                     Open settings
                   </button>

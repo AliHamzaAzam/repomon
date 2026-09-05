@@ -71,14 +71,43 @@ describe("the standing duties section", () => {
     expect(daemonCall).not.toHaveBeenCalledWith("schedule.remove", expect.anything());
   });
 
-  it("sends adding one to the surface that already owns the form", async () => {
+  it("adds a duty from the section itself, without a trip through settings", async () => {
     mockDaemon([]);
-    const onAdd = vi.fn();
-    render(() => <RepomindDuties onAdd={onAdd} />);
+    render(() => <RepomindDuties />);
 
     await waitFor(() => expect(screen.getByText("Add")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Add"));
-    expect(onAdd).toHaveBeenCalled();
-    expect(screen.getByText(/runs repomind on a timer/)).toBeInTheDocument();
+
+    const form = screen.getByRole("form", { name: "Add a standing duty" });
+    expect(form).toBeInTheDocument();
+    expect(screen.getByText("Add duty")).toBeDisabled();
+
+    fireEvent.input(screen.getByLabelText("Schedule"), { target: { value: "weekdays 09:00" } });
+    fireEvent.input(screen.getByLabelText("Goal"), { target: { value: "Brief the fleet" } });
+    fireEvent.input(screen.getByLabelText("Action cap"), { target: { value: "12" } });
+    fireEvent.submit(form);
+
+    await waitFor(() =>
+      expect(daemonCall).toHaveBeenCalledWith("schedule.add", {
+        spec: "weekdays 09:00",
+        prompt: "Brief the fleet",
+        max_actions: 12,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Add a standing duty" })).toBeNull(),
+    );
+  });
+
+  it("will not add a duty with no schedule or no goal", async () => {
+    mockDaemon([]);
+    render(() => <RepomindDuties />);
+
+    await waitFor(() => expect(screen.getByText("Add")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Add"));
+    fireEvent.input(screen.getByLabelText("Schedule"), { target: { value: "daily 09:00" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Add a standing duty" }));
+
+    expect(daemonCall).not.toHaveBeenCalledWith("schedule.add", expect.anything());
   });
 });

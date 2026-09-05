@@ -165,4 +165,30 @@ describe("the memory section", () => {
 
     await waitFor(() => expect(screen.getByText(/No journal yet/)).toBeInTheDocument());
   });
+
+  it("opens the daemon's activity journal from the memory section", async () => {
+    mockDaemon({
+      "journal.query": {
+        entries: [
+          {
+            action: "merge_lane",
+            outcome: "ok",
+            at: "2026-09-05T10:00:00Z",
+            repo: "repomon",
+            lane_id: 1,
+            params: "lane 1",
+            detail: "merged cleanly",
+          },
+        ],
+      },
+    });
+    render(() => <RepomindMemory laneId={90} onOpen={vi.fn()} repomind={repomindStub(status())} />);
+
+    await waitFor(() => expect(screen.getByText("Activity")).toBeInTheDocument());
+    expect(screen.queryByText("merge_lane")).toBeNull();
+
+    fireEvent.click(screen.getByText("Activity"));
+    await waitFor(() => expect(screen.getByText(/merge_lane/)).toBeInTheDocument());
+    expect(screen.getByText("Activity journal")).toBeInTheDocument();
+  });
 });

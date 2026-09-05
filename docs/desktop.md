@@ -328,9 +328,10 @@ most recent lane activity so whatever you are working in floats to the top. Only
 Lane order inside a group is deliberately left alone, because sorting lanes by activity makes them
 bubble around on every line an agent prints.
 
-**Automation** holds the standing-orchestration surfaces described below (Journal, Playbooks,
-Schedules, Approvals) as its own sub-tabs. The control center's `⌘K` search can jump straight here
-via "Open Automation & Standing Rules".
+**Policies** holds the standing rules: **Approvals** and **Supervision** defaults, as its own
+sub-tabs. The control center's `⌘K` search can jump straight here via "Open Policies". Playbooks,
+standing duties, and the journal are not settings; they live in the Repomind panel (`mod+9`), and
+the tab says so at the bottom.
 
 **Keyboard** is the shortcut reference, with search, a conflict check (flags any two shortcuts that
 share both a chord and a scope), a warning on Windows and Linux about the Ctrl-reaches-the-terminal
@@ -369,16 +370,14 @@ before it is sent.
 ## The orchestration journal
 
 repomind writes every action it takes to a journal the daemon owns: what it did, which lane and
-repo it touched, and whether it worked. **Settings > Automation > Journal** shows it newest
-first, with a search box over the history.
-
-An entry that names a lane is clickable and jumps you to that lane. Opening the tab shows the
-recent tail rather than a search, so it doubles as "what happened while I was away".
+repo it touched, and whether it worked. The Repomind panel's **Memory** section has an
+**Activity** button that opens it newest first, so the record sits beside the memory it describes
+rather than behind a settings modal.
 
 ## Playbooks
 
 When repomind finishes a multi-lane goal it drafts a playbook: the pattern, the per-repo steps,
-the worker prompts that worked, the failure modes it hit. **Settings > Automation > Playbooks**
+the worker prompts that worked, the failure modes it hit. The Repomind panel's **Playbooks** section
 lists them.
 
 A draft is inert. repomind is only offered a playbook back once you approve it, which is
@@ -393,9 +392,9 @@ Approve is the review.
 
 ## Standing orchestrations
 
-**Settings > Automation > Schedules** runs repomind on a timer without you starting it. Add one with a
-spec, a goal, and optionally an action cap; results arrive as notifications and land in the
-journal.
+The Repomind panel's **Standing duties** section runs repomind on a timer without you starting
+it. **Add** opens an inline form there: a spec, a goal, and optionally an action cap. Results
+arrive as notifications and land in the journal.
 
 The spec grammar is `daily HH:MM`, `weekdays HH:MM`, `weekends HH:MM`, `every Nm`, or `every Nh`.
 The app deliberately does not re-implement that grammar to pre-validate your input, because a
@@ -409,7 +408,7 @@ schedule that fires and does nothing.
 
 ## Approval policy
 
-**Settings > Automation > Approvals** lists the command patterns repomind may approve on your behalf,
+**Settings > Policies > Approvals** lists the command patterns repomind may approve on your behalf,
 grouped by project. These are learned: after you approve the same pattern in the same repo enough
 times, repomind proposes a rule and you confirm it. Revoke any of them here.
 
@@ -462,10 +461,10 @@ Below that, five sections in one scrolling column:
   draft into `playbooks/rejected/` rather than deleting it, so the text stays readable in the
   home's history. An approved playbook with a revision waiting appears on both lists: the approved
   text is what agents get, and the revision is still a decision you owe.
-- **Standing duties** lists the schedules from **Settings > Automation > Schedules**, each with its
-  spec, its goal, its action cap, when it last ran and when it runs next, and **Remove** behind a
-  confirmation. **Add** opens that settings surface rather than growing a second form for the same
-  record.
+- **Standing duties** lists the schedules, each with its spec, its goal, its action cap, when it
+  last ran and when it runs next, and **Remove** behind a confirmation. **Add** opens an inline
+  form in the same section: a schedule, a goal, and an action cap, validated the way the daemon
+  validates them.
 - **Memory** answers whether the memory feeding all of this is current. The boot line says when the
   context was last assembled, how big it came out, and what the token budget left out, with
   **Regenerate** and **Open**. The export line says when the daemon's one-way export last ran,

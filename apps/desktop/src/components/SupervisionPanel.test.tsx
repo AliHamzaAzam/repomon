@@ -263,10 +263,10 @@ describe("SupervisionPanel", () => {
     const switchButton = screen.getByRole("switch", { name: /supervise this lane/i });
     expect(switchButton).toBeDisabled();
 
-    // Open settings button should trigger actions.openSettingsTab("automation")
+    // Open settings button should trigger actions.openSettingsTab("policies", "supervision")
     const openSettingsBtn = screen.getByRole("button", { name: /open settings/i });
     fireEvent.click(openSettingsBtn);
-    expect(openSettingsTab).toHaveBeenCalledWith("automation");
+    expect(openSettingsTab).toHaveBeenCalledWith("policies", "supervision");
 
     // No supervision.set should have been called
     const setCalls = calls.list.filter((c) => c.method === "supervision.set");

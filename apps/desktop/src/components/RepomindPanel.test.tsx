@@ -169,7 +169,7 @@ describe("the Repomind control room", () => {
     expect(openFile).toHaveBeenCalledWith("plans/active/ship-r6.md");
   });
 
-  it("sends adding a duty to Settings > Automation > Schedules", async () => {
+  it("adds a duty in the panel rather than sending the operator to settings", async () => {
     mockDaemon();
     const openSettingsTab = vi.fn();
     render(() => (
@@ -182,7 +182,8 @@ describe("the Repomind control room", () => {
 
     await waitFor(() => expect(screen.getByText("Add")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Add"));
-    expect(openSettingsTab).toHaveBeenCalledWith("automation", "schedules");
+    expect(screen.getByRole("form", { name: "Add a standing duty" })).toBeInTheDocument();
+    expect(openSettingsTab).not.toHaveBeenCalled();
   });
 
   it("drives the lifecycle through the one action every surface shares", async () => {

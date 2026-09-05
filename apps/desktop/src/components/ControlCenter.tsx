@@ -168,13 +168,13 @@ export default function ControlCenter(props: ControlCenterProps) {
     });
 
     items.push({
-      id: "action-open-automation",
+      id: "action-open-policies",
       category: "Actions",
-      title: "Open Automation & Standing Rules",
-      subtitle: "Manage Playbooks, recurring schedules, and auto-approvals",
+      title: "Open Policies",
+      subtitle: "Auto-approval rules and supervision defaults",
       icon: "command",
       run: () => {
-        props.actions.openSettingsTab("automation");
+        props.actions.openSettingsTab("policies", "approvals");
       },
     });
 

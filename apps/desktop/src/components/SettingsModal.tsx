@@ -28,7 +28,7 @@ import {
   readAutoCollapseEmptyLanes,
   saveAutoCollapseEmptyLanes,
 } from "../stores/uiSettings";
-import AutomationSettings, { type AutomationSection } from "./AutomationSettings";
+import PolicySettings, { type PolicySection } from "./PolicySettings";
 import ColorField from "./controls/ColorField";
 import Select from "./controls/Select";
 import Switch from "./controls/Switch";
@@ -49,13 +49,13 @@ import {
   IconTrash,
 } from "./icons";
 
-export type SettingsTab = "general" | "system" | "agents" | "notifications" | "appearance" | "remote" | "automation" | "keyboard";
+export type SettingsTab = "general" | "system" | "agents" | "notifications" | "appearance" | "remote" | "policies" | "keyboard";
 
 interface SettingsModalProps {
   onClose: () => void;
   initialTab?: SettingsTab;
-  /// Which sub-tab of the Automation tab to open on, when that is the initial tab.
-  initialAutomationSection?: AutomationSection;
+  /// Which sub-tab of the Policies tab to open on, when that is the initial tab.
+  initialPolicySection?: PolicySection;
   onConfigSaved?: (config: ConfigView) => void;
   onPreviewSound?: (cue: SoundCue, volume: number, profile?: SoundProfile) => boolean;
   onUpdateAvailable?: (version: string) => void;
@@ -71,7 +71,7 @@ const TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "notifications", label: "Notifications" },
   { id: "appearance", label: "Appearance" },
   { id: "remote", label: "Remote" },
-  { id: "automation", label: "Automation" },
+  { id: "policies", label: "Policies" },
   { id: "keyboard", label: "Keyboard" },
 ];
 
@@ -1678,8 +1678,8 @@ export default function SettingsModal(props: SettingsModalProps) {
               </div>
             </Show>
 
-            <Show when={tab() === "automation"}>
-              <AutomationSettings initialSection={props.initialAutomationSection} />
+            <Show when={tab() === "policies"}>
+              <PolicySettings initialSection={props.initialPolicySection} />
             </Show>
 
             <Show when={tab() === "keyboard"}>

@@ -1,7 +1,9 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 
+import type { JournalEntry } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
 import type { RepomindStore } from "../stores/repomind";
+import { formatTime, journalQueryParams } from "./automation";
 import Select from "./controls/Select";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { Section, SectionButton, SectionNote, sinceLabel } from "./RepomindSection";
@@ -37,11 +39,16 @@ export default function RepomindMemory(props: RepomindMemoryProps) {
   const [selected, setSelected] = createSignal<string | null>(null);
   const [entries, setEntries] = createSignal<string[]>([]);
   const [error, setError] = createSignal<string | null>(null);
+  // The daemon's own record of what it did, which used to live behind Settings > Automation.
+  const [showActivity, setShowActivity] = createSignal(false);
+  const [activity, setActivity] = createSignal<JournalEntry[]>([]);
+  const [activityError, setActivityError] = createSignal<string | null>(null);
 
   let live = true;
   // Newest read wins, one guard per read: the listing and the day's content resolve separately.
   let listToken = 0;
   let dayToken = 0;
+  let activityToken = 0;
   onCleanup(() => {
     live = false;
   });
@@ -101,6 +108,25 @@ export default function RepomindMemory(props: RepomindMemoryProps) {
     const lane = props.laneId;
     home()?.export.last_run;
     void listDays(lane);
+  });
+
+  async function readActivity() {
+    const mine = ++activityToken;
+    try {
+      const result = await daemonCall("journal.query", journalQueryParams(""));
+      if (!live || mine !== activityToken) return;
+      setActivity(result.entries ?? []);
+      setActivityError(null);
+    } catch (cause) {
+      if (!live || mine !== activityToken) return;
+      setActivity([]);
+      setActivityError(errorMessage(cause));
+    }
+  }
+
+  createEffect(() => {
+    if (!showActivity()) return;
+    void readActivity();
   });
 
   createEffect(() => {
@@ -165,6 +191,11 @@ export default function RepomindMemory(props: RepomindMemoryProps) {
         <div class="border-t border-line/70 pt-2.5">
           <div class="mb-1.5 flex items-center gap-1.5">
             <span class="section-label shrink-0">Journal</span>
+            <SectionButton
+              label="Activity"
+              title="Browse what the daemon actually did, newest first"
+              onClick={() => setShowActivity((open) => !open)}
+            />
             <Show when={dayOptions().length}>
               <div class="min-w-0 flex-1">
                 <Select
@@ -184,6 +215,42 @@ export default function RepomindMemory(props: RepomindMemoryProps) {
               )}
             </Show>
           </div>
+
+          <Show when={showActivity()}>
+            <div class="mb-2 rounded-lg border border-line bg-raised/30 p-2">
+              <p class="section-label mb-1">Activity journal</p>
+              <Show when={activityError()}>
+                {(message) => <SectionNote tone="fault">{message()}</SectionNote>}
+              </Show>
+              <Show
+                when={activity().length}
+                fallback={
+                  <Show when={!activityError()}>
+                    <SectionNote>Nothing journaled yet.</SectionNote>
+                  </Show>
+                }
+              >
+                <ul class="max-h-48 space-y-1 overflow-y-auto pr-1">
+                  <For each={activity()}>
+                    {(entry) => (
+                      <li class="flex items-baseline gap-1.5 font-mono text-[10px] leading-relaxed">
+                        <span
+                          class={entry.outcome === "ok" ? "shrink-0 text-signal" : "shrink-0 text-fault"}
+                        >
+                          {entry.outcome}
+                        </span>
+                        <span class="min-w-0 flex-1 truncate text-foreground" title={entry.detail ?? undefined}>
+                          {entry.action}
+                          <Show when={entry.repo}>{(repo) => <span class="text-muted"> · {repo()}</span>}</Show>
+                        </span>
+                        <span class="shrink-0 text-muted/80">{formatTime(entry.at)}</span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+            </div>
+          </Show>
 
           <Show when={archive().length}>
             <button

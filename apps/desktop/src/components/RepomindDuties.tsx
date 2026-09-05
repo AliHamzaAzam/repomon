@@ -2,16 +2,23 @@ import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 
 import type { Schedule } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
-import { Section, SectionButton, SectionNote, sinceLabel, untilLabel } from "./RepomindSection";
+import { scheduleAddParams } from "./automation";
+import {
+  InlineField,
+  InlineForm,
+  Section,
+  SectionButton,
+  SectionNote,
+  sinceLabel,
+  untilLabel,
+} from "./RepomindSection";
 
 /// Standing duties: the schedules that run repomind without anyone starting it.
 ///
-/// The panel reads and removes them, and sends adding one to Settings > Automation > Schedules
-/// rather than growing a second form. A spec, a goal, and an action cap deserve the room that
-/// surface gives them, and two forms for one record is how the two drift apart.
+/// Adding one happens here, in the same section that lists them, rather than in Settings: a duty
+/// is three short fields, and sending the operator to a modal to write them meant leaving the
+/// readings that prompted the duty in the first place.
 export interface RepomindDutiesProps {
-  /// Opens Settings on the Automation tab, already on Schedules.
-  onAdd?: () => void;
   /// Bumped by the panel so the list re-reads when the home changes under us.
   revision?: number;
 }
@@ -27,6 +34,36 @@ export default function RepomindDuties(props: RepomindDutiesProps) {
   const [error, setError] = createSignal<string | null>(null);
   const [confirming, setConfirming] = createSignal<number | null>(null);
   const [busy, setBusy] = createSignal<number | null>(null);
+  const [adding, setAdding] = createSignal(false);
+  const [spec, setSpec] = createSignal("");
+  const [goal, setGoal] = createSignal("");
+  const [cap, setCap] = createSignal("");
+  const [saving, setSaving] = createSignal(false);
+
+  /// The same rule Settings enforced: a duty needs a schedule to run on and something to do.
+  const canAdd = () => spec().trim().length > 0 && goal().trim().length > 0;
+
+  function resetForm() {
+    setSpec("");
+    setGoal("");
+    setCap("");
+    setAdding(false);
+  }
+
+  async function add() {
+    if (!canAdd()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await daemonCall("schedule.add", scheduleAddParams(spec(), goal(), cap()));
+      resetForm();
+      await load();
+    } catch (cause) {
+      if (live) setError(errorMessage(cause));
+    } finally {
+      if (live) setSaving(false);
+    }
+  }
 
   let live = true;
   // Newest read wins.
@@ -72,9 +109,44 @@ export default function RepomindDuties(props: RepomindDutiesProps) {
     <Section
       title="Standing duties"
       detail={String(duties().length)}
-      action={<SectionButton label="Add" title="Open Settings > Automation > Schedules" onClick={() => props.onAdd?.()} />}
+      action={
+        <SectionButton
+          label={adding() ? "Cancel" : "Add"}
+          title="Add a standing duty: a schedule, a goal, and an action cap"
+          onClick={() => (adding() ? resetForm() : setAdding(true))}
+        />
+      }
     >
       <Show when={error()}>{(message) => <SectionNote tone="fault">{message()}</SectionNote>}</Show>
+
+      <Show when={adding()}>
+        <InlineForm
+          label="Add a standing duty"
+          submitLabel="Add duty"
+          busy={saving()}
+          canSubmit={canAdd()}
+          onSubmit={() => void add()}
+          onCancel={resetForm}
+        >
+          <InlineField
+            label="Schedule"
+            placeholder="weekdays 09:00, every 2h"
+            value={spec()}
+            autofocus
+            onInput={setSpec}
+          />
+          <InlineField
+            label="Goal"
+            placeholder="Brief the fleet and audit open branches"
+            value={goal()}
+            onInput={setGoal}
+          />
+          <InlineField label="Action cap" placeholder="cap, e.g. 20" value={cap()} onInput={setCap} />
+          <p class="font-mono text-[10px] text-muted/70">
+            daily HH:MM · weekdays HH:MM · weekends HH:MM · every Nm · every Nh
+          </p>
+        </InlineForm>
+      </Show>
 
       <Show
         when={duties().length}

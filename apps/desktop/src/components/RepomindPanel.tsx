@@ -224,7 +224,6 @@ export default function RepomindPanel(props: RepomindPanelProps) {
               />
               <RepomindDuties
                 revision={revision()}
-                onAdd={() => props.actions?.openSettingsTab("automation", "schedules")}
               />
               <RepomindMemory laneId={lane()} repomind={props.repomind} onOpen={openInEditor} />
               <RepomindControllers sessions={sessions()} onFocus={focusPane} />

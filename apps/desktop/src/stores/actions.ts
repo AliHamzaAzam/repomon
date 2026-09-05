@@ -2,7 +2,7 @@ import { createSignal } from "solid-js";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { ConfirmOptions } from "../components/ConfirmDialog";
-import type { AutomationSection } from "../components/AutomationSettings";
+import type { PolicySection } from "../components/PolicySettings";
 import type { SettingsTab } from "../components/SettingsModal";
 import { pickDirectory } from "../ipc/dialog";
 import { daemonCall } from "../ipc/rpc";
@@ -24,7 +24,7 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general");
   // Which sub-tab of Settings > Automation to land on, for callers that mean one of them
   // specifically rather than the tab as a whole.
-  const [automationSection, setAutomationSection] = createSignal<AutomationSection | undefined>();
+  const [policySection, setPolicySection] = createSignal<PolicySection | undefined>();
   const [spawnLane, setSpawnLane] = createSignal<Lane | null>(null);
   const [newLaneOpen, setNewLaneOpen] = createSignal(false);
   const [newLaneRepoId, setNewLaneRepoId] = createSignal<number | null>(null);
@@ -270,15 +270,15 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     closeShortcutsGuide: () => setShortcutsGuideOpen(false),
     settingsOpen,
     settingsTab,
-    automationSection,
+    policySection,
     openSettings: () => {
       setSettingsTab("general");
-      setAutomationSection(undefined);
+      setPolicySection(undefined);
       setSettingsOpen(true);
     },
-    openSettingsTab: (tab: SettingsTab, section?: AutomationSection) => {
+    openSettingsTab: (tab: SettingsTab, section?: PolicySection) => {
       setSettingsTab(tab);
-      setAutomationSection(section);
+      setPolicySection(section);
       setSettingsOpen(true);
     },
     closeSettings: () => setSettingsOpen(false),
