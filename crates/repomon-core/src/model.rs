@@ -1182,6 +1182,12 @@ pub enum TmuxDoctorSource {
 }
 
 /// Machine health and probe info for `tmux`.
+///
+/// tmux is not a Windows dependency: Windows agents run through the bundled ConPTY
+/// `repomon-agent-host.exe` instead ([`AgentHostDoctorInfo`]). The field stays for wire
+/// compatibility, but on Windows [`Self::not_applicable`] is set and the probed values
+/// underneath it are meaningless — clients must not show a tmux row or count it toward an
+/// "all good" summary there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -1193,6 +1199,10 @@ pub struct TmuxDoctorInfo {
     pub source: Option<TmuxDoctorSource>,
     #[serde(default)]
     pub path: Option<String>,
+    /// True on Windows, where tmux plays no role. Older clients that don't know this field
+    /// default it to `false` and keep their pre-Windows behavior.
+    #[serde(default)]
+    pub not_applicable: bool,
 }
 
 /// Machine health and probe info for `git`.
@@ -1205,6 +1215,54 @@ pub struct GitDoctorInfo {
     pub version: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// The platform `system.doctor` ran on. Clients use this instead of user-agent sniffing to pick
+/// platform-correct rows, hints, and install commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum DoctorPlatform {
+    Macos,
+    Linux,
+    Windows,
+}
+
+impl DoctorPlatform {
+    /// The platform this process is actually running on.
+    pub fn current() -> Self {
+        match std::env::consts::OS {
+            "windows" => DoctorPlatform::Windows,
+            "macos" => DoctorPlatform::Macos,
+            _ => DoctorPlatform::Linux,
+        }
+    }
+}
+
+/// Where a resolved `repomon-agent-host.exe` originates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum AgentHostSource {
+    Bundled,
+    Path,
+    Missing,
+}
+
+/// Machine health and probe info for the Windows ConPTY agent host (`repomon-agent-host.exe`),
+/// the Windows counterpart of [`TmuxDoctorInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct AgentHostDoctorInfo {
+    pub available: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    pub source: AgentHostSource,
 }
 
 /// Detected agent choice and probe info for doctor.
@@ -1223,8 +1281,12 @@ pub struct AgentDoctorInfo {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct SystemDoctorResult {
+    pub platform: DoctorPlatform,
     pub tmux: TmuxDoctorInfo,
     pub git: GitDoctorInfo,
+    /// Populated on Windows only; `null` elsewhere, where tmux is the relevant runtime instead.
+    #[serde(default)]
+    pub agent_host: Option<AgentHostDoctorInfo>,
     pub agents: Vec<AgentDoctorInfo>,
 }
 
