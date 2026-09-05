@@ -374,3 +374,9 @@ guard; final completion can arrive later on the same ticket. `snapshot` matches
 arrives before the RPC response. Desktop waits for the event locally, with a
 20-second ceiling, then re-snapshots quota and today's cost and shows an inline
 notice when appropriate. Late completion still refreshes the displayed numbers.
+
+A deadline notification means work is continuing, including later accounts in a
+round. Desktop renders `timeout` as "Still probing, this can take a moment",
+including its own 20-second ceiling. Only `error` uses failure wording. Fleet
+polling continues during the round, so accounts already probed can update before
+the final completion.

@@ -150,7 +150,7 @@ async fn refresh_with_deadline(ctx: &Arc<Ctx>, deadline: Duration) -> agent::Usa
                     &ctx,
                     request,
                     agent::UsageRefreshedReason::Timeout,
-                    Some("Probe timed out".into()),
+                    Some("Still probing, this can take a moment".into()),
                 )
                 .await;
             }

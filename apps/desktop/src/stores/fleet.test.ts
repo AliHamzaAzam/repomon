@@ -657,7 +657,9 @@ describe("ticketed manual refresh events", () => {
       await vi.advanceTimersByTimeAsync(19_999);
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-      expect((await result)?.reason).toBe("timeout");
+      const waiting = await result;
+      expect(waiting?.reason).toBe("timeout");
+      expect(waiting?.detail).toBe("Still probing, this can take a moment");
     } finally { f.stop(); vi.useRealTimers(); }
   });
 });

@@ -747,3 +747,19 @@ describe("sidebar cost visibility", () => {
     localStorage.removeItem("repomon:sidebar-show-today-cost");
   });
 });
+
+
+describe("long probe feedback", () => {
+  it.each([
+    ["timeout", "Still probing, this can take a moment"],
+    ["error", "Usage probe failed; try again"],
+  ])("uses accurate copy for a %s event", async (reason, notice) => {
+    const { fleet, actions } = stubs([], []);
+    fleet.focusedUsage = () => ({ key: "default", label: "main", age_secs: 0, report: { windows: [] } });
+    fleet.refreshUsage = vi.fn().mockResolvedValue({ refreshed: false, reason, detail: null, snapshot: [] });
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+    fireEvent.click(screen.getByLabelText("Refresh rate limit data"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(notice));
+    expect(screen.queryByText("Probe timed out")).not.toBeInTheDocument();
+  });
+});

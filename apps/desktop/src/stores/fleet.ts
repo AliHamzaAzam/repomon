@@ -613,7 +613,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     const wait: UsageWait = { early: new Map(), complete, fail, promise };
     usageWait = wait;
     wait.timer = setTimeout(() => settleUsage(wait, {
-      refreshed: false, request_id: wait.requestId, reason: "timeout", detail: "Probe timed out", snapshot: usage(),
+      refreshed: false, request_id: wait.requestId, reason: "timeout", detail: "Still probing, this can take a moment", snapshot: usage(),
     }), 20_000);
     // Subscribe before requesting the probe. A fast completion may precede the RPC response;
     // buffer it until the response identifies the ticket, then ignore every other round.

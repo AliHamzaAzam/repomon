@@ -619,7 +619,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
           probe_disabled: "Usage probe is off in Settings",
           no_active_kind: "No agent running to probe",
           cooldown: "A usage refresh is already running",
-          timeout: "Probe timed out",
+          timeout: "Still probing, this can take a moment",
           error: "Usage probe failed; try again",
         };
         setUsageNotice(notices[result.reason]);

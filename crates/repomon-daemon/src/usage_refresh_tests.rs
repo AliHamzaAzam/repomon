@@ -81,6 +81,46 @@ async fn manual_timeout_event_keeps_round_inflight_until_final_completion() {
 }
 
 #[tokio::test]
+async fn two_account_round_reports_progress_then_success_without_false_failure() {
+    let (_dir, ctx, _) = fixture();
+    let mut events = ctx.events.subscribe();
+    let request = refresh_with_deadline(&ctx, Duration::from_millis(10))
+        .await
+        .request_id
+        .unwrap();
+    ctx.usage.lock().await.insert(
+        "first".into(),
+        UsageEntry {
+            report: UsageReport::default(),
+            label: "first".into(),
+            fetched_at: Instant::now(),
+        },
+    );
+    let waiting = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting["params"]["reason"], "timeout");
+    assert_eq!(
+        waiting["params"]["detail"],
+        "Still probing, this can take a moment"
+    );
+    assert_eq!(waiting["params"]["snapshot"].as_array().unwrap().len(), 1);
+    ctx.usage.lock().await.insert(
+        "second".into(),
+        UsageEntry {
+            report: UsageReport::default(),
+            label: "second".into(),
+            fetched_at: Instant::now(),
+        },
+    );
+    finish_round(&ctx, request, agent::UsageRefreshReason::Ok).await;
+    let done = events.recv().await.unwrap();
+    assert_eq!(done["params"]["reason"], "ok");
+    assert_eq!(done["params"]["snapshot"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn socket_keystroke_completes_while_a_slow_probe_is_pending() {
     let (dir, ctx, backend) = fixture();
     let socket = dir.path().join("refresh.sock");
@@ -91,12 +131,16 @@ async fn socket_keystroke_completes_while_a_slow_probe_is_pending() {
             crate::serve(ctx, &socket).await.unwrap();
         }
     });
-    let mut stream = loop {
-        if let Ok(stream) = transport::connect(&Endpoint::from_path(&socket)).await {
-            break stream;
+    let mut stream = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(stream) = transport::connect(&Endpoint::from_path(&socket)).await {
+                break stream;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
+    })
+    .await
+    .expect("fixture socket should bind");
     protocol::write_message(&mut stream, &Request::new(1, "subscribe", None))
         .await
         .unwrap();
