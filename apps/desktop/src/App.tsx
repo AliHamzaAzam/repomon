@@ -263,7 +263,7 @@ function App(props: AppProps) {
   });
 
   // Shared open/switch/toggle-close behavior for the mail, git, editor, and supervision right-rail
-  // tabs, used by both the mod+2 / mod+3 / mod+7 / mod+8 shortcuts and their header icon-button
+  // tabs, used by both their numbered panel chords (see keymap.ts) and their header icon-button
   // counterparts (item 4) so the entry points can never drift apart.
   const openPanelTab = (id: "repomind" | "git" | "editor" | "mail" | "supervision") => {
     // The right rail and fleet-wide grid use mutually exclusive mission-grid column models.
