@@ -305,6 +305,33 @@ function App(props: AppProps) {
     }
   };
 
+  /// Run one of the header's panel commands by binding id, or report that this id is not one.
+  /// The global chord handler and the command palette both go through here, so a command can
+  /// never do one thing from the keyboard and another from the palette.
+  const runPanelCommand = (id: string): boolean => {
+    switch (id) {
+      case "panel.control": actions.toggleControl(); return true;
+      case "panel.settings": actions.openSettings(); return true;
+      case "panel.multitasking": workspace.toggleMultitasking(); return true;
+      case "panel.extensions":
+        workspace.setMultitasking(false);
+        setUsageOpen(false);
+        setExtensionsOpen((open) => !open);
+        return true;
+      case "panel.usage":
+        workspace.setMultitasking(false);
+        setExtensionsOpen(false);
+        setUsageOpen((open) => !open);
+        return true;
+      case "panel.git": openPanelTab("git"); return true;
+      case "panel.editor": openPanelTab("editor"); return true;
+      case "panel.mail": openPanelTab("mail"); return true;
+      case "panel.supervision": openPanelTab("supervision"); return true;
+      case "panel.repomind": openPanelTab("repomind"); return true;
+      default: return false;
+    }
+  };
+
   const onShortcut = (event: KeyboardEvent) => {
     if (event.defaultPrevented) return;
     const binding = matchChord(event);
@@ -322,24 +349,8 @@ function App(props: AppProps) {
     if (binding.when === "agent" && !agent) return;
 
     event.preventDefault();
+    if (runPanelCommand(binding.id)) return;
     switch (binding.id) {
-      case "panel.control": actions.toggleControl(); break;
-      case "panel.settings": actions.openSettings(); break;
-      case "panel.multitasking": workspace.toggleMultitasking(); break;
-      case "panel.extensions":
-        workspace.setMultitasking(false);
-        setUsageOpen(false);
-        setExtensionsOpen((open) => !open);
-        break;
-      case "panel.usage":
-        workspace.setMultitasking(false);
-        setExtensionsOpen(false);
-        setUsageOpen((open) => !open);
-        break;
-      case "panel.git": openPanelTab("git"); break;
-      case "panel.editor": openPanelTab("editor"); break;
-      case "panel.mail": openPanelTab("mail"); break;
-      case "panel.supervision": openPanelTab("supervision"); break;
       case "finder.open":
         if (lane) editor.openFinder();
         break;
@@ -352,9 +363,6 @@ function App(props: AppProps) {
         break;
       case "editor.markdownPreview":
         if (lane) editor.toggleMarkdownPreview();
-        break;
-      case "panel.repomind":
-        openPanelTab("repomind");
         break;
       case "panel.repomindFull":
         workspace.setMultitasking(false);
@@ -576,7 +584,30 @@ function App(props: AppProps) {
             </button>
           </div>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
-          <ControlCenter fleet={fleet} notifications={notifications} messages={messages} actions={actions} />
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              usageOpen() ? "text-signal font-semibold" : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => {
+              workspace.setMultitasking(false);
+              setExtensionsOpen(false);
+              setUsageOpen((open) => !open);
+            }}
+            aria-pressed={usageOpen()}
+            title={`Usage (${chordFor("panel.usage")})`}
+          >
+            <IconMeter size={13} />
+            <span>Usage</span>
+          </button>
+          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <ControlCenter
+            fleet={fleet}
+            notifications={notifications}
+            messages={messages}
+            actions={actions}
+            onPanelCommand={runPanelCommand}
+          />
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
             type="button"
@@ -624,22 +655,6 @@ function App(props: AppProps) {
           >
             <IconShield size={13} />
             <span>Supervision</span>
-          </button>
-          <button
-            type="button"
-            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
-              usageOpen() ? "text-signal font-semibold" : "text-muted hover:text-foreground"
-            }`}
-            onClick={() => {
-              workspace.setMultitasking(false);
-              setExtensionsOpen(false);
-              setUsageOpen((open) => !open);
-            }}
-            aria-pressed={usageOpen()}
-            title={`Usage (${chordFor("panel.usage")})`}
-          >
-            <IconMeter size={13} />
-            <span>Usage</span>
           </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
