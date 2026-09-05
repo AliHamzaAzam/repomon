@@ -236,6 +236,79 @@ pub fn attach_command_for(window: &str) -> AttachCommand {
 pub use host_backend::WindowsBackend;
 
 // ---------------------------------------------------------------------------
+// `system.doctor` support: locating `repomon-agent-host.exe`
+// ---------------------------------------------------------------------------
+
+/// Pure `repomon-agent-host.exe` resolution for `system.doctor`, mirroring
+/// [`super::tmux::resolve_tmux_from`]'s precedence: an env override, then a bundled copy beside
+/// the app (checked against the given candidate directories), then `PATH`. Takes every input as
+/// a parameter so the precedence is unit-testable on every OS with a temp directory standing in
+/// for the app bundle; [`agent_host_doctor`] supplies the real values.
+pub fn resolve_agent_host_from(
+    env_override: Option<&str>,
+    sibling_dirs: &[std::path::PathBuf],
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<(std::path::PathBuf, crate::model::AgentHostSource)> {
+    if let Some(val) = env_override {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some((
+                std::path::PathBuf::from(trimmed),
+                crate::model::AgentHostSource::Path,
+            ));
+        }
+    }
+    for dir in sibling_dirs {
+        let cand = dir.join("repomon-agent-host.exe");
+        if cand.is_file() {
+            return Some((cand, crate::model::AgentHostSource::Bundled));
+        }
+    }
+    let on_path = match path_var {
+        Some(p) => crate::exec::find_in(p, "repomon-agent-host"),
+        None => crate::exec::find_in_path("repomon-agent-host"),
+    };
+    on_path.map(|p| (p, crate::model::AgentHostSource::Path))
+}
+
+/// The real `system.doctor` probe for the agent host: gathers the actual env var, executable-
+/// relative candidate directories, and `PATH`, then applies [`resolve_agent_host_from`]. No
+/// version is reported — the host protocol (PROTOCOL.md) has no `--version` query.
+pub fn agent_host_doctor() -> crate::model::AgentHostDoctorInfo {
+    let env_override = std::env::var("REPOMON_HOST_BIN").ok();
+    let mut sibling_dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        sibling_dirs.push(dir.to_path_buf());
+        if let Some(parent) = dir.parent() {
+            sibling_dirs.push(parent.to_path_buf());
+        }
+    }
+    if let Some(dir) = crate::service::repomond_path().parent() {
+        sibling_dirs.push(dir.to_path_buf());
+    }
+    match resolve_agent_host_from(
+        env_override.as_deref(),
+        &sibling_dirs,
+        std::env::var_os("PATH").as_deref(),
+    ) {
+        Some((path, source)) => crate::model::AgentHostDoctorInfo {
+            available: true,
+            version: None,
+            path: Some(path.to_string_lossy().into_owned()),
+            source,
+        },
+        None => crate::model::AgentHostDoctorInfo {
+            available: false,
+            version: None,
+            path: None,
+            source: crate::model::AgentHostSource::Missing,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The backend proper (Windows only)
 // ---------------------------------------------------------------------------
 
@@ -1223,5 +1296,77 @@ mod tests {
         assert!(is_supported_agent_program("agy.cmd"));
         assert!(!is_supported_agent_program("claude-helper.exe"));
         assert!(!is_supported_agent_program(""));
+    }
+
+    #[test]
+    fn agent_host_resolution_prefers_env_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_env_host = dir.path().join("fake-env-host.exe");
+        std::fs::write(&fake_env_host, b"fake").unwrap();
+
+        let sibling_dir = dir.path().join("bundle");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        std::fs::write(sibling_dir.join("repomon-agent-host.exe"), b"sibling").unwrap();
+
+        let resolved = resolve_agent_host_from(
+            Some(fake_env_host.to_str().unwrap()),
+            &[sibling_dir],
+            None,
+        );
+        assert_eq!(
+            resolved,
+            Some((fake_env_host, crate::model::AgentHostSource::Path))
+        );
+    }
+
+    #[test]
+    fn agent_host_resolution_falls_back_to_bundled_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let sibling_dir = dir.path().join("bundle");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        let sibling_host = sibling_dir.join("repomon-agent-host.exe");
+        std::fs::write(&sibling_host, b"sibling-host").unwrap();
+
+        let empty_path = std::ffi::OsStr::new("");
+        let resolved = resolve_agent_host_from(None, &[sibling_dir], Some(empty_path));
+        assert_eq!(
+            resolved,
+            Some((sibling_host, crate::model::AgentHostSource::Bundled))
+        );
+    }
+
+    #[test]
+    fn agent_host_resolution_falls_back_to_path_when_not_bundled() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_path = dir.path().join("repomon-agent-host");
+        std::fs::write(&on_path, b"fake").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&on_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
+
+        let empty_sibling_dir = dir.path().join("empty");
+        std::fs::create_dir_all(&empty_sibling_dir).unwrap();
+
+        let resolved =
+            resolve_agent_host_from(None, &[empty_sibling_dir], Some(path_var.as_os_str()));
+        assert_eq!(
+            resolved,
+            Some((on_path, crate::model::AgentHostSource::Path))
+        );
+    }
+
+    #[test]
+    fn agent_host_resolution_returns_none_when_nowhere_to_find_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_sibling_dir = dir.path().join("empty");
+        std::fs::create_dir_all(&empty_sibling_dir).unwrap();
+        let empty_path = std::ffi::OsStr::new("");
+
+        let resolved =
+            resolve_agent_host_from(None, &[empty_sibling_dir], Some(empty_path));
+        assert_eq!(resolved, None);
     }
 }
