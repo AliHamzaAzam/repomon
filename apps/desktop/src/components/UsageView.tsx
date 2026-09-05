@@ -44,13 +44,12 @@ const BUCKETS: { id: UsageBucket; label: string }[] = [
   { id: "day", label: "Day" },
 ];
 
-/** The sessions table's sortable columns, in the order they appear. */
-const SESSION_COLUMNS: { id: SessionSort; label: string; numeric: boolean }[] = [
-  { id: "recent", label: "Recent", numeric: false },
-  { id: "retries", label: "Retries", numeric: true },
-  { id: "time", label: "Time", numeric: true },
-  { id: "tokens", label: "Tokens", numeric: true },
-  { id: "cost", label: "Cost", numeric: true },
+/** The sessions table's sortable numeric columns, in the order they appear. */
+const SESSION_COLUMNS: { id: SessionSort; label: string }[] = [
+  { id: "retries", label: "Retries" },
+  { id: "time", label: "Time" },
+  { id: "tokens", label: "Tokens" },
+  { id: "cost", label: "Cost" },
 ];
 
 function percent(value: number): string {
@@ -409,14 +408,26 @@ export default function UsageView(props: UsageViewProps) {
               <table class="w-full text-xs">
                 <thead class="sticky top-0 z-10 bg-background">
                   <tr class="border-b border-line text-muted">
-                    <th class="py-1 text-left font-normal">Task</th>
+                    <th
+                      class="py-1 text-left font-normal"
+                      aria-sort={store.sort() === "recent" ? "descending" : "none"}
+                    >
+                      <SortButton
+                        column={{ id: "recent", label: "Task" }}
+                        active={store.sort() === "recent"}
+                        onSelect={store.setSort}
+                      />
+                    </th>
                     <th class="py-1 text-left font-normal">Agent</th>
                     <th class="py-1 text-left font-normal">Lane</th>
                     <th class="py-1 text-right font-normal">Turns</th>
                     <th class="py-1 text-right font-normal">Tools</th>
-                    <For each={SESSION_COLUMNS.filter((column) => column.numeric)}>
+                    <For each={SESSION_COLUMNS}>
                       {(column) => (
-                        <th class="py-1 text-right font-normal">
+                        <th
+                          class="py-1 text-right font-normal"
+                          aria-sort={store.sort() === column.id ? "descending" : "none"}
+                        >
                           <SortButton
                             column={column}
                             active={store.sort() === column.id}
@@ -479,7 +490,11 @@ function SortButton(props: {
       class={`focus-ring rounded-xs transition-colors ${
         props.active ? "font-semibold text-foreground" : "text-muted hover:text-foreground"
       }`}
-      aria-sort={props.active ? "descending" : "none"}
+      title={
+        props.column.id === "recent"
+          ? "Newest activity first"
+          : `Largest ${props.column.label.toLowerCase()} first`
+      }
       onClick={() => props.onSelect(props.column.id)}
     >
       {props.column.label}

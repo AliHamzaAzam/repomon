@@ -290,10 +290,14 @@ describe("UsageView", () => {
     const s = source();
     mount(s, fleet());
     await flush();
+    // "Cost" also names the chart's measure toggle and the breakdown table's column, so pick the
+    // one that is actually a sortable heading.
     const heading = screen
       .getAllByText("Cost")
-      .find((node) => node.hasAttribute("aria-sort")) as HTMLElement;
-    fireEvent.click(heading);
+      .map((node) => node.closest("th"))
+      .find((cell) => cell?.hasAttribute("aria-sort")) as HTMLTableCellElement;
+    expect(heading.getAttribute("aria-sort")).toBe("none");
+    fireEvent.click(heading.querySelector("button") as HTMLButtonElement);
     await flush();
     expect(heading.getAttribute("aria-sort")).toBe("descending");
   });
