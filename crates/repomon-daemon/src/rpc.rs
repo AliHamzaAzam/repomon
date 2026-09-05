@@ -6155,8 +6155,17 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         .find(|s| !s.external && s.status != AgentStatus::RateLimited)
                 };
                 if let Some(sess) = sess {
-                    sess.status = AgentStatus::RateLimited;
-                    sess.resume_at = rl.reset_at;
+                    if rate_limit_has_lifted(rl.detected_at, rl.reset_at, sess.last_activity_at, now)
+                    {
+                        // The reset time named in the pause has already arrived, or the
+                        // transcript shows real output newer than when the pause was first
+                        // detected: the agent has resumed, whatever a lingering pane capture
+                        // still shows. Leave the session's genuine transcript/pane status alone
+                        // instead of relabeling it rate-limited.
+                    } else {
+                        sess.status = AgentStatus::RateLimited;
+                        sess.resume_at = rl.reset_at;
+                    }
                 }
             }
         }
@@ -6405,12 +6414,22 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             });
             let mut seen = ctx.pane_seen.lock().await;
             seen.retain(|w, _| live.contains(w.as_str()));
+            ctx.quota_deadlines
+                .lock()
+                .await
+                .retain(|w, _| live.contains(w.as_str()));
         }
         let now_utc = chrono::Utc::now();
         let seen = ctx.pane_seen.lock().await;
+        let mut quota_deadlines = ctx.quota_deadlines.lock().await;
         for ((li, si, w, _), (found_dialog, found_subagent, found_spinner, found_quota)) in
             candidates.into_iter().zip(sniffs)
         {
+            // A quota wall's own "resets in Xh Ym" window is fixed to an absolute deadline the
+            // first time it's seen for this window; once that deadline passes, a lingering copy
+            // of the same message still inside the (short) pane capture no longer counts.
+            let found_quota =
+                gate_quota_reading(&mut quota_deadlines, &w, found_quota, now_utc);
             let s = &mut lanes[li].agent_sessions[si];
             s.subagent_running = found_subagent;
             let (status, reason) = status_from_pane(
@@ -6503,6 +6522,67 @@ fn stamp_attention_kind(lanes: &mut [Lane]) {
                 .as_str()
                 .to_string(),
         );
+    }
+}
+
+/// Whether a tracked usage-limit pause has run its course and must stop being shown as
+/// `RateLimited`.
+///
+/// The pane-scraping detector (`repomon_core::agent::detect_usage_limit`) matches the limit
+/// wording anywhere in a capture, with no notion of whether it is still the last thing that
+/// happened, so a message that scrolled off screen at 02:30 can keep matching for hours after
+/// the agent resumed, and the ONLY things that reliably say a pause is over are wall-clock time
+/// and the transcript itself. A pause lifts when EITHER holds:
+///
+/// (a) the reset instant the message named has already arrived (`now >= reset_at`): once that
+///     moment has passed there is nothing left to wait for, whatever the pane still shows; or
+/// (b) the session's transcript carries real activity newer than when the pause was first
+///     detected (`last_activity_at > detected_at`): the agent could not have written that
+///     without the model actually running again.
+///
+/// Both are checked against facts that don't depend on the pane still looking a particular way,
+/// which is what a merely-absent-detection check (miss streaks in the auto-continue watcher)
+/// cannot guarantee on its own.
+pub(crate) fn rate_limit_has_lifted(
+    detected_at: chrono::DateTime<chrono::Utc>,
+    reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_activity_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    reset_at.is_some_and(|r| now >= r) || last_activity_at > detected_at
+}
+
+/// Gate a freshly sniffed Antigravity quota-wall reading against its own countdown: the first
+/// time a window's reading names a "resets in Xh Ym" window, fix `now + that duration` as an
+/// absolute deadline in `deadlines`; while that deadline is still ahead, keep reporting the
+/// reading, but once `now` reaches it, drop the reading (and the tracked deadline) even if the
+/// same wall text is still sitting in the window's (short) pane capture. A reading naming no
+/// window (open-ended "quota exhausted") is passed through unchanged: there is no countdown to
+/// judge it against, so presence alone is all the caller has, exactly like Claude's own
+/// no-reset-time case in `rate_limit_has_lifted`. `deadlines` is keyed by tmux window name.
+pub(crate) fn gate_quota_reading(
+    deadlines: &mut std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+    window: &str,
+    reading: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let Some(text) = reading else {
+        deadlines.remove(window);
+        return None;
+    };
+    match repomon_core::agent::prompt::parse_reset_duration(&text) {
+        None => Some(text),
+        Some(duration) => {
+            let deadline = *deadlines
+                .entry(window.to_string())
+                .or_insert_with(|| now + duration);
+            if now >= deadline {
+                deadlines.remove(window);
+                None
+            } else {
+                Some(text)
+            }
+        }
     }
 }
 
@@ -9175,6 +9255,120 @@ pub(crate) fn write_orchestrator_mcp_config_named(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+
+    /// Real incident, 2026-09-05: `fleet_status` reported window `lane-81-7` on lane 81 as
+    /// "rate-limited, resuming ~06:00" at 11:07, over five hours after the named reset time,
+    /// and after the session had produced many turns of genuine work since 06:00. The
+    /// pane-scraping detector (`detect_usage_limit`) matches the limit wording anywhere in a
+    /// capture with no notion of whether it's still the last thing that happened, so a stale
+    /// banner lingering in scrollback kept `ctx.rate_limits` populated indefinitely. These two
+    /// tests are the regression: the reset time alone, or fresh transcript activity alone, must
+    /// each be enough to lift the pause.
+    #[test]
+    fn rate_limit_lifts_once_the_reset_time_has_passed_even_without_new_activity() {
+        // The pane never produced new output after the pause (auto-continue may still be
+        // nudging it), but the reset instant it named has already come and gone, so the row
+        // must stop claiming "rate-limited, resuming ~06:00".
+        let pane = include_str!(
+            "../../repomon-core/src/agent/fixtures/claude_session_limit_reset_passed.txt"
+        );
+        assert!(
+            repomon_core::agent::detect_usage_limit(pane).is_some(),
+            "sanity: the pane still reads as a usage-limit pause to the raw pane scan"
+        );
+        let detected_at = Utc.with_ymd_and_hms(2026, 9, 5, 2, 31, 0).unwrap();
+        let reset_at = Utc.with_ymd_and_hms(2026, 9, 5, 6, 0, 0).unwrap();
+        let last_activity_at = detected_at; // nothing new since the pause was first seen
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 11, 7, 0).unwrap();
+        assert!(rate_limit_has_lifted(
+            detected_at,
+            Some(reset_at),
+            last_activity_at,
+            now
+        ));
+    }
+
+    #[test]
+    fn rate_limit_lifts_when_transcript_activity_postdates_the_pause() {
+        // No reset time was parseable from this message (the classic "try again later"
+        // wording), so a bare miss-streak clear is all the auto-continue watcher has. But the
+        // transcript itself proves the agent produced real output long after the pause was
+        // detected, which the model could not have written while genuinely blocked.
+        let pane = include_str!(
+            "../../repomon-core/src/agent/fixtures/claude_session_limit_then_resumed.txt"
+        );
+        let lim = repomon_core::agent::detect_usage_limit(pane)
+            .expect("sanity: the pane still reads as a usage-limit pause to the raw pane scan");
+        assert_eq!(lim.reset_at, None, "sanity: this message names no reset time");
+        let detected_at = Utc.with_ymd_and_hms(2026, 9, 5, 2, 31, 0).unwrap();
+        let last_activity_at = Utc.with_ymd_and_hms(2026, 9, 5, 10, 45, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 11, 7, 0).unwrap();
+        assert!(rate_limit_has_lifted(
+            detected_at,
+            lim.reset_at,
+            last_activity_at,
+            now
+        ));
+    }
+
+    /// Regression guard: a genuinely still-paused agent (reset still ahead, no new transcript
+    /// activity) must keep reading as rate-limited. The fix must not clear pauses early.
+    #[test]
+    fn rate_limit_still_applies_before_reset_with_no_new_activity() {
+        let detected_at = Utc.with_ymd_and_hms(2026, 9, 5, 2, 31, 0).unwrap();
+        let reset_at = Utc.with_ymd_and_hms(2026, 9, 5, 6, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 3, 0, 0).unwrap();
+        assert!(!rate_limit_has_lifted(
+            detected_at,
+            Some(reset_at),
+            detected_at,
+            now
+        ));
+    }
+
+    #[test]
+    fn quota_wall_reading_clears_once_its_own_countdown_elapses() {
+        // A stale "resets in 2h 15m" message lingering in a short pane capture must not keep
+        // reporting quota-exhausted past its own countdown.
+        let mut deadlines = std::collections::HashMap::new();
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 5, 9, 0, 0).unwrap();
+        let reading = Some("quota exhausted, resets in 2h 15m".to_string());
+        // First sighting: fixes the deadline at t0 + 2h15m and reports it.
+        assert_eq!(
+            gate_quota_reading(&mut deadlines, "lane-9", reading.clone(), t0),
+            reading
+        );
+        // Still within the window, even seeing the same lingering text again.
+        let mid = t0 + chrono::Duration::hours(1);
+        assert_eq!(
+            gate_quota_reading(&mut deadlines, "lane-9", reading.clone(), mid),
+            reading
+        );
+        // Past the deadline: the same lingering text no longer counts.
+        let after = t0 + chrono::Duration::hours(3);
+        assert_eq!(
+            gate_quota_reading(&mut deadlines, "lane-9", reading, after),
+            None
+        );
+    }
+
+    #[test]
+    fn open_ended_quota_wall_has_no_countdown_to_expire() {
+        let mut deadlines = std::collections::HashMap::new();
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 9, 0, 0).unwrap();
+        let reading = Some("quota exhausted".to_string());
+        assert_eq!(
+            gate_quota_reading(&mut deadlines, "lane-9", reading.clone(), now),
+            reading
+        );
+        let later = now + chrono::Duration::hours(10);
+        assert_eq!(
+            gate_quota_reading(&mut deadlines, "lane-9", reading.clone(), later),
+            reading,
+            "no parseable window means presence alone is the signal, forever"
+        );
+    }
 
     /// Real capture, 2026-09-04: window `lane-81-7` had an on-screen spinner and two live
     /// subagent rows while its transcript, whose last entry was assistant text, read `Waiting`.

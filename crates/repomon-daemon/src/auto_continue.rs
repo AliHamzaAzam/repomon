@@ -45,6 +45,10 @@ const CLEAR_AFTER_MISSES: u8 = 2;
 #[derive(Debug, Clone)]
 pub struct RateLimit {
     pub reset_at: Option<DateTime<Utc>>,
+    /// When this pause was first detected. The overlay compares a session's transcript
+    /// activity against this instant to tell a genuinely still-paused agent from one that has
+    /// already produced new output since; see `rpc::rate_limit_has_lifted`.
+    pub detected_at: DateTime<Utc>,
 }
 
 /// The watcher's private scheduling state for one lane.
@@ -263,10 +267,13 @@ async fn apply(
                     miss_streak: 0,
                 },
             );
-            ctx.rate_limits
-                .lock()
-                .await
-                .insert(window.to_string(), RateLimit { reset_at });
+            ctx.rate_limits.lock().await.insert(
+                window.to_string(),
+                RateLimit {
+                    reset_at,
+                    detected_at: now,
+                },
+            );
             ctx.broadcast(
                 pubsub::topic::AGENT_STATUS,
                 serde_json::json!({ "lane_id": lane, "window": window, "status": "rate-limited" }),

@@ -276,6 +276,11 @@ pub struct Ctx {
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     /// Keyed by slot window (`lane-7-2`), not lane: each slot pauses independently.
     pub rate_limits: Mutex<HashMap<String, auto_continue::RateLimit>>,
+    /// Per window: the absolute instant an Antigravity quota wall's "resets in Xh Ym" window
+    /// resolves to, fixed the first time that window text is seen for the window so a stale
+    /// wall message lingering in a short pane capture can't keep reporting quota-exhausted past
+    /// its own countdown. See `rpc::gate_quota_reading`.
+    pub quota_deadlines: Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
     /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a local UI is active.
     pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,
@@ -500,6 +505,7 @@ impl Ctx {
             gate_cache: Mutex::new(HashMap::new()),
             bytes_watches: Arc::new(Mutex::new(HashMap::new())),
             rate_limits: Mutex::new(HashMap::new()),
+            quota_deadlines: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             usage_refresh: Notify::new(),
             usage_ingest_wake: Notify::new(),
