@@ -4859,7 +4859,7 @@ pub async fn dispatch(
         // fetch's error if it failed. Bridge-readable (a read, like `usage.status`).
         "usage.rates" => to_value(crate::usage_rates::status(ctx).await),
         // LOCAL-ONLY: forces an immediate LiteLLM fetch, bypassing the daily cadence. Stays off
-        // the remote allowlist for the same reason `usage.ingest_now` does — it's an on-demand
+        // the remote allowlist for the same reason `usage.ingest_now` does: it's an on-demand
         // network call a paired device shouldn't be able to trigger at will.
         "usage.refresh_rates" => {
             crate::usage_rates::run_refresh(ctx).await;

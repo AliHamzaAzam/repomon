@@ -632,7 +632,7 @@ retried forever. The Usage view's pricing footnote and `repomon usage rates` bot
 active rates came from (LiteLLM, overrides, built-in, and how many of each), when the snapshot was
 last fetched, and the last fetch's error if one is in progress; a Refresh button (and
 `repomon usage rates --refresh`) forces an immediate fetch. Turn the daily fetch off entirely with
-`refresh_prices = false` in `[usage]` — no other change is needed, and nothing about the ledger
+`refresh_prices = false` in `[usage]`. No other change is needed, and nothing about the ledger
 itself requires network access.
 
 ## Known gaps

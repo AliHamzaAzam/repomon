@@ -30,7 +30,7 @@ pub struct TokenCounts {
 }
 
 /// Where a resolved rate came from. Config overrides win over a LiteLLM snapshot, which wins over
-/// the built-in table — the built-in table is the floor every model can fall back to.
+/// the built-in table; the built-in table is the floor every model can fall back to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -245,7 +245,7 @@ impl PriceTable {
         }
         if let Some(alias) = resolve_alias(model) {
             // Guard against a self-mapped alias (kept for a couple of entries as a documented,
-            // pinned no-op — see `ALIASES`): re-running the exact match on the same string would
+            // pinned no-op, see `ALIASES`): re-running the exact match on the same string would
             // just repeat step 1's miss, so only take the alias branch when it names somewhere new.
             if alias != model {
                 if let Some(hit) = self.exact_match(alias, at).or_else(|| self.prefix_match(alias, at)) {
@@ -348,7 +348,7 @@ pub fn is_free_tier(model: &str) -> bool {
 ///
 /// This is a name fix, not a rate invention: every target here is a real LiteLLM entry. When
 /// LiteLLM renames or drops one of these, the alias just stops matching and the model falls back
-/// to the family-prefix rule, then to the built-in table, then to unpriced — it never fabricates
+/// to the family-prefix rule, then to the built-in table, then to unpriced: it never fabricates
 /// a number.
 const ALIASES: &[(&str, &str)] = &[
     // The mythos-5-1 codename has no LiteLLM entry of its own yet; its family's current release
@@ -715,7 +715,7 @@ mod tests {
         });
         // "claude-mythos-5-1" has no row of its own here, and is not a prefix match for
         // "claude-mythos-5" (prefix matching only runs the other direction: the table's row must
-        // prefix the query, not the reverse) — only the alias resolves it.
+        // prefix the query, not the reverse), so only the alias resolves it.
         let price = table.lookup("claude-mythos-5-1", at(2026, 9, 1)).unwrap();
         assert_eq!(price.source, RateSource::Litellm);
         assert_eq!(price.input_per_mtok, 4.0);
@@ -725,7 +725,7 @@ mod tests {
     fn an_alias_beats_a_generic_family_prefix_on_the_unaliased_name() {
         // The built-in table prices anything starting with "codex-" off the generic GPT-5 rate
         // card. "codex-auto-review" also has a specific LiteLLM entry via its alias
-        // ("gpt-5-codex") — that should win over the generic built-in prefix.
+        // ("gpt-5-codex"), which should win over the generic built-in prefix.
         let mut table = PriceTable::builtin();
         table.insert(ModelPrice {
             model: "gpt-5-codex".into(),

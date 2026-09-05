@@ -4,8 +4,8 @@
 //! Deliberately its own module rather than living inside [`crate::usage_ingest`]: that module is
 //! a concurrent-edit hotspot (the Claude transcript reader and source discovery). This module
 //! owns the network fetch and its metadata; the fetched snapshot body itself lands at
-//! [`crate::usage_ingest::price_cache_path`] — the same file [`crate::usage_ingest::price_table`]
-//! already reads when `[usage] refresh_prices` is on — so the two modules cooperate through one
+//! [`crate::usage_ingest::price_cache_path`], the same file [`crate::usage_ingest::price_table`]
+//! already reads when `[usage] refresh_prices` is on, so the two modules cooperate through one
 //! shared file path rather than a direct dependency in either direction.
 //!
 //! ```text
@@ -34,7 +34,7 @@ pub const UNPRICED_RETRY_DELAY: chrono::Duration = chrono::Duration::minutes(10)
 /// How often the background task wakes to check whether a refresh (daily or retry) is due.
 const POLL_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
-/// Where the fetch's metadata (etag, fetched/attempted timestamps, last error) is cached —
+/// Where the fetch's metadata (etag, fetched/attempted timestamps, last error) is cached,
 /// beside the price snapshot itself, which lives at `usage_ingest::price_cache_path()`.
 pub fn meta_cache_path() -> PathBuf {
     config::data_dir().join("prices/litellm_meta.json")
@@ -48,7 +48,7 @@ struct CacheMeta {
     /// When a fetch last landed a 200 or a 304 (either counts: a 304 confirms the cache is
     /// current). `None` until the first successful attempt.
     fetched_at: Option<DateTime<Utc>>,
-    /// When a fetch was last attempted at all, success or failure — this, not `fetched_at`, is
+    /// When a fetch was last attempted at all, success or failure. This, not `fetched_at`, is
     /// what gates the daily cadence, so a failing endpoint is retried once a day rather than
     /// hammered every poll tick.
     last_attempt_at: Option<DateTime<Utc>>,
@@ -87,7 +87,7 @@ pub fn is_due(last_attempt_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> boo
 ///
 /// Not persisted across a daemon restart: a restart is itself a fresh chance, and if the model is
 /// genuinely still unpriced the next `note_unpriced` call (from the next ledger read) schedules a
-/// new one anyway. One retry per gap, not a loop — `mark_fired` spends it even if the retry itself
+/// new one anyway. One retry per gap, not a loop: `mark_fired` spends it even if the retry itself
 /// doesn't resolve the gap, so a permanently-unpriced model doesn't refetch every ten minutes
 /// forever.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -135,11 +135,11 @@ impl RetryTracker {
 /// The daemon-held state behind `usage.rates` / `usage.refresh_rates`.
 ///
 /// Only the in-memory, restart-safe-to-lose piece (the unpriced-model retry) lives here. The
-/// fetch metadata (etag / timestamps / last error) is not cached in `Ctx` — it's read fresh from
+/// fetch metadata (etag / timestamps / last error) is not cached in `Ctx`; it's read fresh from
 /// disk on every `status()`/`run_refresh()` call instead, the same way `usage_ingest::price_table`
 /// re-reads its snapshot file rather than caching it in `Ctx`. That keeps `Ctx::new` free of disk
 /// I/O against the real data dir (tests construct a `Ctx` without an isolated `REPOMON_DATA_DIR`
-/// far more often than they set one), at the cost of one small file read per call — cheap next to
+/// far more often than they set one), at the cost of one small file read per call, cheap next to
 /// the 24h cadence this is on.
 #[derive(Default)]
 pub struct RatesRuntime {
@@ -192,7 +192,7 @@ fn write_snapshot(body: &str) -> std::io::Result<()> {
     std::fs::write(path, body)
 }
 
-/// Run one fetch attempt now, unconditionally (the daily/retry cadence is the caller's job — see
+/// Run one fetch attempt now, unconditionally (the daily/retry cadence is the caller's job, see
 /// [`spawn_daily_task`]). Updates the cached metadata and, on a 200 that parses, the cached
 /// snapshot body.
 pub async fn run_refresh(ctx: &Arc<Ctx>) {
@@ -382,7 +382,7 @@ mod tests {
         tracker.mark_fired();
         assert!(
             !tracker.due(due_at + chrono::Duration::hours(1)),
-            "spent — still unpriced stays flagged rather than retried forever"
+            "spent: still unpriced stays flagged rather than retried forever"
         );
         // Still unpriced after the retry: note_unpriced must not schedule another one.
         tracker.note_unpriced(due_at);

@@ -148,7 +148,7 @@ pub async fn summary(
     Labels::load(ctx).await.apply(group_by, &mut out.groups);
     // Feeds the price refresh's one ten-minute retry: a gap here after the day's fetch already
     // ran is worth one extra attempt (a newly-seen model, or a refresh that landed between
-    // scans), but only once — see `usage_rates::RetryTracker`.
+    // scans), but only once; see `usage_rates::RetryTracker`.
     crate::usage_rates::note_unpriced(ctx, !out.unpriced_models.is_empty()).await;
     Ok(out)
 }

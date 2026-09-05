@@ -313,7 +313,7 @@ export function windowLine(startedAt: string | null, duration: string): string {
 
 /**
  * The Usage view's pricing footnote and the CLI's `repomon usage rates` summary line share this
- * wording (see `format_rates_footnote` in `repomon-core/src/pricing.rs`) — kept as two small,
+ * wording (see `format_rates_footnote` in `repomon-core/src/pricing.rs`), kept as two small,
  * independently-testable implementations (Rust and TypeScript can't share one function) rather
  * than round-tripping a formatted string through the RPC, which would bake English into the wire
  * format for no benefit.
