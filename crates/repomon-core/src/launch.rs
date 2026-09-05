@@ -250,7 +250,14 @@ pub async fn spawn_and_watch_boot(
     socket: &Path,
     window: Duration,
 ) -> std::result::Result<(), DaemonLaunchError> {
-    let mut child = spawn_daemon(socket)?;
+    watch_boot(spawn_daemon(socket)?, socket, window).await
+}
+
+async fn watch_boot(
+    mut child: Child,
+    socket: &Path,
+    window: Duration,
+) -> std::result::Result<(), DaemonLaunchError> {
     let endpoint = crate::transport::Endpoint::from_path(socket);
     let deadline = Instant::now() + window;
 
@@ -259,6 +266,11 @@ pub async fn spawn_and_watch_boot(
         // because something else reaped it) falls through to the endpoint probe below, which is
         // the authority on whether the daemon came up.
         if let Ok(Some(status)) = child.try_wait() {
+            // A competing launch may have won the bind race while this child exited.
+            // The endpoint remains authoritative even when our own child lost.
+            if crate::transport::connect(&endpoint).await.is_ok() {
+                return Ok(());
+            }
             let log_path = service::log_file();
             let code = exit_code_label(&status);
             append_daemon_log(&format!(
@@ -271,9 +283,11 @@ pub async fn spawn_and_watch_boot(
             });
         }
         if crate::transport::connect(&endpoint).await.is_ok() {
+            let _ = child.try_wait();
             return Ok(());
         }
         if Instant::now() >= deadline {
+            let _ = child.try_wait();
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -642,6 +656,25 @@ mod tests {
     use tokio::net::UnixListener;
 
     use super::{connect_with_backoff, connect_with_retry};
+
+    #[tokio::test]
+    async fn exited_duplicate_is_healthy_when_endpoint_becomes_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("bind-race.sock");
+        let endpoint = crate::transport::Endpoint::from_path(&socket);
+        assert!(crate::transport::connect(&endpoint).await.is_err());
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .unwrap();
+        assert!(!child.wait().unwrap().success());
+        let _winner = UnixListener::bind(&socket).unwrap();
+        assert!(
+            super::watch_boot(child, &socket, Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
+    }
 
     #[tokio::test]
     async fn connects_after_startup_gap() {
