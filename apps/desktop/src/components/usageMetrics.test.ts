@@ -8,6 +8,7 @@ import {
   formatTokens,
   formatUsd,
   foldTailSeries,
+  groupRowLabel,
   isWeekend,
   laneCell,
   narrowerBucket,
@@ -81,6 +82,22 @@ describe("usage chart reducers", () => {
   it("gives every series its own palette slot in a fixed order", () => {
     expect(seriesVar(0)).toBe("var(--chart-1)");
     expect(seriesVar(MAX_SERIES - 1)).toBe(`var(--chart-${MAX_SERIES})`);
+  });
+
+  it("reads a blank model key as 'unknown model' rather than a blank row", () => {
+    expect(groupRowLabel({ key: "", label: "" }, "model")).toBe("unknown model");
+  });
+
+  it("leaves a real model label alone", () => {
+    expect(groupRowLabel({ key: "gpt-6-astra", label: "gpt-6-astra" }, "model")).toBe(
+      "gpt-6-astra",
+    );
+  });
+
+  it("does not relabel a blank key outside the model grouping", () => {
+    // An unattributed repo or lane already reads as "unattributed" by the time it reaches here
+    // (the daemon labels it); this fallback is model-specific and must not touch other groupings.
+    expect(groupRowLabel({ key: "", label: "unattributed" }, "repo")).toBe("unattributed");
   });
 
   it("folds a seventh series into one Other row rather than reusing a colour", () => {

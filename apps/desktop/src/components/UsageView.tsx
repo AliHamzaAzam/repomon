@@ -18,6 +18,7 @@ import {
   formatDuration,
   formatTokens,
   formatUsd,
+  groupRowLabel,
   laneCell,
   seriesVar,
   sessionColumnVisibility,
@@ -373,7 +374,7 @@ export default function UsageView(props: UsageViewProps) {
                             style={{ "background-color": seriesVar(index()) }}
                             aria-hidden="true"
                           />
-                          {row.label}
+                          {groupRowLabel(row, store.groupBy())}
                         </td>
                         <td class="py-1 text-right tabular-nums text-muted">
                           {formatTokens(row.totals.input_tokens)}

@@ -254,12 +254,22 @@ pub fn scan_claude_transcript(
 }
 
 /// Read a Codex rollout from `from_offset`.
+///
+/// A `token_count` event can arrive before the session's first `turn_context` (Codex logs the
+/// running total before it logs which model produced it), or a rare `turn_context` can omit its
+/// `model` field. Either way that row's model would come out empty, so any `token_count` seen
+/// before a model is known is queued in `pending_model_backfill` and rewritten to the first model
+/// this scan finds once one turns up. If none ever does, the `session_meta` model (when the
+/// payload carries one) or [`UNKNOWN_MODEL`] stands in, so an event never lands with an empty
+/// model.
 pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
     let source_path = path.to_string_lossy().to_string();
-    let mut events = Vec::new();
+    let mut events: Vec<ScannedEvent> = Vec::new();
     let mut session_id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut model = String::new();
+    let mut meta_model: Option<String> = None;
+    let mut pending_model_backfill: Vec<usize> = Vec::new();
     let mut pick = HeadlinePick::default();
     let mut turns = 0u32;
     let mut first_at: Option<DateTime<Utc>> = None;
@@ -273,12 +283,20 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
                 if let Some(p) = payload {
                     session_id = str_at(p, "session_id");
                     cwd = str_at(p, "cwd");
+                    if meta_model.is_none() {
+                        meta_model = str_at(p, "model");
+                    }
                 }
             }
             "turn_context" => {
                 if let Some(p) = payload {
                     if let Some(m) = p.get("model").and_then(Value::as_str) {
                         model = m.to_string();
+                        // The first real model this scan finds backfills any token_count rows
+                        // already queued from before the session's first turn_context.
+                        for idx in pending_model_backfill.drain(..) {
+                            events[idx].model = model.clone();
+                        }
                     }
                     if let Some(c) = str_at(p, "cwd") {
                         cwd = Some(c);
@@ -321,6 +339,7 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
                             first_at = Some(at);
                         }
                         last_at = Some(at);
+                        let index = events.len();
                         events.push(ScannedEvent {
                             at,
                             agent_kind: "codex".to_string(),
@@ -339,6 +358,9 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
                             source_path: source_path.clone(),
                             source_offset: offset,
                         });
+                        if model.is_empty() {
+                            pending_model_backfill.push(index);
+                        }
                     }
                     _ => {}
                 }
@@ -346,6 +368,15 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
             _ => {}
         }
     })?;
+
+    // No turn_context ever surfaced a model in this scan: fall back to the session_meta model
+    // when the payload carries one, or an explicit placeholder, so nothing lands blank.
+    if !pending_model_backfill.is_empty() {
+        let fallback = meta_model.clone().unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+        for idx in pending_model_backfill.drain(..) {
+            events[idx].model = fallback.clone();
+        }
+    }
 
     let (headline, headline_raw) = pick.resolve();
     let sessions = session_id
@@ -611,6 +642,11 @@ const HEADLINE_RAW_MAX_CHARS: usize = 400;
 
 /// What a session with no text an operator wrote is called.
 pub const UNTITLED_SESSION: &str = "untitled session";
+
+/// What an event is labelled when no reader can find any model for it at all. Readers carry the
+/// last known model forward and backfill from later context before ever reaching for this, so it
+/// only shows up for a session with no model information anywhere in its source.
+pub const UNKNOWN_MODEL: &str = "unknown";
 
 /// Remove every injected block from `raw`. An opening tag or preamble with no closing marker
 /// swallows the rest of the text: a truncated injection is still an injection.
@@ -1042,6 +1078,27 @@ mod tests {
         assert_eq!(e.tokens.output, 231);
         assert_eq!(e.thinking_tokens, 172);
         assert!(!e.estimated);
+    }
+
+    #[test]
+    fn codex_scan_backfills_a_token_count_that_arrives_before_the_first_turn_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            "r.jsonl",
+            include_str!("fixtures/codex_model_before_context_v0.jsonl"),
+        );
+        let scan = scan_codex_rollout(&p, 0).unwrap();
+        assert_eq!(scan.events.len(), 2);
+        assert!(
+            scan.events.iter().all(|e| !e.model.is_empty()),
+            "an event must never land with an empty model"
+        );
+        assert_eq!(
+            scan.events[0].model, "gpt-5.6-sol",
+            "the token_count logged before the session's first turn_context backfills from it"
+        );
+        assert_eq!(scan.events[1].model, "gpt-5.6-sol");
     }
 
     #[test]

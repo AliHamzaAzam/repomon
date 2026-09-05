@@ -152,6 +152,19 @@ describe("UsageView", () => {
     expect(screen.getByText(/No published rate for local-model/)).toBeTruthy();
   });
 
+  it("renders a blank model key as 'unknown model' rather than a blank row", async () => {
+    const withUnlabelledModel: UsageSummary = {
+      ...summary,
+      group_by: "model",
+      groups: [{ key: "", label: "", totals, unpriced: false }],
+    };
+    mount(source({ summary: vi.fn().mockResolvedValue(withUnlabelledModel) }), fleet());
+    await flush();
+    fireEvent.click(screen.getByText("Model"));
+    await flush();
+    expect(screen.getByText("unknown model")).toBeTruthy();
+  });
+
   it("shows the findings the optimize panel was given", async () => {
     mount(source(), fleet());
     await flush();

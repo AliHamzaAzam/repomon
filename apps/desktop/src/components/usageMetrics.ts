@@ -2,7 +2,7 @@
  * Pure reducers behind the usage chart. Kept out of the component so the shapes a chart depends on
  * (bucket order, stacking, the palette assignment, axis rounding) are testable without a DOM.
  */
-import type { UsageBucket, UsageSeries, UsageTimeline } from "../bindings";
+import type { UsageBucket, UsageGroupBy, UsageSeries, UsageTimeline } from "../bindings";
 
 /**
  * How many series the categorical palette holds. Colours are assigned in this fixed order and are
@@ -14,6 +14,17 @@ export const MAX_SERIES = 6;
 /** The CSS variable carrying series `index`'s colour. */
 export function seriesVar(index: number): string {
   return `var(--chart-${Math.min(index, MAX_SERIES - 1) + 1})`;
+}
+
+/**
+ * What a breakdown row reads as. A blank key only ever turns up grouped by model, from a reader
+ * that could not attribute a turn to one; every other grouping either always has a key or already
+ * reads as "unattributed" once the daemon labels it. This is a defensive fallback should one slip
+ * through regardless of which reader emitted it.
+ */
+export function groupRowLabel(row: { key: string; label: string }, groupBy: UsageGroupBy): string {
+  if (groupBy === "model" && row.key.trim() === "") return "unknown model";
+  return row.label;
 }
 
 /** Which measure a chart stacks. */
