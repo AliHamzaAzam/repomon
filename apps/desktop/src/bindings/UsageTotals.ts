@@ -7,4 +7,8 @@ export type UsageTotals = { input_tokens: number, output_tokens: number, cache_r
 /**
  * Of `total_tokens`, how many came from an estimate rather than a reported count.
  */
-estimated_tokens: number, cost_usd: number, events: number, };
+estimated_tokens: number, 
+/**
+ * Of `total_tokens`, how many a subagent spent rather than the session's own turns.
+ */
+subagent_tokens: number, cost_usd: number, events: number, };

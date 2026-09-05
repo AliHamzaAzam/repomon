@@ -202,6 +202,10 @@ pub async fn findings(
 pub async fn status(ctx: &Arc<Ctx>) -> repomon_core::Result<UsageStatus> {
     let cursors: Vec<UsageCursor> = ctx.store.usage_cursors().await?;
     let (events, first, last) = ctx.store.usage_extent().await?;
+    let stale_sources = ctx
+        .store
+        .usage_sources_below_ingest_version(repomon_core::usage_ledger::INGEST_VERSION)
+        .await?;
     Ok(UsageStatus {
         sources: cursors.len() as u64,
         last_scan_at: cursors.iter().map(|c| c.scanned_at).max(),
@@ -210,6 +214,7 @@ pub async fn status(ctx: &Arc<Ctx>) -> repomon_core::Result<UsageStatus> {
         first_event_at: first,
         last_event_at: last,
         ingesting: ctx.usage_ingest_lock.try_lock().is_err(),
+        stale_sources,
     })
 }
 

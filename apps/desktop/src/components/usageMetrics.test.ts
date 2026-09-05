@@ -17,6 +17,7 @@ import {
   pathTail,
   seriesVar,
   sessionColumnVisibility,
+  subagentShare,
   toStackedBars,
   windowLine,
   withContinuousAxis,
@@ -35,6 +36,7 @@ function series(key: string, points: [string, number, number][]) {
       thinking_tokens: 0,
       total_tokens: points.reduce((a, p) => a + p[1], 0),
       estimated_tokens: 0,
+      subagent_tokens: 0,
       cost_usd: points.reduce((a, p) => a + p[2], 0),
       events: points.length,
     },
@@ -231,15 +233,37 @@ describe("laneCell", () => {
 
 describe("sessionColumnVisibility", () => {
   it("shows every column at a wide table width", () => {
-    expect(sessionColumnVisibility(900)).toEqual({ tools: true, retries: true });
+    expect(sessionColumnVisibility(900)).toEqual({ subagents: true, tools: true, retries: true });
+  });
+
+  it("drops Sub before Tools as the table narrows", () => {
+    expect(sessionColumnVisibility(750)).toEqual({ subagents: false, tools: true, retries: true });
   });
 
   it("drops Tools before Retries as the table narrows", () => {
-    expect(sessionColumnVisibility(650)).toEqual({ tools: false, retries: true });
+    expect(sessionColumnVisibility(650)).toEqual({ subagents: false, tools: false, retries: true });
   });
 
-  it("drops both Tools and Retries at the narrowest widths", () => {
-    expect(sessionColumnVisibility(400)).toEqual({ tools: false, retries: false });
+  it("drops Sub, Tools and Retries at the narrowest widths", () => {
+    expect(sessionColumnVisibility(400)).toEqual({
+      subagents: false,
+      tools: false,
+      retries: false,
+    });
+  });
+});
+
+describe("subagentShare", () => {
+  it("reports what share of a session's tokens its subagents spent", () => {
+    expect(subagentShare({ subagent_tokens: 150, total_tokens: 450 })).toBe(33);
+  });
+
+  it("has nothing to say about a session that delegated nothing", () => {
+    expect(subagentShare({ subagent_tokens: 0, total_tokens: 450 })).toBe(null);
+  });
+
+  it("never rounds a session that did delegate down to nothing", () => {
+    expect(subagentShare({ subagent_tokens: 1, total_tokens: 100000 })).toBe(1);
   });
 });
 

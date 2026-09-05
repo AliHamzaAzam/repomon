@@ -76,6 +76,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
         25,
         include_str!("../../migrations/0025_usage_headline_version.sql"),
     ),
+    (26, include_str!("../../migrations/0026_usage_subagents.sql")),
+    (
+        27,
+        include_str!("../../migrations/0027_usage_ingest_version.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -1847,8 +1852,15 @@ impl Store {
 
     // ---- usage ledger ----
 
-    /// Insert ledger events, ignoring any whose `(source_path, source_offset)` is already stored,
-    /// and fold the rows that were new into [`usage_daily`]. Returns how many rows were inserted.
+    /// Insert ledger events and fold them into [`usage_daily`]. Returns how many rows the call
+    /// actually changed.
+    ///
+    /// A row is keyed on `(source_path, source_offset)`, so re-reading a source is harmless. A key
+    /// that is already stored is taken to the elementwise maximum of the two counts rather than
+    /// ignored: a Claude message is written one line per content block and the last line carries
+    /// the final numbers, so the pass that first sees a message part-written must be allowed to
+    /// correct itself when the rest of it lands. Counts only ever grow, so the maximum is the
+    /// finished message, and the rollup moves by the difference rather than by the whole row.
     ///
     /// The whole call is one transaction, so a rollup can never drift from the events it
     /// summarizes: either both land or neither does.
@@ -1858,14 +1870,27 @@ impl Store {
     ) -> Result<usize> {
         self.call(move |c| {
             let tx = c.transaction()?;
-            let mut inserted = Vec::with_capacity(events.len());
+            let mut added: Vec<crate::usage_ledger::UsageEvent> = Vec::with_capacity(events.len());
+            // Corrections to rows already stored: the increase only, so the rollup does not count
+            // the message twice.
+            let mut raised: Vec<crate::usage_ledger::UsageEvent> = Vec::new();
             {
-                let mut stmt = tx.prepare(&format!(
+                let mut insert = tx.prepare(&format!(
                     "INSERT OR IGNORE INTO usage_events({USAGE_EVENT_COLS})
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
                 ))?;
+                let mut stored = tx.prepare(
+                    "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                            thinking_tokens
+                     FROM usage_events WHERE source_path = ?1 AND source_offset = ?2",
+                )?;
+                let mut raise = tx.prepare(
+                    "UPDATE usage_events SET input_tokens = ?3, output_tokens = ?4,
+                        cache_read_tokens = ?5, cache_write_tokens = ?6, thinking_tokens = ?7
+                     WHERE source_path = ?1 AND source_offset = ?2",
+                )?;
                 for e in events {
-                    let n = stmt.execute(params![
+                    let n = insert.execute(params![
                         to_iso(&e.at),
                         e.agent_kind,
                         e.model,
@@ -1882,50 +1907,91 @@ impl Store {
                         e.thinking_tokens as i64,
                         e.estimated as i64,
                         e.external as i64,
+                        e.subagent as i64,
                         e.source_path,
                         e.source_offset,
                     ])?;
                     if n > 0 {
-                        inserted.push(e);
+                        added.push(e);
+                        continue;
                     }
-                }
-            }
-            let count = inserted.len();
-            {
-                let mut stmt = tx.prepare(
-                    "INSERT INTO usage_daily(day, agent_kind, model, account, repo_id, lane_id,
-                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                        thinking_tokens, estimated_tokens, events)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                     ON CONFLICT(day, agent_kind, model, account, repo_id, lane_id) DO UPDATE SET
-                        input_tokens = input_tokens + excluded.input_tokens,
-                        output_tokens = output_tokens + excluded.output_tokens,
-                        cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                        cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
-                        thinking_tokens = thinking_tokens + excluded.thinking_tokens,
-                        estimated_tokens = estimated_tokens + excluded.estimated_tokens,
-                        events = events + excluded.events",
-                )?;
-                for r in crate::usage_ledger::rollup(&inserted) {
-                    stmt.execute(params![
-                        r.day,
-                        r.agent_kind,
-                        r.model,
-                        r.account,
-                        r.repo_id.unwrap_or(0),
-                        r.lane_id.unwrap_or(0),
-                        r.input_tokens as i64,
-                        r.output_tokens as i64,
-                        r.cache_read_tokens as i64,
-                        r.cache_write_tokens as i64,
-                        r.thinking_tokens as i64,
-                        r.estimated_tokens as i64,
-                        r.events as i64,
+                    let before: (i64, i64, i64, i64, i64) = stored.query_row(
+                        params![e.source_path, e.source_offset],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )?;
+                    let merged = (
+                        before.0.max(e.input_tokens as i64),
+                        before.1.max(e.output_tokens as i64),
+                        before.2.max(e.cache_read_tokens as i64),
+                        before.3.max(e.cache_write_tokens as i64),
+                        before.4.max(e.thinking_tokens as i64),
+                    );
+                    if merged == before {
+                        continue;
+                    }
+                    raise.execute(params![
+                        e.source_path,
+                        e.source_offset,
+                        merged.0,
+                        merged.1,
+                        merged.2,
+                        merged.3,
+                        merged.4,
                     ])?;
+                    raised.push(crate::usage_ledger::UsageEvent {
+                        input_tokens: (merged.0 - before.0).max(0) as u64,
+                        output_tokens: (merged.1 - before.1).max(0) as u64,
+                        cache_read_tokens: (merged.2 - before.2).max(0) as u64,
+                        cache_write_tokens: (merged.3 - before.3).max(0) as u64,
+                        thinking_tokens: (merged.4 - before.4).max(0) as u64,
+                        ..e
+                    });
                 }
             }
+            let count = added.len() + raised.len();
+            let mut daily = crate::usage_ledger::rollup(&added);
+            // A correction is not a new turn, so it moves the tokens without moving the count.
+            for mut row in crate::usage_ledger::rollup(&raised) {
+                row.events = 0;
+                daily.push(row);
+            }
+            apply_usage_daily(&tx, &daily, 1)?;
             tx.commit()?;
             Ok(count)
+        })
+        .await
+    }
+
+    /// Forget every event one source contributed, taking them back out of [`usage_daily`] too.
+    ///
+    /// Ingest calls this before re-reading a source whose events an older reader produced: the
+    /// fresh read is authoritative, and a correction that only ever added would leave the
+    /// superseded rows behind.
+    pub async fn delete_usage_events_for_source(&self, source_path: String) -> Result<usize> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            let gone: Vec<crate::usage_ledger::UsageEvent> = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT {USAGE_EVENT_COLS} FROM usage_events WHERE source_path = ?1"
+                ))?;
+                let rows = stmt.query_map(params![source_path], usage_event_from_row)?;
+                collect(rows)?
+            };
+            apply_usage_daily(&tx, &crate::usage_ledger::rollup(&gone), -1)?;
+            tx.execute(
+                "DELETE FROM usage_events WHERE source_path = ?1",
+                params![source_path],
+            )?;
+            tx.commit()?;
+            Ok(gone.len())
         })
         .await
     }
@@ -2015,25 +2081,48 @@ impl Store {
         .await
     }
 
-    /// Record where a source was read up to, and whether reading it failed.
+    /// Record where a source was read up to, which reader revision read it, and whether reading
+    /// it failed.
     pub async fn set_usage_cursor(
         &self,
         source_path: String,
         offset: u64,
         mtime: i64,
         error: Option<String>,
+        ingest_version: u32,
     ) -> Result<()> {
         let now = to_iso(&Utc::now());
         self.call(move |c| {
             c.execute(
-                "INSERT INTO usage_ingest_cursors(source_path, offset, mtime, scanned_at, error)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO usage_ingest_cursors(source_path, offset, mtime, scanned_at, error,
+                    ingest_version)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(source_path) DO UPDATE SET
                     offset = excluded.offset, mtime = excluded.mtime,
-                    scanned_at = excluded.scanned_at, error = excluded.error",
-                params![source_path, offset as i64, mtime, now, error],
+                    scanned_at = excluded.scanned_at, error = excluded.error,
+                    ingest_version = excluded.ingest_version",
+                params![
+                    source_path,
+                    offset as i64,
+                    mtime,
+                    now,
+                    error,
+                    ingest_version as i64
+                ],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// How many sources an older reader wrote and ingest has yet to re-read.
+    pub async fn usage_sources_below_ingest_version(&self, version: u32) -> Result<u64> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT COUNT(*) FROM usage_ingest_cursors WHERE ingest_version < ?1",
+            )?;
+            let n: i64 = stmt.query_row(params![version as i64], |row| row.get(0))?;
+            Ok(n.max(0) as u64)
         })
         .await
     }
@@ -2045,6 +2134,12 @@ impl Store {
     /// leaves both the stored headline and its version alone, so a session already flagged stale
     /// stays eligible for [`Store::usage_sessions_needing_headline_upgrade`] rather than being
     /// waved through on a pass that never looked at its old text again.
+    ///
+    /// The counters accumulate, because a session's turns arrive a few at a time and can come
+    /// from several transcripts at once (its own, and one per subagent it spawned). The one
+    /// exception is a digest an older reader wrote: the first write at a newer `counts_version`
+    /// replaces its counters instead of adding to them, so a re-read of every source converges on
+    /// the true count rather than doubling it.
     pub async fn upsert_usage_sessions(
         &self,
         rows: Vec<crate::usage_ledger::UsageSessionMeta>,
@@ -2055,8 +2150,8 @@ impl Store {
                 let mut stmt = tx.prepare(
                     "INSERT INTO usage_sessions(agent_kind, session_id, headline, headline_raw,
                         headline_version, cwd, repo_id, lane_id, started_at, ended_at, turns,
-                        tool_calls, retries, external, source_path)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                        tool_calls, retries, external, source_path, counts_version)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                      ON CONFLICT(agent_kind, session_id) DO UPDATE SET
                         headline = COALESCE(excluded.headline, headline),
                         headline_raw = COALESCE(excluded.headline_raw, headline_raw),
@@ -2067,9 +2162,13 @@ impl Store {
                         lane_id = COALESCE(excluded.lane_id, lane_id),
                         started_at = COALESCE(started_at, excluded.started_at),
                         ended_at = COALESCE(excluded.ended_at, ended_at),
-                        turns = turns + excluded.turns,
-                        tool_calls = tool_calls + excluded.tool_calls,
-                        retries = retries + excluded.retries,
+                        turns = CASE WHEN counts_version < excluded.counts_version
+                            THEN excluded.turns ELSE turns + excluded.turns END,
+                        tool_calls = CASE WHEN counts_version < excluded.counts_version
+                            THEN excluded.tool_calls ELSE tool_calls + excluded.tool_calls END,
+                        retries = CASE WHEN counts_version < excluded.counts_version
+                            THEN excluded.retries ELSE retries + excluded.retries END,
+                        counts_version = MAX(counts_version, excluded.counts_version),
                         external = excluded.external,
                         source_path = COALESCE(excluded.source_path, source_path)",
                 )?;
@@ -2090,6 +2189,7 @@ impl Store {
                         r.retries as i64,
                         r.external as i64,
                         r.source_path,
+                        r.counts_version as i64,
                     ])?;
                 }
             }
@@ -2183,6 +2283,8 @@ impl Store {
                         SUM(e.cache_write_tokens), SUM(e.thinking_tokens),
                         SUM(CASE WHEN e.estimated = 1 THEN e.input_tokens + e.output_tokens
                                  + e.cache_read_tokens + e.cache_write_tokens ELSE 0 END),
+                        SUM(CASE WHEN e.subagent = 1 THEN e.input_tokens + e.output_tokens
+                                 + e.cache_read_tokens + e.cache_write_tokens ELSE 0 END),
                         COUNT(*), MIN(e.at), MAX(e.at), MAX(e.estimated), MAX(e.external),
                         MAX(e.repo_id), MAX(e.lane_id), MAX(e.cwd),
                         (SELECT x.model FROM usage_events x
@@ -2209,30 +2311,31 @@ impl Store {
                         cache_write_tokens: row.get::<_, i64>(5)?.max(0) as u64,
                         thinking_tokens: row.get::<_, i64>(6)?.max(0) as u64,
                         estimated_tokens: row.get::<_, i64>(7)?.max(0) as u64,
+                        subagent_tokens: row.get::<_, i64>(8)?.max(0) as u64,
                         total_tokens: (row.get::<_, i64>(2)?
                             + row.get::<_, i64>(3)?
                             + row.get::<_, i64>(4)?
                             + row.get::<_, i64>(5)?)
                         .max(0) as u64,
                         cost_usd: 0.0,
-                        events: row.get::<_, i64>(8)?.max(0) as u64,
+                        events: row.get::<_, i64>(9)?.max(0) as u64,
                     };
                     Ok(crate::usage_ledger::UsageSessionRow {
                         agent_kind: row.get(0)?,
                         session_id: row.get(1)?,
-                        started_at: opt_dt_col(row, 9)?,
-                        ended_at: opt_dt_col(row, 10)?,
-                        estimated: row.get::<_, i64>(11)? != 0,
-                        external: row.get::<_, i64>(12)? != 0,
-                        repo_id: row.get(13)?,
-                        lane_id: row.get(14)?,
-                        cwd: row.get(15)?,
-                        model: row.get::<_, Option<String>>(16)?.unwrap_or_default(),
-                        headline: row.get(17)?,
-                        turns: row.get::<_, Option<i64>>(18)?.unwrap_or(0).max(0) as u32,
-                        tool_calls: row.get::<_, Option<i64>>(19)?.unwrap_or(0).max(0) as u32,
-                        retries: row.get::<_, Option<i64>>(20)?.unwrap_or(0).max(0) as u32,
-                        headline_raw: row.get(21)?,
+                        started_at: opt_dt_col(row, 10)?,
+                        ended_at: opt_dt_col(row, 11)?,
+                        estimated: row.get::<_, i64>(12)? != 0,
+                        external: row.get::<_, i64>(13)? != 0,
+                        repo_id: row.get(14)?,
+                        lane_id: row.get(15)?,
+                        cwd: row.get(16)?,
+                        model: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
+                        headline: row.get(18)?,
+                        turns: row.get::<_, Option<i64>>(19)?.unwrap_or(0).max(0) as u32,
+                        tool_calls: row.get::<_, Option<i64>>(20)?.unwrap_or(0).max(0) as u32,
+                        retries: row.get::<_, Option<i64>>(21)?.unwrap_or(0).max(0) as u32,
+                        headline_raw: row.get(22)?,
                         // The store knows ids, not names: `usage_query::Labels` fills this in.
                         lane_label: None,
                         totals,
@@ -2564,7 +2667,53 @@ fn sweep_expired_playbook_drafts(c: &Connection) -> Result<()> {
 /// The `usage_events` columns, in the order [`usage_event_from_row`] reads them.
 const USAGE_EVENT_COLS: &str = "at, agent_kind, model, account, lane_id, repo_id, session_id, cwd, \
      window, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, thinking_tokens, \
-     estimated, external, source_path, source_offset";
+     estimated, external, subagent, source_path, source_offset";
+
+/// Move `rows` into `usage_daily`, `sign` being 1 to add them and -1 to take them back out.
+///
+/// The columns are plain integers, so a negative contribution is just an addition: one statement
+/// serves both directions and the two can never drift apart in how they group a day.
+fn apply_usage_daily(
+    tx: &rusqlite::Transaction<'_>,
+    rows: &[crate::usage_ledger::UsageDailyRow],
+    sign: i64,
+) -> rusqlite::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare(
+        "INSERT INTO usage_daily(day, agent_kind, model, account, repo_id, lane_id,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+            thinking_tokens, estimated_tokens, events)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(day, agent_kind, model, account, repo_id, lane_id) DO UPDATE SET
+            input_tokens = input_tokens + excluded.input_tokens,
+            output_tokens = output_tokens + excluded.output_tokens,
+            cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+            cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+            thinking_tokens = thinking_tokens + excluded.thinking_tokens,
+            estimated_tokens = estimated_tokens + excluded.estimated_tokens,
+            events = events + excluded.events",
+    )?;
+    for r in rows {
+        stmt.execute(params![
+            r.day,
+            r.agent_kind,
+            r.model,
+            r.account,
+            r.repo_id.unwrap_or(0),
+            r.lane_id.unwrap_or(0),
+            sign * r.input_tokens as i64,
+            sign * r.output_tokens as i64,
+            sign * r.cache_read_tokens as i64,
+            sign * r.cache_write_tokens as i64,
+            sign * r.thinking_tokens as i64,
+            sign * r.estimated_tokens as i64,
+            sign * r.events as i64,
+        ])?;
+    }
+    Ok(())
+}
 
 fn usage_event_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::UsageEvent> {
     Ok(crate::usage_ledger::UsageEvent {
@@ -2584,13 +2733,15 @@ fn usage_event_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::Usag
         thinking_tokens: row.get::<_, i64>(13)?.max(0) as u64,
         estimated: row.get::<_, i64>(14)? != 0,
         external: row.get::<_, i64>(15)? != 0,
-        source_path: row.get(16)?,
-        source_offset: row.get(17)?,
+        subagent: row.get::<_, i64>(16)? != 0,
+        source_path: row.get(17)?,
+        source_offset: row.get(18)?,
     })
 }
 
 /// The `usage_ingest_cursors` columns, in the order [`usage_cursor_from_row`] reads them.
-const USAGE_CURSOR_COLS: &str = "source_path, offset, mtime, scanned_at, error";
+const USAGE_CURSOR_COLS: &str =
+    "source_path, offset, mtime, scanned_at, error, ingest_version";
 
 fn usage_cursor_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::UsageCursor> {
     Ok(crate::usage_ledger::UsageCursor {
@@ -2599,6 +2750,7 @@ fn usage_cursor_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::Usa
         mtime: row.get(2)?,
         scanned_at: dt_col(row, 3)?,
         error: row.get(4)?,
+        ingest_version: row.get::<_, i64>(5)?.max(0) as u32,
     })
 }
 
@@ -4754,6 +4906,7 @@ mod tests {
             thinking_tokens: 5,
             estimated: false,
             external: false,
+            subagent: false,
             source_path: "/t/s.jsonl".to_string(),
             source_offset: offset,
         }
@@ -4798,6 +4951,92 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_re_read_with_a_higher_count_replaces_it_in_the_events_and_the_rollup() {
+        // A Claude message that gained a block since the last pass comes back at the same offset
+        // with a larger count; the ledger must hold the larger one, once.
+        let s = store().await;
+        let mut e = usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z");
+        e.output_tokens = 7;
+        assert_eq!(s.record_usage_events(vec![e.clone()]).await.unwrap(), 1);
+        e.output_tokens = 250;
+        assert_eq!(s.record_usage_events(vec![e]).await.unwrap(), 1);
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = s
+            .usage_events_between(from, from + chrono::Duration::days(1))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one message, one row");
+        assert_eq!(rows[0].output_tokens, 250);
+        let daily = s
+            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
+            .await
+            .unwrap();
+        assert_eq!(daily[0].output_tokens, 250);
+        assert_eq!(daily[0].events, 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_sources_events_takes_them_back_out_of_the_daily_rollup() {
+        let s = store().await;
+        s.record_usage_events(vec![usage_event(
+            0,
+            "claude-sonnet-5",
+            "2026-09-01T10:00:00Z",
+        )])
+        .await
+        .unwrap();
+        s.delete_usage_events_for_source("/t/s.jsonl".into())
+            .await
+            .unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(
+            s.usage_events_between(from, from + chrono::Duration::days(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let daily = s
+            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
+            .await
+            .unwrap();
+        assert!(
+            daily.iter().all(|r| r.events == 0 && r.output_tokens == 0),
+            "the rollup must not keep what the events no longer say"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sessions_row_reports_the_share_its_subagents_spent() {
+        let s = store().await;
+        let mut sub = usage_event(1, "claude-sonnet-5", "2026-09-01T10:01:00Z");
+        sub.subagent = true;
+        sub.source_path = "/t/s/subagents/agent-1.jsonl".to_string();
+        s.record_usage_events(vec![
+            usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z"),
+            sub,
+        ])
+        .await
+        .unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = s
+            .usage_sessions_between(from, from + chrono::Duration::days(1), None, 50)
+            .await
+            .unwrap();
+        let row = rows.first().expect("the session both turns belong to");
+        assert_eq!(row.totals.total_tokens, 200, "both turns fold into one row");
+        assert_eq!(
+            row.totals.subagent_tokens, 100,
+            "half of it was spent by a subagent"
         );
     }
 
@@ -4878,14 +5117,14 @@ mod tests {
     async fn an_ingest_cursor_survives_a_round_trip_and_records_an_error() {
         let s = store().await;
         assert!(s.usage_cursor("/t/s.jsonl".into()).await.unwrap().is_none());
-        s.set_usage_cursor("/t/s.jsonl".into(), 512, 99, None)
+        s.set_usage_cursor("/t/s.jsonl".into(), 512, 99, None, 1)
             .await
             .unwrap();
         let c = s.usage_cursor("/t/s.jsonl".into()).await.unwrap().unwrap();
         assert_eq!(c.offset, 512);
         assert_eq!(c.mtime, 99);
         assert!(c.error.is_none());
-        s.set_usage_cursor("/t/s.jsonl".into(), 512, 99, Some("unreadable".into()))
+        s.set_usage_cursor("/t/s.jsonl".into(), 512, 99, Some("unreadable".into()), 1)
             .await
             .unwrap();
         let c = s.usage_cursor("/t/s.jsonl".into()).await.unwrap().unwrap();
@@ -4919,6 +5158,7 @@ mod tests {
             retries: 1,
             external: false,
             source_path: Some("/t/s.jsonl".to_string()),
+            counts_version: crate::usage_ledger::INGEST_VERSION,
         }])
         .await
         .unwrap();

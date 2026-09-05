@@ -12,6 +12,7 @@ const totals = {
   thinking_tokens: 0,
   total_tokens: 450,
   estimated_tokens: 0,
+  subagent_tokens: 150,
   cost_usd: 1.25,
   events: 3,
 };

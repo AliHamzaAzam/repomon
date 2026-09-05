@@ -23,6 +23,7 @@ import {
   laneCell,
   seriesVar,
   sessionColumnVisibility,
+  subagentShare,
   windowLine,
   withContinuousAxis,
   type SessionColumnVisibility,
@@ -153,9 +154,14 @@ export default function UsageView(props: UsageViewProps) {
   // Generous until the first measurement lands, so every column shows rather than flashing narrow.
   const [sessionsWidth, setSessionsWidth] = createSignal(2000);
   const columns = createMemo<SessionColumnVisibility>(() => sessionColumnVisibility(sessionsWidth()));
-  // Task, Agent, Lane, Turns, Time, Tokens, Cost are always shown; Tools and Retries add to that.
+  // Task, Agent, Lane, Turns, Time, Tokens, Cost are always shown; Tools, Sub and Retries add to
+  // that.
   const sessionColSpan = createMemo(
-    () => 7 + (columns().tools ? 1 : 0) + (columns().retries ? 1 : 0),
+    () =>
+      7 +
+      (columns().tools ? 1 : 0) +
+      (columns().subagents ? 1 : 0) +
+      (columns().retries ? 1 : 0),
   );
 
   /** Which lanes the fleet can still focus, so only a live lane becomes a link. */
@@ -204,7 +210,8 @@ export default function UsageView(props: UsageViewProps) {
     });
   });
 
-  // Tools and Retries give way first as the sessions table narrows, so Task keeps room to read.
+  // Sub, Tools and Retries give way first as the sessions table narrows, so Task keeps room to
+  // read.
   // The section only enters the DOM once there is data, so this watches the element signal rather
   // than observing once on mount.
   createEffect(() => {
@@ -463,6 +470,14 @@ export default function UsageView(props: UsageViewProps) {
                     <Show when={columns().tools}>
                       <th class="w-12 py-1 text-right font-normal">Tools</th>
                     </Show>
+                    <Show when={columns().subagents}>
+                      <th
+                        class="w-12 py-1 text-right font-normal"
+                        title="Share of the session's tokens its subagents spent"
+                      >
+                        Sub
+                      </th>
+                    </Show>
                     <For each={SESSION_COLUMNS}>
                       {(column) => (
                         <Show when={column.id !== "retries" || columns().retries}>
@@ -620,6 +635,7 @@ function SessionRow(props: {
     return headline ? headline : "Untitled session";
   };
   const cell = () => laneCell(row());
+  const share = () => subagentShare(row().totals);
   const lane = () => row().lane_label ?? row().cwd ?? "";
   const duration = () => formatDuration(sessionDurationMs(row()));
 
@@ -680,6 +696,18 @@ function SessionRow(props: {
         <Show when={props.columns.tools}>
           <td class="w-12 py-1 text-right tabular-nums text-muted">{row().tool_calls}</td>
         </Show>
+        <Show when={props.columns.subagents}>
+          <td
+            class="w-12 py-1 text-right tabular-nums text-muted"
+            title={
+              share() === null
+                ? "No subagent turns"
+                : `${formatTokens(row().totals.subagent_tokens)} spent by subagents`
+            }
+          >
+            {share() === null ? "-" : `${share()}%`}
+          </td>
+        </Show>
         <Show when={props.columns.retries}>
           <td
             class={`w-14 py-1 text-right tabular-nums ${row().retries > 0 ? "text-attention" : "text-muted"}`}
@@ -709,6 +737,14 @@ function SessionRow(props: {
               <Detail term="Cache read" value={formatTokens(row().totals.cache_read_tokens)} />
               <Detail term="Cache write" value={formatTokens(row().totals.cache_write_tokens)} />
               <Detail term="Thinking" value={formatTokens(row().totals.thinking_tokens)} />
+              <Detail
+                term="Subagents"
+                value={
+                  share() === null
+                    ? "none"
+                    : `${formatTokens(row().totals.subagent_tokens)} · ${share()}%`
+                }
+              />
               <Detail term="Lane" value={lane() || "outside a lane"} />
               <Detail term="Window" value={windowLine(row().started_at, duration())} />
               <SessionIdDetail sessionId={row().session_id} />

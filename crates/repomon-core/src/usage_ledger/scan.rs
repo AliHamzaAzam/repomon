@@ -53,6 +53,8 @@ pub struct ScannedEvent {
     pub thinking_tokens: u64,
     /// Whether the counts were estimated rather than reported.
     pub estimated: bool,
+    /// Whether the turn ran in a subagent the session spawned rather than in the session itself.
+    pub subagent: bool,
     pub source_path: String,
     /// Byte offset of the record inside `source_path`, or a timestamp watermark for databases.
     pub source_offset: i64,
@@ -74,6 +76,9 @@ pub struct ScannedSession {
     pub retries: u32,
     pub first_at: Option<DateTime<Utc>>,
     pub last_at: Option<DateTime<Utc>>,
+    /// Whether this digest came from a subagent transcript nested under the session, in which
+    /// case it carries the subagent's counters but never its headline or its source path.
+    pub subagent: bool,
 }
 
 /// The result of reading one source from an offset.
@@ -131,8 +136,41 @@ where
     Ok(consumed as u64)
 }
 
+/// Where a Claude Code subagent's transcripts live, one directory below the session file.
+const SUBAGENTS_DIR: &str = "subagents";
+
+/// One assistant message, gathered from the several lines that carry it.
+///
+/// Claude Code writes one line per content block, so a message with a thinking block and two tool
+/// calls is three lines sharing `message.id` and `requestId`, each repeating the whole `usage`
+/// object. Only the last line's counts are final, so the group keeps the elementwise maximum:
+/// equal to the last line in practice, and never below it if the CLI ever writes them out of
+/// order.
+struct MessageGroup {
+    first_offset: i64,
+    at: Option<DateTime<Utc>>,
+    model: String,
+    cwd: Option<String>,
+    tokens: TokenCounts,
+    thinking_tokens: u64,
+    tool_calls: u32,
+    has_usage: bool,
+    synthetic: bool,
+}
+
 /// Read a Claude Code transcript from `from_offset`. `account` is the account key the transcript
 /// root belongs to, or `None` for the default account.
+///
+/// Two shapes of file reach this reader. A session transcript sits at `<project>/<session>.jsonl`.
+/// A subagent transcript sits at `<project>/<session>/subagents/agent-<id>.jsonl`, and its turns
+/// belong to the session directory above it: the events are marked `subagent`, and the digest
+/// carries the subagent's counters but neither its headline nor its own prompt, so a subagent's
+/// task can never replace the session's.
+///
+/// A message is only counted as a turn once a later line settles it. The final assistant message
+/// of a file may still gain blocks, so its event is emitted (its tokens are real) while the read
+/// resumes at that message's first line, and the same event is written again with the final
+/// counts once the rest of it lands.
 pub fn scan_claude_transcript(
     path: &Path,
     from_offset: u64,
@@ -140,27 +178,50 @@ pub fn scan_claude_transcript(
 ) -> Result<SourceScan> {
     let source_path = path.to_string_lossy().to_string();
     let account = account.unwrap_or("default").to_string();
-    let mut events = Vec::new();
-    let mut session: Option<ScannedSession> = None;
+    let dir_name = |p: Option<&Path>| {
+        p.and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().to_string())
+    };
+    let parent = path.parent();
+    let subagent = dir_name(parent).as_deref() == Some(SUBAGENTS_DIR);
+    // The session directory is the one above `subagents/`, and it is named for the session that
+    // spawned the agent, which is the row this usage folds into.
+    let parent_session = subagent
+        .then(|| dir_name(parent.and_then(Path::parent)))
+        .flatten();
+
+    let mut groups: Vec<MessageGroup> = Vec::new();
+    let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // The group the most recent assistant line joined, cleared by any other line. Whatever is
+    // still open at the end of the read is the message that may not be finished.
+    let mut open: Option<usize> = None;
+    let mut session_id: Option<String> = None;
     let mut pick = HeadlinePick::default();
 
-    let next_offset = for_each_line(path, from_offset, |v, offset| {
+    let consumed = for_each_line(path, from_offset, |v, offset| {
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
-        let cwd = str_at(v, "cwd");
-        let session_id = str_at(v, "sessionId").or_else(|| str_at(v, "session_id"));
-        let at = parse_at(v, "timestamp");
         if kind == "user" {
             if let Some(text) = v.get("message").and_then(message_text) {
                 pick.offer_user(&text);
             }
         }
         if kind != "assistant" {
+            open = None;
             return;
         }
         let message = match v.get("message") {
             Some(m) => m,
-            None => return,
+            None => {
+                open = None;
+                return;
+            }
         };
+        if session_id.is_none() {
+            session_id = parent_session
+                .clone()
+                .or_else(|| str_at(v, "sessionId"))
+                .or_else(|| str_at(v, "session_id"));
+        }
         let model = message
             .get("model")
             .and_then(Value::as_str)
@@ -183,73 +244,135 @@ pub fn scan_claude_transcript(
                     .count() as u32
             })
             .unwrap_or(0);
+        // A line with no message id is its own message: nothing else can claim to be part of it.
+        let key = match message.get("id").and_then(Value::as_str) {
+            Some(id) => format!("id:{id}"),
+            None => format!("at:{offset}"),
+        };
+        let index = match by_key.get(&key) {
+            Some(index) => *index,
+            None => {
+                groups.push(MessageGroup {
+                    first_offset: offset,
+                    at: parse_at(v, "timestamp"),
+                    model: model.clone(),
+                    cwd: str_at(v, "cwd"),
+                    tokens: TokenCounts::default(),
+                    thinking_tokens: 0,
+                    tool_calls: 0,
+                    has_usage: false,
+                    synthetic,
+                });
+                by_key.insert(key, groups.len() - 1);
+                groups.len() - 1
+            }
+        };
+        open = Some(index);
+        let group = &mut groups[index];
+        group.tool_calls += tool_calls;
+        if group.at.is_none() {
+            group.at = parse_at(v, "timestamp");
+        }
+        if group.model.is_empty() {
+            group.model = model;
+        }
+        if group.cwd.is_none() {
+            group.cwd = str_at(v, "cwd");
+        }
+        if let Some(usage) = message.get("usage") {
+            group.has_usage = true;
+            group.tokens.input = group.tokens.input.max(u64_at(Some(usage), "input_tokens"));
+            group.tokens.output = group.tokens.output.max(u64_at(Some(usage), "output_tokens"));
+            group.tokens.cache_read = group
+                .tokens
+                .cache_read
+                .max(u64_at(Some(usage), "cache_read_input_tokens"));
+            group.tokens.cache_write = group
+                .tokens
+                .cache_write
+                .max(u64_at(Some(usage), "cache_creation_input_tokens"));
+            group.thinking_tokens = group.thinking_tokens.max(u64_at(
+                usage.get("output_tokens_details"),
+                "thinking_tokens",
+            ));
+        }
+    })?;
 
+    let mut events = Vec::new();
+    let mut session: Option<ScannedSession> = None;
+    for (index, group) in groups.iter().enumerate() {
+        // The message still being written is counted next time, once a later line settles it;
+        // its tokens are emitted now, at the same offset, so the re-read replaces rather than
+        // duplicates them.
+        let settled = open != Some(index);
         if let Some(id) = session_id.clone() {
             let s = session.get_or_insert_with(|| ScannedSession {
                 session_id: id,
                 agent_kind: "claude-code".to_string(),
                 headline: None,
                 headline_raw: None,
-                cwd: cwd.clone(),
+                cwd: group.cwd.clone(),
                 turns: 0,
                 tool_calls: 0,
                 retries: 0,
-                first_at: at,
-                last_at: at,
+                first_at: group.at,
+                last_at: group.at,
+                subagent,
             });
-            if synthetic {
-                s.retries += 1;
-            } else {
-                s.turns += 1;
-                s.tool_calls += tool_calls;
-            }
-            if at.is_some() {
-                if s.first_at.is_none() {
-                    s.first_at = at;
+            if settled {
+                if group.synthetic {
+                    s.retries += 1;
+                } else {
+                    s.turns += 1;
+                    s.tool_calls += group.tool_calls;
                 }
-                s.last_at = at;
+            }
+            if group.at.is_some() {
+                if s.first_at.is_none() {
+                    s.first_at = group.at;
+                }
+                s.last_at = group.at;
             }
         }
-        if synthetic {
-            return;
+        if group.synthetic || !group.has_usage {
+            continue;
         }
-        let usage = match message.get("usage") {
-            Some(u) => u,
-            None => return,
-        };
-        let at = match at {
+        let at = match group.at {
             Some(at) => at,
-            None => return,
+            None => continue,
         };
         events.push(ScannedEvent {
             at,
             agent_kind: "claude-code".to_string(),
-            model,
+            model: group.model.clone(),
             account: account.clone(),
-            session_id,
-            cwd,
-            tokens: TokenCounts {
-                input: u64_at(Some(usage), "input_tokens"),
-                output: u64_at(Some(usage), "output_tokens"),
-                cache_read: u64_at(Some(usage), "cache_read_input_tokens"),
-                cache_write: u64_at(Some(usage), "cache_creation_input_tokens"),
-            },
-            thinking_tokens: u64_at(usage.get("output_tokens_details"), "thinking_tokens"),
+            session_id: session_id.clone(),
+            cwd: group.cwd.clone(),
+            tokens: group.tokens,
+            thinking_tokens: group.thinking_tokens,
             estimated: false,
+            subagent,
             source_path: source_path.clone(),
-            source_offset: offset,
+            source_offset: group.first_offset,
         });
-    })?;
+    }
 
+    // A subagent's transcript opens with the prompt the session handed it, which is a task the
+    // session set rather than one the operator wrote; the session's own headline stands.
     if let Some(s) = session.as_mut() {
-        let (headline, raw) = pick.resolve();
-        s.headline = headline;
-        s.headline_raw = raw;
+        if !subagent {
+            let (headline, raw) = pick.resolve();
+            s.headline = headline;
+            s.headline_raw = raw;
+        }
     }
     Ok(SourceScan {
         events,
         sessions: session.into_iter().collect(),
-        next_offset,
+        next_offset: match open {
+            Some(index) => groups[index].first_offset as u64,
+            None => consumed,
+        },
     })
 }
 
@@ -343,6 +466,7 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
                         events.push(ScannedEvent {
                             at,
                             agent_kind: "codex".to_string(),
+                            subagent: false,
                             model: model.clone(),
                             account: "codex".to_string(),
                             session_id: session_id.clone(),
@@ -383,6 +507,7 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
         .map(|id| ScannedSession {
             session_id: id,
             agent_kind: "codex".to_string(),
+            subagent: false,
             headline,
             headline_raw,
             cwd,
@@ -470,6 +595,7 @@ pub fn scan_antigravity_transcript(
             },
             thinking_tokens: thinking.len() as u64 / CHARS_PER_TOKEN,
             estimated: true,
+            subagent: false,
             source_path: source_path.clone(),
             source_offset: offset,
         });
@@ -480,6 +606,7 @@ pub fn scan_antigravity_transcript(
         .map(|id| ScannedSession {
             session_id: id,
             agent_kind: "antigravity".to_string(),
+            subagent: false,
             headline,
             headline_raw,
             cwd: cwd.map(str::to_string),
@@ -556,6 +683,7 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
                 .or_insert_with(|| ScannedSession {
                     session_id: id,
                     agent_kind: "opencode".to_string(),
+                    subagent: false,
                     headline: title.as_deref().and_then(headline_from_text),
                     headline_raw: title.map(|t| raw_excerpt(&t)),
                     cwd: cwd.clone(),
@@ -588,6 +716,7 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
             },
             thinking_tokens: u64_at(Some(tokens), "reasoning"),
             estimated: false,
+            subagent: false,
             source_path: source_path.clone(),
             source_offset: created_ms,
         });
@@ -1021,6 +1150,88 @@ mod tests {
         let mut sorted = offsets.clone();
         sorted.dedup();
         assert_eq!(offsets, sorted, "offsets are distinct and ascending");
+    }
+
+    #[test]
+    fn claude_scan_counts_a_multi_block_message_once_at_its_highest_usage() {
+        // Ground truth from a real transcript: one assistant message with a thinking block and
+        // two tool calls is written as three lines sharing `message.id`, each repeating the same
+        // `usage` object, and only the last line carries the final output count.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            dir.path(),
+            "s.jsonl",
+            include_str!("fixtures/claude_multiblock_v0.jsonl"),
+        );
+        let scan = scan_claude_transcript(&p, 0, None).unwrap();
+        assert_eq!(scan.events.len(), 1, "three lines, one billable message");
+        let e = &scan.events[0];
+        assert_eq!(e.tokens.input, 5);
+        assert_eq!(e.tokens.output, 250, "the highest count the message reported");
+        assert_eq!(e.tokens.cache_read, 1000);
+        assert_eq!(e.tokens.cache_write, 400);
+        assert_eq!(e.thinking_tokens, 30);
+        let s = scan.sessions.first().expect("one session");
+        assert_eq!(s.turns, 1, "one message is one turn");
+        assert_eq!(s.tool_calls, 2, "both tool calls in the message still count");
+    }
+
+    #[test]
+    fn claude_scan_holds_back_a_message_that_may_still_be_growing() {
+        // The last assistant message in a file may yet gain blocks, so the reader emits it and
+        // rewinds to its first line rather than settling a partial count.
+        let dir = tempfile::tempdir().unwrap();
+        let body = include_str!("fixtures/claude_multiblock_v0.jsonl");
+        let truncated: String = body
+            .lines()
+            .take(3)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let p = write(dir.path(), "s.jsonl", &truncated);
+        let scan = scan_claude_transcript(&p, 0, None).unwrap();
+        assert_eq!(scan.events.len(), 1);
+        assert_eq!(scan.events[0].tokens.output, 7, "only what has been written");
+        assert_eq!(
+            scan.sessions.first().expect("one session").turns,
+            0,
+            "an unsettled message is not counted as a turn yet"
+        );
+        assert_eq!(
+            scan.next_offset, scan.events[0].source_offset as u64,
+            "the next read resumes at the unsettled message, not past it"
+        );
+    }
+
+    #[test]
+    fn claude_scan_attributes_a_subagent_transcript_to_the_session_it_sits_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("sess-claude-1/subagents");
+        std::fs::create_dir_all(&nested).unwrap();
+        let p = write(
+            &nested,
+            "agent-a1b2c3d4.jsonl",
+            include_str!("fixtures/claude_subagent_v0.jsonl"),
+        );
+        let scan = scan_claude_transcript(&p, 0, None).unwrap();
+        assert_eq!(scan.events.len(), 2);
+        assert!(
+            scan.events.iter().all(|e| e.session_id.as_deref() == Some("sess-claude-1")),
+            "a subagent turn belongs to the session that spawned it"
+        );
+        assert!(
+            scan.events.iter().all(|e| e.subagent),
+            "every turn in a subagents/ transcript is marked as one"
+        );
+        assert_eq!(scan.events[0].tokens.output, 140, "the message counts once");
+        let s = scan.sessions.first().expect("the parent session");
+        assert_eq!(s.session_id, "sess-claude-1");
+        assert!(s.subagent);
+        assert_eq!(
+            s.headline, None,
+            "a subagent's own prompt must not become the parent session's task"
+        );
+        assert_eq!(s.turns, 2);
+        assert_eq!(s.tool_calls, 1);
     }
 
     #[test]

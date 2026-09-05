@@ -11,4 +11,9 @@ offset: number,
 /**
  * The source's modification time when it was last read, as a Unix second.
  */
-mtime: number, scanned_at: string, error: string | null, };
+mtime: number, scanned_at: string, error: string | null, 
+/**
+ * Which revision of the readers produced this source's stored events. A cursor below
+ * [`INGEST_VERSION`] is re-read from the start, its previous events replaced.
+ */
+ingest_version: number, };

@@ -107,6 +107,7 @@ export function foldTailSeries(timeline: UsageTimeline): UsageTimeline {
       thinking_tokens: sum((s) => s.totals.thinking_tokens),
       total_tokens: sum((s) => s.totals.total_tokens),
       estimated_tokens: sum((s) => s.totals.estimated_tokens),
+      subagent_tokens: sum((s) => s.totals.subagent_tokens),
       cost_usd: sum((s) => s.totals.cost_usd),
       events: sum((s) => s.totals.events),
     },
@@ -277,24 +278,42 @@ export function laneCell(row: { lane_label: string | null; cwd: string | null })
 
 /** Which of the sessions table's narrower columns fit at a given table width. */
 export interface SessionColumnVisibility {
+  subagents: boolean;
   tools: boolean;
   retries: boolean;
 }
 
 /**
- * Below this width Tools is the first column to go: it is the least-consulted of the counters, and
- * the one most redundant with Turns. Below the narrower threshold Retries goes too, leaving Task,
- * Agent, Lane and the three cost-relevant columns (Time, Tokens, Cost): what is being asked of the
- * fleet and what it costs, which is what the view exists to answer.
+ * Sub is the first column to go as the table narrows: it qualifies the Tokens figure beside it
+ * rather than adding one, and the expanded row still carries it. Tools goes next, being the
+ * least-consulted counter and the one most redundant with Turns. Below the narrowest threshold
+ * Retries goes too, leaving Task, Agent, Lane and the three cost-relevant columns (Time, Tokens,
+ * Cost): what is being asked of the fleet and what it costs, which is what the view exists to
+ * answer.
  */
+const HIDE_SUBAGENTS_BELOW_PX = 820;
 const HIDE_TOOLS_BELOW_PX = 720;
 const HIDE_RETRIES_BELOW_PX = 580;
 
 export function sessionColumnVisibility(tableWidth: number): SessionColumnVisibility {
   return {
+    subagents: tableWidth >= HIDE_SUBAGENTS_BELOW_PX,
     tools: tableWidth >= HIDE_TOOLS_BELOW_PX,
     retries: tableWidth >= HIDE_RETRIES_BELOW_PX,
   };
+}
+
+/**
+ * What share of a session's tokens its subagents spent, as a rounded percentage, or `null` when
+ * it delegated nothing. A session that delegated a sliver still reads as "1%" rather than "0%",
+ * because zero is what "no subagents at all" means here.
+ */
+export function subagentShare(totals: {
+  subagent_tokens: number;
+  total_tokens: number;
+}): number | null {
+  if (totals.subagent_tokens <= 0 || totals.total_tokens <= 0) return null;
+  return Math.max(1, Math.round((totals.subagent_tokens / totals.total_tokens) * 100));
 }
 
 /**

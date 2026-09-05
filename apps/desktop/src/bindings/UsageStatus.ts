@@ -20,4 +20,9 @@ errors: Array<UsageCursor>, events: number, first_event_at: string | null, last_
 /**
  * Whether an ingest pass is running right now.
  */
-ingesting: boolean, };
+ingesting: boolean, 
+/**
+ * Sources an older reader wrote that ingest has yet to re-read. Counts down to zero over a
+ * few passes after a reader is corrected.
+ */
+stale_sources: number, };

@@ -18,7 +18,7 @@ use std::time::Duration;
 use repomon_core::agent::claude;
 use repomon_core::pricing::PriceTable;
 use repomon_core::usage_ledger::{
-    FleetIndex, UsageEvent, UsageSessionMeta,
+    FleetIndex, INGEST_VERSION, UsageEvent, UsageSessionMeta,
     scan::{
         ScannedEvent, SourceScan, scan_antigravity_transcript, scan_claude_transcript,
         scan_codex_rollout, scan_opencode_db,
@@ -370,6 +370,7 @@ fn to_event(e: ScannedEvent, index: &FleetIndex, windows: &HashMap<i64, String>)
         thinking_tokens: e.thinking_tokens,
         estimated: e.estimated,
         external: a.external,
+        subagent: e.subagent,
         source_path: e.source_path,
         source_offset: e.source_offset,
     }
@@ -400,6 +401,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
         listed: sources.len(),
         ..Default::default()
     };
+    let mut reingested = 0usize;
     for source in sources {
         let path = source.path.to_string_lossy().to_string();
         let cursor = ctx.store.usage_cursor(path.clone()).await?;
@@ -409,12 +411,28 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
         })
         .await
         .map_err(|e| repomon_core::Error::Other(e.to_string()))?;
+        // A source an older reader wrote is re-read from the start whatever its fingerprint says,
+        // because the correction is to how the file was counted rather than to the file. Only a
+        // bounded number per pass, so a version bump converges over a few minutes instead of one
+        // long stall; the rest keep their cursors and are picked up on a later tick.
+        let stale = cursor
+            .as_ref()
+            .is_some_and(|c| c.ingest_version < INGEST_VERSION)
+            && reingested < REINGEST_BATCH;
         if let Some(c) = &cursor {
-            if c.mtime == print && c.error.is_none() {
+            if c.mtime == print && c.error.is_none() && !stale {
                 continue;
             }
         }
-        let offset = cursor.map(|c| c.offset).unwrap_or(0);
+        if stale {
+            reingested += 1;
+            ctx.store.delete_usage_events_for_source(path.clone()).await?;
+        }
+        let offset = if stale {
+            0
+        } else {
+            cursor.map(|c| c.offset).unwrap_or(0)
+        };
         let scanned = tokio::task::spawn_blocking({
             let source = source.clone();
             move || scan_source(&source, offset)
@@ -427,7 +445,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
             Err(e) => {
                 report.failed += 1;
                 ctx.store
-                    .set_usage_cursor(path, offset, print, Some(e.to_string()))
+                    .set_usage_cursor(path, offset, print, Some(e.to_string()), INGEST_VERSION)
                     .await?;
                 continue;
             }
@@ -457,7 +475,10 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                     tool_calls: s.tool_calls,
                     retries: s.retries,
                     external: a.external,
-                    source_path: Some(path.clone()),
+                    // A subagent transcript is not where the session's headline lives, so it must
+                    // not become the file the headline redigest re-reads.
+                    source_path: (!s.subagent).then(|| path.clone()),
+                    counts_version: INGEST_VERSION,
                 }
             })
             .collect();
@@ -466,11 +487,16 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
             ctx.store.upsert_usage_sessions(sessions).await?;
         }
         ctx.store
-            .set_usage_cursor(path, scan.next_offset, print, None)
+            .set_usage_cursor(path, scan.next_offset, print, None, INGEST_VERSION)
             .await?;
     }
     Ok(report)
 }
+
+/// How many sources an older reader wrote [`ingest_once`] re-reads in one pass. Bounded for the
+/// same reason [`HEADLINE_REDIGEST_BATCH`] is: a version bump leaves every source stale at once,
+/// and a full re-read of years of transcripts in one tick would stall the pass that follows it.
+const REINGEST_BATCH: usize = 25;
 
 /// How many stale session digests [`redigest_stale_headlines`] rewrites in one call. Bounded so a
 /// headline-extractor version bump, which leaves every existing session stale at once, catches up
@@ -784,6 +810,97 @@ mod tests {
         assert_eq!(claude[0].window.as_deref(), Some("lane-1"));
     }
 
+    /// Every ledger row, over a window wide enough that no test has to spell one out.
+    async fn all_events(ctx: &Arc<Ctx>) -> Vec<repomon_core::usage_ledger::UsageEvent> {
+        ctx.store
+            .usage_events_between(
+                chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::Utc::now() + chrono::Duration::days(365),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_source_an_older_reader_wrote_is_re_read_and_its_events_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        let path = dir
+            .path()
+            .join("claude/projects/-repos-demo/sess-claude-1.jsonl")
+            .to_string_lossy()
+            .to_string();
+        // What the pre-fix reader left behind: a row per content-block line, at offsets the
+        // current reader no longer produces, and a cursor saying the whole file was read.
+        ctx.store
+            .record_usage_events(vec![stale_claude_event(&path, 4096)])
+            .await
+            .unwrap();
+        ctx.store
+            .set_usage_cursor(path.clone(), 1, 0, None, 0)
+            .await
+            .unwrap();
+
+        ingest_once(&ctx).await.unwrap();
+
+        let events = all_events(&ctx).await;
+        assert!(
+            !events.iter().any(|e| e.source_offset == 4096),
+            "the superseded row must be gone, not merely added to"
+        );
+        assert_eq!(
+            ctx.store
+                .usage_cursor(path)
+                .await
+                .unwrap()
+                .expect("the cursor")
+                .ingest_version,
+            repomon_core::usage_ledger::INGEST_VERSION
+        );
+        let daily = ctx
+            .store
+            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
+            .await
+            .unwrap();
+        let rolled: u64 = daily.iter().map(|d| d.output_tokens).sum();
+        let counted: u64 = events
+            .iter()
+            .filter(|e| e.at.format("%Y-%m-%d").to_string() == "2026-09-01")
+            .map(|e| e.output_tokens)
+            .sum();
+        assert_eq!(rolled, counted, "the rollup matches the events it summarizes");
+    }
+
+    #[tokio::test]
+    async fn usage_status_counts_the_sources_still_waiting_to_be_re_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        ctx.store
+            .set_usage_cursor("/t/old.jsonl".into(), 1, 0, None, 0)
+            .await
+            .unwrap();
+        let status = crate::usage_query::status(&ctx).await.unwrap();
+        assert_eq!(status.stale_sources, 1);
+        ctx.store
+            .set_usage_cursor(
+                "/t/old.jsonl".into(),
+                1,
+                0,
+                None,
+                repomon_core::usage_ledger::INGEST_VERSION,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::usage_query::status(&ctx).await.unwrap().stale_sources,
+            0
+        );
+    }
+
     #[tokio::test]
     async fn a_second_ingest_pass_adds_nothing_and_reads_no_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -886,6 +1003,34 @@ mod tests {
             retries: 0,
             external: true,
             source_path: Some(source_path.to_string()),
+            counts_version: INGEST_VERSION,
+        }
+    }
+
+    /// A row shaped the way the pre-fix reader wrote them: one per content-block line.
+    fn stale_claude_event(source_path: &str, offset: i64) -> UsageEvent {
+        UsageEvent {
+            at: chrono::DateTime::parse_from_rfc3339("2026-09-01T10:01:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            agent_kind: "claude-code".to_string(),
+            model: "claude-sonnet-5".to_string(),
+            account: "default".to_string(),
+            lane_id: None,
+            repo_id: None,
+            session_id: Some("sess-claude-1".to_string()),
+            window: None,
+            cwd: Some("/repos/demo".to_string()),
+            input_tokens: 2,
+            output_tokens: 611,
+            cache_read_tokens: 30449,
+            cache_write_tokens: 26034,
+            thinking_tokens: 487,
+            estimated: false,
+            external: true,
+            subagent: false,
+            source_path: source_path.to_string(),
+            source_offset: offset,
         }
     }
 
@@ -909,6 +1054,7 @@ mod tests {
             thinking_tokens: 0,
             estimated: false,
             external: true,
+            subagent: false,
             source_path: "r.jsonl".to_string(),
             source_offset: 0,
         }

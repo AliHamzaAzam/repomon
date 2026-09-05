@@ -557,6 +557,19 @@ per billable turn, and attributes each row to a repo and lane by the directory t
 Nothing is sent anywhere and no API key is needed. Sessions repomon did not start still appear,
 marked as running outside a lane.
 
+Claude Code writes a subagent's turns to its own transcript, one directory below the session file
+at `<project>/<session>/subagents/agent-<id>.jsonl`. Those turns are read too and folded into the
+session that spawned them: same lane, same repo, same row, with the sessions table's **Sub** column
+saying what share of the row's tokens the subagents spent. It writes an assistant message as one
+line per content block, all repeating the same running `usage`, so a message is counted once, at
+the highest figure its lines reported, rather than once per block.
+
+A correction to how a transcript is counted also corrects the history already recorded: each
+source carries the reader revision that read it, and ingest re-reads the ones an older revision
+wrote, replacing what they produced. That runs a bounded number of sources per pass, so a fresh
+version converges over a few minutes rather than in one stall; `usage.status` says how many sources
+are still waiting.
+
 The view carries:
 
 - Headline figures for the window: equivalent API cost first, then tokens and cache hit rate, with
@@ -578,9 +591,9 @@ The view carries:
   session by task rather than by identifier, links to that session's row, and folds repeats of the
   same shape into one line with a count and a total.
 - A sessions table with the task headline pulled from the transcript, the lane named the way the
-  sidebar names it, turns, tool calls, retries, duration, tokens and cost. Headings sort, and a
-  row opens to the token split, the lane, and the window the session ran in. Clicking a session's
-  lane focuses it.
+  sidebar names it, turns, tool calls, the subagent share, retries, duration, tokens and cost.
+  Headings sort, and a row opens to the token split, the subagent tokens, the lane, and the window
+  the session ran in. Clicking a session's lane focuses it.
 - Export to CSV or JSON. The daemon writes the file under its data directory and names the path.
 
 Numbers are formatted once, everywhere, including the CLI: tokens as k, M or B with one decimal

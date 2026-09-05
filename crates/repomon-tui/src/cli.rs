@@ -2588,6 +2588,7 @@ mod tests {
             thinking_tokens: 0,
             total_tokens: tokens,
             estimated_tokens: 0,
+            subagent_tokens: 0,
             cost_usd: cost,
             events: 1,
         };

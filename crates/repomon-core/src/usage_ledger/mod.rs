@@ -22,6 +22,14 @@ pub mod scan;
 
 pub use scan::{HEADLINE_VERSION, UNTITLED_SESSION};
 
+/// Which revision of the readers produced a source's stored events.
+///
+/// Bumping this makes ingest re-read every source from the start and replace what it wrote last
+/// time, a bounded batch per pass, so a correction to a reader corrects the history it already
+/// recorded rather than only what arrives next. Version 1 is the first to count a multi-block
+/// Claude message once and to read the subagent transcripts nested under a session.
+pub const INGEST_VERSION: u32 = 1;
+
 /// One stored ledger row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageEvent {
@@ -44,6 +52,8 @@ pub struct UsageEvent {
     pub estimated: bool,
     /// Whether the session ran outside repomon's control.
     pub external: bool,
+    /// Whether the turn ran in a subagent the session spawned rather than in the session itself.
+    pub subagent: bool,
     pub source_path: String,
     pub source_offset: i64,
 }
@@ -320,6 +330,9 @@ pub struct UsageTotals {
     /// Of `total_tokens`, how many came from an estimate rather than a reported count.
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub estimated_tokens: u64,
+    /// Of `total_tokens`, how many a subagent spent rather than the session's own turns.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub subagent_tokens: u64,
     pub cost_usd: f64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub events: u64,
@@ -335,6 +348,9 @@ impl UsageTotals {
         self.total_tokens += e.total_tokens();
         if e.estimated {
             self.estimated_tokens += e.total_tokens();
+        }
+        if e.subagent {
+            self.subagent_tokens += e.total_tokens();
         }
         self.cost_usd += table.cost(&e.model, e.at, &e.tokens()).unwrap_or(0.0);
         self.events += 1;
@@ -512,6 +528,7 @@ pub fn timeline(
                     totals.thinking_tokens += t.thinking_tokens;
                     totals.total_tokens += t.total_tokens;
                     totals.estimated_tokens += t.estimated_tokens;
+                    totals.subagent_tokens += t.subagent_tokens;
                     totals.cost_usd += t.cost_usd;
                     totals.events += t.events;
                     UsagePoint {
@@ -940,6 +957,9 @@ pub struct UsageSessionMeta {
     pub retries: u32,
     pub external: bool,
     pub source_path: Option<String>,
+    /// Which revision of [`INGEST_VERSION`] counted `turns`, `tool_calls` and `retries`. A row
+    /// below it has its counters replaced rather than added to on the next write.
+    pub counts_version: u32,
 }
 
 /// How far one ingest source has been read, and what went wrong last time if anything did.
@@ -956,6 +976,10 @@ pub struct UsageCursor {
     pub mtime: i64,
     pub scanned_at: DateTime<Utc>,
     pub error: Option<String>,
+    /// Which revision of the readers produced this source's stored events. A cursor below
+    /// [`INGEST_VERSION`] is re-read from the start, its previous events replaced.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub ingest_version: u32,
 }
 
 /// The answer to `usage.status`.
@@ -976,6 +1000,10 @@ pub struct UsageStatus {
     pub last_event_at: Option<DateTime<Utc>>,
     /// Whether an ingest pass is running right now.
     pub ingesting: bool,
+    /// Sources an older reader wrote that ingest has yet to re-read. Counts down to zero over a
+    /// few passes after a reader is corrected.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub stale_sources: u64,
 }
 
 /// Price session rows through `table`, charging each row's totals at its dominant model's rate.
@@ -1070,6 +1098,7 @@ mod tests {
             thinking_tokens: 0,
             estimated: false,
             external: false,
+            subagent: false,
             source_path: "t.jsonl".to_string(),
             source_offset: 0,
         }
