@@ -228,8 +228,16 @@ export function chordOf(event: KeyboardEvent, platform?: string): string | null 
   // number row entirely), so keying off `event.key` would make every shifted digit chord
   // unreachable while still rendering as available in the help reference.
   const digit = event.code.startsWith("Digit") ? event.code.slice(5) : null;
-  // "?" already implies shift on most layouts, so do not double-encode it.
-  const key = digit ?? (event.key === "?" ? "?" : event.key.toLowerCase());
+  // The Slash key is the one physical key on a US layout that produces two entirely different
+  // characters depending on Shift ("/" and "?"), and both are bound to different global chords
+  // (mod+/ and mod+?). Most browsers report event.key as "?" once Shift is down, but holding a
+  // platform modifier (Cmd on macOS) can suppress that layout translation and leave event.key at
+  // the unshifted "/" even though event.shiftKey is still true - so read the shift state off
+  // event.code plus event.shiftKey rather than trusting event.key alone to have flipped. Treat it
+  // as the shifted "?" whenever code says Slash and either signal says shifted; both keep it "?"
+  // (never double-encoded as "shift+?"), and neither ever satisfies a bare "/" chord.
+  const isShiftedSlash = event.code === "Slash" && (event.key === "?" || event.shiftKey);
+  const key = digit ?? (isShiftedSlash ? "?" : event.key.toLowerCase());
   const shift = event.shiftKey && key !== "?" ? "shift+" : "";
   return `mod+${shift}${key}`;
 }
@@ -245,7 +253,16 @@ export function matchChord(event: KeyboardEvent, platform?: string): Binding | n
 /// event did not land in a text input. Exported so keymap.test.ts can check it against the
 /// "sidebar" scope entries in BINDINGS directly, instead of trusting App.tsx's copy of the same
 /// logic to stay in sync by hand.
+///
+/// Guarding against every platform modifier here (not just the ones "mod" resolves to) is load
+/// bearing: this handler sits on a DOM ancestor of the fleet list and the filter input, so it
+/// sees a chord's keydown before the window-level onShortcut listener does. Cmd+Shift+/ (the
+/// help.open chord) can, depending on the browser, still carry a bare "/" in event.key even
+/// though a modifier is held - without this guard that keystroke would match "sidebar.filter" in
+/// this function first, steal the event with its own preventDefault, and the shortcuts overlay
+/// would never get a chance to open.
 export function matchSidebarKey(event: KeyboardEvent): string | null {
+  if (event.metaKey || event.ctrlKey || event.altKey) return null;
   if (event.key === "/") return "sidebar.filter";
   if (event.key === "j" || event.key === "ArrowDown") return "sidebar.next";
   if (event.key === "k" || event.key === "ArrowUp") return "sidebar.prev";

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
@@ -427,6 +427,74 @@ describe("Repomon desktop shell", () => {
     });
   });
 
+  it("opens the shortcuts overlay on Cmd+Shift+/ without focusing or typing into the fleet filter", async () => {
+    // Regression for the reported bug: Cmd+? (physically Cmd+Shift+/) was matching the fleet
+    // sidebar's bare "/" navigation instead of help.open, because that handler sits ahead of the
+    // window-level shortcut dispatcher in the DOM and didn't guard against a modifier being held.
+    // Fired on the filter input itself so the event bubbles through that sidebar handler exactly
+    // as it would in the real app, whether or not the filter already had focus.
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const filterInput = within(container).getByPlaceholderText(/Filter/i);
+    expect(document.activeElement).not.toBe(filterInput);
+
+    fireEvent.keyDown(filterInput, { key: "?", code: "Slash", shiftKey: true, metaKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    });
+    expect(document.activeElement).not.toBe(filterInput);
+    expect(filterInput).toHaveValue("");
+  });
+
+  it("opens the shortcuts overlay for Cmd+Shift+/ even when the browser reports event.key as the unshifted \"/\"", async () => {
+    // The literal bug report: on real hardware, holding Cmd can suppress the shift translation
+    // so event.key stays "/" (event.shiftKey and event.code still say the key was physically
+    // Shift+Slash). Before the fix this exact shape matched matchSidebarKey's bare "/" check
+    // ahead of matchChord ever running, so the filter got focused and the overlay never opened.
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const filterInput = within(container).getByPlaceholderText(/Filter/i);
+    expect(document.activeElement).not.toBe(filterInput);
+
+    fireEvent.keyDown(filterInput, { key: "/", code: "Slash", shiftKey: true, metaKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    });
+    expect(document.activeElement).not.toBe(filterInput);
+    expect(filterInput).toHaveValue("");
+  });
+
+  it("focuses the fleet filter on Cmd+/, never the shortcuts overlay", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const filterInput = within(container).getByPlaceholderText(/Filter/i);
+    expect(document.activeElement).not.toBe(filterInput);
+
+    fireEvent.keyDown(filterInput, { key: "/", code: "Slash", metaKey: true });
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(filterInput);
+    });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+  });
+
   it("opens the shortcuts overlay on a bare \"?\" outside a text input", async () => {
     render(() => <App connectionSource={sourceFor({
       phase: "starting",
@@ -480,5 +548,59 @@ describe("Repomon desktop shell", () => {
     })} />);
 
     expect(within(container).queryByRole("button", { name: /for shortcuts/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("Repomon desktop shell: Slash key shortcuts on a non-mac platform", () => {
+  // "mod" resolves from navigator.platform when App.tsx calls matchChord without an explicit
+  // platform argument (the real, unmocked path), so exercising the non-mac branch here means
+  // actually flipping the platform rather than just swapping metaKey for ctrlKey.
+  beforeAll(() => {
+    Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+  });
+  afterAll(() => {
+    Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("opens the shortcuts overlay on Ctrl+Shift+/ without focusing or typing into the fleet filter", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const filterInput = within(container).getByPlaceholderText(/Filter/i);
+    expect(document.activeElement).not.toBe(filterInput);
+
+    fireEvent.keyDown(filterInput, { key: "?", code: "Slash", shiftKey: true, ctrlKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    });
+    expect(document.activeElement).not.toBe(filterInput);
+    expect(filterInput).toHaveValue("");
+  });
+
+  it("focuses the fleet filter on Ctrl+/, never the shortcuts overlay", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const filterInput = within(container).getByPlaceholderText(/Filter/i);
+    expect(document.activeElement).not.toBe(filterInput);
+
+    fireEvent.keyDown(filterInput, { key: "/", code: "Slash", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(filterInput);
+    });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
   });
 });

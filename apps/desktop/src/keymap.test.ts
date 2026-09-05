@@ -83,6 +83,18 @@ describe("matchSidebarKey", () => {
   it("ignores keys with no sidebar meaning", () => {
     expect(matchSidebarKey(key({ key: "x" }))).toBeNull();
   });
+
+  it("never fires while a platform modifier is held, even if event.key still reads as the bare key", () => {
+    // Regression: some browsers report event.key as "/" for Cmd+Shift+/ (the help.open chord)
+    // even though a modifier is held. This handler sits on a DOM ancestor of the fleet filter
+    // input, ahead of the window-level chord dispatcher, so without this guard it would steal
+    // the keystroke and focus the filter instead of ever letting the shortcuts overlay open.
+    expect(matchSidebarKey(key({ key: "/", metaKey: true }))).toBeNull();
+    expect(matchSidebarKey(key({ key: "/", metaKey: true, shiftKey: true }))).toBeNull();
+    expect(matchSidebarKey(key({ key: "/", ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(matchSidebarKey(key({ key: "j", metaKey: true }))).toBeNull();
+    expect(matchSidebarKey(key({ key: "n", altKey: true }))).toBeNull();
+  });
 });
 
 describe("detectActiveScope", () => {
@@ -175,6 +187,100 @@ describe("matchChord", () => {
     expect(matchChord(key({ key: "3", code: "Digit3", metaKey: true }), "mac")?.id).toBe("panel.usage");
     expect(matchChord(key({ key: "8", code: "Digit8", metaKey: true }), "mac")?.id).toBe("panel.mail");
   });
+
+  describe("the Slash key: mod+? vs mod+/", () => {
+    // The Slash key is the one place a shifted and unshifted chord are both bound globally
+    // (help.open on "?", fleet.filter on "/"). Regression coverage for the bug report: Cmd+? was
+    // opening the fleet filter and typing into it instead of the shortcuts overlay.
+    it("opens the shortcuts guide for Cmd+Shift+/ when the browser reports key \"?\"", () => {
+      expect(
+        matchChord(key({ key: "?", code: "Slash", shiftKey: true, metaKey: true }), "mac")?.id,
+      ).toBe("help.open");
+    });
+
+    it("opens the shortcuts guide for Ctrl+Shift+/ on non-mac when the browser reports key \"?\"", () => {
+      expect(
+        matchChord(key({ key: "?", code: "Slash", shiftKey: true, ctrlKey: true }), "other")?.id,
+      ).toBe("help.open");
+    });
+
+    it("also opens the shortcuts guide when the browser suppresses the shift translation and still reports key \"/\"", () => {
+      // Real-world quirk: holding a platform modifier can leave event.key at the unshifted
+      // character even though event.shiftKey is true and event.code confirms the physical key.
+      expect(
+        matchChord(key({ key: "/", code: "Slash", shiftKey: true, metaKey: true }), "mac")?.id,
+      ).toBe("help.open");
+    });
+
+    it("focuses the fleet filter for a plain Cmd+/, never the shortcuts guide", () => {
+      const binding = matchChord(key({ key: "/", code: "Slash", metaKey: true }), "mac");
+      expect(binding?.id).toBe("fleet.filter");
+    });
+
+    it("focuses the fleet filter for a plain Ctrl+/ on non-mac, never the shortcuts guide", () => {
+      const binding = matchChord(key({ key: "/", code: "Slash", ctrlKey: true }), "other");
+      expect(binding?.id).toBe("fleet.filter");
+    });
+
+    it("never lets the shifted chord match the unshifted sibling's id or vice versa", () => {
+      const help = matchChord(key({ key: "?", code: "Slash", shiftKey: true, metaKey: true }), "mac");
+      const filter = matchChord(key({ key: "/", code: "Slash", metaKey: true }), "mac");
+      expect(help?.id).not.toBe(filter?.id);
+      expect(help?.id).toBe("help.open");
+      expect(filter?.id).toBe("fleet.filter");
+    });
+  });
+});
+
+/// event.key for a shifted US-layout symbol, keyed by the unshifted character. Only the
+/// punctuation keys actually bound to a global shifted chord need an entry.
+const SHIFTED_SYMBOL: Record<string, string> = { "9": "(", "0": ")", "1": "!", "2": "@" };
+
+/// Build a plausible KeyboardEvent for a registry chord string ("mod+shift+9", "mod+/", "mod+?",
+/// "mod+e", ...), on the given platform, either respecting or deliberately flipping the chord's
+/// own shift state. Digits always carry their `code` so the digit-vs-symbol ambiguity chordOf
+/// resolves via `code` is exercised the same way a real browser would trigger it; the Slash key
+/// carries `code: "Slash"` for the same reason.
+function eventForChord(chord: string, platform: "mac" | "other", opts: { flipShift?: boolean } = {}): KeyboardEvent {
+  const tokens = chord.split("+");
+  const base = tokens[tokens.length - 1];
+  const wantsShift = tokens.includes("shift") || base === "?";
+  const shiftKey = opts.flipShift ? !wantsShift : wantsShift;
+  const mod = platform === "mac" ? { metaKey: true } : { ctrlKey: true };
+
+  if (/^\d$/.test(base)) {
+    const keyChar = shiftKey ? SHIFTED_SYMBOL[base] ?? base : base;
+    return key({ key: keyChar, code: `Digit${base}`, shiftKey, ...mod });
+  }
+  if (base === "/" || base === "?") {
+    // A real "/" chord is never itself written with an explicit "shift+" token, and "?" always
+    // implies shift - either way `wantsShift` above already reflects which symbol this is.
+    const keyChar = shiftKey ? "?" : "/";
+    return key({ key: keyChar, code: "Slash", shiftKey, ...mod });
+  }
+  if (/^[a-z]$/.test(base)) {
+    return key({ key: shiftKey ? base.toUpperCase() : base, shiftKey, ...mod });
+  }
+  // Punctuation with no registered shifted twin (",", ".", "[", "]"): event.key is stable
+  // regardless of the shift flag we're asked to simulate, since there is nothing to flip to.
+  return key({ key: base, shiftKey, ...mod });
+}
+
+describe("matchChord over the whole registry: a shifted chord never matches its unshifted sibling", () => {
+  const globalBindings = BINDINGS.filter((binding) => (binding.scope ?? "global") === "global");
+
+  for (const platform of ["mac", "other"] as const) {
+    for (const binding of globalBindings) {
+      it(`${binding.id} (${binding.chord}) matches itself on ${platform}, and its shift-flipped twin never matches it`, () => {
+        const own = eventForChord(binding.chord, platform);
+        expect(matchChord(own, platform)?.id).toBe(binding.id);
+
+        const flipped = eventForChord(binding.chord, platform, { flipShift: true });
+        const flippedMatch = matchChord(flipped, platform);
+        expect(flippedMatch?.id).not.toBe(binding.id);
+      });
+    }
+  }
 });
 
 describe("numbered panel chords", () => {
@@ -220,5 +326,12 @@ describe("formatChord", () => {
     expect(formatChord("mod+shift+m", "mac")).toBe("⌘⇧M");
     expect(formatChord("mod+e", "other")).toBe("Ctrl+E");
     expect(formatChord("mod+shift+m", "other")).toBe("Ctrl+Shift+M");
+  });
+
+  it("renders the help chord distinctly from the filter chord on both platforms", () => {
+    expect(formatChord("mod+?", "mac")).toBe("⌘?");
+    expect(formatChord("mod+?", "other")).toBe("Ctrl+?");
+    expect(formatChord("mod+/", "mac")).toBe("⌘/");
+    expect(formatChord("mod+/", "other")).toBe("Ctrl+/");
   });
 });
