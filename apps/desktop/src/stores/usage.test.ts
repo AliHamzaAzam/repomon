@@ -46,6 +46,8 @@ const session: UsageSessionRow = {
   agent_kind: "claude-code",
   model: "claude-sonnet-5",
   headline: "Wire up the ledger",
+  headline_raw: "<local-command-caveat>ran /status</local-command-caveat>\nWire up the ledger",
+  lane_label: "demo/main",
   repo_id: 1,
   lane_id: 3,
   cwd: "/repos/demo",
@@ -174,6 +176,81 @@ describe("usage store", () => {
       await flush();
       expect(store.error()).toContain("daemon is down");
       expect(store.loading()).toBe(false);
+      dispose();
+    });
+  });
+
+  it("sends explicit bounds for a custom range and names the window", async () => {
+    await createRoot(async (dispose) => {
+      const s = source();
+      const store = createUsageStore(s);
+      await store.refresh();
+      store.setCustomRange(
+        new Date("2026-08-01T00:00:00Z"),
+        new Date("2026-08-31T23:59:59Z"),
+        "Last month",
+      );
+      await flush();
+      expect(s.summary).toHaveBeenLastCalledWith({
+        range: "custom",
+        since: "2026-08-01T00:00:00.000Z",
+        until: "2026-08-31T23:59:59.000Z",
+        group_by: "kind",
+      });
+      expect(store.step().label).toBe("Last month");
+      dispose();
+    });
+  });
+
+  it("narrows into a bucket and steps back out through the trail", async () => {
+    await createRoot(async (dispose) => {
+      const s = source();
+      const store = createUsageStore(s);
+      store.setRange("month");
+      await flush();
+      expect(store.bucket()).toBe("day");
+
+      store.narrowTo("2026-09-05T00:00:00.000Z");
+      await flush();
+      expect(store.range()).toBe("custom");
+      expect(store.bucket()).toBe("hour");
+      expect(store.trail()).toHaveLength(1);
+      expect(s.timeline).toHaveBeenLastCalledWith({
+        range: "custom",
+        since: "2026-09-05T00:00:00.000Z",
+        until: "2026-09-06T00:00:00.000Z",
+        group_by: "kind",
+        bucket: "hour",
+      });
+
+      store.narrowTo("2026-09-05T10:00:00.000Z");
+      await flush();
+      expect(store.bucket()).toBe("quarter");
+      expect(store.trail()).toHaveLength(2);
+
+      store.backTo(0);
+      await flush();
+      expect(store.range()).toBe("month");
+      expect(store.trail()).toHaveLength(0);
+      dispose();
+    });
+  });
+
+  it("orders the sessions table by the column that was asked for", async () => {
+    await createRoot(async (dispose) => {
+      const s = source({
+        sessions: vi.fn().mockResolvedValue([
+          { ...session, session_id: "cheap", totals: { ...totals, cost_usd: 0.5 }, retries: 7 },
+          { ...session, session_id: "dear", totals: { ...totals, cost_usd: 9 }, retries: 0 },
+        ]),
+      });
+      const store = createUsageStore(s);
+      await store.refresh();
+      await flush();
+      store.setSort("cost");
+      expect(store.visibleSessions()[0].session_id).toBe("dear");
+      store.setSort("retries");
+      expect(store.visibleSessions()[0].session_id).toBe("cheap");
       dispose();
     });
   });
