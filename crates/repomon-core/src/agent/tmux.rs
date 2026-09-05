@@ -240,6 +240,7 @@ impl TmuxRuntime {
                         },
                         source: Some(resolved.source),
                         path: Some(resolved.path.to_string_lossy().into_owned()),
+                        not_applicable: false,
                     }
                 }
                 _ => crate::model::TmuxDoctorInfo {
@@ -247,6 +248,7 @@ impl TmuxRuntime {
                     version: None,
                     source: None,
                     path: Some(resolved.path.to_string_lossy().into_owned()),
+                    not_applicable: false,
                 },
             },
             None => crate::model::TmuxDoctorInfo {
@@ -254,6 +256,7 @@ impl TmuxRuntime {
                 version: None,
                 source: None,
                 path: None,
+                not_applicable: false,
             },
         }
     }
@@ -1144,6 +1147,19 @@ impl TmuxRuntime {
 /// Single-quote a string for safe inclusion in a shell command.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Adjust a raw tmux probe for platform (pure): tmux is not a Windows dependency (agents run
+/// through the bundled ConPTY [`super::windows::agent_host_doctor`] instead), so on Windows this
+/// marks the probe `not_applicable` rather than reporting it meaningfully missing. Off Windows
+/// the probe passes through unchanged. Takes the platform as a parameter (rather than reading it
+/// itself) so the Windows branch is testable on every OS.
+pub fn tmux_doctor_for_platform(
+    platform: crate::model::DoctorPlatform,
+    mut raw: crate::model::TmuxDoctorInfo,
+) -> crate::model::TmuxDoctorInfo {
+    raw.not_applicable = platform == crate::model::DoctorPlatform::Windows;
+    raw
 }
 
 /// Render a [`SpawnSpec`] to the single shell command string tmux runs via `sh -c`:
@@ -2300,5 +2316,36 @@ mod tests {
 
         let resolved = resolve_tmux_from(None, Some(empty_path), &[empty_sibling_dir]);
         assert_eq!(resolved, None);
+    }
+
+    fn sample_tmux_doctor(available: bool) -> crate::model::TmuxDoctorInfo {
+        crate::model::TmuxDoctorInfo {
+            available,
+            version: available.then(|| "tmux 3.4".to_string()),
+            source: available.then_some(crate::model::TmuxDoctorSource::System),
+            path: available.then(|| "/usr/bin/tmux".to_string()),
+            not_applicable: false,
+        }
+    }
+
+    #[test]
+    fn tmux_not_applicable_on_windows_regardless_of_probe() {
+        for available in [true, false] {
+            let doc =
+                tmux_doctor_for_platform(crate::model::DoctorPlatform::Windows, sample_tmux_doctor(available));
+            assert!(doc.not_applicable, "windows tmux must be marked not_applicable");
+        }
+    }
+
+    #[test]
+    fn tmux_stays_applicable_off_windows() {
+        for platform in [
+            crate::model::DoctorPlatform::Macos,
+            crate::model::DoctorPlatform::Linux,
+        ] {
+            let raw = sample_tmux_doctor(true);
+            let doc = tmux_doctor_for_platform(platform, raw.clone());
+            assert_eq!(doc, raw, "non-windows platforms must pass the probe through unchanged");
+        }
     }
 }

@@ -36,7 +36,7 @@ pub use claude::TranscriptSummary;
 pub use limit::{LimitMenu, UsageLimit, detect_usage_limit, menu_select_keys};
 pub use tmux::{
     ResolvedTmux, TmuxRuntime, WindowMeta, resolve_tmux_from, resolve_tmux_uncached, resolved_tmux,
-    shell_quote, tmux_program,
+    shell_quote, tmux_doctor_for_platform, tmux_program,
 };
 pub use usage::{
     AccountUsage, UsageRefreshReason, UsageRefreshResult, UsageRefreshed, UsageRefreshedReason,
