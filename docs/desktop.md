@@ -559,22 +559,46 @@ marked as running outside a lane.
 
 The view carries:
 
-- Headline figures for the window: equivalent API cost, tokens, cache hit rate, the share of the
-  tokens that were estimated rather than reported, and the number of turns.
-- A timeline of cost per bucket, stacked by whichever dimension the "Split by" control names.
-  Fifteen-minute, hourly and daily buckets.
+- Headline figures for the window: equivalent API cost first, then tokens and cache hit rate, with
+  turns and the estimated share behind them.
+- The window itself, spelled out under the controls: which range is on, and the dates it resolves
+  to. **Today**, **7 days** and **30 days** are the named ranges; **Custom** opens a calendar for
+  any two days, with **This month** and **Last month** as presets. The calendar is keyboard
+  navigable: arrows walk days and weeks, PageUp and PageDown walk months, Enter takes a day.
+- A timeline of cost or tokens per bucket, stacked by whichever dimension the "Split by" control
+  names, with a measure toggle above it. Every bucket in the window is drawn, empty ones included,
+  so the axis is a timeline rather than a list of the hours that happened to be busy. Weekends are
+  shaded on day buckets, hovering shows a crosshair and a readout (including "No usage"), and a
+  legend entry isolates its series.
+- Clicking a bar narrows the window to it: a day opens as hours, an hour as quarter hours. The
+  breadcrumb above the chart puts the window it came from back.
 - A breakdown table for that same dimension: agent, model, repo, lane or account.
 - Findings: the top cost drivers, models reading at a low cache hit rate, sessions that spent many
-  turns retrying, and light sessions that a cheaper model would have handled.
-- A sessions table with the task headline pulled from the transcript, turns, tool calls, retries,
-  duration, tokens and cost. Clicking a session's lane focuses it.
+  turns retrying, and light sessions that a cheaper model would have handled. A finding names its
+  session by task rather than by identifier, links to that session's row, and folds repeats of the
+  same shape into one line with a count and a total.
+- A sessions table with the task headline pulled from the transcript, the lane named the way the
+  sidebar names it, turns, tool calls, retries, duration, tokens and cost. Headings sort, and a
+  row opens to the token split, the lane, and the window the session ran in. Clicking a session's
+  lane focuses it.
 - Export to CSV or JSON. The daemon writes the file under its data directory and names the path.
+
+Numbers are formatted once, everywhere, including the CLI: tokens as k, M or B with one decimal
+("12.6B", never "12580.0M"); money as whole dollars above a thousand and cents below a hundred;
+durations with an empty unit dropped, so three hours reads "3h".
+
+A session's headline is the first thing the operator actually wrote. The extractor skips the
+blocks the CLIs inject into a turn (`<local-command-caveat>`, `<system-reminder>`,
+`<USER_REQUEST>`, `<task-notification>`, `<agent-message>`) and lines that are slash commands,
+takes the first real sentence, falls back to the first assistant sentence, and otherwise says
+"untitled session". The raw turn is kept as the row's tooltip.
 
 Costs are what the tokens would have cost on the provider's API. On a subscription plan such as
 Claude Max or Google AI Pro that is the value the plan returned rather than an invoice, which is
 why the figure is labelled "equivalent API cost" and sits beside the plan's own quota percentages
 on the sidebar's rate-limits card. A model with no published rate still contributes its tokens and
-is named under the breakdown rather than quietly costing nothing.
+is named under the breakdown rather than quietly costing nothing. A free-tier model id (one ending
+in `-free`) is priced at zero instead, because zero is its published rate.
 
 Antigravity keeps no token counts anywhere the CLI can read, so its rows are estimated from content
 length at four characters per token and counted in the "estimated" share.
