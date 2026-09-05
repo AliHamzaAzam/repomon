@@ -1888,3 +1888,16 @@ export function IconAlertTriangle(props: IconProps): JSX.Element {
     </svg>
   );
 }
+
+
+export function IconEye(props: IconProps & { off?: boolean }): JSX.Element {
+  return (
+    <svg width={props.size ?? 14} height={props.size ?? 14} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width={props.strokeWidth ?? 1.75} stroke-linecap="round"
+      stroke-linejoin="round" class={props.class} aria-hidden="true">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
+      {props.off ? <path d="m3 3 18 18" /> : null}
+    </svg>
+  );
+}

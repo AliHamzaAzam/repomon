@@ -727,3 +727,23 @@ describe("manual usage outcomes", () => {
     expect(screen.getByLabelText("Refresh rate limit data")).not.toBeDisabled();
   });
 });
+
+
+describe("sidebar cost visibility", () => {
+  it("defaults on, hides the Today row, and persists across a remount", () => {
+    localStorage.removeItem("repomon:sidebar-show-today-cost");
+    const { fleet, actions } = stubs([], []);
+    fleet.focusedUsage = () => ({ key: "default", label: "main", age_secs: 0, report: { windows: [] } });
+    fleet.costToday = () => 12;
+    const first = render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+    expect(screen.getByText("Today")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Hide today's cost in the sidebar"));
+    expect(screen.queryByText("Today")).not.toBeInTheDocument();
+    first.unmount();
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+    expect(screen.queryByText("Today")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Show today's cost in the sidebar"));
+    expect(screen.getByText("Today")).toBeInTheDocument();
+    localStorage.removeItem("repomon:sidebar-show-today-cost");
+  });
+});

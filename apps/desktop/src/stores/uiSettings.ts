@@ -42,6 +42,32 @@ export function onAutoCollapseChanged(callback: (enabled: boolean) => void): () 
   return () => window.removeEventListener(AUTO_COLLAPSE_EVENT, handler);
 }
 
+/** Sidebar cost visibility uses the same preference/event store as auto-collapse. */
+export const SIDEBAR_COST_STORAGE_KEY = "repomon:sidebar-show-today-cost";
+const SIDEBAR_COST_EVENT = "repomon:sidebar-show-today-cost-changed";
+
+export function readSidebarShowTodayCost(): boolean {
+  try { return localStorage.getItem(SIDEBAR_COST_STORAGE_KEY) !== "false"; }
+  catch { return true; }
+}
+
+export function saveSidebarShowTodayCost(enabled: boolean): void {
+  try { localStorage.setItem(SIDEBAR_COST_STORAGE_KEY, String(enabled)); } catch {}
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(SIDEBAR_COST_EVENT, { detail: enabled }));
+  }
+}
+
+export function onSidebarShowTodayCostChanged(callback: (enabled: boolean) => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const handler = (event: Event) => {
+    const value = (event as CustomEvent<unknown>).detail;
+    callback(typeof value === "boolean" ? value : readSidebarShowTodayCost());
+  };
+  window.addEventListener(SIDEBAR_COST_EVENT, handler);
+  return () => window.removeEventListener(SIDEBAR_COST_EVENT, handler);
+}
+
 export const LAYOUT_CHANGED_EVENT = "repomon:layout-changed";
 
 /**

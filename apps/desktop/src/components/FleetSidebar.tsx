@@ -8,6 +8,9 @@ import type { WorkspaceStore } from "../stores/workspace";
 import { formatUsd } from "./usageMetrics";
 import {
   readAutoCollapseEmptyLanes,
+  readSidebarShowTodayCost,
+  saveSidebarShowTodayCost,
+  onSidebarShowTodayCostChanged,
   onAutoCollapseChanged,
   notifyLayoutChanged,
 } from "../stores/uiSettings";
@@ -22,6 +25,7 @@ import RepoExtMenu from "./RepoExtMenu";
 import RepomindRow, { RepomindRowMenu, type RepomindMenuAction } from "./RepomindRow";
 import {
   AgentIcon,
+  IconEye,
   IconArrowDown,
   IconArrowUp,
   IconBolt,
@@ -573,6 +577,8 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   // E9: local spin state for the Rate Limits manual refresh button. Scoped here rather than reusing
   // `fleet.loading()`, which also flips on every 1.2s poll tick and would make the icon flicker
   // continuously instead of spinning only for the click the user actually made.
+  const [showTodayCost, setShowTodayCost] = createSignal(readSidebarShowTodayCost());
+  onMount(() => onCleanup(onSidebarShowTodayCostChanged(setShowTodayCost)));
   const [usageRefreshing, setUsageRefreshing] = createSignal(false);
   const [usageNotice, setUsageNotice] = createSignal<string | null>(null);
   let usageRequest = 0;
@@ -1110,6 +1116,16 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   </span>
                   <button
                     type="button"
+                    class="focus-ring flex shrink-0 items-center justify-center rounded p-0.5 text-muted hover:bg-raised transition-colors"
+                    title={showTodayCost() ? "Hide today's cost in the sidebar" : "Show today's cost in the sidebar"}
+                    aria-label={showTodayCost() ? "Hide today's cost in the sidebar" : "Show today's cost in the sidebar"}
+                    aria-pressed={showTodayCost()}
+                    onClick={() => { const next = !showTodayCost(); setShowTodayCost(next); saveSidebarShowTodayCost(next); notifyLayoutChanged(); }}
+                  >
+                    <IconEye size={11} off={!showTodayCost()} />
+                  </button>
+                  <button
+                    type="button"
                     class="focus-ring ml-0.5 flex items-center justify-center rounded p-0.5 text-muted/50 hover:bg-raised hover:text-muted transition-colors disabled:opacity-40"
                     title="Refresh usage data"
                     aria-label="Refresh rate limit data"
@@ -1123,7 +1139,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               <Show when={usageNotice()}><p role="status" class="mb-1.5 text-[10px] text-muted">{usageNotice()}</p></Show>
               {/* A partial fleet double in a test may not carry the ledger; the line simply
                   does not render then. */}
-              <Show when={props.fleet.costToday?.() != null}>
+              <Show when={showTodayCost() && props.fleet.costToday?.() != null}>
                 <div class="mb-1.5 flex items-center justify-between font-mono text-[10px]">
                   <span class="text-muted/90">Today</span>
                   <span class="tabular-nums text-foreground" title="What today's tokens would cost at published API rates">
