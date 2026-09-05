@@ -633,14 +633,21 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
             Ok(s) => s,
             Err(e) => {
                 report.failed += 1;
-                let version = if stale && source_missing(&source.path).await? {
-                    INGEST_VERSION
+                if stale && !source_missing(&source.path).await? {
+                    ctx.store
+                        .fail_usage_recount(path, e.to_string(), INGEST_VERSION)
+                        .await?;
                 } else {
-                    version
-                };
-                ctx.store
-                    .set_usage_cursor(path, offset, print, Some(e.to_string()), version)
-                    .await?;
+                    ctx.store
+                        .set_usage_cursor(
+                            path,
+                            offset,
+                            print,
+                            Some(e.to_string()),
+                            if stale { INGEST_VERSION } else { version },
+                        )
+                        .await?;
+                }
                 continue;
             }
         };
@@ -1414,6 +1421,45 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_stale_source_retires_on_third_failure_preserving_events_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        let path = dir.path().join("unreadable.jsonl");
+        fs::create_dir(&path).unwrap();
+        let path = path.to_string_lossy().to_string();
+        ctx.store
+            .record_usage_events(vec![stale_claude_event(&path, 4096)])
+            .await
+            .unwrap();
+        ctx.store
+            .set_usage_cursor(path.clone(), 4096, 1, None, 0)
+            .await
+            .unwrap();
+        for attempt in 1..=3 {
+            let report = ingest_once(&ctx).await.unwrap();
+            assert_eq!(report.failed, 1);
+            assert_eq!(report.recount_attempts, 1);
+            assert_eq!(report.stale_remaining, u64::from(attempt < 3));
+            let cursor = ctx.store.usage_cursor(path.clone()).await.unwrap().unwrap();
+            assert_eq!(
+                cursor.ingest_version,
+                if attempt < 3 { 0 } else { INGEST_VERSION }
+            );
+            assert_eq!(cursor.offset, 4096);
+            assert!(cursor.error.is_some());
+            assert!(
+                ctx.store
+                    .usage_source_event(path.clone())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(ingest_once(&ctx).await.unwrap().recount_attempts, 0);
     }
 
     #[tokio::test]

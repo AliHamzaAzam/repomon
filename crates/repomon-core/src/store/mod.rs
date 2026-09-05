@@ -82,6 +82,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0027_usage_ingest_version.sql"),
     ),
     (28, include_str!("../../migrations/0028_usage_events_model.sql")),
+    (29, include_str!("../../migrations/0029_usage_recount_failures.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -2134,7 +2135,7 @@ impl Store {
                  ON CONFLICT(source_path) DO UPDATE SET
                     offset = excluded.offset, mtime = excluded.mtime,
                     scanned_at = excluded.scanned_at, error = excluded.error,
-                    ingest_version = excluded.ingest_version",
+                    ingest_version = excluded.ingest_version, recount_failures = 0",
                 params![
                     source_path,
                     offset as i64,
@@ -2143,6 +2144,28 @@ impl Store {
                     error,
                     ingest_version as i64
                 ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Keep old events and the resume offset after a failed recount. Three consecutive failed
+    /// attempts retire this cursor for the current reader; success resets the persisted counter.
+    pub async fn fail_usage_recount(
+        &self,
+        source_path: String,
+        error: String,
+        version: u32,
+    ) -> Result<()> {
+        let now = to_iso(&Utc::now());
+        self.call(move |c| {
+            c.execute(
+                "UPDATE usage_ingest_cursors SET error = ?2, scanned_at = ?3,
+                    ingest_version = CASE WHEN recount_failures + 1 >= 3 THEN ?4 ELSE ingest_version END,
+                    recount_failures = CASE WHEN recount_failures + 1 >= 3 THEN 0 ELSE recount_failures + 1 END
+                 WHERE source_path = ?1 AND ingest_version < ?4",
+                params![source_path, error, now, version],
             )?;
             Ok(())
         })
@@ -5222,6 +5245,69 @@ mod tests {
         let c = s.usage_cursor("/t/s.jsonl".into()).await.unwrap().unwrap();
         assert_eq!(c.error.as_deref(), Some("unreadable"));
         assert_eq!(s.usage_cursors().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recount_failures_survive_reopen_and_success_resets_the_streak() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("usage.db");
+        let path = "/t/recount.jsonl".to_string();
+        let s = Store::open(&db).unwrap();
+        s.set_usage_cursor(path.clone(), 512, 99, None, 0)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            s.fail_usage_recount(path.clone(), "unreadable".into(), 1)
+                .await
+                .unwrap();
+        }
+        drop(s);
+        let s = Store::open(&db).unwrap();
+        s.fail_usage_recount(path.clone(), "still unreadable".into(), 1)
+            .await
+            .unwrap();
+        let cursor = s.usage_cursor(path.clone()).await.unwrap().unwrap();
+        assert_eq!(cursor.ingest_version, 1);
+        assert_eq!(cursor.offset, 512);
+        assert_eq!(cursor.error.as_deref(), Some("still unreadable"));
+        // A later reader revision gets its own full retry budget.
+        s.fail_usage_recount(path.clone(), "retry".into(), 2)
+            .await
+            .unwrap();
+        s.fail_usage_recount(path.clone(), "retry".into(), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.usage_cursor(path.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .ingest_version,
+            1
+        );
+        s.set_usage_cursor(path.clone(), 1024, 100, None, 2)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            s.fail_usage_recount(path.clone(), "new failure".into(), 3)
+                .await
+                .unwrap();
+            assert_eq!(
+                s.usage_cursor(path.clone())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .ingest_version,
+                2
+            );
+        }
+        s.fail_usage_recount(path.clone(), "third failure".into(), 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.usage_cursor(path).await.unwrap().unwrap().ingest_version,
+            3
+        );
     }
 
     #[tokio::test]
