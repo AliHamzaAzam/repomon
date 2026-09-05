@@ -5,7 +5,7 @@
 .DESCRIPTION
   Everything below is something CI could not previously tell us, and something the operator hit
   on a real VM: a daemon that dies in the loader before any Rust runs, a client that cannot reach
-  it over a named pipe, and an installer whose three executables do not end up side by side (the
+  it over a named pipe, and an installer whose four executables do not end up side by side (the
   daemon spawns the agent host by looking next to itself, so "side by side" is load bearing).
 
   Four checks, all fatal:
@@ -14,7 +14,7 @@
     2. repomond.exe serves a private pipe with a throwaway data directory, and repomon.exe
        reaches it with a read RPC.
     3. The daemon shuts down when asked.
-    4. The NSIS bundle installs silently and leaves repomon-desktop.exe, repomond.exe, and
+    4. The NSIS bundle installs silently and leaves repomon-desktop.exe, repomon.exe, repomond.exe, and
        repomon-agent-host.exe in one directory.
 
   Nothing here touches the runner's real data directory, its real pipe name, or any process it
@@ -125,7 +125,7 @@ if (-not $daemon.WaitForExit(20000)) {
 }
 Write-Host "== the daemon shut down cleanly"
 
-# -------------------------------------------------------- 4. the installer lays out three exes
+# -------------------------------------------------------- 4. the installer lays out four exes
 
 $bundleDir = Join-Path $releaseDir "bundle\nsis"
 if (-not (Test-Path -LiteralPath $bundleDir)) { Fail "no NSIS bundle directory at $bundleDir" }
@@ -138,7 +138,7 @@ Write-Host "== installing $($installer.Name) silently into $InstallDir"
 $setup = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/D=$InstallDir") -PassThru -Wait
 if ($setup.ExitCode -ne 0) { Fail "the installer exited with $($setup.ExitCode)" }
 
-$expected = @("repomon-desktop.exe", "repomond.exe", "repomon-agent-host.exe")
+$expected = @("repomon-desktop.exe", "repomon.exe", "repomond.exe", "repomon-agent-host.exe")
 $found = @{}
 foreach ($name in $expected) {
   $hit = Get-ChildItem -LiteralPath $InstallDir -Filter $name -Recurse -ErrorAction SilentlyContinue |
@@ -154,9 +154,9 @@ foreach ($name in $expected) {
 $directories = @($found.Values | Sort-Object -Unique)
 if ($directories.Count -ne 1) {
   foreach ($name in $expected) { Write-Host "$name -> $($found[$name])" }
-  Fail "the three executables are not in one directory; the daemon spawns the agent host by looking next to itself"
+  Fail "the four executables are not in one directory; the daemon spawns the agent host by looking next to itself"
 }
-Write-Host "== the installer put all three executables in $($directories[0])"
+Write-Host "== the installer put all four executables in $($directories[0])"
 
 Remove-Item -LiteralPath $dataDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "Windows smoke test passed."
