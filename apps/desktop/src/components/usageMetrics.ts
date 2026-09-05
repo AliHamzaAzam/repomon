@@ -148,8 +148,10 @@ function oneDecimal(value: number): string {
 }
 
 /**
- * Dollars: whole dollars above a thousand, cents below a hundred, and enough places below a cent
- * that a fraction of one still reads as a number. Mirrors `repomon_core::usage_ledger::money`.
+ * Dollars: whole dollars above a thousand, cents below a hundred, and never more than two decimal
+ * places, so a column of costs reads as one consistent format rather than mixing precisions. A
+ * sub-cent amount reads as "<$0.01".
+ * Mirrors `repomon_core::usage_ledger::money`.
  */
 export function formatUsd(n: number): string {
   if (n === 0) return "$0";
@@ -158,14 +160,14 @@ export function formatUsd(n: number): string {
   if (size >= 1000) return `${sign}$${Math.round(size).toLocaleString("en-US")}`;
   if (size >= 100) return `${sign}$${size.toFixed(1)}`;
   if (size >= 0.01) return `${sign}$${size.toFixed(2)}`;
-  return `${sign}$${size.toFixed(4)}`;
+  return `${sign}<$0.01`;
 }
 
 /** How long something took, with an empty unit dropped so "3h 0m" reads "3h". */
 export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "";
+  if (!Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 60_000) return "<1m";
   const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "under a minute";
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   const restMinutes = minutes % 60;
@@ -244,6 +246,35 @@ export function bucketLabel(at: string, bucket: UsageBucket): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * The Agent column's character budget keeps "claude-fable-5-1" intact.
+ */
+export const AGENT_ID_MAX_CHARS = 18;
+
+/**
+ * Shorten `text` to `max` characters by eliding the middle, so an identifier's family and its
+ * version both survive. Text already within budget is returned unchanged.
+ */
+export function truncateMiddle(text: string, max: number): string {
+  if (text.length <= max) return text;
+  if (max <= 1) return text.slice(0, max);
+  const keep = max - 1;
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
+}
+
+/** Above this many retries a session's retry count is worth flagging; below it, it is routine. */
+const RETRY_NOTICE_THRESHOLD = 5;
+
+/**
+ * Whether a session's retry count should draw the eye. One or two retries are unremarkable and
+ * stay quiet; only a run that retried repeatedly is worth the attention colour.
+ */
+export function retryTone(retries: number): "quiet" | "notice" {
+  return retries >= RETRY_NOTICE_THRESHOLD ? "notice" : "quiet";
+}
+
 /** The last two "/"-separated segments of a path, or the whole path when it has fewer than that. */
 export function pathTail(path: string): string {
   const parts = path.split("/").filter((part) => part.length > 0);
@@ -264,7 +295,9 @@ export interface LaneCell {
  * a raw working-directory path to show, and a full absolute path (`/Users/.../some-long-repo-name`)
  * both crowds out every other column and tells the operator nothing a shorter form would not: the
  * last two segments are shown instead, tagged "external" so a bare path never reads as if repomon
- * had named it, with the full path kept in the tooltip.
+ * had named it, with the full path kept in the tooltip. A session with no path at all is not
+ * "external" to anything in particular; it is only unknown, so it is not tagged either, rather
+ * than stacking two warnings over one blank cell.
  */
 export function laneCell(row: { lane_label: string | null; cwd: string | null }): LaneCell {
   if (row.lane_label) {
@@ -273,7 +306,7 @@ export function laneCell(row: { lane_label: string | null; cwd: string | null })
   if (row.cwd) {
     return { label: pathTail(row.cwd), title: row.cwd, external: true };
   }
-  return { label: "unknown", title: "unknown", external: true };
+  return { label: "unknown", title: "unknown", external: false };
 }
 
 /** Which of the sessions table's narrower columns fit at a given table width. */
@@ -291,9 +324,31 @@ export interface SessionColumnVisibility {
  * Cost): what is being asked of the fleet and what it costs, which is what the view exists to
  * answer.
  */
-const HIDE_SUBAGENTS_BELOW_PX = 820;
-const HIDE_TOOLS_BELOW_PX = 720;
-const HIDE_RETRIES_BELOW_PX = 580;
+// Pixel budgets include both 8px gutters. Task gets the remaining width, never less than 180px.
+export const SESSION_WIDTHS = {
+  task: 180,
+  agent: 160,
+  lane: 176,
+  turns: 64,
+  tools: 64,
+  subagents: 56,
+  retries: 80,
+  time: 80,
+  tokens: 80,
+  cost: 104,
+} as const;
+const ESSENTIAL_SESSION_WIDTH = SESSION_WIDTHS.task + SESSION_WIDTHS.agent + SESSION_WIDTHS.lane
+  + SESSION_WIDTHS.turns + SESSION_WIDTHS.time + SESSION_WIDTHS.tokens + SESSION_WIDTHS.cost;
+const HIDE_RETRIES_BELOW_PX = ESSENTIAL_SESSION_WIDTH + SESSION_WIDTHS.retries;
+const HIDE_TOOLS_BELOW_PX = HIDE_RETRIES_BELOW_PX + SESSION_WIDTHS.tools;
+const HIDE_SUBAGENTS_BELOW_PX = HIDE_TOOLS_BELOW_PX + SESSION_WIDTHS.subagents;
+
+/** One plan for the table's colgroup and the detail panel's grid. */
+export function sessionColumnPlan(visible: SessionColumnVisibility) {
+  return Object.entries(SESSION_WIDTHS)
+    .filter(([id]) => !(id in visible) || visible[id as keyof SessionColumnVisibility])
+    .map(([id, width]) => ({ id, width }));
+}
 
 export function sessionColumnVisibility(tableWidth: number): SessionColumnVisibility {
   return {

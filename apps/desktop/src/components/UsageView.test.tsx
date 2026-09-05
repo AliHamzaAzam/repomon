@@ -424,3 +424,63 @@ describe("UsageView", () => {
     expect(onOpenLane).toHaveBeenCalledWith(3);
   });
 });
+
+
+describe("UsageView table layout", () => {
+  it("gives long identities and five-digit counters separate padded columns", async () => {
+    const model = "claude-3-7-sonnet-20250219";
+    const lane = "repomon/repomon-fix-status-v2-with-a-long-path";
+    mount(source({ sessions: vi.fn().mockResolvedValue([{ ...session, model, lane_label: lane,
+      turns: 11798, tool_calls: 99999, retries: 38, ended_at: session.started_at }]) }));
+    await flush();
+    const table = screen.getByRole("table", { name: "Sessions" });
+    const cells = table.querySelectorAll("tbody tr:first-child td");
+    expect(cells).toHaveLength(10);
+    for (const cell of cells) expect(cell.classList.contains("px-2")).toBe(true);
+    expect(cells[1].getAttribute("title")).toBe(model);
+    expect(cells[1].textContent).toMatch(/^claude-3-.*20250219$/);
+    expect(cells[2].querySelector(".truncate-start bdi")?.textContent).toBe(lane);
+    for (const cell of Array.from(cells).slice(3)) {
+      expect(cell.classList.contains("text-right")).toBe(true);
+      expect(cell.classList.contains("tabular-nums")).toBe(true);
+    }
+    expect(cells[3].textContent).toBe("11798");
+    expect(cells[4].textContent).toBe("99999");
+    expect(cells[6].classList.contains("text-attention")).toBe(true);
+    expect(cells[7].textContent).toBe("<1m");
+    const widths = Array.from(table.querySelectorAll("col")).map((col) => col.style.width);
+    expect(widths).toEqual(["", "160px", "176px", "64px", "64px", "56px", "80px", "80px", "80px", "104px"]);
+    expect(table.querySelector("thead")?.className).toContain("sticky top-0 z-10 bg-surface");
+    for (const button of table.querySelectorAll("th button")) expect(button.querySelector("svg")).toBeTruthy();
+    fireEvent.click(screen.getByText("Wire up the ledger"));
+    await flush();
+    const panel = table.querySelector(".usage-session-details");
+    expect(panel).toBeTruthy();
+    expect(table.getAttribute("style")).toContain("--session-grid: minmax(180px, 1fr) 160px 176px");
+    expect(panel?.closest("td")?.colSpan).toBe(10);
+  });
+
+  it("keeps external attribution and routine retries quiet", async () => {
+    mount(source({ sessions: vi.fn().mockResolvedValue([{ ...session, lane_id: null,
+      lane_label: null, cwd: "/repos/external-task", ended_at: null }]) }));
+    await flush();
+    expect(screen.getByText("external").className).toContain("text-muted");
+    expect(screen.getByText("external").className).not.toContain("attention");
+    const table = screen.getByRole("table", { name: "Sessions" });
+    expect(table.querySelectorAll("tbody td")[6].className).toContain("text-muted");
+    expect(table.querySelectorAll("tbody td")[7].textContent).toBe("-");
+  });
+
+  it("uses matching gutters and numeric alignment in Where it went", async () => {
+    mount(source());
+    await flush();
+    const table = screen.getByRole("table", { name: "Where it went" });
+    for (const cell of table.querySelectorAll("th, td")) expect(cell.classList.contains("px-2")).toBe(true);
+    for (const row of table.querySelectorAll("tbody tr")) {
+      for (const cell of Array.from(row.children).slice(1)) {
+        expect(cell.classList.contains("tabular-nums")).toBe(true);
+        expect(cell.classList.contains("text-right")).toBe(true);
+      }
+    }
+  });
+});

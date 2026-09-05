@@ -15,15 +15,19 @@ import {
 import UsageChart from "./UsageChart";
 import UsageRangePicker from "./UsageRangePicker";
 import {
+  AGENT_ID_MAX_CHARS,
   formatDuration,
   formatRatesFootnote,
   formatTokens,
   formatUsd,
   groupRowLabel,
   laneCell,
+  retryTone,
   seriesVar,
+  sessionColumnPlan,
   sessionColumnVisibility,
   subagentShare,
+  truncateMiddle,
   windowLine,
   withContinuousAxis,
   type SessionColumnVisibility,
@@ -60,15 +64,14 @@ const BUCKETS: { id: UsageBucket; label: string }[] = [
 ];
 
 /**
- * The sessions table's sortable numeric columns, in the order they appear, each with the fixed
- * width its column keeps under `table-fixed`. Retries is the one column here that can also drop
- * out entirely at a narrow table width; see `sessionColumnVisibility`.
+ * Sortable numeric headings, in display order. The shared column plan owns their widths;
+ * Retries drops out at narrow widths according to `sessionColumnVisibility`.
  */
-const SESSION_COLUMNS: { id: SessionSort; label: string; widthClass: string }[] = [
-  { id: "retries", label: "Retries", widthClass: "w-14" },
-  { id: "time", label: "Time", widthClass: "w-16" },
-  { id: "tokens", label: "Tokens", widthClass: "w-16" },
-  { id: "cost", label: "Cost", widthClass: "w-20" },
+const SESSION_COLUMNS: { id: SessionSort; label: string }[] = [
+  { id: "retries", label: "Retries" },
+  { id: "time", label: "Time" },
+  { id: "tokens", label: "Tokens" },
+  { id: "cost", label: "Cost" },
 ];
 
 function percent(value: number): string {
@@ -154,6 +157,13 @@ export default function UsageView(props: UsageViewProps) {
   // Generous until the first measurement lands, so every column shows rather than flashing narrow.
   const [sessionsWidth, setSessionsWidth] = createSignal(2000);
   const columns = createMemo<SessionColumnVisibility>(() => sessionColumnVisibility(sessionsWidth()));
+  const columnPlan = createMemo(() => sessionColumnPlan(columns()));
+  const tableMinWidth = createMemo(() => columnPlan().reduce((sum, col) => sum + col.width, 0));
+  const detailGrid = createMemo(() =>
+    columnPlan()
+      .map((col) => col.id === "task" ? `minmax(${col.width}px, 1fr)` : `${col.width}px`)
+      .join(" "),
+  );
   // Task, Agent, Lane, Turns, Time, Tokens, Cost are always shown; Tools, Sub and Retries add to
   // that.
   const sessionColSpan = createMemo(
@@ -362,45 +372,51 @@ export default function UsageView(props: UsageViewProps) {
 
           <div class="flex flex-wrap items-start gap-4 border-t border-line px-4 py-4">
             <Card title="Where it went">
-              <table class="w-full text-xs">
-                <thead>
-                  <tr class="border-b border-line text-muted">
-                    <th class="py-1 text-left font-normal">Group</th>
-                    <th class="py-1 text-right font-normal">In</th>
-                    <th class="py-1 text-right font-normal">Out</th>
-                    <th class="py-1 text-right font-normal">Cached</th>
-                    <th class="py-1 text-right font-normal">Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <For each={summary()?.groups ?? []}>
-                    {(row, index) => (
-                      <tr class="border-b border-line/60 odd:bg-raised/30">
-                        <td class="max-w-56 truncate py-1 text-foreground">
-                          <span
-                            class="mr-1.5 inline-block h-2 w-2 rounded-xs align-middle"
-                            style={{ "background-color": seriesVar(index()) }}
-                            aria-hidden="true"
-                          />
-                          {groupRowLabel(row, store.groupBy())}
-                        </td>
-                        <td class="py-1 text-right tabular-nums text-muted">
-                          {formatTokens(row.totals.input_tokens)}
-                        </td>
-                        <td class="py-1 text-right tabular-nums text-muted">
-                          {formatTokens(row.totals.output_tokens)}
-                        </td>
-                        <td class="py-1 text-right tabular-nums text-muted">
-                          {formatTokens(row.totals.cache_read_tokens)}
-                        </td>
-                        <td class="py-1 text-right font-semibold tabular-nums text-foreground">
-                          {formatUsd(row.totals.cost_usd)}
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
+              <div class="overflow-x-auto">
+                <table class="usage-table w-full min-w-100 table-fixed text-xs" aria-label="Where it went">
+                  <colgroup>
+                    <col />
+                    <col class="w-16" /><col class="w-16" /><col class="w-16" /><col class="w-24" />
+                  </colgroup>
+                  <thead>
+                    <tr class="border-b border-line text-muted">
+                      <th class="px-2 py-2 text-left font-medium">Group</th>
+                      <th class="px-2 py-2 text-right font-medium">In</th>
+                      <th class="px-2 py-2 text-right font-medium">Out</th>
+                      <th class="px-2 py-2 text-right font-medium">Cached</th>
+                      <th class="px-2 py-2 text-right font-medium">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <For each={summary()?.groups ?? []}>
+                      {(row, index) => (
+                        <tr class="border-b border-line/30 hover:bg-raised/60">
+                          <td class="truncate px-2 py-2 text-foreground" title={groupRowLabel(row, store.groupBy())}>
+                            <span
+                              class="mr-1.5 inline-block h-2 w-2 rounded-xs align-middle"
+                              style={{ "background-color": seriesVar(index()) }}
+                              aria-hidden="true"
+                            />
+                            {groupRowLabel(row, store.groupBy())}
+                          </td>
+                          <td class="px-2 py-2 text-right tabular-nums text-muted">
+                            {formatTokens(row.totals.input_tokens)}
+                          </td>
+                          <td class="px-2 py-2 text-right tabular-nums text-muted">
+                            {formatTokens(row.totals.output_tokens)}
+                          </td>
+                          <td class="px-2 py-2 text-right tabular-nums text-muted">
+                            {formatTokens(row.totals.cache_read_tokens)}
+                          </td>
+                          <td class="px-2 py-2 text-right font-semibold tabular-nums text-foreground">
+                            {formatUsd(row.totals.cost_usd)}
+                          </td>
+                        </tr>
+                      )}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
               <Show when={(summary()?.unpriced_models.length ?? 0) > 0}>
                 <p class="mt-2 text-xs text-attention">
                   No published rate for {summary()?.unpriced_models.join(", ")}. Tokens are counted;
@@ -451,69 +467,75 @@ export default function UsageView(props: UsageViewProps) {
               when={store.visibleSessions().length > 0}
               fallback={<p class="text-xs text-muted">No session matches that filter.</p>}
             >
-              <table class="w-full table-fixed text-xs">
-                <thead class="sticky top-0 z-10 bg-background">
-                  <tr class="border-b border-line text-muted">
-                    <th
-                      class="py-1 text-left font-normal"
-                      aria-sort={store.sort() === "recent" ? "descending" : "none"}
-                    >
-                      <SortButton
-                        column={{ id: "recent", label: "Task" }}
-                        active={store.sort() === "recent"}
-                        onSelect={store.setSort}
-                      />
-                    </th>
-                    <th class="w-24 py-1 text-left font-normal">Agent</th>
-                    <th class="w-40 py-1 text-left font-normal">Lane</th>
-                    <th class="w-12 py-1 text-right font-normal">Turns</th>
-                    <Show when={columns().tools}>
-                      <th class="w-12 py-1 text-right font-normal">Tools</th>
-                    </Show>
-                    <Show when={columns().subagents}>
+              <div class="focus-ring max-h-128 overflow-auto" tabindex="0" role="region" aria-label="Sessions table">
+                <table class="usage-table w-full table-fixed text-xs" aria-label="Sessions"
+                  style={{ "min-width": `${tableMinWidth()}px`, "--session-grid": detailGrid() }}>
+                  <colgroup>
+                    <For each={columnPlan()}>{(col) => <col style={col.id === "task" ? {} : { width: `${col.width}px` }} />}</For>
+                  </colgroup>
+                  <thead class="sticky top-0 z-10 bg-surface">
+                    <tr class="border-b border-line text-muted">
                       <th
-                        class="w-12 py-1 text-right font-normal"
-                        title="Share of the session's tokens its subagents spent"
+                        class="px-2 py-2 text-left font-medium"
+                        aria-sort={store.sort() === "recent" ? "descending" : "none"}
                       >
-                        Sub
+                        <SortButton
+                          column={{ id: "recent", label: "Task" }}
+                          active={store.sort() === "recent"}
+                          onSelect={store.setSort}
+                        />
                       </th>
-                    </Show>
-                    <For each={SESSION_COLUMNS}>
-                      {(column) => (
-                        <Show when={column.id !== "retries" || columns().retries}>
-                          <th
-                            class={`${column.widthClass} py-1 text-right font-normal`}
-                            aria-sort={store.sort() === column.id ? "descending" : "none"}
-                          >
-                            <SortButton
-                              column={column}
-                              active={store.sort() === column.id}
-                              onSelect={store.setSort}
-                            />
-                          </th>
-                        </Show>
+                      <th class="px-2 py-2 text-left font-medium">Agent</th>
+                      <th class="px-2 py-2 text-left font-medium">Lane</th>
+                      <th class="px-2 py-2 text-right font-medium">Turns</th>
+                      <Show when={columns().tools}>
+                        <th class="px-2 py-2 text-right font-medium">Tools</th>
+                      </Show>
+                      <Show when={columns().subagents}>
+                        <th
+                          class="px-2 py-2 text-right font-medium"
+                          title="Share of the session's tokens its subagents spent"
+                        >
+                          Sub
+                        </th>
+                      </Show>
+                      <For each={SESSION_COLUMNS}>
+                        {(column) => (
+                          <Show when={column.id !== "retries" || columns().retries}>
+                            <th
+                              class="px-2 py-2 text-right font-medium"
+                              aria-sort={store.sort() === column.id ? "descending" : "none"}
+                            >
+                              <SortButton
+                                column={column}
+                                active={store.sort() === column.id}
+                                onSelect={store.setSort}
+                              />
+                            </th>
+                          </Show>
+                        )}
+                      </For>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <For each={store.visibleSessions()}>
+                      {(row) => (
+                        <SessionRow
+                          row={row}
+                          expanded={expanded() === row.session_id}
+                          laneIsLive={row.lane_id !== null && liveLanes().has(row.lane_id)}
+                          columns={columns()}
+                          colSpan={sessionColSpan()}
+                          onToggle={() =>
+                            setExpanded((open) => (open === row.session_id ? null : row.session_id))
+                          }
+                          onOpenLane={props.onOpenLane}
+                        />
                       )}
                     </For>
-                  </tr>
-                </thead>
-                <tbody>
-                  <For each={store.visibleSessions()}>
-                    {(row) => (
-                      <SessionRow
-                        row={row}
-                        expanded={expanded() === row.session_id}
-                        laneIsLive={row.lane_id !== null && liveLanes().has(row.lane_id)}
-                        columns={columns()}
-                        colSpan={sessionColSpan()}
-                        onToggle={() =>
-                          setExpanded((open) => (open === row.session_id ? null : row.session_id))
-                        }
-                        onOpenLane={props.onOpenLane}
-                      />
-                    )}
-                  </For>
-                </tbody>
-              </table>
+                  </tbody>
+                </table>
+              </div>
             </Show>
             <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
               <p
@@ -555,7 +577,7 @@ function Figure(props: { value: string; label: string }) {
   );
 }
 
-/** A sortable column heading. The arrow only appears on the column doing the sorting. */
+/** A sortable heading with a stable indicator slot, emphasized for the active sort. */
 function SortButton(props: {
   column: { id: SessionSort; label: string };
   active: boolean;
@@ -564,7 +586,7 @@ function SortButton(props: {
   return (
     <button
       type="button"
-      class={`focus-ring rounded-xs transition-colors ${
+      class={`focus-ring inline-flex items-center gap-1 rounded-xs whitespace-nowrap transition-colors ${
         props.active ? "font-semibold text-foreground" : "text-muted hover:text-foreground"
       }`}
       title={
@@ -575,11 +597,9 @@ function SortButton(props: {
       onClick={() => props.onSelect(props.column.id)}
     >
       {props.column.label}
-      <Show when={props.active}>
-        <span class="ml-0.5" aria-hidden="true">
-          <IconChevronDown size={9} class="inline align-middle" />
-        </span>
-      </Show>
+      <span class={props.active ? "text-foreground" : "text-muted/60"} aria-hidden="true">
+        <IconChevronDown size={10} />
+      </span>
     </button>
   );
 }
@@ -637,15 +657,17 @@ function SessionRow(props: {
   const cell = () => laneCell(row());
   const share = () => subagentShare(row().totals);
   const lane = () => row().lane_label ?? row().cwd ?? "";
-  const duration = () => formatDuration(sessionDurationMs(row()));
+  const duration = () => formatDuration(
+    row().started_at && row().ended_at ? sessionDurationMs(row()) : NaN,
+  );
 
   return (
     <>
       <tr
-        class="cursor-pointer border-b border-line/60 odd:bg-raised/30 hover:bg-raised/60"
+        class="cursor-pointer border-b border-line/30 hover:bg-raised/60"
         onClick={() => props.onToggle()}
       >
-        <td class="min-w-0 py-1 text-foreground" title={row().headline_raw ?? task()}>
+        <td class="min-w-0 px-2 py-2 text-foreground" title={row().headline_raw ?? task()}>
           <button
             type="button"
             class="focus-ring flex w-full min-w-0 items-center gap-1 rounded-xs text-left"
@@ -665,40 +687,41 @@ function SessionRow(props: {
             </span>
           </button>
         </td>
-        <td class="w-24 truncate py-1 text-muted">{row().model || row().agent_kind}</td>
-        <td class="w-40 py-1">
+        <td class="px-2 py-2 text-muted" title={row().model || row().agent_kind}>
+          <span class="block truncate">{truncateMiddle(row().model || row().agent_kind, AGENT_ID_MAX_CHARS)}</span>
+        </td>
+        <td class="px-2 py-2">
           <Show
             when={props.laneIsLive && row().lane_id !== null}
             fallback={
               <span class="flex min-w-0 items-center gap-1" title={cell().title}>
-                <span class="truncate text-muted">{cell().label}</span>
+                <span class="truncate-start min-w-0 flex-1 text-muted"><bdi dir="ltr">{cell().label}</bdi></span>
                 <Show when={cell().external}>
-                  <span class="shrink-0 text-attention/90">·</span>
-                  <span class="shrink-0 text-attention/90">external</span>
+                  <span class="shrink-0 text-[10px] text-muted">external</span>
                 </Show>
               </span>
             }
           >
             <button
               type="button"
-              class="focus-ring truncate rounded-xs text-signal hover:underline"
+              class="focus-ring truncate-start block w-full min-w-0 rounded-xs text-signal hover:underline"
               title={row().cwd ?? undefined}
               onClick={(event) => {
                 event.stopPropagation();
                 props.onOpenLane?.(row().lane_id as number);
               }}
             >
-              {lane()}
+              <bdi dir="ltr">{lane()}</bdi>
             </button>
           </Show>
         </td>
-        <td class="w-12 py-1 text-right tabular-nums text-muted">{row().turns}</td>
+        <td class="px-2 py-2 text-right tabular-nums text-muted">{row().turns}</td>
         <Show when={props.columns.tools}>
-          <td class="w-12 py-1 text-right tabular-nums text-muted">{row().tool_calls}</td>
+          <td class="px-2 py-2 text-right tabular-nums text-muted">{row().tool_calls}</td>
         </Show>
         <Show when={props.columns.subagents}>
           <td
-            class="w-12 py-1 text-right tabular-nums text-muted"
+            class="px-2 py-2 text-right tabular-nums text-muted"
             title={
               share() === null
                 ? "No subagent turns"
@@ -710,48 +733,48 @@ function SessionRow(props: {
         </Show>
         <Show when={props.columns.retries}>
           <td
-            class={`w-14 py-1 text-right tabular-nums ${row().retries > 0 ? "text-attention" : "text-muted"}`}
+            class={`px-2 py-2 text-right tabular-nums ${retryTone(row().retries) === "notice" ? "font-medium text-attention" : "text-muted"}`}
           >
             {row().retries}
           </td>
         </Show>
-        <td class="w-16 py-1 text-right tabular-nums text-muted">{duration()}</td>
-        <td class="w-16 py-1 text-right tabular-nums text-muted">
+        <td class="px-2 py-2 text-right tabular-nums text-muted">{duration()}</td>
+        <td class="px-2 py-2 text-right tabular-nums text-muted">
           {formatTokens(row().totals.total_tokens)}
         </td>
-        <td class="w-20 py-1 text-right font-semibold tabular-nums text-foreground">
+        <td class="px-2 py-2 text-right font-semibold tabular-nums text-foreground">
           {formatUsd(row().totals.cost_usd)}
         </td>
       </tr>
       <Show when={props.expanded}>
-        <tr class="border-b border-line/60 bg-raised/40">
-          <td colspan={props.colSpan} class="px-1 py-2">
-            <p class="mb-2 text-xs text-foreground" title={row().headline_raw ?? undefined}>
-              {task()}
-            </p>
-            <dl class="flex flex-wrap gap-x-8 gap-y-2 text-xs">
-              <Detail term="Model" value={row().model || "unknown"} />
-              <Detail term="Agent" value={row().agent_kind} />
-              <Detail term="Input" value={formatTokens(row().totals.input_tokens)} />
-              <Detail term="Output" value={formatTokens(row().totals.output_tokens)} />
-              <Detail term="Cache read" value={formatTokens(row().totals.cache_read_tokens)} />
-              <Detail term="Cache write" value={formatTokens(row().totals.cache_write_tokens)} />
-              <Detail term="Thinking" value={formatTokens(row().totals.thinking_tokens)} />
-              <Detail
-                term="Subagents"
-                value={
-                  share() === null
-                    ? "none"
-                    : `${formatTokens(row().totals.subagent_tokens)} · ${share()}%`
-                }
-              />
-              <Detail term="Lane" value={lane() || "outside a lane"} />
-              <Detail term="Window" value={windowLine(row().started_at, duration())} />
-              <SessionIdDetail sessionId={row().session_id} />
-              <Show when={row().estimated}>
-                <Detail term="Counts" value="estimated from content length" />
-              </Show>
-            </dl>
+        <tr class="border-b border-line/30 bg-raised/40">
+          <td colspan={props.colSpan} class="usage-detail-cell">
+            <div class="usage-session-details">
+              <div class="min-w-0 px-2 py-3">
+                <p class="mb-2 break-words text-xs text-foreground" title={row().headline_raw ?? undefined}>{task()}</p>
+                <dl><SessionIdDetail sessionId={row().session_id} /></dl>
+              </div>
+              <dl class="min-w-0 space-y-2 px-2 py-3">
+                <Detail term="Model" value={row().model || "unknown"} />
+                <Detail term="Agent" value={row().agent_kind} />
+              </dl>
+              <dl class="min-w-0 space-y-2 px-2 py-3">
+                <Detail term="Lane" value={lane() || "outside a lane"} />
+                <Detail term="Window" value={windowLine(row().started_at, duration())} />
+              </dl>
+              <dl class="col-start-4 col-end-[-1] grid grid-cols-3 gap-y-2 py-3">
+                <Detail numeric term="Input" value={formatTokens(row().totals.input_tokens)} />
+                <Detail numeric term="Output" value={formatTokens(row().totals.output_tokens)} />
+                <Detail numeric term="Cache read" value={formatTokens(row().totals.cache_read_tokens)} />
+                <Detail numeric term="Cache write" value={formatTokens(row().totals.cache_write_tokens)} />
+                <Detail numeric term="Thinking" value={formatTokens(row().totals.thinking_tokens)} />
+                <Detail numeric term="Subagents" value={share() === null ? "none" : `${formatTokens(row().totals.subagent_tokens)} · ${share()}%`} />
+                <Detail numeric term="Turns" value={String(row().turns)} />
+                <Detail numeric term="Tools" value={String(row().tool_calls)} />
+                <Detail numeric term="Retries" value={String(row().retries)} />
+                <Show when={row().estimated}><Detail term="Counts" value="estimated from content length" /></Show>
+              </dl>
+            </div>
           </td>
         </tr>
       </Show>
@@ -759,11 +782,11 @@ function SessionRow(props: {
   );
 }
 
-function Detail(props: { term: string; value: string }) {
+function Detail(props: { term: string; value: string; numeric?: boolean }) {
   return (
-    <div class="min-w-0">
+    <div class={props.numeric ? "min-w-0 px-2 text-right tabular-nums" : "min-w-0"}>
       <dt class="section-label">{props.term}</dt>
-      <dd class="truncate font-mono text-[11px] text-foreground">{props.value}</dd>
+      <dd class="break-words text-xs text-foreground" title={props.value}>{props.value}</dd>
     </div>
   );
 }

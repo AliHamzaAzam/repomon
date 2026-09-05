@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { RatesStatus, UsageTimeline } from "../bindings";
 import {
   MAX_SERIES,
+  AGENT_ID_MAX_CHARS,
+  SESSION_WIDTHS,
+  retryTone,
+  sessionColumnPlan,
+  truncateMiddle,
   bucketAxis,
   formatDuration,
   formatRatesFootnote,
@@ -135,7 +140,7 @@ describe("usage chart reducers", () => {
     expect(formatTokens(12_400)).toBe("12.4k");
     expect(formatTokens(4_200_000)).toBe("4.2M");
     expect(formatUsd(12.487)).toBe("$12.49");
-    expect(formatUsd(0.0031)).toBe("$0.0031");
+    expect(formatUsd(0.0031)).toBe("<$0.01");
     expect(formatUsd(0)).toBe("$0");
   });
 
@@ -155,7 +160,7 @@ describe("usage chart reducers", () => {
     expect(formatDuration(3 * 3_600_000)).toBe("3h");
     expect(formatDuration(3 * 3_600_000 + 20 * 60_000)).toBe("3h 20m");
     expect(formatDuration(45 * 60_000)).toBe("45m");
-    expect(formatDuration(0)).toBe("");
+    expect(formatDuration(0)).toBe("<1m");
   });
 
   it("enumerates every bucket in a window, including the empty ones", () => {
@@ -226,22 +231,22 @@ describe("laneCell", () => {
     expect(laneCell({ lane_label: null, cwd: null })).toEqual({
       label: "unknown",
       title: "unknown",
-      external: true,
+      external: false,
     });
   });
 });
 
 describe("sessionColumnVisibility", () => {
   it("shows every column at a wide table width", () => {
-    expect(sessionColumnVisibility(900)).toEqual({ subagents: true, tools: true, retries: true });
+    expect(sessionColumnVisibility(1200)).toEqual({ subagents: true, tools: true, retries: true });
   });
 
   it("drops Sub before Tools as the table narrows", () => {
-    expect(sessionColumnVisibility(750)).toEqual({ subagents: false, tools: true, retries: true });
+    expect(sessionColumnVisibility(1000)).toEqual({ subagents: false, tools: true, retries: true });
   });
 
   it("drops Tools before Retries as the table narrows", () => {
-    expect(sessionColumnVisibility(650)).toEqual({ subagents: false, tools: false, retries: true });
+    expect(sessionColumnVisibility(950)).toEqual({ subagents: false, tools: false, retries: true });
   });
 
   it("drops Sub, Tools and Retries at the narrowest widths", () => {
@@ -348,5 +353,50 @@ describe("formatRatesFootnote", () => {
   it("says not fetched yet when enabled but nothing has landed", () => {
     const line = formatRatesFootnote(status({ enabled: true }), now);
     expect(line).toContain("not fetched yet");
+  });
+});
+
+
+describe("session table formatting and width budget", () => {
+  it("keeps sub-cent, cents and whole-dollar boundary costs compact", () => {
+    expect(formatUsd(0.000001)).toBe("<$0.01");
+    expect(formatUsd(0.0099)).toBe("<$0.01");
+    expect(formatUsd(0.01)).toBe("$0.01");
+    expect(formatUsd(89.3)).toBe("$89.30");
+    expect(formatUsd(99.999)).toBe("$100.00");
+    expect(formatUsd(1000)).toBe("$1,000");
+    expect(formatUsd(12580.9)).toBe("$12,581");
+  });
+
+  it("never leaves a duration blank and uses a compact sub-minute label", () => {
+    for (const ms of [0, 1, 30_000, 59_999]) expect(formatDuration(ms)).toBe("<1m");
+    expect(formatDuration(60_000)).toBe("1m");
+    expect(formatDuration(NaN)).toBe("-");
+    expect(formatDuration(-1)).toBe("-");
+  });
+
+  it("preserves the model family and version when shortening long ids", () => {
+    expect(truncateMiddle("claude-fable-5-1", AGENT_ID_MAX_CHARS)).toBe("claude-fable-5-1");
+    const label = truncateMiddle("claude-3-7-sonnet-20250219", AGENT_ID_MAX_CHARS);
+    expect(label).toHaveLength(AGENT_ID_MAX_CHARS);
+    expect(label).toMatch(/^claude-3-/);
+    expect(label).toMatch(/20250219$/);
+  });
+
+  it("keeps routine retries quiet and emphasizes repeated retries", () => {
+    for (const count of [0, 1, 2, 4]) expect(retryTone(count)).toBe("quiet");
+    for (const count of [5, 38]) expect(retryTone(count)).toBe("notice");
+  });
+
+  it("drops optional columns before they consume the task minimum", () => {
+    for (const width of [844, 900, 923, 924, 987, 988, 1043, 1044, 1200]) {
+      const plan = sessionColumnPlan(sessionColumnVisibility(width));
+      expect(plan.reduce((sum, col) => sum + col.width, 0)).toBeLessThanOrEqual(width);
+      expect(plan[0]).toEqual({ id: "task", width: 180 });
+    }
+    expect(SESSION_WIDTHS.cost).toBeGreaterThan(SESSION_WIDTHS.tokens);
+    expect(sessionColumnPlan(sessionColumnVisibility(900)).map((c) => c.id)).toEqual([
+      "task", "agent", "lane", "turns", "time", "tokens", "cost",
+    ]);
   });
 });

@@ -180,6 +180,44 @@
   outline-offset: 1px;
 }
 
+/* Ellipsis at the start of a single line rather than the end, so a truncated path or branch name
+   keeps its most distinguishing part (the tail) on screen instead of the shared prefix every row
+   has anyway. The full string stays in the DOM (readable to search and assistive tech); only the
+   rendered line is clipped, from its start edge rather than the usual end. */
+.truncate-start {
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Shared table rhythm. Fixed columns include the gutter, including the expanded detail grid. */
+.usage-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  line-height: 1rem;
+}
+
+.usage-table th {
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.usage-table td {
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 30%, transparent);
+  vertical-align: middle;
+}
+
+.usage-table td.usage-detail-cell {
+  padding: 0;
+}
+
+.usage-session-details {
+  display: grid;
+  grid-template-columns: var(--session-grid);
+}
+
 .mission-grid {
   display: grid;
   min-height: 0;

@@ -851,7 +851,7 @@ fn cheaper_sibling(model: &str) -> Option<&'static str> {
 }
 
 /// Format dollars for prose and tables: whole dollars above a thousand, cents below a hundred,
-/// and enough places below a cent that a fraction of one still reads as a number.
+/// and a compact threshold for sub-cent amounts.
 pub fn money(usd: f64) -> String {
     if usd == 0.0 {
         return "$0".to_string();
@@ -867,7 +867,7 @@ pub fn money(usd: f64) -> String {
     if size >= 0.01 {
         return format!("{sign}${size:.2}");
     }
-    format!("{sign}${size:.4}")
+    format!("{sign}<$0.01")
 }
 
 /// Format a token count the way an axis label or a table cell wants it: k, M or B with one
@@ -1383,11 +1383,14 @@ mod tests {
     #[test]
     fn money_is_whole_dollars_above_a_thousand_and_cents_below_a_hundred() {
         assert_eq!(money(0.0), "$0");
-        assert_eq!(money(0.0042), "$0.0042");
+        assert_eq!(money(0.0042), "<$0.01");
+        assert_eq!(money(0.0099), "<$0.01");
+        assert_eq!(money(0.01), "$0.01");
         assert_eq!(money(0.42), "$0.42");
         assert_eq!(money(12.5), "$12.50");
         assert_eq!(money(523.45), "$523.5");
         assert_eq!(money(12_580.4), "$12,580");
+        assert_eq!(money(1000.0), "$1,000");
     }
 
     #[test]
