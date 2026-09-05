@@ -32,18 +32,29 @@ export interface StackedBar {
   segments: StackSegment[];
 }
 
-function pointValue(series: UsageSeries, at: string, metric: UsageMetric): number {
-  const point = series.points.find((p) => p.at === at);
-  if (!point) return 0;
-  return metric === "cost" ? point.cost_usd : point.total_tokens;
+/**
+ * A series' points by the instant they start, so a bucket can be looked up by time rather than by
+ * the exact text of its timestamp. The daemon writes `2026-09-05T10:00:00Z` and a generated axis
+ * writes `2026-09-05T10:00:00.000Z`; those are the same bucket, and matching on the string would
+ * quietly draw every bar as empty.
+ */
+function pointsByInstant(series: UsageSeries): Map<number, { tokens: number; cost: number }> {
+  const index = new Map<number, { tokens: number; cost: number }>();
+  for (const point of series.points) {
+    index.set(Date.parse(point.at), { tokens: point.total_tokens, cost: point.cost_usd });
+  }
+  return index;
 }
 
 /** One stacked bar per bucket, segments in series order, zero segments dropped. */
 export function toStackedBars(timeline: UsageTimeline, metric: UsageMetric): StackedBar[] {
+  const indexed = timeline.series.map(pointsByInstant);
   return timeline.buckets.map((at) => {
+    const instant = Date.parse(at);
     const segments: StackSegment[] = [];
     timeline.series.forEach((s, index) => {
-      const value = pointValue(s, at, metric);
+      const point = indexed[index].get(instant);
+      const value = point ? (metric === "cost" ? point.cost : point.tokens) : 0;
       if (value <= 0) return;
       segments.push({ key: s.key, label: s.label, value, color: seriesVar(index) });
     });
@@ -59,12 +70,17 @@ export function foldTailSeries(timeline: UsageTimeline): UsageTimeline {
   if (timeline.series.length <= MAX_SERIES) return timeline;
   const kept = timeline.series.slice(0, MAX_SERIES - 1);
   const tail = timeline.series.slice(MAX_SERIES - 1);
+  const tailIndex = tail.map(pointsByInstant);
   const points = timeline.buckets
-    .map((at) => ({
-      at,
-      total_tokens: tail.reduce((a, s) => a + pointValue(s, at, "tokens"), 0),
-      cost_usd: tail.reduce((a, s) => a + pointValue(s, at, "cost"), 0),
-    }))
+    .map((at) => {
+      const instant = Date.parse(at);
+      const found = tailIndex.map((index) => index.get(instant));
+      return {
+        at,
+        total_tokens: found.reduce((a, p) => a + (p?.tokens ?? 0), 0),
+        cost_usd: found.reduce((a, p) => a + (p?.cost ?? 0), 0),
+      };
+    })
     .filter((p) => p.total_tokens > 0 || p.cost_usd > 0);
   const sum = (pick: (s: UsageSeries) => number) => tail.reduce((a, s) => a + pick(s), 0);
   const other: UsageSeries = {

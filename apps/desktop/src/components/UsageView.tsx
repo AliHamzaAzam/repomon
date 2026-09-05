@@ -137,11 +137,22 @@ export default function UsageView(props: UsageViewProps) {
   /** Which lanes the fleet can still focus, so only a live lane becomes a link. */
   const liveLanes = createMemo(() => new Set(props.fleet.lanes().map((lane) => lane.id)));
 
+  /**
+   * The window on screen. The daemon answers with the window it actually read, so that is what
+   * the header prints and what the chart's axis spans; the store's own resolution is only the
+   * stand-in until the first answer lands.
+   */
+  const windowRange = createMemo(() => {
+    const answered = summary();
+    if (!answered) return store.resolved();
+    return { from: new Date(answered.from), to: new Date(answered.to) };
+  });
+
   /** The timeline drawn with every bucket in the window, empty ones included. */
   const continuous = createMemo(() => {
     const timeline = store.timeline();
     if (!timeline) return null;
-    const { from, to } = store.resolved();
+    const { from, to } = windowRange();
     return withContinuousAxis(timeline, from.toISOString(), to.toISOString());
   });
 
@@ -236,9 +247,7 @@ export default function UsageView(props: UsageViewProps) {
         </For>
         <span class="font-medium text-foreground">{store.step().label}</span>
         <span aria-hidden="true">·</span>
-        <span class="tabular-nums">
-          {windowDates(store.resolved().from, store.resolved().to)}
-        </span>
+        <span class="tabular-nums">{windowDates(windowRange().from, windowRange().to)}</span>
       </div>
 
       <Show when={store.error()}>

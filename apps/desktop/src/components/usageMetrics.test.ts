@@ -145,10 +145,12 @@ describe("usage chart reducers", () => {
   });
 
   it("gives a sparse timeline a continuous axis so three busy hours do not fill the plot", () => {
+    // The daemon writes "…:00Z"; a generated axis writes "…:00.000Z". Same bucket, so the axis
+    // must match on the instant rather than on the text.
     const sparse = timeline(
       series("claude-code", [
-        ["2026-09-05T10:00:00.000Z", 10, 1],
-        ["2026-09-05T13:00:00.000Z", 20, 2],
+        ["2026-09-05T10:00:00Z", 10, 1],
+        ["2026-09-05T13:00:00Z", 20, 2],
       ]),
     );
     const filled = withContinuousAxis(sparse, "2026-09-05T10:00:00Z", "2026-09-05T13:00:00Z");
