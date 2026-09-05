@@ -1,17 +1,29 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { UsageBucket, UsageFinding, UsageGroupBy, UsageSessionRow } from "../bindings";
 import type { FleetStore } from "../stores/fleet";
 import { sessionDurationMs, type SessionSort, type UsageStore } from "../stores/usage";
-import { IconChevronDown, IconChevronRight, IconMeter, IconRefresh, IconSearch } from "./icons";
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconCopy,
+  IconMeter,
+  IconRefresh,
+  IconSearch,
+} from "./icons";
 import UsageChart from "./UsageChart";
 import UsageRangePicker from "./UsageRangePicker";
 import {
   formatDuration,
   formatTokens,
   formatUsd,
+  laneCell,
   seriesVar,
+  sessionColumnVisibility,
+  windowLine,
   withContinuousAxis,
+  type SessionColumnVisibility,
   type UsageMetric,
 } from "./usageMetrics";
 
@@ -44,12 +56,16 @@ const BUCKETS: { id: UsageBucket; label: string }[] = [
   { id: "day", label: "Day" },
 ];
 
-/** The sessions table's sortable numeric columns, in the order they appear. */
-const SESSION_COLUMNS: { id: SessionSort; label: string }[] = [
-  { id: "retries", label: "Retries" },
-  { id: "time", label: "Time" },
-  { id: "tokens", label: "Tokens" },
-  { id: "cost", label: "Cost" },
+/**
+ * The sessions table's sortable numeric columns, in the order they appear, each with the fixed
+ * width its column keeps under `table-fixed`. Retries is the one column here that can also drop
+ * out entirely at a narrow table width; see `sessionColumnVisibility`.
+ */
+const SESSION_COLUMNS: { id: SessionSort; label: string; widthClass: string }[] = [
+  { id: "retries", label: "Retries", widthClass: "w-14" },
+  { id: "time", label: "Time", widthClass: "w-16" },
+  { id: "tokens", label: "Tokens", widthClass: "w-16" },
+  { id: "cost", label: "Cost", widthClass: "w-20" },
 ];
 
 function percent(value: number): string {
@@ -131,7 +147,14 @@ export default function UsageView(props: UsageViewProps) {
   const empty = () => !store.loading() && (totals()?.events ?? 0) === 0;
   const [metric, setMetric] = createSignal<UsageMetric>("cost");
   const [expanded, setExpanded] = createSignal<string | null>(null);
-  let sessionsRef: HTMLDivElement | undefined;
+  const [sessionsEl, setSessionsEl] = createSignal<HTMLDivElement>();
+  // Generous until the first measurement lands, so every column shows rather than flashing narrow.
+  const [sessionsWidth, setSessionsWidth] = createSignal(2000);
+  const columns = createMemo<SessionColumnVisibility>(() => sessionColumnVisibility(sessionsWidth()));
+  // Task, Agent, Lane, Turns, Time, Tokens, Cost are always shown; Tools and Retries add to that.
+  const sessionColSpan = createMemo(
+    () => 7 + (columns().tools ? 1 : 0) + (columns().retries ? 1 : 0),
+  );
 
   /** Which lanes the fleet can still focus, so only a live lane becomes a link. */
   const liveLanes = createMemo(() => new Set(props.fleet.lanes().map((lane) => lane.id)));
@@ -160,7 +183,7 @@ export default function UsageView(props: UsageViewProps) {
     store.setQuery(row.session_id);
     setExpanded(row.session_id);
     // Guarded: the sessions table is only in the DOM once there is something to show.
-    sessionsRef?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    sessionsEl()?.scrollIntoView?.({ block: "start", behavior: "smooth" });
   }
 
   onMount(() => {
@@ -177,6 +200,20 @@ export default function UsageView(props: UsageViewProps) {
       active = false;
       stop?.();
     });
+  });
+
+  // Tools and Retries give way first as the sessions table narrows, so Task keeps room to read.
+  // The section only enters the DOM once there is data, so this watches the element signal rather
+  // than observing once on mount.
+  createEffect(() => {
+    const el = sessionsEl();
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width !== undefined) setSessionsWidth(width);
+    });
+    observer.observe(el);
+    onCleanup(() => observer.disconnect());
   });
 
   return (
@@ -387,7 +424,7 @@ export default function UsageView(props: UsageViewProps) {
             </Card>
           </div>
 
-          <div class="border-t border-line px-4 py-4" ref={sessionsRef}>
+          <div class="border-t border-line px-4 py-4" ref={setSessionsEl}>
             <div class="mb-2 flex items-center gap-3">
               <h2 class="section-label">Sessions</h2>
               <label class="flex h-7 flex-1 items-center gap-1.5 rounded-lg border border-line bg-surface px-2">
@@ -405,7 +442,7 @@ export default function UsageView(props: UsageViewProps) {
               when={store.visibleSessions().length > 0}
               fallback={<p class="text-xs text-muted">No session matches that filter.</p>}
             >
-              <table class="w-full text-xs">
+              <table class="w-full table-fixed text-xs">
                 <thead class="sticky top-0 z-10 bg-background">
                   <tr class="border-b border-line text-muted">
                     <th
@@ -418,22 +455,26 @@ export default function UsageView(props: UsageViewProps) {
                         onSelect={store.setSort}
                       />
                     </th>
-                    <th class="py-1 text-left font-normal">Agent</th>
-                    <th class="py-1 text-left font-normal">Lane</th>
-                    <th class="py-1 text-right font-normal">Turns</th>
-                    <th class="py-1 text-right font-normal">Tools</th>
+                    <th class="w-24 py-1 text-left font-normal">Agent</th>
+                    <th class="w-40 py-1 text-left font-normal">Lane</th>
+                    <th class="w-12 py-1 text-right font-normal">Turns</th>
+                    <Show when={columns().tools}>
+                      <th class="w-12 py-1 text-right font-normal">Tools</th>
+                    </Show>
                     <For each={SESSION_COLUMNS}>
                       {(column) => (
-                        <th
-                          class="py-1 text-right font-normal"
-                          aria-sort={store.sort() === column.id ? "descending" : "none"}
-                        >
-                          <SortButton
-                            column={column}
-                            active={store.sort() === column.id}
-                            onSelect={store.setSort}
-                          />
-                        </th>
+                        <Show when={column.id !== "retries" || columns().retries}>
+                          <th
+                            class={`${column.widthClass} py-1 text-right font-normal`}
+                            aria-sort={store.sort() === column.id ? "descending" : "none"}
+                          >
+                            <SortButton
+                              column={column}
+                              active={store.sort() === column.id}
+                              onSelect={store.setSort}
+                            />
+                          </th>
+                        </Show>
                       )}
                     </For>
                   </tr>
@@ -445,6 +486,8 @@ export default function UsageView(props: UsageViewProps) {
                         row={row}
                         expanded={expanded() === row.session_id}
                         laneIsLive={row.lane_id !== null && liveLanes().has(row.lane_id)}
+                        columns={columns()}
+                        colSpan={sessionColSpan()}
                         onToggle={() =>
                           setExpanded((open) => (open === row.session_id ? null : row.session_id))
                         }
@@ -547,6 +590,8 @@ function SessionRow(props: {
   row: UsageSessionRow;
   expanded: boolean;
   laneIsLive: boolean;
+  columns: SessionColumnVisibility;
+  colSpan: number;
   onToggle: () => void;
   onOpenLane?: (laneId: number) => void;
 }) {
@@ -555,6 +600,7 @@ function SessionRow(props: {
     const headline = row().headline?.trim();
     return headline ? headline : "Untitled session";
   };
+  const cell = () => laneCell(row());
   const lane = () => row().lane_label ?? row().cwd ?? "";
   const duration = () => formatDuration(sessionDurationMs(row()));
 
@@ -564,10 +610,10 @@ function SessionRow(props: {
         class="cursor-pointer border-b border-line/60 odd:bg-raised/30 hover:bg-raised/60"
         onClick={() => props.onToggle()}
       >
-        <td class="max-w-96 py-1 text-foreground" title={row().headline_raw ?? task()}>
+        <td class="min-w-0 py-1 text-foreground" title={row().headline_raw ?? task()}>
           <button
             type="button"
-            class="focus-ring flex w-full items-center gap-1 rounded-xs text-left"
+            class="focus-ring flex w-full min-w-0 items-center gap-1 rounded-xs text-left"
             aria-expanded={props.expanded}
             onClick={(event) => {
               event.stopPropagation();
@@ -579,22 +625,28 @@ function SessionRow(props: {
                 <IconChevronDown size={10} />
               </Show>
             </span>
-            <span class={`truncate ${row().headline ? "" : "text-muted"}`}>{task()}</span>
+            <span class={`min-w-0 flex-1 truncate ${row().headline ? "" : "text-muted"}`}>
+              {task()}
+            </span>
           </button>
         </td>
-        <td class="py-1 text-muted">{row().model || row().agent_kind}</td>
-        <td class="py-1">
+        <td class="w-24 truncate py-1 text-muted">{row().model || row().agent_kind}</td>
+        <td class="w-40 py-1">
           <Show
             when={props.laneIsLive && row().lane_id !== null}
             fallback={
-              <span class="text-muted" title={row().cwd ?? undefined}>
-                {lane()}
+              <span class="flex min-w-0 items-center gap-1" title={cell().title}>
+                <span class="truncate text-muted">{cell().label}</span>
+                <Show when={cell().external}>
+                  <span class="shrink-0 text-attention/90">·</span>
+                  <span class="shrink-0 text-attention/90">external</span>
+                </Show>
               </span>
             }
           >
             <button
               type="button"
-              class="focus-ring rounded-xs text-signal hover:underline"
+              class="focus-ring truncate rounded-xs text-signal hover:underline"
               title={row().cwd ?? undefined}
               onClick={(event) => {
                 event.stopPropagation();
@@ -605,24 +657,31 @@ function SessionRow(props: {
             </button>
           </Show>
         </td>
-        <td class="py-1 text-right tabular-nums text-muted">{row().turns}</td>
-        <td class="py-1 text-right tabular-nums text-muted">{row().tool_calls}</td>
-        <td
-          class={`py-1 text-right tabular-nums ${row().retries > 0 ? "text-attention" : "text-muted"}`}
-        >
-          {row().retries}
-        </td>
-        <td class="py-1 text-right tabular-nums text-muted">{duration()}</td>
-        <td class="py-1 text-right tabular-nums text-muted">
+        <td class="w-12 py-1 text-right tabular-nums text-muted">{row().turns}</td>
+        <Show when={props.columns.tools}>
+          <td class="w-12 py-1 text-right tabular-nums text-muted">{row().tool_calls}</td>
+        </Show>
+        <Show when={props.columns.retries}>
+          <td
+            class={`w-14 py-1 text-right tabular-nums ${row().retries > 0 ? "text-attention" : "text-muted"}`}
+          >
+            {row().retries}
+          </td>
+        </Show>
+        <td class="w-16 py-1 text-right tabular-nums text-muted">{duration()}</td>
+        <td class="w-16 py-1 text-right tabular-nums text-muted">
           {formatTokens(row().totals.total_tokens)}
         </td>
-        <td class="py-1 text-right font-semibold tabular-nums text-foreground">
+        <td class="w-20 py-1 text-right font-semibold tabular-nums text-foreground">
           {formatUsd(row().totals.cost_usd)}
         </td>
       </tr>
       <Show when={props.expanded}>
         <tr class="border-b border-line/60 bg-raised/40">
-          <td colspan="9" class="px-1 py-2">
+          <td colspan={props.colSpan} class="px-1 py-2">
+            <p class="mb-2 text-xs text-foreground" title={row().headline_raw ?? undefined}>
+              {task()}
+            </p>
             <dl class="flex flex-wrap gap-x-8 gap-y-2 text-xs">
               <Detail term="Model" value={row().model || "unknown"} />
               <Detail term="Agent" value={row().agent_kind} />
@@ -632,17 +691,8 @@ function SessionRow(props: {
               <Detail term="Cache write" value={formatTokens(row().totals.cache_write_tokens)} />
               <Detail term="Thinking" value={formatTokens(row().totals.thinking_tokens)} />
               <Detail term="Lane" value={lane() || "outside a lane"} />
-              <Detail
-                term="Window"
-                value={
-                  row().started_at
-                    ? `${new Date(row().started_at as string).toLocaleString()}${
-                        duration() ? ` for ${duration()}` : ""
-                      }`
-                    : "unknown"
-                }
-              />
-              <Detail term="Session" value={row().session_id} />
+              <Detail term="Window" value={windowLine(row().started_at, duration())} />
+              <SessionIdDetail sessionId={row().session_id} />
               <Show when={row().estimated}>
                 <Detail term="Counts" value="estimated from content length" />
               </Show>
@@ -659,6 +709,49 @@ function Detail(props: { term: string; value: string }) {
     <div class="min-w-0">
       <dt class="section-label">{props.term}</dt>
       <dd class="truncate font-mono text-[11px] text-foreground">{props.value}</dd>
+    </div>
+  );
+}
+
+/** The session id: muted so it reads as an identifier rather than a fact, with a copy button next
+ * to it since it is the one detail an operator is likely to paste elsewhere (a bug report, a log
+ * search) rather than just read. */
+function SessionIdDetail(props: { sessionId: string }) {
+  const [copied, setCopied] = createSignal(false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(timer));
+
+  async function copy(event: MouseEvent) {
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(props.sessionId);
+      setCopied(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be denied; the id is still visible to select and copy by hand.
+    }
+  }
+
+  return (
+    <div class="min-w-0">
+      <dt class="section-label">Session</dt>
+      <dd class="flex items-center gap-1">
+        <span class="truncate font-mono text-[11px] text-muted" title={props.sessionId}>
+          {props.sessionId}
+        </span>
+        <button
+          type="button"
+          class="focus-ring shrink-0 rounded-xs p-0.5 text-muted transition-colors hover:text-foreground"
+          title="Copy session ID"
+          aria-label="Copy session ID"
+          onClick={copy}
+        >
+          <Show when={copied()} fallback={<IconCopy size={10} />}>
+            <IconCheck size={10} class="text-signal" />
+          </Show>
+        </button>
+      </dd>
     </div>
   );
 }

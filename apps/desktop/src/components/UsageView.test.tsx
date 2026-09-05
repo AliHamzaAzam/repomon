@@ -111,7 +111,7 @@ function source(overrides: Partial<UsageSource> = {}): UsageSource {
       ingesting: false,
     }),
     exportRows: vi.fn().mockResolvedValue({ path: "/data/usage.csv", events: 88, bytes: 4096 }),
-    ingestNow: vi.fn().mockResolvedValue({ listed: 4, scanned: 0, events: 0, failed: 0 }),
+    ingestNow: vi.fn().mockResolvedValue({ listed: 4, scanned: 0, events: 0, failed: 0, redigested: 0 }),
     subscribe: vi.fn().mockResolvedValue(() => undefined),
     ...overrides,
   };
@@ -230,6 +230,24 @@ describe("UsageView", () => {
     expect(screen.getByText("demo (lane removed)")).toBeTruthy();
   });
 
+  it("shortens a raw cwd path and tags it external for a session outside every lane", async () => {
+    const cwd = "/Users/azaleas/Documents/Codex/2026-08-30/frontend-design-plugin-frontend-design-claude";
+    mount(
+      source({
+        sessions: vi
+          .fn()
+          .mockResolvedValue([{ ...session, lane_id: null, lane_label: null, cwd, external: true }]),
+      }),
+      fleet(),
+    );
+    await flush();
+    expect(
+      screen.getByText("2026-08-30/frontend-design-plugin-frontend-design-claude"),
+    ).toBeTruthy();
+    expect(screen.getByText("external")).toBeTruthy();
+    expect(screen.queryByText(cwd)).toBeNull();
+  });
+
   it("links a finding to the session row it is about", async () => {
     mount(
       source({
@@ -284,6 +302,18 @@ describe("UsageView", () => {
     await flush();
     expect(screen.getByText("Cache read")).toBeTruthy();
     expect(screen.getByText("Session")).toBeTruthy();
+  });
+
+  it("copies the session id from the expanded row", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    mount(source(), fleet());
+    await flush();
+    fireEvent.click(screen.getByText("Wire up the ledger"));
+    await flush();
+    fireEvent.click(screen.getByTitle("Copy session ID"));
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("sess-1");
   });
 
   it("reorders the sessions table from a column heading", async () => {

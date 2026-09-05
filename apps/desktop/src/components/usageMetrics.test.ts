@@ -9,10 +9,14 @@ import {
   formatUsd,
   foldTailSeries,
   isWeekend,
+  laneCell,
   narrowerBucket,
   niceMax,
+  pathTail,
   seriesVar,
+  sessionColumnVisibility,
   toStackedBars,
+  windowLine,
   withContinuousAxis,
 } from "./usageMetrics";
 
@@ -166,5 +170,71 @@ describe("usage chart reducers", () => {
     expect(narrowerBucket("day")).toBe("hour");
     expect(narrowerBucket("hour")).toBe("quarter");
     expect(narrowerBucket("quarter")).toBeNull();
+  });
+});
+
+describe("pathTail", () => {
+  it("keeps only the last two path segments of a long absolute path", () => {
+    expect(pathTail("/Users/azaleas/Documents/Codex/2026-08-30/frontend-design-plugin")).toBe(
+      "2026-08-30/frontend-design-plugin",
+    );
+  });
+
+  it("returns a short path unchanged", () => {
+    expect(pathTail("/repos/demo")).toBe("repos/demo");
+    expect(pathTail("/demo")).toBe("demo");
+  });
+});
+
+describe("laneCell", () => {
+  it("shows a lane's own label unchanged, with the cwd as its tooltip", () => {
+    const cell = laneCell({ lane_label: "demo/main", cwd: "/repos/demo" });
+    expect(cell).toEqual({ label: "demo/main", title: "/repos/demo", external: false });
+  });
+
+  it("shortens a raw cwd path for a session outside every lane and tags it external", () => {
+    const cwd = "/Users/azaleas/Documents/Codex/2026-08-30/frontend-design-plugin-frontend-design-claude";
+    const cell = laneCell({ lane_label: null, cwd });
+    expect(cell).toEqual({
+      label: "2026-08-30/frontend-design-plugin-frontend-design-claude",
+      title: cwd,
+      external: true,
+    });
+  });
+
+  it("falls back to unknown when a session has neither a lane label nor a cwd", () => {
+    expect(laneCell({ lane_label: null, cwd: null })).toEqual({
+      label: "unknown",
+      title: "unknown",
+      external: true,
+    });
+  });
+});
+
+describe("sessionColumnVisibility", () => {
+  it("shows every column at a wide table width", () => {
+    expect(sessionColumnVisibility(900)).toEqual({ tools: true, retries: true });
+  });
+
+  it("drops Tools before Retries as the table narrows", () => {
+    expect(sessionColumnVisibility(650)).toEqual({ tools: false, retries: true });
+  });
+
+  it("drops both Tools and Retries at the narrowest widths", () => {
+    expect(sessionColumnVisibility(400)).toEqual({ tools: false, retries: false });
+  });
+});
+
+describe("windowLine", () => {
+  it("puts a session's start and duration on one line", () => {
+    expect(windowLine("2026-09-05T10:00:00Z", "30m")).toMatch(/^Sep 5, .+ · 30m$/);
+  });
+
+  it("drops the duration when there is none to show", () => {
+    expect(windowLine("2026-09-05T10:00:00Z", "")).not.toContain("·");
+  });
+
+  it("reads as unknown with no start time", () => {
+    expect(windowLine(null, "30m")).toBe("unknown");
   });
 });

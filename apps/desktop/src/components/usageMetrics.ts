@@ -231,6 +231,74 @@ export function bucketLabel(at: string, bucket: UsageBucket): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+/** The last two "/"-separated segments of a path, or the whole path when it has fewer than that. */
+export function pathTail(path: string): string {
+  const parts = path.split("/").filter((part) => part.length > 0);
+  return parts.length <= 2 ? parts.join("/") : parts.slice(-2).join("/");
+}
+
+/** What the sessions table's Lane cell shows for one row. */
+export interface LaneCell {
+  label: string;
+  /** The full path, or the label itself when there is no path behind it. */
+  title: string;
+  /** True for a session repomon did not run: no lane, sometimes not even a known repo. */
+  external: boolean;
+}
+
+/**
+ * A lane repomon named reads as that name, unchanged. A session outside every lane has nothing but
+ * a raw working-directory path to show, and a full absolute path (`/Users/.../some-long-repo-name`)
+ * both crowds out every other column and tells the operator nothing a shorter form would not: the
+ * last two segments are shown instead, tagged "external" so a bare path never reads as if repomon
+ * had named it, with the full path kept in the tooltip.
+ */
+export function laneCell(row: { lane_label: string | null; cwd: string | null }): LaneCell {
+  if (row.lane_label) {
+    return { label: row.lane_label, title: row.cwd ?? row.lane_label, external: false };
+  }
+  if (row.cwd) {
+    return { label: pathTail(row.cwd), title: row.cwd, external: true };
+  }
+  return { label: "unknown", title: "unknown", external: true };
+}
+
+/** Which of the sessions table's narrower columns fit at a given table width. */
+export interface SessionColumnVisibility {
+  tools: boolean;
+  retries: boolean;
+}
+
+/**
+ * Below this width Tools is the first column to go: it is the least-consulted of the counters, and
+ * the one most redundant with Turns. Below the narrower threshold Retries goes too, leaving Task,
+ * Agent, Lane and the three cost-relevant columns (Time, Tokens, Cost): what is being asked of the
+ * fleet and what it costs, which is what the view exists to answer.
+ */
+const HIDE_TOOLS_BELOW_PX = 720;
+const HIDE_RETRIES_BELOW_PX = 580;
+
+export function sessionColumnVisibility(tableWidth: number): SessionColumnVisibility {
+  return {
+    tools: tableWidth >= HIDE_TOOLS_BELOW_PX,
+    retries: tableWidth >= HIDE_RETRIES_BELOW_PX,
+  };
+}
+
+/**
+ * A session's start and duration on one line, for the sessions table's expanded row: "Sep 5,
+ * 10:00 AM · 30m" rather than a locale timestamp followed by a separately-worded "for 30m", which
+ * ran long enough to make the Window detail the widest cell in the row.
+ */
+export function windowLine(startedAt: string | null, duration: string): string {
+  if (!startedAt) return "unknown";
+  const start = new Date(startedAt);
+  if (Number.isNaN(start.getTime())) return "unknown";
+  const day = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const time = start.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return duration ? `${day}, ${time} · ${duration}` : `${day}, ${time}`;
+}
+
 /** A bucket start and end, spelled out for a tooltip heading. */
 export function bucketSpanLabel(at: string, bucket: UsageBucket): string {
   const start = new Date(at);
