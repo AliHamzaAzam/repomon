@@ -436,6 +436,30 @@ fn parse_reset_window(line: &str) -> Option<String> {
     Some(tokens.join(" "))
 }
 
+/// Parse a `detect_quota_exhausted` reason's trailing "resets in 2h 15m" window into an actual
+/// duration, so a caller can turn it into an absolute deadline once (at first sight) instead of
+/// trusting the wall message to still be accurate however long it lingers in a short pane
+/// capture. Returns `None` when the reason names no reset window (the open-ended "quota
+/// exhausted" case, which a caller should keep retrying on presence alone).
+pub fn parse_reset_duration(reason: &str) -> Option<chrono::Duration> {
+    let window = parse_reset_window(reason)?;
+    let mut total = chrono::Duration::zero();
+    let mut found = false;
+    for tok in window.split_whitespace() {
+        let digits: String = tok.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let unit = &tok[digits.len()..];
+        let n: i64 = digits.parse().ok()?;
+        total += match unit {
+            "h" => chrono::Duration::hours(n),
+            "m" => chrono::Duration::minutes(n),
+            "s" => chrono::Duration::seconds(n),
+            _ => return None,
+        };
+        found = true;
+    }
+    found.then_some(total)
+}
+
 /// The keystrokes (tmux `send-keys` names) that select `target` (0-based option index):
 /// arrow from the visible cursor to the option's row, then Enter. Without a visible cursor,
 /// fall back to the option's printed number — digit selection confirms immediately; the
@@ -1641,6 +1665,19 @@ Do you want to proceed?
         );
         assert_eq!(detect_active_spinner(pane), None);
         assert_eq!(detect_dialog(pane), None);
+    }
+
+    #[test]
+    fn parses_the_quota_reset_window_into_a_duration() {
+        assert_eq!(
+            parse_reset_duration("quota exhausted, resets in 2h 15m"),
+            Some(chrono::Duration::hours(2) + chrono::Duration::minutes(15))
+        );
+        assert_eq!(
+            parse_reset_duration("quota exhausted"),
+            None,
+            "an open-ended wall names no window to parse"
+        );
     }
 
     /// Prose about quotas is not a quota wall, and neither is Claude's own usage-limit copy

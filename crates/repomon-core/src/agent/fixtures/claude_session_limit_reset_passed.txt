@@ -1,0 +1,10 @@
+● Working on the migration script...
+● Bash: cargo test -p repomon-core
+
+You've hit your session limit · resets 6am (Asia/Karachi)
+/upgrade to increase your usage limit.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                                claude-4.5
