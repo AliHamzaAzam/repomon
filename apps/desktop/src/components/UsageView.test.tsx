@@ -492,3 +492,28 @@ describe("UsageView table layout", () => {
     }
   });
 });
+
+describe("recount progress", () => {
+  it("shows progress then removes the line and refetches when stale reaches zero", async () => {
+    vi.useFakeTimers();
+    const src = source();
+    let stale = 25;
+    src.status = vi.fn().mockImplementation(async () => ({
+      sources: 300, stale_sources: stale, ingesting: false, last_scan_at: null,
+      errors: [], events: 3, first_event_at: null, last_event_at: null,
+    }));
+    try {
+      mount(src);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByText("Recounting 275 of 300 transcripts, totals will settle shortly")).toBeInTheDocument();
+      const before = vi.mocked(src.summary).mock.calls.length;
+      stale = 0;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(screen.queryByText(/Recounting/)).not.toBeInTheDocument();
+      expect(vi.mocked(src.summary).mock.calls.length).toBe(before + 1);
+      const polls = vi.mocked(src.status).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(vi.mocked(src.status).mock.calls.length).toBe(polls);
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+});

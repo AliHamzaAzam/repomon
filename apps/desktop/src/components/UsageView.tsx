@@ -305,6 +305,7 @@ export default function UsageView(props: UsageViewProps) {
         <span class="tabular-nums">{windowDates(windowRange().from, windowRange().to)}</span>
       </div>
 
+      <Show when={(store.status()?.stale_sources ?? 0) > 0}><p role="status" class="px-4 py-1.5 text-xs text-muted">Recounting {Math.max(0, (store.status()?.sources ?? 0) - (store.status()?.stale_sources ?? 0))} of {store.status()?.sources} transcripts, totals will settle shortly</p></Show>
       <Show when={store.error()}>
         <p class="border-b border-line px-4 py-2 text-xs text-fault">{store.error()}</p>
       </Show>

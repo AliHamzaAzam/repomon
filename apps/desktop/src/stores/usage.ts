@@ -9,7 +9,7 @@
  *
  * The source is injectable so the store's behaviour is testable without a daemon.
  */
-import { createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
 import type {
   RatesStatus,
@@ -217,6 +217,31 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
       if (token === loadToken) setLoading(false);
     }
   }
+
+  onCleanup(() => { loadToken += 1; });
+
+  // Poll only while a recount is pending. A newer window load or a disposed store owns the
+  // result, so a slow status response cannot repaint that newer state.
+  createEffect(() => {
+    if ((status()?.stale_sources ?? 0) <= 0) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const token = loadToken;
+      try {
+        const next = await source.status();
+        if (!active || token !== loadToken) return;
+        setStatus(next);
+        if (next.stale_sources === 0) await refresh();
+      } catch {
+        // A transient status failure leaves the last progress visible until the next poll.
+      } finally {
+        if (active) timer = setTimeout(() => void poll(), 3000);
+      }
+    };
+    timer = setTimeout(() => void poll(), 3000);
+    onCleanup(() => { active = false; clearTimeout(timer); });
+  });
 
   const reload = () => {
     void refresh();

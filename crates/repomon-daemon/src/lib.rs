@@ -31,7 +31,7 @@ pub mod worktree_watch;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use repomon_core::agent::backend::{CaptureOpts, SessionBackend};
@@ -298,6 +298,11 @@ pub struct Ctx {
     pub usage_refresh_inflight: Mutex<()>,
     /// Wakes the usage-ledger ingest loop for an immediate pass.
     pub usage_ingest_wake: Notify,
+    /// The newest-first ingest walk's rotation offset (see `usage_ingest::rotated_window`).
+    /// Advances by the scan budget each pass once there are more sources than fit one window, so
+    /// an old source outside the newest window is still eventually walked instead of being
+    /// permanently shadowed. Stays 0 forever while everything fits in one window.
+    pub usage_scan_rotation: AtomicUsize,
     /// Held for the duration of an ingest pass, so `usage.ingest_now` reports honestly and two
     /// passes never read the same file at once.
     pub usage_ingest_lock: Mutex<()>,
@@ -524,6 +529,7 @@ impl Ctx {
             usage_refresh_watch: watch::channel(usage_watch::UsageRefreshRound::default()).0,
             usage_refresh_inflight: Mutex::new(()),
             usage_ingest_wake: Notify::new(),
+            usage_scan_rotation: AtomicUsize::new(0),
             usage_ingest_lock: Mutex::new(()),
             usage_rates: Mutex::new(usage_rates::RatesRuntime::new()),
             auto_continue_off: Mutex::new(HashSet::new()),

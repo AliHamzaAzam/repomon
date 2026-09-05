@@ -2082,6 +2082,39 @@ impl Store {
         .await
     }
 
+    /// Stale sources independent of discovery's newest-file budget.
+    pub async fn stale_usage_cursors(
+        &self,
+        version: u32,
+        limit: usize,
+    ) -> Result<Vec<crate::usage_ledger::UsageCursor>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {USAGE_CURSOR_COLS} FROM usage_ingest_cursors
+                 WHERE ingest_version < ?1
+                 ORDER BY ingest_version ASC, mtime DESC, source_path ASC LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(params![version, limit as i64], usage_cursor_from_row)?;
+            collect(rows)
+        })
+        .await
+    }
+
+    /// Recover reader and attribution metadata for a tracked source outside current discovery roots.
+    pub async fn usage_source_event(
+        &self,
+        path: String,
+    ) -> Result<Option<crate::usage_ledger::UsageEvent>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {USAGE_EVENT_COLS} FROM usage_events WHERE source_path = ?1 LIMIT 1"
+            ))?;
+            let mut rows = stmt.query_map(params![path], usage_event_from_row)?;
+            rows.next().transpose().map_err(Into::into)
+        })
+        .await
+    }
+
     /// Record where a source was read up to, which reader revision read it, and whether reading
     /// it failed.
     pub async fn set_usage_cursor(
