@@ -312,22 +312,19 @@ fn install_tools() -> Result<CliStatus, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
 
+    let mut notes = Vec::new();
     for tool in tools() {
-        let from = source.join(tool);
-        let to = dir.join(tool);
-        // Replace whatever is there: an older symlink into a previous app location, or a copy
-        // from `install.ps1`. Removing first is what makes install idempotent.
-        if to.exists() || std::fs::symlink_metadata(&to).is_ok() {
-            std::fs::remove_file(&to)
-                .map_err(|e| format!("could not replace {}: {e}", to.display()))?;
+        if let Some(note) = install_tool(&source.join(tool), &dir.join(tool))? {
+            notes.push(note);
         }
-        link_or_copy(&from, &to)?;
     }
 
     #[cfg(windows)]
     windows_path::add_to_user_path(&dir)?;
 
-    Ok(read_status(&dir))
+    let mut status = read_status(&dir);
+    status.notes.extend(notes);
+    Ok(status)
 }
 
 #[tauri::command]
@@ -354,14 +351,100 @@ fn uninstall_tools() -> Result<CliStatus, String> {
         }
         #[cfg(not(unix))]
         let _ = meta;
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+            let backup = backup_path(&path);
+            if backup.exists() {
+                std::fs::rename(&backup, &path)
+                    .map_err(|e| format!("could not restore {}: {e}", backup.display()))?;
+            }
+        }
+        #[cfg(windows)]
+        retire_copy(&path)?;
     }
 
     #[cfg(windows)]
     windows_path::remove_from_user_path(&dir)?;
 
     Ok(read_status(&dir))
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+fn install_tool(from: &Path, to: &Path) -> Result<Option<String>, String> {
+    // Also catch two spellings of the same location before moving or deleting anything.
+    if from == to
+        || std::fs::canonicalize(from)
+            .ok()
+            .zip(std::fs::canonicalize(to).ok())
+            .is_some_and(|(from, to)| from == to)
+    {
+        return Ok(None);
+    }
+    let mut note = None;
+    if let Ok(meta) = std::fs::symlink_metadata(to) {
+        if meta.is_dir() {
+            return Err(format!("refusing to replace directory {}", to.display()));
+        }
+        #[cfg(unix)]
+        if meta.file_type().is_symlink() {
+            std::fs::remove_file(to)
+                .map_err(|e| format!("could not replace {}: {e}", to.display()))?;
+        } else {
+            let backup = backup_path(to);
+            if std::fs::symlink_metadata(&backup).is_ok() {
+                return Err(format!(
+                    "preserving existing backup {}; move it before installing",
+                    backup.display()
+                ));
+            }
+            std::fs::rename(to, &backup)
+                .map_err(|e| format!("could not back up {}: {e}", to.display()))?;
+            note = Some(format!(
+                "moved your existing {} to {}",
+                to.file_name().unwrap().to_string_lossy(),
+                backup.file_name().unwrap().to_string_lossy()
+            ));
+        }
+        #[cfg(windows)]
+        {
+            note = retire_copy(to)?;
+        }
+    }
+    if let Err(error) = link_or_copy(from, to) {
+        #[cfg(unix)]
+        if note.is_some() {
+            let _ = std::fs::rename(backup_path(to), to);
+        }
+        return Err(error);
+    }
+    Ok(note)
+}
+
+/// Windows permits renaming an executing image even when deletion is deferred until exit.
+/// Unique retired names allow another reinstall while an earlier daemon still runs.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn retire_copy(path: &Path) -> Result<Option<String>, String> {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let retired = path.with_extension(format!("old-{}-{id}", std::process::id()));
+    std::fs::rename(path, &retired)
+        .map_err(|e| format!("could not move {}: {e}", path.display()))?;
+    match std::fs::remove_file(&retired) {
+        Ok(()) => Ok(None),
+        Err(_) => Ok(Some(format!(
+            "old running copy remains at {}; remove it after it exits",
+            retired.display()
+        ))),
+    }
 }
 
 /// unix links, Windows copies.
@@ -486,6 +569,50 @@ mod windows_path {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn install_preserves_existing_binary_and_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("bundled");
+        let to = dir.path().join("repomon");
+        std::fs::write(&from, "new").unwrap();
+        std::fs::write(&to, "original").unwrap();
+        assert_eq!(
+            super::install_tool(&from, &to).unwrap().unwrap(),
+            "moved your existing repomon to repomon.bak"
+        );
+        assert_eq!(
+            std::fs::read_to_string(super::backup_path(&to)).unwrap(),
+            "original"
+        );
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "new");
+        super::install_tool(&from, &to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(super::backup_path(&to)).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn installing_onto_itself_preserves_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("repomon");
+        std::fs::write(&exe, "source").unwrap();
+        super::install_tool(&exe, &exe).unwrap();
+        assert_eq!(std::fs::read_to_string(exe).unwrap(), "source");
+    }
+
+    #[test]
+    fn copy_replacement_retires_the_old_path_before_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join("repomond.exe");
+        std::fs::write(&to, "old").unwrap();
+        super::retire_copy(&to).unwrap();
+        assert!(!to.exists());
+        std::fs::write(&to, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(to).unwrap(), "new");
+    }
+
     #[cfg(unix)]
     #[test]
     fn sleeping_shell_path_probe_is_bounded() {

@@ -136,6 +136,13 @@ describe("the command-line tools card", () => {
     expect(screen.queryByText("Installed, not on PATH")).not.toBeInTheDocument();
   });
 
+  it("shows where an existing command was backed up", async () => {
+    render(() => <CommandLineToolsCard read={async () => notInstalled()}
+      install={async () => ({ ...installedAndOnPath(), notes: ["moved your existing repomon to repomon.bak"] })} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+    expect(await screen.findByText("moved your existing repomon to repomon.bak")).toBeInTheDocument();
+  });
+
   it("renders nothing outside the Tauri shell", () => {
     const { container } = render(() => <CommandLineToolsCard />);
     expect(container.querySelector("[data-testid='command-line-tools']")).toBeNull();
