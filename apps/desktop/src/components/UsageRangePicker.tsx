@@ -38,6 +38,26 @@ function sameDay(a: Date, b: Date): boolean {
   return a.toDateString() === b.toDateString();
 }
 
+function sameMonth(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+}
+
+/** Today's midnight is never a live signal here: nothing in this popover needs to move as the
+ * clock ticks past midnight while it happens to be open, and reading it once keeps every future
+ * check comparing against the same instant. */
+function today(): Date {
+  return startOfDay(new Date());
+}
+
+/** The window can never reach into the future: `to` is clamped at today and `from` at whatever
+ * `to` came out to, so a stray future date never becomes a read the daemon has no data for. */
+function clampToToday(from: Date, to: Date): [Date, Date] {
+  const limit = today();
+  const clampedTo = to > limit ? limit : to;
+  const clampedFrom = from > clampedTo ? clampedTo : from;
+  return [clampedFrom, clampedTo];
+}
+
 /** The six-week grid a month is drawn on, starting on Monday. */
 function monthGrid(month: Date): Date[] {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
@@ -73,8 +93,10 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
     const next = !open();
     setOpen(next);
     if (next) {
-      setFrom(null);
-      setTo(null);
+      // The last 7 days ending today, so a picker opened and applied without touching a day
+      // still lands on a sensible window rather than an empty one.
+      setFrom(addDays(today(), -6));
+      setTo(today());
       queueMicrotask(() => gridRef?.focus());
     }
   }
@@ -89,6 +111,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
   onCleanup(() => document.removeEventListener("pointerdown", onPointerDown, true));
 
   function pick(day: Date) {
+    if (day > today()) return; // A future day is shown muted and takes no click.
     const start = from();
     if (!start || to()) {
       setFrom(day);
@@ -103,7 +126,8 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
     if (!start) return;
     const end = to() ?? start;
     const [a, b] = start <= end ? [start, end] : [end, start];
-    props.onApply(startOfDay(a), endOfDay(b));
+    const [clampedA, clampedB] = clampToToday(a, b);
+    props.onApply(startOfDay(clampedA), endOfDay(clampedB));
     close();
   }
 
@@ -217,8 +241,9 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
             </span>
             <button
               type="button"
-              class="focus-ring rounded p-1 text-muted transition-colors hover:text-foreground"
+              class="focus-ring rounded p-1 text-muted transition-colors hover:text-foreground disabled:opacity-30 disabled:hover:text-muted"
               aria-label="Next month"
+              disabled={sameMonth(month(), today())}
               onClick={() => setMonth(addMonths(month(), 1))}
             >
               <IconChevronRight size={12} />
@@ -247,22 +272,31 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
                 const selected = () => isEdge(day);
                 const covered = () => inRange(day) && !selected();
                 const focused = () => sameDay(day, cursor());
+                // A day after today is not a read the daemon can answer, so it is shown muted
+                // and takes neither hover nor a click rather than quietly picking a future date.
+                const future = () => day > today();
                 return (
                   <button
                     type="button"
                     role="gridcell"
                     tabindex="-1"
                     aria-selected={selected()}
+                    aria-disabled={future()}
+                    aria-label={day.toDateString()}
+                    disabled={future()}
                     class={`h-7 rounded text-center text-[11px] tabular-nums transition-colors ${
-                      selected()
-                        ? "bg-signal font-semibold text-background"
-                        : covered()
-                          ? "bg-signal/15 text-foreground"
-                          : outside()
-                            ? "text-muted/50 hover:bg-raised"
-                            : "text-foreground hover:bg-raised"
+                      future()
+                        ? "cursor-default text-muted/30"
+                        : selected()
+                          ? "bg-signal font-semibold text-background"
+                          : covered()
+                            ? "bg-signal/15 text-foreground"
+                            : outside()
+                              ? "text-muted/50 hover:bg-raised"
+                              : "text-foreground hover:bg-raised"
                     } ${focused() && !selected() ? "ring-1 ring-signal/60" : ""}`}
                     onClick={() => {
+                      if (future()) return;
                       setCursor(day);
                       pick(day);
                       gridRef?.focus();

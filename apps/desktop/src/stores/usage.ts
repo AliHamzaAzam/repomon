@@ -238,16 +238,24 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
       const { from, to } = resolveWindow({ range: next }, now);
       goTo({ range: next, label: RANGE_LABELS[next], bucket: bucketFor(next, from, to) }, []);
     },
-    /** Pick an explicit window from the date picker or a preset. */
+    /**
+     * Pick an explicit window from the date picker or a preset. Clamped so the window can never
+     * reach into the future: whatever the caller asks for, the end lands at latest on "now" and
+     * the start at latest on that clamped end, so a stray future date never becomes a read the
+     * daemon has no data for and the header never promises tomorrow's numbers.
+     */
     setCustomRange(since: Date, until: Date, label?: string) {
-      const [from, to] = since <= until ? [since, until] : [until, since];
+      const [start, end] = since <= until ? [since, until] : [until, since];
+      const now = new Date();
+      const clampedEnd = end > now ? now : end;
+      const clampedStart = start > clampedEnd ? clampedEnd : start;
       goTo(
         {
           range: "custom",
-          since: from.toISOString(),
-          until: to.toISOString(),
-          label: label ?? windowLabel(from, to),
-          bucket: bucketFor("custom", from, to),
+          since: clampedStart.toISOString(),
+          until: clampedEnd.toISOString(),
+          label: label ?? windowLabel(clampedStart, clampedEnd),
+          bucket: bucketFor("custom", clampedStart, clampedEnd),
         },
         [],
       );

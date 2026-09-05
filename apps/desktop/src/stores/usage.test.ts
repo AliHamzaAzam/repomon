@@ -2,7 +2,7 @@ import { createRoot } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
 import type { UsageSessionRow, UsageSummary, UsageTimeline } from "../bindings";
-import { createUsageStore, type UsageSource } from "./usage";
+import { createUsageStore, windowLabel, type UsageSource } from "./usage";
 
 const totals = {
   input_tokens: 100,
@@ -21,7 +21,7 @@ const summary: UsageSummary = {
   to: "2026-09-05T12:00:00Z",
   group_by: "kind",
   totals,
-  groups: [{ key: "claude-code", label: "claude-code", totals }],
+  groups: [{ key: "claude-code", label: "claude-code", totals, unpriced: false }],
   cache_hit_rate: 0.75,
   estimated_share: 0,
   unpriced_models: [],
@@ -202,6 +202,59 @@ describe("usage store", () => {
       expect(store.step().label).toBe("Last month");
       dispose();
     });
+  });
+
+  it("clamps a custom range whose end reaches into the future", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T12:00:00Z"));
+    try {
+      await createRoot(async (dispose) => {
+        const s = source();
+        const store = createUsageStore(s);
+        await store.refresh();
+        // Asked for a window running six days past "now"; the end must clamp to now, not sail
+        // past it, and the header label must describe the window actually read.
+        store.setCustomRange(new Date("2026-09-01T00:00:00Z"), new Date("2026-09-11T00:00:00Z"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.summary).toHaveBeenLastCalledWith({
+          range: "custom",
+          since: "2026-09-01T00:00:00.000Z",
+          until: "2026-09-05T12:00:00.000Z",
+          group_by: "kind",
+        });
+        expect(store.step().label).toBe(
+          windowLabel(new Date("2026-09-01T00:00:00Z"), new Date("2026-09-05T12:00:00Z")),
+        );
+        dispose();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clamps a custom range whose start is also past the clamped end", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T12:00:00Z"));
+    try {
+      await createRoot(async (dispose) => {
+        const s = source();
+        const store = createUsageStore(s);
+        await store.refresh();
+        // Both ends land in the future; the whole window collapses onto "now" rather than
+        // reporting a since after its own until.
+        store.setCustomRange(new Date("2026-09-10T00:00:00Z"), new Date("2026-09-20T00:00:00Z"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.summary).toHaveBeenLastCalledWith({
+          range: "custom",
+          since: "2026-09-05T12:00:00.000Z",
+          until: "2026-09-05T12:00:00.000Z",
+          group_by: "kind",
+        });
+        dispose();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("narrows into a bucket and steps back out through the trail", async () => {
