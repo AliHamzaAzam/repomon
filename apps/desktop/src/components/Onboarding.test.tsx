@@ -67,6 +67,7 @@ function createMockActions(repos: Repo[] = []): ActionsStore {
     fleet: { repos: () => repos },
     addRepo: vi.fn().mockResolvedValue(undefined),
     openSettingsTab: vi.fn(),
+    openShortcutsGuide: vi.fn(),
   } as unknown as ActionsStore;
 }
 
@@ -411,7 +412,7 @@ describe("setup wizard steps", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
-  it("summarises what was set up and suggests three things to do next", async () => {
+  it("summarises what was set up and suggests four things to do next", async () => {
     const repo: Repo = {
       id: 1,
       name: "repomon",
@@ -433,6 +434,15 @@ describe("setup wizard steps", () => {
     expect(screen.getByText("Open a lane.")).toBeInTheDocument();
     expect(screen.getByText("Find a file fast.")).toBeInTheDocument();
     expect(screen.getByText("Start Repomind.")).toBeInTheDocument();
+    expect(screen.getByText("Learn the keyboard shortcuts.")).toBeInTheDocument();
+  });
+
+  it("opens the shortcuts guide from the Done step's next action", () => {
+    const { actions } = mountWizard({ step: "done" });
+
+    fireEvent.click(screen.getByText("Learn the keyboard shortcuts.").closest("button")!);
+
+    expect(actions.openShortcutsGuide).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
 import type { FleetSource } from "./stores/fleet";
+import { formatChord } from "./keymap";
 import { SHORTCUTS_HINT_LAUNCH_COUNT_KEY } from "./stores/uiSettings";
 
 function sourceFor(snapshot: ConnectionSnapshot): ConnectionSource {
@@ -122,6 +123,24 @@ describe("Repomon desktop shell", () => {
 
     fireEvent.keyDown(window, { key: "4", code: "Digit4", metaKey: true });
     await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "false"));
+  });
+
+  it("shows the real keymap.ts chord in header toolbar button titles, not hand-written text", () => {
+    // Regression check mirroring ControlCenter.test.tsx's "Keyboard Shortcuts" chord test: these
+    // titles used to hard-code strings like "Extensions (⌘4)" that could drift from the actual
+    // binding in keymap.ts. They're now derived from BINDINGS via chordFor/formatChord.
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "starting",
+      endpoint: "Resolving local daemon endpoint",
+      message: null,
+      daemon: null,
+    })} />);
+
+    const extensions = within(container).getByRole("button", { name: "Extensions" });
+    expect(extensions).toHaveAttribute("title", `Extensions (${formatChord("mod+4")})`);
+
+    const settings = within(container).getByRole("button", { name: "Settings" });
+    expect(settings).toHaveAttribute("title", `Settings (${formatChord("mod+,")})`);
   });
 
   it("toggles the fleet-wide Multitasking workspace and hides the lane sidebar", async () => {

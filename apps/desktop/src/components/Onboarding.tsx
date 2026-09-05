@@ -2,6 +2,7 @@ import { For, Match, Show, Switch as SwitchBlock, createSignal, onCleanup, onMou
 
 import type { AgentDoctorInfo, SystemDoctorResult } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
+import { BINDINGS, formatChord } from "../keymap";
 import type { ActionsStore } from "../stores/actions";
 import {
   FIRST_STEP,
@@ -242,6 +243,7 @@ export default function Onboarding(props: OnboardingProps) {
                   agent={defaultAgent()}
                   alerts={Boolean(config()?.notify_enabled && config()?.notify_needs_you)}
                   repomind={startRepomind()}
+                  onOpenShortcuts={() => props.actions.openShortcutsGuide()}
                 />
               </Match>
             </SwitchBlock>
@@ -654,11 +656,20 @@ function RepomindStep(props: {
   );
 }
 
+/// Look up a chord by binding id in keymap.ts's BINDINGS and format it for display. Mirrors
+/// ControlCenter.tsx's and App.tsx's helper of the same name and purpose, so the Done step's
+/// "keyboard shortcuts" hint can never drift out of sync with the real binding.
+function chordFor(id: string): string | undefined {
+  const binding = BINDINGS.find((entry) => entry.id === id);
+  return binding ? formatChord(binding.chord) : undefined;
+}
+
 function DoneStep(props: {
   repoCount: number;
   agent: string | null;
   alerts: boolean;
   repomind: boolean;
+  onOpenShortcuts: () => void;
 }) {
   const summary = () => [
     { label: "Repositories", value: props.repoCount === 0 ? "None yet" : `${props.repoCount} added` },
@@ -711,6 +722,23 @@ function DoneStep(props: {
             Its row sits at the top of the sidebar. Start it once and it keeps notes for every lane
             that follows.
           </p>
+        </li>
+        <li>
+          <button
+            type="button"
+            class="focus-ring flex w-full cursor-pointer gap-3 rounded-lg border border-line bg-surface/50 p-3 text-left transition-colors hover:bg-raised"
+            onClick={() => props.onOpenShortcuts()}
+          >
+            <span class="mt-0.5 shrink-0 text-signal"><IconCommand size={14} /></span>
+            <p class="text-[11px] leading-relaxed text-muted">
+              <span class="text-xs font-medium text-foreground">Learn the keyboard shortcuts.</span>{" "}
+              Press{" "}
+              <kbd class="rounded border border-line bg-surface px-1 py-0.5 font-mono text-[10px] text-foreground">
+                {chordFor("help.open")}
+              </kbd>{" "}
+              anytime, or click here now, to open the full cheat sheet.
+            </p>
+          </button>
         </li>
       </ul>
     </div>

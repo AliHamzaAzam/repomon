@@ -26,7 +26,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { BINDINGS, formatChord, isMac, matchChord, matchSidebarKey } from "./keymap";
+import { BINDINGS, formatChord, matchChord, matchSidebarKey } from "./keymap";
 import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
@@ -93,6 +93,15 @@ function persistRepomindOpen(open: boolean) {
   try {
     localStorage.setItem(REPOMIND_OPEN_STORAGE_KEY, String(open));
   } catch {}
+}
+
+/// Look up a chord by binding id in keymap.ts's BINDINGS and format it for display, so a header
+/// toolbar button's title can never drift out of sync with what the chord actually does. Mirrors
+/// ControlCenter.tsx's helper of the same name and purpose. Returns undefined for an id with no
+/// chord, or none registered.
+function chordFor(id: string): string | undefined {
+  const binding = BINDINGS.find((entry) => entry.id === id);
+  return binding ? formatChord(binding.chord) : undefined;
 }
 
 function App(props: AppProps) {
@@ -516,7 +525,7 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("git")}
             aria-pressed={repomindOpen() && rightPanelTab() === "git"}
-            title="Git (⌘3)"
+            title={`Git (${chordFor("panel.git")})`}
           >
             <IconGitBranch size={13} />
             <span>Git</span>
@@ -549,7 +558,7 @@ function App(props: AppProps) {
                 openPanelTab("editor");
               }}
               aria-pressed={repomindOpen() && rightPanelTab() === "editor"}
-              title="Toggle compact editor in side rail (⌘7)"
+              title={`Toggle compact editor in side rail (${chordFor("panel.editor")})`}
             >
               <IconChevronDown size={10} />
             </button>
@@ -566,7 +575,7 @@ function App(props: AppProps) {
             }`}
             onClick={workspace.toggleMultitasking}
             aria-pressed={workspace.multitasking()}
-            title="Multitasking (⌘9)"
+            title={`Multitasking (${chordFor("panel.multitasking")})`}
           >
             <IconMultitask size={13} />
             <span>Multitasking</span>
@@ -584,7 +593,7 @@ function App(props: AppProps) {
               setExtensionsOpen(!extensionsOpen());
             }}
             aria-pressed={extensionsOpen()}
-            title="Extensions (⌘4)"
+            title={`Extensions (${chordFor("panel.extensions")})`}
           >
             <IconExtensions size={13} />
             <span>Extensions</span>
@@ -599,7 +608,7 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("supervision")}
             aria-pressed={repomindOpen() && rightPanelTab() === "supervision"}
-            title="Supervision (⌘8)"
+            title={`Supervision (${chordFor("panel.supervision")})`}
           >
             <IconShield size={13} />
             <span>Supervision</span>
@@ -614,7 +623,7 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("mail")}
             aria-pressed={repomindOpen() && rightPanelTab() === "mail"}
-            title="Repomail (⌘2)"
+            title={`Repomail (${chordFor("panel.mail")})`}
           >
             <IconMail size={13} />
             <span>Repomail</span>
@@ -632,7 +641,7 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("repomind")}
             aria-pressed={repomindOpen() && rightPanelTab() === "repomind"}
-            title="Repomind (⌘5)"
+            title={`Repomind (${chordFor("panel.repomind")})`}
           >
             <IconSparkles size={13} />
             <span>Repomind</span>
@@ -644,7 +653,7 @@ function App(props: AppProps) {
             class="focus-ring flex size-7 items-center justify-center text-muted transition-colors hover:text-foreground"
             onClick={() => actions.openSettings()}
             aria-label="Settings"
-            title="Settings (⌘,)"
+            title={`Settings (${chordFor("panel.settings")})`}
           >
             <IconSettings size={14} />
           </button>
