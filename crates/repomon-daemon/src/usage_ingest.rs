@@ -62,6 +62,9 @@ pub struct IngestReport {
     pub failed: usize,
 }
 
+/// Where Claude Code nests a session's subagent transcripts.
+const CLAUDE_SUBAGENTS_DIR: &str = "subagents";
+
 /// The directory Codex writes rollouts to.
 fn codex_sessions_root() -> PathBuf {
     if let Ok(p) = std::env::var("REPOMON_CODEX_SESSIONS") {
@@ -144,14 +147,36 @@ pub fn discover_sources(budget: usize) -> Vec<Source> {
     };
     for (projects, account) in claude_roots {
         for dir in read_dir(&projects) {
-            for file in read_dir(&dir) {
-                if file.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            for entry in read_dir(&dir) {
+                // A session's subagents get their own transcripts, one directory below its file:
+                // `<project>/<session>/subagents/agent-<id>.jsonl`. They are the larger half of
+                // the spend on a fleet that delegates, so the ledger reads them as sources of
+                // their own; the reader folds each back into the session named by the directory.
+                if entry.is_dir() {
+                    for file in read_dir(&entry.join(CLAUDE_SUBAGENTS_DIR)) {
+                        if file.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                            continue;
+                        }
+                        out.push((
+                            mtime(&file),
+                            Source {
+                                path: file,
+                                kind: SourceKind::Claude,
+                                account: account.clone(),
+                                cwd_hint: None,
+                                model_hint: String::new(),
+                            },
+                        ));
+                    }
+                    continue;
+                }
+                if entry.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
                 out.push((
-                    mtime(&file),
+                    mtime(&entry),
                     Source {
-                        path: file,
+                        path: entry,
                         kind: SourceKind::Claude,
                         account: account.clone(),
                         cwd_hint: None,
@@ -667,6 +692,14 @@ mod tests {
             include_str!("../../repomon-core/src/usage_ledger/fixtures/claude_usage_v0.jsonl"),
         )
         .unwrap();
+        // Claude Code nests each subagent's transcript one directory below the session file.
+        let subagents = projects.join("sess-claude-1/subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        fs::write(
+            subagents.join("agent-a1b2c3d4.jsonl"),
+            include_str!("../../repomon-core/src/usage_ledger/fixtures/claude_subagent_v0.jsonl"),
+        )
+        .unwrap();
 
         let codex = root.join("codex/sessions/2026/09/02");
         fs::create_dir_all(&codex).unwrap();
@@ -739,6 +772,19 @@ mod tests {
     }
 
     #[test]
+    fn discovery_finds_the_subagent_transcripts_nested_under_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let sources = discover_sources(usize::MAX);
+        let nested: Vec<&Source> = sources
+            .iter()
+            .filter(|s| s.path.parent().and_then(|p| p.file_name()) == Some("subagents".as_ref()))
+            .collect();
+        assert_eq!(nested.len(), 1, "the subagent transcript is a source too");
+        assert_eq!(nested[0].kind, SourceKind::Claude);
+    }
+
+    #[test]
     fn discovery_carries_the_antigravity_working_directory_from_the_conversation_cache() {
         let dir = tempfile::tempdir().unwrap();
         let _env = with_seeded_sources(dir.path());
@@ -804,7 +850,11 @@ mod tests {
             .iter()
             .filter(|r| r.agent_kind == "claude-code")
             .collect();
-        assert_eq!(claude.len(), 3);
+        assert_eq!(
+            claude.len(),
+            5,
+            "three turns of the session's own and two of its subagent's"
+        );
         assert!(claude.iter().all(|r| r.lane_id.is_some()));
         assert!(claude.iter().all(|r| !r.external));
         assert_eq!(claude[0].window.as_deref(), Some("lane-1"));
@@ -821,6 +871,56 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    async fn all_sessions(ctx: &Arc<Ctx>) -> Vec<repomon_core::usage_ledger::UsageSessionRow> {
+        ctx.store
+            .usage_sessions_between(
+                chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::Utc::now() + chrono::Duration::days(365),
+                None,
+                50,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_subagent_turn_folds_into_the_row_of_the_session_that_spawned_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        ingest_once(&ctx).await.unwrap();
+        let events = all_events(&ctx).await;
+        let sub: Vec<_> = events.iter().filter(|e| e.subagent).collect();
+        assert_eq!(sub.len(), 2, "both subagent messages are recorded");
+        assert!(
+            sub.iter()
+                .all(|e| e.session_id.as_deref() == Some("sess-claude-1")),
+            "a subagent turn belongs to the session that spawned it"
+        );
+        assert!(
+            sub.iter().all(|e| e.lane_id.is_some() && !e.external),
+            "and to the same lane as the session"
+        );
+        let row = all_sessions(&ctx)
+            .await
+            .into_iter()
+            .find(|r| r.session_id == "sess-claude-1")
+            .expect("the session row");
+        assert_eq!(
+            row.totals.subagent_tokens, 2007,
+            "the row says how much of its spend was its subagents"
+        );
+        assert!(row.totals.total_tokens > row.totals.subagent_tokens);
+        assert_eq!(
+            row.headline.as_deref(),
+            Some("Wire up the ledger"),
+            "the subagent's own prompt must not become the session's task"
+        );
+        assert_eq!(row.turns, 5, "three of its own turns and two subagent ones");
     }
 
     #[tokio::test]
@@ -981,7 +1081,10 @@ mod tests {
             .expect("the claude session");
         assert_eq!(claude.headline.as_deref(), Some("Wire up the ledger"));
         assert_eq!(claude.retries, 1);
-        assert_eq!(claude.tool_calls, 1);
+        assert_eq!(
+            claude.tool_calls, 2,
+            "one of its own and one its subagent made"
+        );
     }
 
     /// A digest stamped with an old `headline_version` is what a session looked like under a
