@@ -215,6 +215,8 @@ On Linux this writes `~/.config/systemd/user/repomon.service`; run
 
 ## Usage
 
+Correct model prices in **Settings > Usage** or with `repomon usage rates set/reset`; overrides re-price usage immediately without a restart.
+
 ```sh
 repomon                                # just run it: starts the daemon if needed, then the TUI
 repomon add ~/code/pos-saas            # register a repo

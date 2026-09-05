@@ -685,6 +685,34 @@ The `[usage]` table in `~/.config/repomon/config.toml`:
 `repomon usage today|week|month`, `repomon usage report`, `repomon usage ingest` and
 `repomon usage status` answer the same questions from a terminal, with `--group-by` and `--csv`.
 
+### Model rates in Settings
+
+Open **Settings > Usage** to turn tracking or daily price refresh on and off, inspect price
+provenance, or refresh prices now. The **Model rates** table includes every model the ledger
+has seen and every model with an override. Unpriced rows come first by default; filter by
+model id or sort any column, including last seen and 30-day tokens. The Usage view's unpriced
+warning opens this tab with the first unpriced model already in the filter.
+
+Rates are USD per million tokens. Choose **Edit**, type only the rates you want to change,
+and save. Blank fields keep the currently resolved value, including any existing override;
+zero explicitly sets a free rate. **Reset** removes the entire override for that model.
+**Add model** accepts a model id or family prefix before its first run. Changes take effect
+immediately, including costs for past usage, without restarting the daemon.
+
+For the same model id, an override wins over the LiteLLM snapshot, then the built-in table.
+Resolution checks an exact id first, then known aliases, then the longest matching family
+prefix. For example, `claude-haiku-4-5` can price `claude-haiku-4-5-20251001` when no exact
+row exists. A published exact row takes priority over a broader family override; edit the
+exact id to correct it. A partial override inherits the other rates from the resolved row.
+
+The CLI uses the same live config patches:
+
+```sh
+repomon usage rates set claude-sonnet-5 --output 9
+repomon usage rates set future-model --input 2 --output 10 --cache-read 0.2 --cache-write 2.5
+repomon usage rates reset claude-sonnet-5
+```
+
 ### Where prices come from
 
 A price is resolved in this order: `[usage.price_overrides]` first, then the daily LiteLLM
