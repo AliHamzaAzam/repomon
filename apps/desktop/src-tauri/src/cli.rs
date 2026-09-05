@@ -239,8 +239,18 @@ fn read_status(dir: &Path) -> CliStatus {
         }
     }
     let installed = missing.is_empty();
+    let mut notes = Vec::new();
+    let copied = copy_install();
+    #[cfg(unix)]
+    let copied = copied || tools().iter().any(|tool| is_managed_copy(&dir.join(tool)));
+    if copied {
+        notes.push(COPY_NOTE.into());
+    }
     let (path, known) = user_path();
     let on_path = known.then(|| path_lists_dir(&path, dir, path_separator()));
+    if !known {
+        notes.push("could not read your shell PATH".into());
+    }
     CliStatus {
         installed,
         dir: dir.display().to_string(),
@@ -249,11 +259,7 @@ fn read_status(dir: &Path) -> CliStatus {
         tools: present,
         missing,
         path_hint: (on_path != Some(true)).then(|| path_hint(dir)),
-        notes: if known {
-            vec![]
-        } else {
-            vec!["could not read your shell PATH".into()]
-        },
+        notes,
     }
 }
 
@@ -314,7 +320,7 @@ fn install_tools() -> Result<CliStatus, String> {
 
     let mut notes = Vec::new();
     for tool in tools() {
-        if let Some(note) = install_tool(&source.join(tool), &dir.join(tool))? {
+        if let Some(note) = install_tool(&source.join(tool), &dir.join(tool), copy_install())? {
             notes.push(note);
         }
     }
@@ -337,32 +343,7 @@ pub async fn cli_uninstall() -> Result<CliStatus, String> {
 fn uninstall_tools() -> Result<CliStatus, String> {
     let dir = install_dir()?;
     for tool in tools() {
-        let path = dir.join(tool);
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        // On unix the install directory is shared with everything else the user put in
-        // `~/.local/bin`, including a `repomon` from `install.sh` or `cargo install`. Only remove
-        // what this card created, which is always a symlink. On Windows the directory is ours
-        // alone (`install.ps1` uses `%LOCALAPPDATA%\Programs\repomon`), so anything in it goes.
-        #[cfg(unix)]
-        if !meta.file_type().is_symlink() {
-            continue;
-        }
-        #[cfg(not(unix))]
-        let _ = meta;
-        #[cfg(unix)]
-        {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
-            let backup = backup_path(&path);
-            if backup.exists() {
-                std::fs::rename(&backup, &path)
-                    .map_err(|e| format!("could not restore {}: {e}", backup.display()))?;
-            }
-        }
-        #[cfg(windows)]
-        retire_copy(&path)?;
+        uninstall_tool(&dir.join(tool))?;
     }
 
     #[cfg(windows)]
@@ -377,7 +358,7 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn install_tool(from: &Path, to: &Path) -> Result<Option<String>, String> {
+fn install_tool(from: &Path, to: &Path, copy: bool) -> Result<Option<String>, String> {
     // Also catch two spellings of the same location before moving or deleting anything.
     if from == to
         || std::fs::canonicalize(from)
@@ -393,7 +374,7 @@ fn install_tool(from: &Path, to: &Path) -> Result<Option<String>, String> {
             return Err(format!("refusing to replace directory {}", to.display()));
         }
         #[cfg(unix)]
-        if meta.file_type().is_symlink() {
+        if meta.file_type().is_symlink() || is_managed_copy(to) {
             std::fs::remove_file(to)
                 .map_err(|e| format!("could not replace {}: {e}", to.display()))?;
         } else {
@@ -417,7 +398,7 @@ fn install_tool(from: &Path, to: &Path) -> Result<Option<String>, String> {
             note = retire_copy(to)?;
         }
     }
-    if let Err(error) = link_or_copy(from, to) {
+    if let Err(error) = link_or_copy(from, to, copy) {
         #[cfg(unix)]
         if note.is_some() {
             let _ = std::fs::rename(backup_path(to), to);
@@ -452,18 +433,102 @@ fn retire_copy(path: &Path) -> Result<Option<String>, String> {
 /// A symlink keeps the CLI in step with the app across updates, which is why unix uses one. On
 /// Windows creating a symlink needs developer mode or an elevated prompt, so the app copies
 /// instead and a new app version republishes the copies on the next Install.
-fn link_or_copy(from: &Path, to: &Path) -> Result<(), String> {
+fn link_or_copy(from: &Path, to: &Path, copy: bool) -> Result<(), String> {
+    if copy {
+        std::fs::copy(from, to)
+            .map_err(|e| format!("could not copy {} to {}: {e}", from.display(), to.display()))?;
+        #[cfg(unix)]
+        std::fs::write(copy_marker(to), copy_identity(to)?)
+            .map_err(|e| format!("could not record installed copy {}: {e}", to.display()))?;
+        return Ok(());
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(from, to)
+        .map_err(|e| format!("could not link {} to {}: {e}", to.display(), from.display()))?;
+    Ok(())
+}
+
+const COPY_NOTE: &str = "These tools are copies and will not follow app updates. Remove and install them again after updating the app.";
+
+/// APPIMAGE names the original image; APPDIR names its extracted temporary mount.
+fn needs_copy(
+    windows: bool,
+    linux: bool,
+    appimage: Option<&std::ffi::OsStr>,
+    appdir: Option<&std::ffi::OsStr>,
+) -> bool {
+    windows
+        || (linux
+            && [appimage, appdir]
+                .into_iter()
+                .flatten()
+                .any(|value| !value.is_empty()))
+}
+
+fn copy_install() -> bool {
+    needs_copy(
+        cfg!(windows),
+        cfg!(target_os = "linux"),
+        std::env::var_os("APPIMAGE").as_deref(),
+        std::env::var_os("APPDIR").as_deref(),
+    )
+}
+
+#[cfg(unix)]
+fn copy_marker(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.repomon-copy",
+        path.file_name().unwrap().to_string_lossy()
+    ))
+}
+
+/// A replaced or modified user binary must not be removed because an old marker survived.
+#[cfg(unix)]
+fn copy_identity(path: &Path) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{}:{}:{}:{}:{}",
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec()
+    ))
+}
+
+#[cfg(unix)]
+fn is_managed_copy(path: &Path) -> bool {
+    copy_identity(path)
+        .ok()
+        .zip(std::fs::read_to_string(copy_marker(path)).ok())
+        .is_some_and(|(actual, recorded)| actual == recorded)
+}
+
+fn uninstall_tool(path: &Path) -> Result<(), String> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(from, to)
-            .map_err(|e| format!("could not link {} to {}: {e}", to.display(), from.display()))
+        if !meta.file_type().is_symlink() && !is_managed_copy(path) {
+            return Ok(());
+        }
+        std::fs::remove_file(path)
+            .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+        let _ = std::fs::remove_file(copy_marker(path));
+        let backup = backup_path(path);
+        if backup.exists() {
+            std::fs::rename(&backup, path)
+                .map_err(|e| format!("could not restore {}: {e}", backup.display()))?;
+        }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        std::fs::copy(from, to)
-            .map(|_| ())
-            .map_err(|e| format!("could not copy {} to {}: {e}", from.display(), to.display()))
+        let _ = meta;
+        retire_copy(path)?;
     }
+    Ok(())
 }
 
 /// The user PATH in `HKEY_CURRENT_USER\Environment`. Never `HKEY_LOCAL_MACHINE`: this install is
@@ -569,6 +634,68 @@ mod windows_path {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn appimage_paths_copy_but_native_linux_packages_link() {
+        use std::ffi::OsStr;
+        assert!(super::needs_copy(
+            false,
+            true,
+            Some(OsStr::new("/opt/Repomon.AppImage")),
+            None
+        ));
+        assert!(super::needs_copy(
+            false,
+            true,
+            None,
+            Some(OsStr::new("/tmp/.mount_repomon"))
+        ));
+        assert!(!super::needs_copy(false, true, None, None));
+        assert!(!super::needs_copy(false, true, Some(OsStr::new("")), None));
+        assert!(!super::needs_copy(
+            false,
+            false,
+            Some(OsStr::new("ignored")),
+            None
+        ));
+        assert!(super::needs_copy(true, false, None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn appimage_copy_survives_mount_removal_and_uninstall_restores_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("mount-tool");
+        let to = dir.path().join("repomon");
+        std::fs::write(&from, "bundled").unwrap();
+        std::fs::write(&to, "original").unwrap();
+        super::install_tool(&from, &to, true).unwrap();
+        super::install_tool(&from, &to, true).unwrap();
+        std::fs::remove_file(&from).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "bundled");
+        assert!(
+            !std::fs::symlink_metadata(&to)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        super::uninstall_tool(&to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "original");
+        assert!(!super::copy_marker(&to).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_copy_marker_does_not_remove_a_user_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("source");
+        let to = dir.path().join("repomon");
+        std::fs::write(&from, "bundled").unwrap();
+        super::install_tool(&from, &to, true).unwrap();
+        std::fs::write(&to, "user replacement").unwrap();
+        super::uninstall_tool(&to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "user replacement");
+    }
+
     #[cfg(unix)]
     #[test]
     fn install_preserves_existing_binary_and_backup() {
@@ -578,7 +705,7 @@ mod tests {
         std::fs::write(&from, "new").unwrap();
         std::fs::write(&to, "original").unwrap();
         assert_eq!(
-            super::install_tool(&from, &to).unwrap().unwrap(),
+            super::install_tool(&from, &to, false).unwrap().unwrap(),
             "moved your existing repomon to repomon.bak"
         );
         assert_eq!(
@@ -586,7 +713,7 @@ mod tests {
             "original"
         );
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "new");
-        super::install_tool(&from, &to).unwrap();
+        super::install_tool(&from, &to, false).unwrap();
         assert_eq!(
             std::fs::read_to_string(super::backup_path(&to)).unwrap(),
             "original"
@@ -598,7 +725,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("repomon");
         std::fs::write(&exe, "source").unwrap();
-        super::install_tool(&exe, &exe).unwrap();
+        super::install_tool(&exe, &exe, false).unwrap();
         assert_eq!(std::fs::read_to_string(exe).unwrap(), "source");
     }
 

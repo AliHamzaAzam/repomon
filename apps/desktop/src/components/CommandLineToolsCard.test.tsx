@@ -143,6 +143,13 @@ describe("the command-line tools card", () => {
     expect(await screen.findByText("moved your existing repomon to repomon.bak")).toBeInTheDocument();
   });
 
+  it("explains that AppImage copies do not follow app updates", async () => {
+    render(() => <CommandLineToolsCard read={async () => ({
+      ...installedAndOnPath(), notes: ["These tools are copies and will not follow app updates."],
+    })} />);
+    expect(await screen.findByText("These tools are copies and will not follow app updates.")).toBeInTheDocument();
+  });
+
   it("renders nothing outside the Tauri shell", () => {
     const { container } = render(() => <CommandLineToolsCard />);
     expect(container.querySelector("[data-testid='command-line-tools']")).toBeNull();
