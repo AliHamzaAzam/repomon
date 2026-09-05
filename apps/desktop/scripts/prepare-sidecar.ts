@@ -78,7 +78,10 @@ const targetArgs =
   process.env.TAURI_ENV_TARGET_TRIPLE || process.env.REPOMON_DESKTOP_TARGET
     ? ["--target", target]
     : [];
-const packages = ["-p", "repomon-daemon"];
+// The daemon and the CLI ship on every platform: the daemon because the app is useless without
+// one, the CLI because Settings > System installs it from the bundle rather than sending people
+// to a download page. The ConPTY agent host is Windows only (tmux plays its part elsewhere).
+const packages = ["-p", "repomon-daemon", "-p", "repomon-tui"];
 if (windows) packages.push("-p", "repomon-host");
 
 const build = Bun.spawnSync(
@@ -109,6 +112,7 @@ function copySidecar(name: string) {
 }
 
 copySidecar("repomond");
+copySidecar("repomon");
 if (windows) copySidecar("repomon-agent-host");
 
 function computeSha256(data: Buffer | Uint8Array): string {

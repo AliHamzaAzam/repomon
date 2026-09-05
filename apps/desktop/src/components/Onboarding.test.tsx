@@ -187,6 +187,14 @@ describe("setup wizard sequence", () => {
     mountWizard({ step: "done" });
     expect(screen.getByRole("button", { name: /Open Repomon/ })).toBeInTheDocument();
   });
+
+  it("offers the command line from the last step, and says where to find it later", () => {
+    mountWizard({ step: "done" });
+    // The card itself only renders inside the Tauri shell, so what the wizard owns is the offer
+    // and the promise that skipping it here is not a one-time chance.
+    expect(screen.getByText("Work from the terminal too")).toBeInTheDocument();
+    expect(screen.getByText(/Settings > System/)).toBeInTheDocument();
+  });
 });
 
 describe("setup wizard resume", () => {

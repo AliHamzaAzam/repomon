@@ -1,7 +1,11 @@
 {
   "bundle": {
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/repomond", "binaries/tmux"]
+    "externalBin": [
+      "binaries/repomond",
+      "binaries/repomon",
+      "binaries/tmux"
+    ]
   },
   "plugins": {
     "updater": {

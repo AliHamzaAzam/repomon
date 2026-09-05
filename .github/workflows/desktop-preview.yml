@@ -84,26 +84,32 @@ jobs:
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: bun install --frozen-lockfile
-      - name: Build daemon sidecar
+      # Two sidecars on every platform: the daemon, and the `repomon` CLI that Settings > System
+      # installs from the bundle (so "download the app" is the only step a CLI user needs).
+      - name: Build daemon and CLI sidecars
         shell: bash
         run: |
           mkdir -p apps/desktop/src-tauri/binaries
           if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
             # The universal build compiles each arch slice (needs the per-arch sidecar) and then
             # copies the universal-named one when bundling, so provide all three.
-            cargo build --release --locked -p repomon-daemon --target aarch64-apple-darwin
-            cargo build --release --locked -p repomon-daemon --target x86_64-apple-darwin
-            cp target/aarch64-apple-darwin/release/repomond apps/desktop/src-tauri/binaries/repomond-aarch64-apple-darwin
-            cp target/x86_64-apple-darwin/release/repomond apps/desktop/src-tauri/binaries/repomond-x86_64-apple-darwin
-            lipo -create -output apps/desktop/src-tauri/binaries/repomond-universal-apple-darwin \
-              target/aarch64-apple-darwin/release/repomond \
-              target/x86_64-apple-darwin/release/repomond
+            cargo build --release --locked -p repomon-daemon -p repomon-tui --target aarch64-apple-darwin
+            cargo build --release --locked -p repomon-daemon -p repomon-tui --target x86_64-apple-darwin
+            for bin in repomond repomon; do
+              cp "target/aarch64-apple-darwin/release/$bin" "apps/desktop/src-tauri/binaries/$bin-aarch64-apple-darwin"
+              cp "target/x86_64-apple-darwin/release/$bin" "apps/desktop/src-tauri/binaries/$bin-x86_64-apple-darwin"
+              lipo -create -output "apps/desktop/src-tauri/binaries/$bin-universal-apple-darwin" \
+                "target/aarch64-apple-darwin/release/$bin" \
+                "target/x86_64-apple-darwin/release/$bin"
+            done
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
-            cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
+            cargo build --release --locked -p repomon-daemon -p repomon-tui --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond.exe" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe"
+            cp "target/${{ matrix.target }}/release/repomon.exe" "apps/desktop/src-tauri/binaries/repomon-${{ matrix.target }}.exe"
           else
-            cargo build --release --locked -p repomon-daemon --target "${{ matrix.target }}"
+            cargo build --release --locked -p repomon-daemon -p repomon-tui --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/repomon" "apps/desktop/src-tauri/binaries/repomon-${{ matrix.target }}"
           fi
       - name: Build agent-host sidecar (Windows)
         if: ${{ matrix.host_sidecar }}
@@ -184,9 +190,7 @@ jobs:
       - name: Windows smoke test
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo build --release --locked -p repomon-tui --target "${{ matrix.target }}"
-          .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"
+        run: .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"
 
   cleanup:
     needs: preview

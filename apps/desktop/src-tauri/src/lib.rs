@@ -1,5 +1,6 @@
 mod assets;
 mod boot;
+mod cli;
 mod connection;
 mod control;
 mod ipc;
@@ -57,6 +58,9 @@ pub fn run() {
             boot::daemon_boot_check,
             boot::daemon_diagnostics,
             boot::open_daemon_log,
+            cli::cli_install,
+            cli::cli_status,
+            cli::cli_uninstall,
             control::daemon_service_info,
             control::daemon_stop,
             control::daemon_start,

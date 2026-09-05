@@ -95,6 +95,4 @@ jobs:
       - name: Windows smoke test
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo build --release --locked -p repomon-tui --target "${{ matrix.target }}"
-          .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"
+        run: .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"

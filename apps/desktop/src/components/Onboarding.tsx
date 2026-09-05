@@ -16,6 +16,7 @@ import {
   type OnboardingStepId,
 } from "../stores/onboarding";
 import BrandLockup from "./BrandLockup";
+import CommandLineToolsCard from "./CommandLineToolsCard";
 import SystemHealthView from "./SystemHealthView";
 import WindowChromeHeader from "./WindowChrome";
 import Switch from "./controls/Switch";
@@ -694,7 +695,19 @@ function DoneStep(props: {
         </For>
       </dl>
 
-      <h3 class="section-label">Try next</h3>
+      {/* The CLI is optional, so the wizard offers it here rather than making it a step. Everything
+          it needs is already in the bundle; Install is a local copy, not a download. */}
+      <h3 class="section-label">Work from the terminal too</h3>
+      <div class="mt-2 rounded-xl border border-line bg-surface/50 p-3">
+        <p class="mb-2.5 text-[11px] leading-relaxed text-muted">
+          The same fleet drives from a terminal with <span class="font-mono text-foreground">repomon</span>.
+          It is bundled with this app, so installing it is a local copy. You can do this later from
+          Settings &gt; System.
+        </p>
+        <CommandLineToolsCard compact />
+      </div>
+
+      <h3 class="mt-7 section-label">Try next</h3>
       <ul class="mt-2 space-y-2">
         <li class="flex gap-3 rounded-lg border border-line bg-surface/50 p-3">
           <span class="mt-0.5 shrink-0 text-signal"><IconPlus size={14} /></span>

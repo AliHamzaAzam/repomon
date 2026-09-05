@@ -1,7 +1,11 @@
 {
   "bundle": {
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/repomond", "binaries/repomon-agent-host"]
+    "externalBin": [
+      "binaries/repomond",
+      "binaries/repomon",
+      "binaries/repomon-agent-host"
+    ]
   },
   "plugins": {
     "updater": {

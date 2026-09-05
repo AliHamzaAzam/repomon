@@ -3,6 +3,7 @@ import { For, Show, createEffect, createSignal } from "solid-js";
 import type { SystemDoctorResult } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
+import CommandLineToolsCard from "./CommandLineToolsCard";
 import DaemonBootRow from "./DaemonBootRow";
 import { AgentIcon, IconCheck, IconCopy, IconGitBranch, IconRefresh, IconTerminal } from "./icons";
 
@@ -145,6 +146,9 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
       {/* The one check that does not go through the daemon, so it still answers when the daemon
           is the thing that is broken. */}
       <DaemonBootRow />
+
+      {/* The CLI ships inside this app; installing it is a local copy, not a download. */}
+      <CommandLineToolsCard />
 
       {/* Error Banner */}
       <Show when={doctorError()}>
