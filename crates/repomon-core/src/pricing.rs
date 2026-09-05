@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -104,13 +104,6 @@ pub fn snapshot_effective_from() -> DateTime<Utc> {
 
 /// UTC midnight on the day the table is built, so a placeholder rate dated "today" still applies
 /// to every event from earlier today rather than only ones after this exact instant.
-fn today_utc_midnight() -> DateTime<Utc> {
-    let now = Utc::now();
-    Utc.with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-        .single()
-        .unwrap_or(now)
-}
-
 impl PriceTable {
     /// A table with no rows. Every lookup misses.
     pub fn empty() -> Self {
@@ -161,16 +154,16 @@ impl PriceTable {
             });
         }
         // GPT-6 has no published rate card yet. This copies the GPT-5 row as a best-effort
-        // placeholder rather than leaving the family unpriced, dated from today so it never
-        // reprices something billed before the family existed. Replace it the moment a real rate
-        // is published, with `[usage.price_overrides."gpt-6"]`.
+        // placeholder rather than leaving the family unpriced. It carries the built-in date like
+        // every other row so a published LiteLLM rate or an undated override always outranks it;
+        // a moving date here would let the placeholder win over the snapshot for recent events.
         table.insert(ModelPrice {
             model: "gpt-6".to_string(),
             input_per_mtok: 1.25,
             output_per_mtok: 10.0,
             cache_read_per_mtok: 0.125,
             cache_write_per_mtok: 1.25,
-            effective_from: today_utc_midnight(),
+            effective_from: builtin_effective_from(),
             source: RateSource::Builtin,
         });
         table
@@ -1048,6 +1041,18 @@ mod tests {
         let over = row.price_override.as_ref().unwrap();
         assert_eq!(over.output_per_mtok, Some(9.0));
         assert_eq!(over.input_per_mtok, None);
+    }
+
+    #[test]
+    fn every_builtin_row_predates_the_snapshot_floor() {
+        for row in &PriceTable::builtin().rows {
+            assert!(
+                row.effective_from < snapshot_effective_from(),
+                "{} is dated {} which would outrank a LiteLLM snapshot row",
+                row.model,
+                row.effective_from
+            );
+        }
     }
 
     #[test]
