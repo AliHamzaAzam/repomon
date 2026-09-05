@@ -73,7 +73,7 @@ fn remote_method_allowed(method: &str) -> bool {
         // local-only: each drives an on-demand host action (a disk scan, a file write, a network
         // fetch) rather than just reading what the daemon already has.
         | "usage.summary" | "usage.timeline" | "usage.sessions" | "usage.findings"
-        | "usage.status" | "usage.rates"
+        | "usage.status" | "usage.rates" | "usage.models"
         // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
         | "terminal.list_all"
         // event stream + per-client streaming hint
@@ -599,6 +599,7 @@ mod tests {
             "usage.findings",
             "usage.status",
             "usage.rates",
+            "usage.models",
         ] {
             assert!(remote_method_allowed(m), "{m} must be allowed");
         }

@@ -223,6 +223,21 @@ pub async fn status(ctx: &Arc<Ctx>) -> repomon_core::Result<UsageStatus> {
     })
 }
 
+/// The Settings > Usage "Model rates" table: one row per model the ledger has ever seen, plus one
+/// for every model with a `[usage.price_overrides]` entry the ledger hasn't seen yet.
+pub async fn model_rates(ctx: &Arc<Ctx>) -> repomon_core::Result<Vec<repomon_core::pricing::ModelRateRow>> {
+    let table = crate::usage_ingest::price_table(ctx).await;
+    let overrides = ctx.config.read().await.usage.price_overrides.clone();
+    let now = Utc::now();
+    let seen = ctx
+        .store
+        .usage_model_seen(now - chrono::Duration::days(30))
+        .await?;
+    Ok(repomon_core::pricing::model_rate_rows(
+        &table, &overrides, &seen, now,
+    ))
+}
+
 /// Which file an export writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -518,5 +533,52 @@ mod tests {
         assert_eq!(s.sources, 0);
         assert!(s.errors.is_empty());
         assert!(!s.ingesting);
+    }
+
+    #[tokio::test]
+    async fn model_rates_lists_a_seen_model_and_an_unseen_overridden_one() {
+        let (ctx, _, _) = ctx_with_repo().await;
+        ctx.config.write().await.usage.refresh_prices = false;
+        ctx.store
+            .record_usage_events(vec![repomon_core::usage_ledger::UsageEvent {
+                at: Utc::now(),
+                agent_kind: "claude-code".to_string(),
+                model: "claude-sonnet-5".to_string(),
+                account: "default".to_string(),
+                lane_id: None,
+                repo_id: None,
+                session_id: Some("s1".to_string()),
+                window: None,
+                cwd: None,
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                thinking_tokens: 0,
+                estimated: false,
+                subagent: false,
+                external: true,
+                source_path: "t.jsonl".to_string(),
+                source_offset: 0,
+            }])
+            .await
+            .unwrap();
+        ctx.config.write().await.usage.price_overrides.insert(
+            "gpt-7".to_string(),
+            repomon_core::pricing::PriceOverride {
+                input_per_mtok: Some(4.0),
+                ..Default::default()
+            },
+        );
+
+        let rows = model_rates(&ctx).await.unwrap();
+        let sonnet = rows.iter().find(|r| r.model == "claude-sonnet-5").unwrap();
+        assert!(sonnet.last_seen.is_some());
+        assert_eq!(sonnet.tokens_30d, 1_500);
+        let gpt7 = rows.iter().find(|r| r.model == "gpt-7").unwrap();
+        assert_eq!(gpt7.source, repomon_core::pricing::ModelRateSource::Override);
+        assert_eq!(gpt7.last_seen, None, "never seen in the ledger");
+
+
     }
 }

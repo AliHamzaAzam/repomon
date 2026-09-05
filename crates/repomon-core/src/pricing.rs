@@ -70,9 +70,11 @@ pub struct ModelPrice {
 }
 
 /// A `[usage.price_overrides."model"]` entry. Every field is optional: a partial override edits
-/// only the rates it names and inherits the rest from the built-in row for that model.
+/// only the rates it names and inherits the rest from the snapshot or built-in row for that model.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct PriceOverride {
     pub input_per_mtok: Option<f64>,
     pub output_per_mtok: Option<f64>,
@@ -196,6 +198,7 @@ impl PriceTable {
                 .iter()
                 .filter(|r| r.model == model)
                 .max_by_key(|r| r.effective_from)
+                .or_else(|| self.lookup(&model, Utc::now()))
                 .cloned();
             let effective_from = over
                 .effective_from
@@ -333,6 +336,115 @@ impl PriceTable {
                 + tokens.cache_write as f64 / PER * p.cache_write_per_mtok,
         )
     }
+}
+
+/// Where a `usage.models` row's rate resolved from, extending [`RateSource`] with the one case
+/// `RateSource` itself never carries: nothing in the table matched at all. `PriceTable::lookup`
+/// never returns this; only [`model_rate_rows`] does, for a model the table has no row for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub enum ModelRateSource {
+    Builtin,
+    Litellm,
+    Override,
+    /// No exact id, alias, or family-prefix row resolved this model. Its rates read as zero.
+    Unpriced,
+}
+
+impl From<RateSource> for ModelRateSource {
+    fn from(source: RateSource) -> Self {
+        match source {
+            RateSource::Builtin => ModelRateSource::Builtin,
+            RateSource::Litellm => ModelRateSource::Litellm,
+            RateSource::Override => ModelRateSource::Override,
+        }
+    }
+}
+
+/// One row of the Settings > Usage "Model rates" table (`usage.models`): a model's resolved
+/// rates and where they came from, its raw override if it has one, and how much the ledger has
+/// actually seen it, so the table can sort by what matters rather than alphabetically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct ModelRateRow {
+    /// The model id or family prefix.
+    pub model: String,
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+    pub cache_read_per_mtok: f64,
+    pub cache_write_per_mtok: f64,
+    pub source: ModelRateSource,
+    /// The raw, possibly-sparse override from `[usage.price_overrides]`, when this model has one.
+    /// This is the operator's own input, not the resolved row above: a partial override (say,
+    /// only `output_per_mtok`) still shows only that one field set here, even though the row's
+    /// other three rates above are filled in from the snapshot or built-in table underneath it.
+    #[serde(rename = "override")]
+    pub price_override: Option<PriceOverride>,
+    /// The most recent ledger event for this model, `None` for a model that only exists because
+    /// it has an override (an operator naming a family prefix ahead of any usage, per the brief's
+    /// "Add model" case).
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Tokens (all kinds summed) this model has run in the last 30 days, for sorting the table by
+    /// what currently matters rather than by raw historical volume.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub tokens_30d: u64,
+}
+
+/// Build the Settings > Usage "Model rates" table: one row per model the ledger has ever seen,
+/// plus one for every model with an override the ledger hasn't seen yet (an operator naming a
+/// family prefix ahead of usage, so it is ready the moment a matching model shows up).
+///
+/// `seen` is `(model, last_seen, tokens_30d)` for every model in the ledger, from whatever source
+/// the caller reads that from (the daemon reads it from `usage_events`). `overrides` is
+/// the raw `[usage.price_overrides]` map, kept separate from `table` because `table` only carries
+/// the fully-resolved row (see [`PriceTable::apply_overrides`]), not the sparse operator input
+/// `ModelRateRow::price_override` reports.
+pub fn model_rate_rows(
+    table: &PriceTable,
+    overrides: &HashMap<String, PriceOverride>,
+    seen: &[(String, Option<DateTime<Utc>>, u64)],
+    at: DateTime<Utc>,
+) -> Vec<ModelRateRow> {
+    let mut models: std::collections::BTreeMap<String, (Option<DateTime<Utc>>, u64)> =
+        std::collections::BTreeMap::new();
+    for (model, last_seen, tokens_30d) in seen {
+        models.insert(model.clone(), (*last_seen, *tokens_30d));
+    }
+    for model in overrides.keys() {
+        models.entry(model.clone()).or_insert((None, 0));
+    }
+    models
+        .into_iter()
+        .map(|(model, (last_seen, tokens_30d))| {
+            let resolved = table.lookup(&model, at);
+            let (input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, source) =
+                match resolved {
+                    Some(p) => (
+                        p.input_per_mtok,
+                        p.output_per_mtok,
+                        p.cache_read_per_mtok,
+                        p.cache_write_per_mtok,
+                        p.source.into(),
+                    ),
+                    None if is_free_tier(&model) => (0.0, 0.0, 0.0, 0.0, ModelRateSource::Builtin),
+                    None => (0.0, 0.0, 0.0, 0.0, ModelRateSource::Unpriced),
+                };
+            ModelRateRow {
+                model: model.clone(),
+                input_per_mtok,
+                output_per_mtok,
+                cache_read_per_mtok,
+                cache_write_per_mtok,
+                source,
+                price_override: overrides.get(&model).cloned(),
+                last_seen,
+                tokens_30d,
+            }
+        })
+        .collect()
 }
 
 /// Whether `model` is a provider's free tier, whose published rate is zero.
@@ -825,6 +937,162 @@ mod tests {
         let line = format_rates_footnote(&status, at(2026, 9, 1));
         assert!(line.contains("failed"), "{line}");
         assert!(line.contains("connection timed out"), "{line}");
+    }
+
+    // --- model_rate_rows(): the Settings > Usage "Model rates" table ---
+
+    #[test]
+    fn model_rate_rows_resolves_an_exact_id_match() {
+        let table = PriceTable::builtin();
+        let seen = [("claude-sonnet-5".to_string(), Some(at(2026, 9, 1)), 1_000u64)];
+        let rows = model_rate_rows(&table, &HashMap::new(), &seen, at(2026, 9, 1));
+        let row = rows.iter().find(|r| r.model == "claude-sonnet-5").unwrap();
+        assert_eq!(row.source, ModelRateSource::Builtin);
+        assert!(row.input_per_mtok > 0.0);
+        assert_eq!(row.tokens_30d, 1_000);
+        assert_eq!(row.last_seen, Some(at(2026, 9, 1)));
+        assert!(row.price_override.is_none());
+    }
+
+    #[test]
+    fn model_rate_rows_resolves_a_dated_id_off_its_family_prefix() {
+        let table = PriceTable::builtin();
+        let seen = [(
+            "claude-haiku-4-5-20251001".to_string(),
+            Some(at(2026, 9, 1)),
+            5u64,
+        )];
+        let rows = model_rate_rows(&table, &HashMap::new(), &seen, at(2026, 9, 1));
+        let row = rows
+            .iter()
+            .find(|r| r.model == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert_eq!(row.source, ModelRateSource::Builtin);
+        assert!(row.input_per_mtok > 0.0);
+    }
+
+    #[test]
+    fn model_rate_rows_reports_override_beating_a_litellm_row() {
+        let mut table = PriceTable::empty();
+        table.insert(ModelPrice {
+            model: "claude-sonnet-5".into(),
+            input_per_mtok: 2.0,
+            output_per_mtok: 10.0,
+            cache_read_per_mtok: 0.2,
+            cache_write_per_mtok: 2.5,
+            effective_from: at(2026, 1, 1),
+            source: RateSource::Litellm,
+        });
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "claude-sonnet-5".to_string(),
+            PriceOverride {
+                input_per_mtok: Some(1.5),
+                ..Default::default()
+            },
+        );
+        table.apply_overrides(overrides.clone());
+        let seen = [("claude-sonnet-5".to_string(), Some(at(2026, 9, 1)), 10u64)];
+        let rows = model_rate_rows(&table, &overrides, &seen, at(2026, 9, 1));
+        let row = rows.iter().find(|r| r.model == "claude-sonnet-5").unwrap();
+        assert_eq!(row.source, ModelRateSource::Override);
+        assert_eq!(row.input_per_mtok, 1.5);
+        // The override only names input; the row still carries the LiteLLM snapshot's other
+        // three rates rather than zeroing them.
+        assert_eq!(row.output_per_mtok, 10.0);
+        assert_eq!(row.cache_read_per_mtok, 0.2);
+        assert_eq!(row.cache_write_per_mtok, 2.5);
+        assert_eq!(
+            row.price_override,
+            Some(PriceOverride {
+                input_per_mtok: Some(1.5),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn model_rate_rows_reports_a_partial_override_sparsely_even_though_the_resolved_row_is_full() {
+        // "an override with only output_per_mtok set keeping the other three from the snapshot"
+        let mut table = PriceTable::empty();
+        table.insert(ModelPrice {
+            model: "gemini-3-pro".into(),
+            input_per_mtok: 2.0,
+            output_per_mtok: 12.0,
+            cache_read_per_mtok: 0.2,
+            cache_write_per_mtok: 2.5,
+            effective_from: at(2026, 1, 1),
+            source: RateSource::Litellm,
+        });
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "gemini-3-pro".to_string(),
+            PriceOverride {
+                output_per_mtok: Some(9.0),
+                ..Default::default()
+            },
+        );
+        table.apply_overrides(overrides.clone());
+        let rows = model_rate_rows(&table, &overrides, &[], at(2026, 9, 1));
+        let row = rows.iter().find(|r| r.model == "gemini-3-pro").unwrap();
+        assert_eq!(row.output_per_mtok, 9.0);
+        assert_eq!(row.input_per_mtok, 2.0, "kept from the snapshot");
+        assert_eq!(row.cache_read_per_mtok, 0.2, "kept from the snapshot");
+        assert_eq!(row.cache_write_per_mtok, 2.5, "kept from the snapshot");
+        // The sparse override itself names only the one field the operator typed.
+        let over = row.price_override.as_ref().unwrap();
+        assert_eq!(over.output_per_mtok, Some(9.0));
+        assert_eq!(over.input_per_mtok, None);
+    }
+
+    #[test]
+    fn sparse_override_for_a_dated_id_inherits_its_family_rates() {
+        let mut table = PriceTable::builtin();
+        let model = "claude-haiku-4-5-20251001";
+        let base = table.lookup(model, at(2026, 9, 1)).unwrap().clone();
+        table.apply_overrides([(model.into(), PriceOverride {
+            output_per_mtok: Some(9.0), ..Default::default()
+        })]);
+        let row = table.lookup(model, at(2026, 9, 1)).unwrap();
+        assert_eq!(row.source, RateSource::Override);
+        assert_eq!(row.output_per_mtok, 9.0);
+        assert_eq!(row.input_per_mtok, base.input_per_mtok);
+        assert_eq!(row.cache_read_per_mtok, base.cache_read_per_mtok);
+        assert_eq!(row.cache_write_per_mtok, base.cache_write_per_mtok);
+    }
+
+    #[test]
+    fn model_rate_rows_flags_a_seen_model_with_no_match_as_unpriced() {
+        let table = PriceTable::builtin();
+        let seen = [("some-unknown-model-9000".to_string(), Some(at(2026, 9, 1)), 3u64)];
+        let rows = model_rate_rows(&table, &HashMap::new(), &seen, at(2026, 9, 1));
+        let row = rows
+            .iter()
+            .find(|r| r.model == "some-unknown-model-9000")
+            .unwrap();
+        assert_eq!(row.source, ModelRateSource::Unpriced);
+        assert_eq!(row.input_per_mtok, 0.0);
+    }
+
+    #[test]
+    fn model_rate_rows_includes_an_override_for_a_model_the_ledger_has_not_seen_yet() {
+        let table = PriceTable::builtin();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "gpt-7".to_string(),
+            PriceOverride {
+                input_per_mtok: Some(3.0),
+                output_per_mtok: Some(15.0),
+                ..Default::default()
+            },
+        );
+        let mut priced = table.clone();
+        priced.apply_overrides(overrides.clone());
+        let rows = model_rate_rows(&priced, &overrides, &[], at(2026, 9, 1));
+        let row = rows.iter().find(|r| r.model == "gpt-7").unwrap();
+        assert_eq!(row.source, ModelRateSource::Override);
+        assert_eq!(row.last_seen, None);
+        assert_eq!(row.tokens_30d, 0);
     }
 
     #[test]

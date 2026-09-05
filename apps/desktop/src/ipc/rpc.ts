@@ -24,6 +24,7 @@ import type {
   JournalEntry,
   Lane,
   MessagePage,
+  ModelRateRow,
   PendingDialog,
   Playbook,
   PolicyAction,
@@ -376,6 +377,7 @@ interface RpcMap {
   "usage.status": { params: undefined; result: UsageStatus };
   "usage.rates": { params: undefined; result: RatesStatus };
   "usage.refresh_rates": { params: undefined; result: RatesStatus };
+  "usage.models": { params: undefined; result: ModelRateRow[] };
   "usage.export": {
     params: UsageWindowParams & { format: "csv" | "json" };
     result: { path: string; events: number; bytes: number };

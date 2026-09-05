@@ -313,3 +313,44 @@ when readable (a partial parse still returns what it could).
 | `event.orchestrator.status` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` — broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.
+
+### Usage model rates
+
+`usage.models` takes no params and returns `ModelRateRow[]`: one row per model in
+`usage_events`, plus every configured override, including unseen model ids or family prefixes.
+It is readable over the remote bridge. Each row contains:
+
+- `model`: model id or family prefix.
+- `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, `cache_write_per_mtok`:
+  resolved USD rates per million tokens.
+- `source`: `builtin`, `litellm`, `override`, or `unpriced`. Unmatched models have zero
+  rates and are explicitly `unpriced`; known free-tier models are `builtin` at zero.
+- `override`: the raw `PriceOverride` or `null`. Its four rate fields and `effective_from`
+  are nullable; absent corrections are never filled with resolved values here.
+- `last_seen`: latest `usage_events.at` timestamp, or `null` for an unseen override.
+- `tokens_30d`: sum of input, output, cache-read, and cache-write tokens in the last 30 days.
+  Thinking tokens already billed as output are not counted twice.
+
+`usage.rates` remains the small provenance response (`RatesStatus`): source counts, refresh
+state, fetch timestamp, next refresh timestamp, ETag, and last error. `usage.refresh_rates`
+returns the same shape after an immediate refresh and remains local-only.
+
+`config.get` includes `usage_enabled` and `usage_refresh_prices`. Local-only `config.set`
+accepts either toggle and these atomic per-model patches:
+
+```json
+{"usage_price_override_upsert":{"model":"claude-sonnet-5","output_per_mtok":9}}
+```
+
+```json
+{"usage_price_override_reset":"claude-sonnet-5"}
+```
+
+Upsert accepts `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, and
+`cache_write_per_mtok`. At least one finite non-negative rate is required. Zero is a valid
+rate. Omitted fields preserve existing overrides, otherwise inheriting the resolved snapshot
+or built-in value. The model must be non-empty with no surrounding whitespace. Reset removes
+that model's entire override; resetting a missing key is a no-op. Both operations return the
+updated config view, persist `[usage.price_overrides]`, and update the daemon's live config.
+The next usage query re-prices history without a restart. Rate edits emit `event.usage.changed`
+as well as `event.config.changed` so open views reload their costs.

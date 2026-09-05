@@ -4858,6 +4858,10 @@ pub async fn dispatch(
         // Where prices come from right now: source counts, LiteLLM freshness, and the last
         // fetch's error if it failed. Bridge-readable (a read, like `usage.status`).
         "usage.rates" => to_value(crate::usage_rates::status(ctx).await),
+        // The Settings > Usage "Model rates" table: one row per model the ledger has ever seen
+        // plus one for every model with an override the ledger hasn't seen yet. Kept separate
+        // from `usage.rates` rather than folded into it so that small status payload stays small.
+        "usage.models" => to_value(crate::usage_query::model_rates(ctx).await.map_err(internal)?),
         // LOCAL-ONLY: forces an immediate LiteLLM fetch, bypassing the daily cadence. Stays off
         // the remote allowlist for the same reason `usage.ingest_now` does: it's an on-demand
         // network call a paired device shouldn't be able to trigger at will.

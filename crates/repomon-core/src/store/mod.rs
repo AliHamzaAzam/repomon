@@ -2367,6 +2367,34 @@ impl Store {
         })
         .await
     }
+
+    /// Every model the ledger has ever seen: its most recent event and how many tokens (every
+    /// kind summed) it has run since `cutoff`. Backs `usage.models`' Settings > Usage table, which
+    /// needs to show every model at least once, not just the ones active in whatever window the
+    /// operator happens to have open.
+    pub async fn usage_model_seen(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<(String, Option<DateTime<Utc>>, u64)>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT model, MAX(at),
+                        SUM(CASE WHEN at >= ?1
+                                 THEN input_tokens + output_tokens + cache_read_tokens
+                                      + cache_write_tokens
+                                 ELSE 0 END)
+                 FROM usage_events
+                 GROUP BY model
+                 ORDER BY model ASC",
+            )?;
+            let rows = stmt.query_map(params![to_iso(&cutoff)], |row| {
+                let tokens_30d: i64 = row.get(2)?;
+                Ok((row.get(0)?, opt_dt_col(row, 1)?, tokens_30d.max(0) as u64))
+            })?;
+            collect(rows)
+        })
+        .await
+    }
 }
 
 // ---- connection init + migrations --------------------------------------------
@@ -4934,6 +4962,36 @@ mod tests {
         assert_eq!(rows[0].cache_write_tokens, 40);
         assert_eq!(rows[0].lane_id, Some(3));
         assert_eq!(rows[0].cwd.as_deref(), Some("/repos/demo"));
+    }
+
+    #[tokio::test]
+    async fn usage_model_seen_reports_last_seen_and_thirty_day_tokens_per_model() {
+        let s = store().await;
+        s.record_usage_events(vec![
+            usage_event(0, "claude-sonnet-5", "2026-09-01T10:00:00Z"),
+            usage_event(1, "claude-sonnet-5", "2026-01-01T00:00:00Z"),
+            usage_event(2, "gpt-5", "2026-08-20T00:00:00Z"),
+        ])
+        .await
+        .unwrap();
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = s.usage_model_seen(cutoff).await.unwrap();
+        let sonnet = rows.iter().find(|(m, ..)| m == "claude-sonnet-5").unwrap();
+        assert_eq!(
+            sonnet.1,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-01T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+        // One event is inside the 30-day-ish cutoff (Sep 1), one is well before it (Jan 1): only
+        // the in-window event's tokens count. Each event contributes 10+20+30+40 = 100 tokens.
+        assert_eq!(sonnet.2, 100);
+        let gpt = rows.iter().find(|(m, ..)| m == "gpt-5").unwrap();
+        assert_eq!(gpt.2, 100, "gpt-5's one event is inside the cutoff too");
     }
 
     #[tokio::test]
