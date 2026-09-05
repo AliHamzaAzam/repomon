@@ -4859,7 +4859,13 @@ pub async fn dispatch(
             let report = crate::usage_ingest::ingest_once(ctx)
                 .await
                 .map_err(internal)?;
-            if report.events > 0 {
+            // A version bump to the headline extractor leaves every existing session stale at
+            // once; an operator hitting "refresh now" should not have to wait out the periodic
+            // tick's bounded batch for the sessions table to stop showing injected text.
+            let redigested = crate::usage_ingest::redigest_stale_headlines(ctx)
+                .await
+                .map_err(internal)?;
+            if report.events > 0 || redigested > 0 {
                 ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, json!({}));
             }
             Ok(json!({
@@ -4867,6 +4873,7 @@ pub async fn dispatch(
                 "scanned": report.scanned,
                 "events": report.events,
                 "failed": report.failed,
+                "redigested": redigested,
             }))
         }
         "usage.refresh" => {

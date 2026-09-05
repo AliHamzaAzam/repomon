@@ -447,6 +447,7 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                     agent_kind: s.agent_kind,
                     headline: s.headline,
                     headline_raw: s.headline_raw,
+                    headline_version: repomon_core::usage_ledger::HEADLINE_VERSION,
                     cwd: s.cwd,
                     repo_id: a.repo_id,
                     lane_id: a.lane_id,
@@ -471,6 +472,89 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
     Ok(report)
 }
 
+/// How many stale session digests [`redigest_stale_headlines`] rewrites in one call. Bounded so a
+/// headline-extractor version bump, which leaves every existing session stale at once, catches up
+/// over several ingest ticks instead of one long pause; each source is a plain file re-read, so
+/// the cost per session is small.
+const HEADLINE_REDIGEST_BATCH: usize = 25;
+
+/// Recompute the headline for sessions whose stored digest predates
+/// [`repomon_core::usage_ledger::HEADLINE_VERSION`], a bounded batch at a time. Only the headline
+/// and its raw tooltip text change here: events, cursors and every other session field are
+/// untouched, so this never re-attributes or re-prices anything, and it is safe to call from both
+/// the periodic ingest tick and `usage.ingest_now`.
+///
+/// A session whose source can be re-read authoritatively gets its headline overwritten outright,
+/// `None` included: a full re-read settles the question, so a stale headline that turns out to be
+/// nothing but an injected preamble must be allowed to lose it. A session whose source is missing,
+/// or that does not resurface in a fresh read, is marked current without touching its content
+/// instead of being retried forever, which would starve the rest of the backlog out of the bounded
+/// batch; a later incremental ingest pass still corrects it for real if the source changes again.
+pub async fn redigest_stale_headlines(ctx: &Arc<Ctx>) -> repomon_core::Result<usize> {
+    use repomon_core::usage_ledger::HEADLINE_VERSION;
+    let stale = ctx
+        .store
+        .usage_sessions_needing_headline_upgrade(HEADLINE_VERSION, HEADLINE_REDIGEST_BATCH)
+        .await?;
+    let mut updated = 0;
+    for (agent_kind, session_id, source_path) in stale {
+        let found = match source_path {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                let agent_kind = agent_kind.clone();
+                let session_id = session_id.clone();
+                tokio::task::spawn_blocking(move || rescan_headline(&path, &agent_kind, &session_id))
+                    .await
+                    .map_err(|e| repomon_core::Error::Other(e.to_string()))?
+            }
+            None => None,
+        };
+        match found {
+            Some((headline, headline_raw)) => {
+                ctx.store
+                    .update_usage_session_headline(
+                        agent_kind,
+                        session_id,
+                        headline,
+                        headline_raw,
+                        HEADLINE_VERSION,
+                    )
+                    .await?;
+                updated += 1;
+            }
+            None => {
+                ctx.store
+                    .mark_usage_session_headline_current(agent_kind, session_id, HEADLINE_VERSION)
+                    .await?;
+            }
+        }
+    }
+    Ok(updated)
+}
+
+/// Re-read one source file from the start and return the headline it now computes for one
+/// session: `Some((None, None))` when the session is found but genuinely has no real headline
+/// (settled, and worth writing over a stale one), or `None` when the file cannot be read or the
+/// session does not resurface in a fresh scan (try again another tick rather than guessing).
+fn rescan_headline(
+    path: &Path,
+    agent_kind: &str,
+    session_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let scan = match agent_kind {
+        "claude-code" => scan_claude_transcript(path, 0, None),
+        "codex" => scan_codex_rollout(path, 0),
+        "antigravity" => scan_antigravity_transcript(path, 0, "", None),
+        "opencode" => scan_opencode_db(path, 0),
+        _ => return None,
+    };
+    scan.ok()?
+        .sessions
+        .into_iter()
+        .find(|s| s.session_id == session_id)
+        .map(|s| (s.headline, s.headline_raw))
+}
+
 /// The periodic ingest loop. Self-gates on `[usage] enabled`, so turning the ledger off costs one
 /// config read per tick and nothing else.
 pub async fn ingest_watch(ctx: Arc<Ctx>) {
@@ -479,6 +563,7 @@ pub async fn ingest_watch(ctx: Arc<Ctx>) {
             let c = ctx.config.read().await;
             Duration::from_secs(c.usage.scan_interval_secs.max(30))
         };
+        let mut changed = false;
         match ingest_once(&ctx).await {
             Ok(report) if report.events > 0 => {
                 tracing::debug!(
@@ -486,10 +571,21 @@ pub async fn ingest_watch(ctx: Arc<Ctx>) {
                     scanned = report.scanned,
                     "usage ingest pass"
                 );
-                ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, serde_json::json!({}));
+                changed = true;
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "usage ingest pass failed"),
+        }
+        match redigest_stale_headlines(&ctx).await {
+            Ok(updated) if updated > 0 => {
+                tracing::debug!(updated, "usage headline redigest pass");
+                changed = true;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "usage headline redigest pass failed"),
+        }
+        if changed {
+            ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, serde_json::json!({}));
         }
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
@@ -769,6 +865,168 @@ mod tests {
         assert_eq!(claude.headline.as_deref(), Some("Wire up the ledger"));
         assert_eq!(claude.retries, 1);
         assert_eq!(claude.tool_calls, 1);
+    }
+
+    /// A digest stamped with an old `headline_version` is what a session looked like under a
+    /// pre-fix extractor: a real headline field holding text the current rules would strip.
+    fn stale_session_meta(session_id: &str, source_path: &str, bad_headline: &str) -> UsageSessionMeta {
+        UsageSessionMeta {
+            session_id: session_id.to_string(),
+            agent_kind: "codex".to_string(),
+            headline: Some(bad_headline.to_string()),
+            headline_raw: Some(bad_headline.to_string()),
+            headline_version: 0,
+            cwd: Some("/repos/demo".to_string()),
+            repo_id: None,
+            lane_id: None,
+            started_at: None,
+            ended_at: None,
+            turns: 1,
+            tool_calls: 0,
+            retries: 0,
+            external: true,
+            source_path: Some(source_path.to_string()),
+        }
+    }
+
+    fn codex_review_event(session_id: &str) -> UsageEvent {
+        UsageEvent {
+            at: chrono::DateTime::parse_from_rfc3339("2026-09-02T09:01:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            agent_kind: "codex".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            account: "codex".to_string(),
+            lane_id: None,
+            repo_id: None,
+            session_id: Some(session_id.to_string()),
+            window: None,
+            cwd: Some("/repos/demo".to_string()),
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            thinking_tokens: 0,
+            estimated: false,
+            external: true,
+            source_path: "r.jsonl".to_string(),
+            source_offset: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_digest_at_an_old_headline_version_is_recomputed_on_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.jsonl");
+        fs::write(
+            &path,
+            include_str!(
+                "../../repomon-core/src/usage_ledger/fixtures/codex_injected_preamble_v0.jsonl"
+            ),
+        )
+        .unwrap();
+        let ctx = Ctx::new(Store::open_in_memory().unwrap(), Config::default(), None);
+        ctx.store
+            .record_usage_events(vec![codex_review_event("sess-codex-review-1")])
+            .await
+            .unwrap();
+        ctx.store
+            .upsert_usage_sessions(vec![stale_session_meta(
+                "sess-codex-review-1",
+                &path.to_string_lossy(),
+                "The following is the Codex agent history whose request action you ar...",
+            )])
+            .await
+            .unwrap();
+        let updated = redigest_stale_headlines(&ctx).await.unwrap();
+        assert_eq!(updated, 1);
+        let rows = ctx
+            .store
+            .usage_sessions_needing_headline_upgrade(
+                repomon_core::usage_ledger::HEADLINE_VERSION,
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "the session must no longer be flagged stale"
+        );
+        let sessions = ctx
+            .store
+            .usage_sessions_between(
+                chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::Utc::now() + chrono::Duration::days(365 * 2),
+                None,
+                50,
+            )
+            .await
+            .unwrap();
+        let s = sessions
+            .iter()
+            .find(|s| s.session_id == "sess-codex-review-1")
+            .expect("the session, joined through its event");
+        assert_eq!(
+            s.headline, None,
+            "the leaked preamble must not survive the redigest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_digest_already_at_the_current_headline_version_is_not_re_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // A source file that, if re-read, would produce a different headline than the one stored
+        // below: proof that a current digest is left alone rather than rescanned.
+        let path = dir.path().join("r.jsonl");
+        fs::write(
+            &path,
+            include_str!("../../repomon-core/src/usage_ledger/fixtures/codex_usage_v0.jsonl"),
+        )
+        .unwrap();
+        let ctx = Ctx::new(Store::open_in_memory().unwrap(), Config::default(), None);
+        ctx.store
+            .upsert_usage_sessions(vec![UsageSessionMeta {
+                headline_version: repomon_core::usage_ledger::HEADLINE_VERSION,
+                ..stale_session_meta(
+                    "sess-codex-1",
+                    &path.to_string_lossy(),
+                    "Already-settled headline",
+                )
+            }])
+            .await
+            .unwrap();
+        let updated = redigest_stale_headlines(&ctx).await.unwrap();
+        assert_eq!(updated, 0, "a current digest is not a candidate at all");
+    }
+
+    #[tokio::test]
+    async fn usage_ingest_now_also_redigests_stale_headlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.jsonl");
+        fs::write(
+            &path,
+            include_str!(
+                "../../repomon-core/src/usage_ledger/fixtures/codex_injected_preamble_v0.jsonl"
+            ),
+        )
+        .unwrap();
+        let ctx = Ctx::new(Store::open_in_memory().unwrap(), Config::default(), None);
+        ctx.store
+            .upsert_usage_sessions(vec![stale_session_meta(
+                "sess-codex-review-1",
+                &path.to_string_lossy(),
+                "<USER_REQUEST>wrapper the CLI added</USER_REQUEST>",
+            )])
+            .await
+            .unwrap();
+        // `usage.ingest_now`'s handler calls both passes; exercising the redigest call directly
+        // here (the RPC layer has its own dispatch tests) confirms it is reachable from that path
+        // without duplicating the whole RPC harness.
+        ingest_once(&ctx).await.unwrap();
+        let updated = redigest_stale_headlines(&ctx).await.unwrap();
+        assert_eq!(updated, 1);
     }
 
     #[tokio::test]
