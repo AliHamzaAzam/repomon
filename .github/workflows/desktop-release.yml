@@ -91,3 +91,10 @@ jobs:
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.signed.conf.json
+      # Same four checks the preview lane runs; see .github/scripts/windows-smoke.ps1.
+      - name: Windows smoke test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p repomon-tui --target "${{ matrix.target }}"
+          .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"

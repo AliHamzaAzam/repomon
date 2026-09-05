@@ -176,6 +176,17 @@ jobs:
           prerelease: true
           includeUpdaterJson: true
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config ${{ matrix.config }}
+      # The one thing CI could not tell us before: whether the Windows binaries actually run on a
+      # machine that is not a developer's. It checks that repomond.exe starts (a missing C runtime
+      # kills it in the loader, exit 0xC0000135, with nothing written to any log), that the CLI
+      # reaches it over a throwaway named pipe with a throwaway data directory, that it shuts down
+      # when asked, and that the installer leaves the three executables in one directory.
+      - name: Windows smoke test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p repomon-tui --target "${{ matrix.target }}"
+          .github/scripts/windows-smoke.ps1 -Triple "${{ matrix.target }}"
 
   cleanup:
     needs: preview
