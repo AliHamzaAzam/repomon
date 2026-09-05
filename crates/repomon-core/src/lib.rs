@@ -22,6 +22,7 @@ pub mod local_llm;
 pub mod model;
 pub mod notes;
 pub mod notify;
+pub mod pricing;
 pub mod process;
 pub mod protocol;
 pub mod registry;
