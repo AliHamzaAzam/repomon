@@ -30,7 +30,7 @@ describe("brand lockup", () => {
     const { container } = render(() => <BrandLockup />);
     const svg = container.querySelector("svg")!;
 
-    expect(svg.getAttribute("viewBox")).toBe("283.5 280 688 688");
+    expect(svg.getAttribute("viewBox")).toBe("37 37 182 182");
     expect(svg.getAttribute("width")).toBe("16");
   });
 

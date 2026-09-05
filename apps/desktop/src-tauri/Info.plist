@@ -4,7 +4,7 @@
   Merged into the generated Info.plist by the macOS bundler.
 
   CFBundleIconName points at the "Repomon" icon inside Contents/Resources/Assets.car, which is
-  compiled from design/repomon-logo/macos-liquid-glass/Repomon.icon (see docs/desktop.md). That
+  compiled from docs/brand/final/macos/Repomon.icon (see docs/desktop.md). That
   catalog is what lets macOS 26 and later draw the icon as real Liquid Glass, rendering the
   refraction, specular highlight, and appearance tinting live rather than showing a flat picture
   of them. Older macOS does not resolve this key and falls back to CFBundleIconFile

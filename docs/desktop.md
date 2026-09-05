@@ -39,29 +39,52 @@ step rather than at the start. Settings > General > Replay Onboarding reopens it
 
 ## The app icon
 
-The icon is authored as an Icon Composer bundle at
-`design/repomon-logo/macos-liquid-glass/Repomon.icon`: layered SVGs plus a manifest describing the
-glass, refraction, and lighting. On macOS 26 and later the system renders those layers live, so the
-icon picks up appearance tinting and specular response instead of being a flat picture of them.
+The approved geometry is `docs/brand/repo-logo-final.svg`, including the user's manual path
+adjustments. Preserve that file's paths, stroke widths, openings, and central square. The macOS
+Icon Composer bundle at `docs/brand/final/macos/Repomon.icon` expands the source strokes into closed
+filled outlines and separates the mesh and square into two SVG layers. This avoids the macOS 26
+renderer filling across open stroke interiors when applying layer colors. The source SVG remains
+unchanged. Icon Composer 2.0 and the Xcode 27 toolchain supply the Liquid Glass
+lighting, refraction, masking, and appearance variants. The SVG layers contain no baked effects.
 
-Regenerate the shipped assets from it with `actool`:
+Regenerate and install the shipped assets from the repository root:
 
 ```bash
-xcrun actool --compile <out> --app-icon Repomon \
-  --output-partial-info-plist <out>/partial.plist \
-  --platform macosx --minimum-deployment-target 11.0 --include-all-app-icons \
-  design/repomon-logo/macos-liquid-glass/Repomon.icon <empty>.xcassets
+python3 docs/brand/final/tools/build-macos.py
+python3 docs/brand/final/tools/install-macos.py
+python3 docs/brand/final/tools/install-windows.py
 ```
 
-That emits `Assets.car` (copied to `src-tauri/macos/`, placed in the bundle by
-`bundle.macOS.files`, and selected by the `CFBundleIconName` in `src-tauri/Info.plist`) and a
-static `Repomon.icns` used as `icons/icon.icns`. The remaining PNG sizes and `icon.ico` are scaled
-from actool's 256px render, which is the largest it emits and is also the ceiling for every entry
-in the bundle's icon list. Older macOS, Windows, and Linux ignore the catalog and get that static
-render.
+Save material, transparency, color, and lighting edits in Icon Composer before running the macOS
+build. The build compiles the saved `.icon` document as-is and checks that its files remain
+byte-identical; it never resets Composer settings. If the canonical SVG geometry changes, run
+`python3 docs/brand/final/tools/export-macos-layers.py` explicitly first to refresh only the two
+vector layers while preserving `icon.json`.
+
+To update an existing local installation's icon without rebuilding or restarting its executable:
+
+```bash
+python3 docs/brand/final/tools/install-macos.py --app /Applications/Repomon.app
+```
+
+This backs up and replaces only `Assets.car` and `icon.icns`, then verifies the executable is
+unchanged. Saving in Icon Composer does not automatically update compiled or installed app icons.
+Dock or Finder can retain the previous cached image until the app is reopened or the icon refreshes.
+
+The macOS build needs Xcode's Icon Composer and native rendering services. It emits six 1024px
+appearance previews, `Assets.car`, and the native static `Repomon.icns` fallback, plus a 256px
+preview extracted from the fallback for compatibility inspection. The installer
+copies the catalog to `src-tauri/macos/` and the ICNS to `src-tauri/icons/icon.icns`.
+`bundle.macOS.files` packages the catalog, and `CFBundleIconName=Repomon` selects it on modern
+macOS. Older macOS uses the native ICNS fallback.
+
+Windows and Linux use a separate flat warm-white tile with the exact approved graphite and orange
+mark. The Windows build requires `rsvg-convert`, renders each size directly from the SVG, and packs
+a multiresolution RGBA ICO. It also regenerates the Store logo sizes. These PNGs are not downsized
+from the macOS glass artwork. Preview and provenance files live in `docs/brand/final/`.
 
 The in-app mark (`src/components/BrandMark.tsx`) is the same glyph drawn from theme tokens rather
-than the icon's fixed gradient, so it follows the light/dark setting and your chosen accent. Only
+than the icon's fixed palette, so it follows the light/dark setting and your chosen accent. Only
 the OS-level icon is the glass artwork.
 
 ## Keyboard control

@@ -10,12 +10,20 @@
 #      uncommitted changes - so the Git panel and fleet sidebar show real-looking content.
 #      None of this touches your real ~/.config/repomon, real data dir, or real daemon.
 #   3. Starts a sandboxed `repomond` on its own socket and registers the fake repos/lanes
-#      over the daemon's JSON-RPC (repo.add, lane.create), plus one fake "agent" - a shell
-#      script that loops forever printing plausible tool-call-shaped output, NOT a real
-#      agent CLI. No API calls happen anywhere in this script. The lane it runs in is
-#      pinned (agent.pin) so it is deterministically the top-priority, auto-selected lane
-#      when the GUI opens - the tour needs the agent terminal visible from frame one, and
-#      relying on natural activity-sort ordering to put it there is not reliable.
+#      over the daemon's JSON-RPC (repo.add, lane.create), plus two agents in two lanes:
+#        - orbit-api's lane runs a fake "agent" - a shell script that loops forever printing
+#          plausible tool-call-shaped output, NOT a real agent CLI.
+#        - meadow-web's lane runs a REAL `claude` (Claude Code CLI) session, spawned with no
+#          task so it sits on its own idle welcome screen - zero API calls - under a fake,
+#          non-authenticated identity (demo@example.com / Demo User / Demo Org) that lives in
+#          its own throwaway CLAUDE_CONFIG_DIR inside the sandbox (see section 3b below); your
+#          real ~/.claude, ~/.claude.json, and Keychain entries are never read or written.
+#      No API calls happen anywhere in this script. meadow-web's claude lane is pinned
+#      (agent.pin) so it is deterministically the top-priority, auto-selected lane when the
+#      GUI opens - the tour needs its idle welcome screen visible from frame one, and relying
+#      on natural activity-sort ordering to put it there is not reliable. orbit-api's fake
+#      agent keeps looping in the background the whole time, visible in the Fleet sidebar for
+#      liveliness, but isn't the hero.
 #   4. Tests screen-recording permission with a throwaway 2-second capture. If macOS blocks
 #      it, the script prints what to grant and stops - it does not open the GUI, run the
 #      AppleScript tour, or touch your real desktop. Grant Screen Recording to your terminal
@@ -23,10 +31,12 @@
 #   5. If recording works: launches the desktop binary pointed at the sandbox (a second,
 #      independent process - the app has no single-instance guard, and it's on a different
 #      socket than your real Repomon.app, so your real fleet is never touched), drives a
-#      short AppleScript tour centered on the live agent terminal (fleet + agent hero shot
-#      -> git panel -> editor panel -> settings/system -> back to the agent terminal),
-#      records ~48s of the full display (menu bar excluded), and converts it to an optimized GIF at docs/gui-demo.gif.
-#   6. Cleans up: kills the sandbox daemon and app, removes the sandbox temp dir. Verifies
+#      short AppleScript tour centered on the real claude session's idle terminal (fleet +
+#      claude hero shot -> git panel -> editor panel -> back to the claude terminal), records
+#      ~48s of the full display (menu bar excluded), and converts it to an optimized GIF at
+#      docs/gui-demo.gif. No keystroke in the tour is ever sent into the claude pane itself.
+#   6. Cleans up: kills the sandbox daemon, the app, and this sandbox's own tmux server (which
+#      takes the spawned claude process down with it), removes the sandbox temp dir. Verifies
 #      your real daemon's PID is unchanged before and after.
 #
 # Idempotent: safe to re-run. Re-running rebuilds the sandbox from scratch each time (the
@@ -34,12 +44,13 @@
 #
 # Tour beats dropped as keyboard-unreachable (see the AppleScript block below for details):
 #   - Hovering the lane roster for a tooltip: hover-only, no mouse automation in this script.
-#   - Explicitly switching to the meadow-web lane: no keymap chord moves lane selection other
-#     than bare j/k (needs focus on the Fleet nav landmark, itself only reachable by a mouse
-#     click or an unverifiable chain of blind Tab presses through an alphabetically-sorted,
-#     dynamically-sized sidebar) and mod+g (jumps only among lanes flagged "needs attention").
-#     The Fleet sidebar is visible for the entire tour regardless, so the other live lanes
-#     (meadow-web's dirty nav-focus-trap lane included) are on screen throughout anyway.
+#   - Explicitly switching lanes: no keymap chord moves lane selection other than bare j/k
+#     (needs focus on the Fleet nav landmark, itself only reachable by a mouse click or an
+#     unverifiable chain of blind Tab presses through an alphabetically-sorted, dynamically-
+#     sized sidebar) and mod+g (jumps only among lanes flagged "needs attention"). Not needed
+#     anyway: meadow-web's claude lane is already the pinned, auto-selected hero on open (see
+#     step 3 above). The Fleet sidebar is visible for the entire tour regardless, so the other
+#     live lane (orbit-api's fake agent) is on screen throughout too.
 #   - Opening a file in the Editor panel: the file tree's rows are plain buttons with only
 #     click handlers, and there is no reliable, verifiable keyboard path onto a specific row
 #     (Tab order into a lazily-loaded tree cannot be confirmed without visually running the
@@ -82,12 +93,29 @@ PROD_SOCK_PATH="/tmp/repomon-${USER}.sock"
 TMUX_SESSION_LABEL="repomon-gui-demo"
 
 SANDBOX="$(mktemp -d /tmp/repomon-gui-demo.XXXXXX)"
+# Resolve /tmp's symlink (-> /private/tmp on macOS) once, right away: the daemon canonicalizes
+# paths it stores (repo/worktree paths, tmux `-c` cwd), so anything that has to byte-for-byte
+# match a worktree's cwd later - notably CLAUDE_DEMO_DIR's `projects` key, section 3b below -
+# must be built from the same resolved form or it silently mismatches.
+SANDBOX="$(cd "$SANDBOX" && pwd -P)"
 DATA_DIR="$SANDBOX/data"
 CONFIG_HOME="$SANDBOX/config"
 REPOS_DIR="$SANDBOX/repos"
 WORKTREES_DIR="$SANDBOX/worktrees"
 OUT_DIR="$SANDBOX/out"
 mkdir -p "$DATA_DIR" "$CONFIG_HOME" "$REPOS_DIR" "$WORKTREES_DIR" "$OUT_DIR"
+
+# Worktree paths, computed here (not down where the lanes are actually created) because the
+# fake Claude identity file built in section 3 below needs meadow-web's exact worktree path
+# as a `projects` key before the daemon (and its `lane.create` git-worktree-add) ever runs -
+# the path just has to match byte-for-byte by the time the real `claude` session starts in it,
+# not exist yet at the time this string is computed.
+ORBIT_WT="$WORKTREES_DIR/orbit-api/rate-limit-headers"
+MEADOW_WT="$WORKTREES_DIR/meadow-web/nav-focus-trap"
+
+# A throwaway CLAUDE_CONFIG_DIR for the one real `claude` session this script spawns (see
+# section 3 below) - entirely separate from the real ~/.claude*, never read or written here.
+CLAUDE_DEMO_DIR="$SANDBOX/claude-demo"
 
 DAEMON_BIN="$REPO_ROOT/target/release/repomond"
 DESKTOP_BIN="$REPO_ROOT/target/release/repomon-desktop"
@@ -115,10 +143,22 @@ cleanup() {
   # This sandbox's own tmux server (see the TMUX_SESSION_LABEL comment above) - unconditional,
   # like the daemon/app kills above, since --keep-sandbox only preserves files for inspection,
   # not live processes, and a leftover fake-agent tmux server has nothing worth keeping anyway.
+  # This also takes down the real `claude` session spawned into it (section 3b/meadow-web) -
+  # kill-server signals its pane's process group but doesn't block on exit, and a just-killed
+  # claude process can still be flushing session state to CLAUDE_DEMO_DIR for a beat afterward,
+  # so a `rm -rf` issued immediately can race an in-flight write and leave a non-empty leftover
+  # dir behind (observed: claude-demo/ survived one cleanup while everything else was removed).
+  # A short settle plus a couple of retries below absorbs that without slowing the common case.
   tmux -L "$TMUX_SESSION_LABEL" kill-server 2>/dev/null || true
+  sleep 0.3
   rm -f "$SOCK_PATH"
   if [[ "$KEEP_SANDBOX" -eq 0 ]]; then
-    rm -rf "$SANDBOX"
+    for _ in 1 2 3; do
+      rm -rf "$SANDBOX" 2>/dev/null || true
+      [[ -e "$SANDBOX" ]] || break
+      sleep 0.3
+    done
+    [[ -e "$SANDBOX" ]] && log "WARNING: could not fully remove sandbox at $SANDBOX - investigate."
   else
     log "kept sandbox at $SANDBOX"
   fi
@@ -430,12 +470,98 @@ done
 EOF
 chmod +x "$FAKE_AGENT"
 
+# ---------------------------------------------------------------------------
+# 3b. A REAL `claude` session, with a fake, non-authenticated identity
+# ---------------------------------------------------------------------------
+#
+# meadow-web's lane (below) runs the actual Claude Code CLI - not fake_agent.sh - spawned
+# with no task, so it sits on its own idle welcome screen and makes zero API calls. To keep
+# it from ever showing this machine's real Claude account, it gets its own CLAUDE_CONFIG_DIR,
+# fully separate from ~/.claude and ~/.claude.json. What was verified (read-only, against the
+# real config - nothing here reads or writes it) before writing this:
+#
+#   - CLAUDE_CONFIG_DIR relocates Claude Code's ENTIRE per-account state, including the
+#     top-level identity file, to "$CLAUDE_CONFIG_DIR/.claude.json" - confirmed by inspecting
+#     an existing second account on this machine (~/.claude-work), which keeps its own
+#     ~/.claude-work/.claude.json with its own `oauthAccount` block, structurally identical
+#     to ~/.claude.json's.
+#   - The OAuth token itself lives in the macOS Keychain under a service name keyed to the
+#     config dir ("Claude Code-credentials" or "...-<hash>"), independent of anything in the
+#     config dir's files. A brand-new config dir has no matching Keychain entry, so a session
+#     using it is NOT authenticated - confirmed by launching one and reading `/status`, which
+#     reported "Auth token: none". That's exactly what's wanted here: zero possibility of a
+#     real API call ever succeeding, on top of the tour never typing anything into this pane
+#     (see the tour's keystroke review near the bottom of this script).
+#   - Despite having no valid token, Claude Code's welcome screen reads the *cached* account
+#     fields (displayName/organizationName/emailAddress) straight out of .claude.json to
+#     render its "Welcome back <name>!" card and the "<plan> · <org>" line under it - no
+#     network call needed. So writing fake values there (via Python's json module, never
+#     sed/string-templating a JSON file) makes the *displayed* identity fake, while the
+#     "Not logged in · Run /login" status-bar badge confirms no real auth is attached.
+#   - hasCompletedOnboarding + theme skip the first-run theme-picker prompt; a `projects`
+#     entry keyed by this exact worktree path (must match byte-for-byte, hence computing
+#     MEADOW_WT up in the paths section above rather than down where lanes are created) with
+#     hasTrustDialogAccepted skips the "do you trust this folder" dialog - both would
+#     otherwise leave the pane short of the idle screen and need typed input the tour never
+#     sends.
+mkdir -p "$CLAUDE_DEMO_DIR"
+python3 - "$CLAUDE_DEMO_DIR/.claude.json" "$MEADOW_WT" <<'PYEOF'
+import json
+import sys
+
+out_path, cwd = sys.argv[1], sys.argv[2]
+config = {
+    "numStartups": 1,
+    "autoUpdates": False,
+    "theme": "dark",
+    "hasCompletedOnboarding": True,
+    "oauthAccount": {
+        "accountUuid": "00000000-0000-0000-0000-000000000000",
+        "emailAddress": "demo@example.com",
+        "organizationUuid": "00000000-0000-0000-0000-000000000001",
+        "hasExtraUsageEnabled": False,
+        "billingType": "stripe_subscription",
+        "accountCreatedAt": "2026-01-01T00:00:00.000000Z",
+        "subscriptionCreatedAt": "2026-01-01T00:00:00.000000Z",
+        "ccOnboardingFlags": {},
+        "claudeCodeTrialEndsAt": None,
+        "claudeCodeTrialDurationDays": None,
+        "seatTier": None,
+        "displayName": "Demo User",
+        "profileFetchedAt": 0,
+        "organizationRole": "admin",
+        "workspaceRole": None,
+        "organizationName": "Demo Org",
+        "organizationType": "claude_max",
+        "organizationRateLimitTier": "default_claude_max_5x",
+        "userRateLimitTier": None,
+    },
+    "projects": {
+        cwd: {
+            "allowedTools": [],
+            "mcpContextUris": [],
+            "mcpServers": {},
+            "enabledMcpjsonServers": [],
+            "disabledMcpjsonServers": [],
+            "hasTrustDialogAccepted": True,
+            "projectOnboardingSeenCount": 1,
+            "hasClaudeMdExternalIncludesApproved": False,
+            "hasClaudeMdExternalIncludesWarningShown": False,
+        }
+    },
+}
+with open(out_path, "w") as f:
+    json.dump(config, f, indent=2)
+PYEOF
+log "built fake, non-authenticated Claude identity for the demo session (demo@example.com / Demo Org) at $CLAUDE_DEMO_DIR - real ~/.claude* never touched"
+
 mkdir -p "$CONFIG_HOME/repomon"
 cat > "$CONFIG_HOME/repomon/config.toml" <<EOF
 tmux_session = "$TMUX_SESSION_LABEL"
 
 [agents]
 demo-agent = "$FAKE_AGENT"
+demo-claude = "CLAUDE_CONFIG_DIR=$CLAUDE_DEMO_DIR claude"
 EOF
 
 # ---------------------------------------------------------------------------
@@ -524,11 +650,9 @@ rpc repo.add "{\"path\": \"$ATLAS\"}" > /dev/null
 log "repos registered: orbit-api=$ORBIT_ID meadow-web=$MEADOW_ID forge-cli atlas-docs"
 
 log "creating worktree lanes..."
-ORBIT_WT="$WORKTREES_DIR/orbit-api/rate-limit-headers"
 LANE1_JSON="$(rpc lane.create "{\"repo_id\": $ORBIT_ID, \"branch\": \"feat/rate-limit-headers\", \"path\": \"$ORBIT_WT\"}")"
 LANE1_ID="$(echo "$LANE1_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
-MEADOW_WT="$WORKTREES_DIR/meadow-web/nav-focus-trap"
 LANE2_JSON="$(rpc lane.create "{\"repo_id\": $MEADOW_ID, \"branch\": \"fix/nav-focus-trap\", \"path\": \"$MEADOW_WT\"}")"
 LANE2_ID="$(echo "$LANE2_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 log "lanes created: orbit-api#$LANE1_ID meadow-web#$LANE2_ID"
@@ -552,18 +676,76 @@ export function useFocusTrap() {
 }
 EOF
 
+# One commit ahead of main in the hero lane (meadow-web - see the pin decision below), so the
+# Git panel's Branch section shows a real "ahead" commit list instead of "Nothing ahead of main".
+mkdir -p "$MEADOW_WT/src/hooks"
+cat > "$MEADOW_WT/src/hooks/useMediaQuery.ts" <<'EOF'
+// Small hook used by the nav-focus-trap fix to detect mobile breakpoints.
+export function useMediaQuery(query: string): boolean {
+  return typeof window !== "undefined" && window.matchMedia(query).matches;
+}
+EOF
+git -C "$MEADOW_WT" add src/hooks/useMediaQuery.ts
+git -C "$MEADOW_WT" -c user.name="Demo User" -c user.email="demo@example.com" \
+  commit -q -m "Add useMediaQuery hook for mobile breakpoint checks"
+
+log "seeded worktree status ($ORBIT_WT):"
+git -C "$ORBIT_WT" status --porcelain | sed 's/^/[gui-demo]   /'
+log "seeded worktree status ($MEADOW_WT):"
+git -C "$MEADOW_WT" status --porcelain | sed 's/^/[gui-demo]   /'
+
+# The Git panel's working-tree section gates its "clean" empty state on the daemon's CACHED
+# DirtyState counts, which refresh on the daemon's own sync cadence - not on the live diff.
+# Wait until the daemon has actually noticed the dirty files before recording, or the panel
+# films as "Working tree clean" despite the seeds above. Checks the hero lane (meadow-web,
+# LANE2 - see the pin decision below) since that's the one the Git panel beat films.
+log "waiting for daemon to notice dirty worktree..."
+for _ in $(seq 1 30); do
+  DIRTY_TOTAL="$(rpc lane.list '{}' | python3 -c '
+import json, sys
+lanes = json.load(sys.stdin)
+lanes = lanes if isinstance(lanes, list) else lanes.get("lanes", [])
+for l in lanes:
+    if l.get("id") == '"$LANE2_ID"':
+        d = (l.get("state") or {}).get("dirty") or {}
+        print(int(d.get("staged", 0)) + int(d.get("unstaged", 0)) + int(d.get("untracked", 0)))
+        break
+else:
+    print(0)
+')"
+  [[ "${DIRTY_TOTAL:-0}" -gt 0 ]] && break
+  sleep 1
+done
+log "daemon dirty count for hero lane: ${DIRTY_TOTAL:-0}"
+if [[ "${DIRTY_TOTAL:-0}" -eq 0 ]]; then
+  log "WARNING: daemon never registered the seeded dirty files - the Git panel's working-tree"
+  log "WARNING: beat will film as 'Working tree clean'. Ctrl-C now and re-run if that matters."
+  sleep 5
+fi
+
 log "spawning fake agent in orbit-api lane..."
 rpc agent.spawn "{\"lane_id\": $LANE1_ID, \"agent\": \"demo-agent\", \"task\": \"Investigate the flaky rate-limit test\"}" > /dev/null
 
-# Pin the lane the fake agent runs in so it sorts first (stores/fleet.ts byPriority: pinned
-# lanes always win) and is therefore the lane auto-selected the moment the GUI's first
-# lane.list poll lands. The tour depends on this: it never sends a lane-selection keystroke,
-# because there is no reliable, keyboard-only way to land on a specific lane (see the header
-# comment above), so the hero shot has to already be pointed at the right lane on open.
-log "pinning orbit-api's agent lane so it's the default selection..."
-rpc agent.pin "{\"lane_id\": $LANE1_ID, \"pinned\": true}" > /dev/null
+# Spawn a REAL `claude` in the meadow-web lane - the actual Claude Code CLI, under the fake,
+# non-authenticated identity built in section 3b above. No "task" key: with it absent (rather
+# than an empty string), the daemon's `p.task.filter(|t| !t.is_empty())` never appends a
+# prompt, so this session lands on its idle welcome screen and never calls the model API.
+log "spawning a real (unauthenticated, fake-identity) claude session in meadow-web lane..."
+rpc agent.spawn "{\"lane_id\": $LANE2_ID, \"agent\": \"demo-claude\"}" > /dev/null
 
-log "sandbox ready: 4 repos, 2 lanes with uncommitted changes, 1 looping fake agent (pinned)"
+# Pin the REAL claude lane so it sorts first (stores/fleet.ts byPriority: pinned lanes always
+# win) and is therefore the lane auto-selected the moment the GUI's first lane.list poll
+# lands. The tour depends on this: it never sends a lane-selection keystroke, because there is
+# no reliable, keyboard-only way to land on a specific lane (see the header comment above), so
+# the hero shot has to already be pointed at the right lane on open. meadow-web's idle welcome
+# screen ("Welcome back Demo User!") is the recognizable showcase here - a real Claude Code
+# session, not a lookalike - so it's the hero, not orbit-api's fake streaming agent. The fake
+# agent keeps running in orbit-api's lane regardless (unpinned but still visible in the Fleet
+# sidebar the whole time) purely for sidebar liveliness.
+log "pinning meadow-web's claude lane so it's the default selection..."
+rpc agent.pin "{\"lane_id\": $LANE2_ID, \"pinned\": true}" > /dev/null
+
+log "sandbox ready: 4 repos, 2 lanes with uncommitted changes, 1 looping fake agent + 1 real idle claude session (pinned)"
 
 # ---------------------------------------------------------------------------
 # 5. Screen recording permission check
@@ -596,16 +778,38 @@ XDG_CONFIG_HOME="$CONFIG_HOME" REPOMON_DATA_DIR="$DATA_DIR" REPOMON_SOCKET="$SOC
 APP_PID=$!
 sleep 4
 
-# Full-screen recording: size the window to fill the display below the menu bar and record
-# exactly that region. The menu bar itself is excluded on purpose - it carries the user's own
-# status items (clock, battery, third-party widgets), which do not belong in a product demo.
+# Full-screen recording: put the app window into native macOS full screen (AXFullScreen), which
+# hides the menu bar entirely, and record the whole display. The user's own status items
+# (clock, battery, widgets) never appear because full-screen mode covers them. If AXFullScreen
+# is not honored (attribute missing or denied), fall back to filling the display below the
+# menu bar and recording that region instead.
 MENUBAR_H=25
 read -r SCREEN_W SCREEN_H < <(osascript -e 'tell application "Finder" to get bounds of window of desktop' | awk -F", " '{print $3, $4}')
 if [[ -z "${SCREEN_W:-}" || -z "${SCREEN_H:-}" ]]; then
   SCREEN_W=1440 SCREEN_H=925  # conservative fallback
 fi
-WIN_X=0 WIN_Y=$MENUBAR_H WIN_W=$SCREEN_W WIN_H=$((SCREEN_H - MENUBAR_H))
-osascript <<OSA
+FS_OK="$(osascript <<OSA
+tell application "System Events"
+  set frontmost of first process whose unix id is $APP_PID to true
+  delay 0.3
+  try
+    set value of attribute "AXFullScreen" of front window of (first process whose unix id is $APP_PID) to true
+    return "yes"
+  on error
+    return "no"
+  end try
+end tell
+OSA
+)"
+if [[ "$FS_OK" == "yes" ]]; then
+  # Native full screen: the space-switch animation takes a moment; record the full display.
+  sleep 2.5
+  WIN_X=0 WIN_Y=0 WIN_W=$SCREEN_W WIN_H=$SCREEN_H
+  log "window in native full screen (${SCREEN_W}x${SCREEN_H})"
+else
+  log "AXFullScreen not honored; falling back to menu-bar-excluded fill"
+  WIN_X=0 WIN_Y=$MENUBAR_H WIN_W=$SCREEN_W WIN_H=$((SCREEN_H - MENUBAR_H))
+  osascript <<OSA
 tell application "System Events"
   set frontmost of first process whose unix id is $APP_PID to true
   delay 0.3
@@ -615,6 +819,7 @@ tell application "System Events"
   end try
 end tell
 OSA
+fi
 sleep 1
 
 # Tour length: sum of every sleep below plus the pre-roll, ~46.5s. REC_SECONDS gives a small
@@ -623,8 +828,40 @@ sleep 1
 REC_SECONDS=50
 
 MOV_PATH="$OUT_DIR/gui-demo-raw.mov"
+
+# Record the Repomon window ONLY (by CGWindowID), so nothing else on the display can ever
+# appear in the demo - not the desktop, not notifications, not other windows. Window-ID
+# lookup needs pyobjc's Quartz (present in the recording user's python3); if unavailable,
+# fall back to the display-region capture of the (full-screened) window.
+DEMO_WIN_ID="$(python3 - "$APP_PID" <<'PYEOF' 2>/dev/null || true
+import sys
+try:
+    import Quartz
+except ImportError:
+    sys.exit(1)
+pid = int(sys.argv[1])
+wins = Quartz.CGWindowListCopyWindowInfo(
+    Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements, Quartz.kCGNullWindowID)
+best = None
+for w in wins or []:
+    if w.get("kCGWindowOwnerPID") != pid:
+        continue
+    b = w.get("kCGWindowBounds", {})
+    area = b.get("Width", 0) * b.get("Height", 0)
+    if best is None or area > best[1]:
+        best = (w.get("kCGWindowNumber"), area)
+if best:
+    print(best[0])
+PYEOF
+)"
 log "recording ~${REC_SECONDS}s to $MOV_PATH"
-screencapture -v -V "$REC_SECONDS" -x -R "${WIN_X},${WIN_Y},${WIN_W},${WIN_H}" "$MOV_PATH" &
+if [[ -n "${DEMO_WIN_ID:-}" ]]; then
+  log "capturing window id $DEMO_WIN_ID (window-only recording, no shadow)"
+  screencapture -v -V "$REC_SECONDS" -x -o -l "$DEMO_WIN_ID" "$MOV_PATH" &
+else
+  log "Quartz window-id lookup unavailable; capturing display region instead"
+  screencapture -v -V "$REC_SECONDS" -x -o -R "${WIN_X},${WIN_Y},${WIN_W},${WIN_H}" "$MOV_PATH" &
+fi
 REC_PID=$!
 sleep 2.0
 
@@ -639,20 +876,24 @@ tour_keycode() {
   osascript -e "tell application \"System Events\" to key code $1"
 }
 
-# Beat 1 (HERO SHOT): fleet sidebar with orbit-api's rate-limit-headers lane already selected
-# (pinned during sandbox setup above, so no keystroke is needed to get here) and its fake
-# agent looping in the terminal bay. This is the point of the product - hold it the longest.
+# Beat 1 (HERO SHOT): fleet sidebar with meadow-web's nav-focus-trap lane already selected
+# (pinned during sandbox setup above, so no keystroke is needed to get here) and a REAL Claude
+# Code session sitting on its idle welcome screen ("Welcome back Demo User!") in the terminal
+# bay - a genuine claude session, not a lookalike, under a fake, non-authenticated identity
+# (see section 3b). orbit-api's fake streaming agent is still visible and looping in the Fleet
+# sidebar for liveliness. This is the point of the product - hold it the longest.
 sleep 9.0
 
 # Beat 2: Git panel (mod+3) on that same lane, whose working tree is seeded dirty (an edited
-# rateLimit.ts, an untracked rateLimitHeaders.ts) - no lane switch needed, it's already the
-# selected lane. (Dropped: switching to meadow-web's lane first - see header comment for why.)
+# MobileMenu.tsx, an untracked useFocusTrap.ts) and one commit ahead of main (useMediaQuery.ts)
+# - no lane switch needed, it's already the selected lane. (Dropped: switching to another lane
+# first - see header comment for why.)
 tour_key "3" "command down"
 sleep 2.0
-sleep 6.0
+sleep 10.0
 
 # Beat 3: Editor panel (mod+7) on the same lane. Shows the file tree for real (including the
-# uncommitted rateLimitHeaders.ts once src/routes/ is expanded) but does not open a file -
+# uncommitted useFocusTrap.ts once src/components/ is expanded) but does not open a file -
 # TreeEntryRow's rows are plain onClick buttons with no verified keyboard path onto a specific
 # row (see header comment). Reading the tour, not clicking, is still the point of this beat.
 tour_key "7" "command down"
@@ -668,24 +909,20 @@ sleep 6.0
 # click handler natively. Verified by reading Modal.tsx and SettingsModal.tsx's TABS array
 # (General, System, Agents, Notifications, Appearance, Automation, Keyboard) - not by running
 # the GUI, which this script cannot do in this environment.
-tour_key "," "command down"
-sleep 1.5
-tour_keycode 48 # Tab: Close button -> "General" tab button
-sleep 0.5
-tour_keycode 48 # Tab: "General" -> "System" tab button
-sleep 0.5
-tour_keycode 36 # Return: activate the "System" tab
-sleep 5.0
-tour_keycode 53 # Escape: close Settings
-sleep 1.5
+# (Settings beat removed: the Tab-order route to the System tab proved unreliable in the
+# recorded run - it landed on General and the closing Escape leaked a ^[ into the terminal.
+# The reclaimed ~9s went to the Git panel and the final agent hold instead.)
 
-# Beat 5: back to the agent terminal for the close. rightPanelTab is still "editor" from beat
+# Beat 5: back to the claude terminal for the close. rightPanelTab is still "editor" from beat
 # 3 (Settings is a separate modal and never touched it), and openPanelTab's own toggle rule is
 # "already open on this tab -> close" - so pressing mod+7 again collapses the right rail
-# instead of doing nothing, handing the full terminal bay back to the agent for the final hold.
+# instead of doing nothing, handing the full terminal bay back to the idle claude welcome
+# screen for the final hold. No keystroke here or anywhere in this tour is ever sent into the
+# claude pane itself (all chords target repomon's own UI, via System Events on the app process)
+# - it stays untouched and idle for the whole recording.
 tour_key "7" "command down"
 sleep 1.5
-sleep 8.0
+sleep 12.5
 
 wait "$REC_PID" 2>/dev/null || true
 log "recording done"

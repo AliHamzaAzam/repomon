@@ -1,63 +1,44 @@
 interface BrandMarkProps {
-  /// Rendered size in pixels. The glyph is a 1254-unit grid with ~95-unit bars, so below about
-  /// 20px the bars fall under 1.5 device pixels and turn to mush. Keep it 24 or larger, or pass
-  /// `tight`, which crops the icon padding and buys the bar weight back at a smaller box.
+  /// Rendered size in pixels. The selected mark uses 22-unit strokes on a 256-unit canvas.
+  /// Pass `tight` at small sizes to crop the source padding and keep the paths legible.
   size?: number;
-  /// Crop the viewBox to the glyph's own bounding box instead of the icon's padded 1254 canvas.
-  ///
-  /// The full canvas is what the app icon needs: the mark occupies the middle ~52% of it and the
-  /// rest is the margin a rounded app tile wants around its artwork. In a 35px title bar that
-  /// margin is dead weight, so a `size={24}` mark draws only 12.5px of ink and reads soft and
-  /// undersized. Cropping to the ink (x 300..955, y 280..968, squared about the glyph's own
-  /// centre) makes the requested size the size of the *mark*: at 16px a bar lands on 2.2 CSS
-  /// pixels instead of 1.2, which is crisp on a 1x display and sharp on a retina one.
+  /// Crop to the glyph's stroke bounds instead of its padded 256-unit canvas. At the title
+  /// bar's 16px size this keeps each stroke about 1.9 CSS pixels wide rather than 1.4.
   tight?: boolean;
   title?: string;
   class?: string;
 }
 
-/// The glyph's bounding box, squared on its taller axis and centred on the ink. The ink spans
-/// 655 x 688 units, so the 688-wide box starts 16.5 units left of it.
-const TIGHT_VIEW_BOX = "283.5 280 688 688";
+/// The selected paths' stroke bounds, including the 11-unit half-stroke around the outer edges.
+const TIGHT_VIEW_BOX = "37 37 182 182";
 
-/// The Repomon mark, the same geometry as the app icon
-/// (`design/repomon-logo/command-mesh-faithful/command-mesh-master.svg`), flattened from that
-/// file's matrix-stretched rects into plain ones. The flattened form was checked pixel-identical
-/// to the original at 1024px before it landed here.
+/// The selected Repomon mark from `docs/brand/repo-logo-final.svg`. Path coordinates, including
+/// the manually adjusted endpoints, stroke width, and central square are preserved exactly.
 ///
 /// It is drawn from theme tokens rather than the source file's fixed palette, so it follows the
-/// selected theme (and the accent) instead of staying locked to the dark-mode colors. The mapping
-/// is exact: the source's teal is `--signal`, its amber pip is `--attention`. Unlike the app icon,
-/// this mark renders on a transparent background so it sits directly on the title bar.
+/// selected theme and accent. The source's graphite paths map to `--signal` and its orange
+/// command square maps to `--attention`. The transparent background sits directly on the title bar.
 export default function BrandMark(props: BrandMarkProps) {
   const size = () => props.size ?? 26;
   return (
     <svg
       width={size()}
       height={size()}
-      viewBox={props.tight ? TIGHT_VIEW_BOX : "0 0 1254 1254"}
+      viewBox={props.tight ? TIGHT_VIEW_BOX : "0 0 256 256"}
+      fill-rule="evenodd"
+      clip-rule="evenodd"
       class={props.class}
       role={props.title ? "img" : "presentation"}
       aria-label={props.title}
       aria-hidden={props.title ? undefined : "true"}
     >
-      <g fill="var(--signal)">
-        <rect x="300" y="280" width="304" height="97" />
-        <rect x="650" y="280" width="305" height="97" />
-        <rect x="300" y="280" width="95" height="393" />
-        <rect x="650" y="280" width="94" height="253" />
-        <rect x="860" y="280" width="95" height="688" />
-        <rect x="458" y="437" width="286" height="96" />
-        <rect x="300" y="578" width="217" height="95" />
-        <rect x="738" y="578" width="217" height="95" />
-        <rect x="300" y="722" width="94" height="246" />
-        <rect x="428" y="578" width="89" height="240" />
-        <rect x="571" y="722" width="234" height="96" />
-        <rect x="571" y="722" width="94" height="246" />
-        <rect x="300" y="873" width="365" height="95" />
-        <rect x="721" y="873" width="234" height="95" />
+      <g fill="none" fill-rule="nonzero" stroke="var(--signal)" stroke-width="22">
+        <path d="M108,48L56,48C50.667,48 48,50.667 48,56L48,120C48,125.333 50.667,128 56,128L80,128C85.333,128 88,130.667 88,136L88,168.125" />
+        <path d="M87.727,88.04L144,88.04C149.333,88.04 152,85.373 152,80.04L152,56C152,50.667 154.667,48 160,48L200,48C205.333,48 208,50.667 208,56L208,200C208,205.333 205.333,208 200,208L160,208" />
+        <path d="M157.091,128L208,128" />
+        <path d="M48,172L48,200C48,205.333 50.667,208 56,208L120,208C125.333,208 128,205.333 128,200L128,176.125C128,170.792 130.667,168.125 136,168.125L168.188,168.125" />
       </g>
-      <rect x="572" y="571" width="110" height="110" fill="var(--attention)" />
+      <rect x="112" y="112" width="32" height="32" fill="var(--attention)" />
     </svg>
   );
 }
