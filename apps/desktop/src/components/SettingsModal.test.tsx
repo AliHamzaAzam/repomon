@@ -351,8 +351,16 @@ describe("System Health tab", () => {
   it("renders healthy system state with system tmux, git, and detected agents", async () => {
     state.config = { ...config };
     state.doctor = {
-      tmux: { available: true, version: "tmux 3.4", source: "system", path: "/opt/homebrew/bin/tmux" },
+      platform: "macos",
+      tmux: {
+        available: true,
+        version: "tmux 3.4",
+        source: "system",
+        path: "/opt/homebrew/bin/tmux",
+        not_applicable: false,
+      },
       git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+      agent_host: null,
       agents: [
         { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
         { kind: "cursor", name: "Cursor Agent", command: "cursor-agent", detected: false },
@@ -382,13 +390,16 @@ describe("System Health tab", () => {
   it("renders reassuring badge when using bundled tmux", async () => {
     state.config = { ...config };
     state.doctor = {
+      platform: "macos",
       tmux: {
         available: true,
         version: "tmux 3.4",
         source: "bundled",
         path: "/Applications/Repomon.app/Contents/MacOS/tmux",
+        not_applicable: false,
       },
       git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+      agent_host: null,
       agents: [],
     };
 
@@ -408,8 +419,10 @@ describe("System Health tab", () => {
   it("renders missing dependencies with actionable copy and copy buttons", async () => {
     state.config = { ...config };
     state.doctor = {
-      tmux: { available: false, version: null, source: null, path: null },
+      platform: "macos",
+      tmux: { available: false, version: null, source: null, path: null, not_applicable: false },
       git: { available: false, version: null, path: null },
+      agent_host: null,
       agents: [
         { kind: "claude-code", name: "Claude Code", command: "claude", detected: false },
         { kind: "antigravity", name: "Antigravity", command: "agy", detected: false },
@@ -477,8 +490,16 @@ describe("System Health tab", () => {
     state.config = { ...config };
     state.doctorCalls = 0;
     state.doctor = {
-      tmux: { available: true, version: "tmux 3.4", source: "system", path: "/opt/homebrew/bin/tmux" },
+      platform: "macos",
+      tmux: {
+        available: true,
+        version: "tmux 3.4",
+        source: "system",
+        path: "/opt/homebrew/bin/tmux",
+        not_applicable: false,
+      },
       git: { available: true, version: "git version 2.44.0", path: "/usr/bin/git" },
+      agent_host: null,
       agents: [],
     };
 

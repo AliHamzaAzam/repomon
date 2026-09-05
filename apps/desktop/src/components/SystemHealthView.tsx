@@ -2,52 +2,82 @@ import { For, Show, createEffect, createSignal } from "solid-js";
 
 import type { SystemDoctorResult } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
-import { isMac } from "../keymap";
+import { isMac, isWindows } from "../keymap";
 import CommandLineToolsCard from "./CommandLineToolsCard";
 import DaemonBootRow from "./DaemonBootRow";
-import { AgentIcon, IconCheck, IconCopy, IconGitBranch, IconRefresh, IconTerminal } from "./icons";
+import {
+  AgentIcon,
+  IconCheck,
+  IconCopy,
+  IconGitBranch,
+  IconRefresh,
+  IconTerminal,
+} from "./icons";
 
-export function getSystemInstallCommand(tool: "tmux" | "git"): string {
-  if (isMac()) {
+export function getSystemInstallCommand(tool: "tmux" | "git", platform?: string): string {
+  if (isMac(platform)) {
     return `brew install ${tool}`;
+  }
+  if (isWindows(platform)) {
+    return tool === "git" ? "winget install --id Git.Git -e" : `winget install ${tool}`;
   }
   return `sudo apt install ${tool}`;
 }
 
-export function getAgentInstallInfo(kind: string, command: string): { command: string; guide?: string } | null {
+export function getAgentInstallInfo(
+  kind: string,
+  command: string,
+  platform?: string,
+): { command: string; guide?: string } | null {
   const k = kind.toLowerCase();
   const c = command.toLowerCase();
+  const windows = isWindows(platform);
+
   if (k.includes("claude") || c === "claude") {
+    // npm-based: the same command installs it everywhere, Windows included.
     return {
       command: "npm install -g @anthropic-ai/claude-code",
       guide: "Install Claude Code CLI via npm",
     };
   }
   if (k.includes("antigravity") || k === "agy" || c === "agy") {
-    return {
-      command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
-      guide: "Install Antigravity CLI via official install script",
-    };
+    return windows
+      ? {
+          command: "irm https://antigravity.google/cli/install.ps1 | iex",
+          guide: "Install Antigravity CLI via PowerShell",
+        }
+      : {
+          command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+          guide: "Install Antigravity CLI via official install script",
+        };
   }
   if (k.includes("codex") || c === "codex") {
+    // npm-based: the same command installs it everywhere, Windows included.
     return {
       command: "npm install -g @openai/codex",
       guide: "Install OpenAI Codex CLI via npm",
     };
   }
   if (k.includes("opencode") || c === "opencode") {
+    // npm-based: the same command installs it everywhere, Windows included.
     return {
       command: "npm install -g opencode-ai",
       guide: "Install OpenCode CLI via npm",
     };
   }
   if (k.includes("cursor") || c === "cursor-agent") {
-    return {
-      command: "curl https://cursor.com/install -fsS | bash",
-      guide: "Install Cursor CLI agent via official install script",
-    };
+    return windows
+      ? {
+          command: "https://cursor.com/downloads",
+          guide: "Cursor has no Windows CLI installer yet; download the app instead",
+        }
+      : {
+          command: "curl https://cursor.com/install -fsS | bash",
+          guide: "Install Cursor CLI agent via official install script",
+        };
   }
   if (k.includes("aider") || c === "aider") {
+    // pip-based: the same command installs it everywhere, Windows included.
     return {
       command: "pip install aider-chat",
       guide: "Install Aider CLI via pip",
@@ -192,17 +222,26 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
         {(doc) => {
           const tmuxInfo = () => doc().tmux;
           const gitInfo = () => doc().git;
+          const agentHostInfo = () => doc().agent_host;
           const agentsList = () => doc().agents;
           const detectedCount = () => agentsList().filter((a) => a.detected).length;
+          // tmux plays no role on Windows (agents run through the bundled ConPTY host instead),
+          // so the runtime-agnostic "ready" summary swaps in agent_host there instead of ever
+          // counting a not_applicable tmux probe against it.
+          const runtimeReady = () => {
+            const tmux = tmuxInfo();
+            const coreReady = tmux.not_applicable ? (agentHostInfo()?.available ?? false) : tmux.available;
+            return coreReady && gitInfo().available;
+          };
 
           return (
             <div class="space-y-4">
-              {/* Section 1: Core Runtime (tmux + git) */}
+              {/* Section 1: Core Runtime (tmux/agent host + git) */}
               <div class="rounded-xl border border-line bg-surface p-3.5 space-y-3">
                 <div class="flex items-center justify-between">
                   <span class="section-label">Core Runtime Dependencies</span>
                   <span class="text-[11px] font-mono text-muted">
-                    {tmuxInfo().available && gitInfo().available ? (
+                    {runtimeReady() ? (
                       <span class="inline-flex items-center gap-1 text-emerald-500 font-medium">
                         <IconCheck size={11} strokeWidth={2.5} />
                         Ready for sessions
@@ -214,7 +253,86 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                 </div>
 
                 <div class="divide-y divide-line/60 rounded-lg border border-line/70 bg-background/50">
-                  {/* tmux Row */}
+                  {/* Agent host (ConPTY) Row — Windows only, replaces tmux */}
+                  <Show when={tmuxInfo().not_applicable}>
+                    <div class="p-3 space-y-1.5">
+                      <div class="flex items-start justify-between gap-3">
+                        <div class="flex items-center gap-2.5 min-w-0">
+                          <div class="flex size-6 items-center justify-center rounded-md border border-line bg-surface text-foreground shrink-0">
+                            <IconTerminal size={13} />
+                          </div>
+                          <div class="min-w-0">
+                            <div class="flex items-center gap-2">
+                              <span class="font-medium text-xs text-foreground">Agent host</span>
+                              <span class="text-[11px] text-muted truncate">ConPTY Runtime</span>
+                            </div>
+                            <p
+                              class="font-mono text-[10.5px] text-muted truncate mt-0.5"
+                              title={agentHostInfo()?.path || undefined}
+                            >
+                              {agentHostInfo()?.path ? agentHostInfo()?.path : "repomon-agent-host.exe not found"}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div class="flex items-center gap-2 shrink-0">
+                          <Show when={agentHostInfo()?.version}>
+                            {(ver) => (
+                              <span class="font-mono text-[10.5px] text-muted bg-surface px-2 py-0.5 rounded border border-line">
+                                {ver()}
+                              </span>
+                            )}
+                          </Show>
+                          <Show
+                            when={agentHostInfo()?.available}
+                            fallback={
+                              <span class="rounded bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10.5px] font-medium text-amber-500">
+                                Missing
+                              </span>
+                            }
+                          >
+                            <Show
+                              when={agentHostInfo()?.source === "bundled"}
+                              fallback={
+                                <span class="flex items-center gap-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10.5px] font-medium text-emerald-500">
+                                  <span class="size-1.5 rounded-full bg-emerald-500" />
+                                  On PATH
+                                </span>
+                              }
+                            >
+                              <span
+                                class="flex items-center gap-1.5 rounded bg-accent/15 border border-accent/30 px-2 py-0.5 text-[10.5px] font-medium text-accent font-mono"
+                                title="Using the ConPTY agent host bundled with this app"
+                              >
+                                <span class="size-1.5 rounded-full bg-accent" />
+                                Bundled
+                              </span>
+                            </Show>
+                          </Show>
+                        </div>
+                      </div>
+
+                      {/* Bundled Reassurance Note */}
+                      <Show when={agentHostInfo()?.available && agentHostInfo()?.source === "bundled"}>
+                        <div class="flex items-center gap-1.5 text-[10.5px] text-accent/90 bg-accent/8 rounded px-2 py-0.5 border border-accent/20">
+                          <span>Using the ConPTY agent host bundled with this app — no separate install needed.</span>
+                        </div>
+                      </Show>
+
+                      {/* Missing agent host helper */}
+                      <Show when={!agentHostInfo()?.available}>
+                        <div class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5 text-xs space-y-2">
+                          <p class="text-foreground text-[11px]">
+                            Repomon needs the bundled repomon-agent-host.exe to run Windows agent
+                            sessions. Reinstalling the app should restore it.
+                          </p>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+
+                  {/* tmux Row — everywhere except Windows */}
+                  <Show when={!tmuxInfo().not_applicable}>
                   <div class="p-3 space-y-1.5">
                     <div class="flex items-start justify-between gap-3">
                       <div class="flex items-center gap-2.5 min-w-0">
@@ -301,6 +419,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                       </div>
                     </Show>
                   </div>
+                  </Show>
 
                   {/* git Row */}
                   <div class="p-3 space-y-1.5">
