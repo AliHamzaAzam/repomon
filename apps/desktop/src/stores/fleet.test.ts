@@ -628,8 +628,23 @@ describe("ticketed manual refresh events", () => {
       const fleet = createFleetStore(source); fleet.start();
       return { fleet, stop: () => { fleet.stop(); dispose(); } };
     });
-    return { ...view, acknowledge, emit: (request_id: number) => event({ jsonrpc: "2.0", method: "event.usage.refreshed", params: { request_id, reason: "ok", detail: null, snapshot: [] } }) };
+    return { ...view, acknowledge, emit: (request_id: number, reason = "ok", detail: string | null = null) => event({ jsonrpc: "2.0", method: "event.usage.refreshed", params: { request_id, reason, detail, snapshot: [] } }) };
   }
+
+  it.each(["probe_disabled", "no_active_kind", "timeout", "error"])("settles on a %s completion instead of waiting for the ceiling", async (reason) => {
+    const f = fixture();
+    try {
+      await f.fleet.refresh();
+      const result = f.fleet.refreshUsage();
+      f.acknowledge({ refreshed: false, reason: "pending", request_id: 42, detail: null, snapshot: [] });
+      await Promise.resolve(); await Promise.resolve();
+      f.emit(42, reason, "No agent running to probe");
+      const settled = await result;
+      expect(settled?.reason).toBe(reason);
+      expect(settled?.refreshed).toBe(false);
+      expect(settled?.detail).toBe("No agent running to probe");
+    } finally { f.stop(); }
+  });
 
   it.each([false, true])("waits for the matching event, including before the ack (%s)", async (early) => {
     const f = fixture();

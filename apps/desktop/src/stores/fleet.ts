@@ -2,6 +2,16 @@ import { createMemo, createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
 import type { AccountUsage, UsageRefreshResult, UsageRefreshed, AgentSession, Lane, Repo } from "../bindings";
+import type { UsageRefreshedReason } from "../bindings/UsageRefreshedReason";
+
+/** Every completion reason the daemon can broadcast; a completion is never dropped on its reason. */
+const REFRESHED_REASONS: readonly UsageRefreshedReason[] = [
+  "ok",
+  "probe_disabled",
+  "no_active_kind",
+  "timeout",
+  "error",
+];
 import { daemonCall, subscribeDaemon, type DaemonEvent } from "../ipc/rpc";
 
 export interface FleetSnapshot {
@@ -591,7 +601,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     if (event.method === "event.usage.refreshed") {
       const result = event.params as UsageRefreshed | undefined;
       if (result && Number.isFinite(result.request_id) && Array.isArray(result.snapshot)
-        && ["ok", "timeout", "error"].includes(result.reason)) {
+        && REFRESHED_REASONS.includes(result.reason)) {
         const wait = usageWait;
         if (wait) {
           if (wait.requestId === undefined) wait.early.set(result.request_id, result);
