@@ -76,7 +76,7 @@ export default function Modal(props: ModalProps) {
         aria-labelledby={titleId}
         aria-describedby={props.subtitle ? subtitleId : undefined}
         tabIndex={-1}
-        class="flex max-h-[88vh] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_24px_80px_var(--shadow)]"
+        class="modal-card flex max-h-[88vh] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_24px_80px_var(--shadow)]"
         style={{ width: props.width ?? "min(34rem, 94vw)" }}
       >
         <header class="flex items-start justify-between border-b border-line px-5 py-4">

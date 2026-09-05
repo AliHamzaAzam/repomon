@@ -96,3 +96,73 @@ describe("index.css multitasking grid row sizing", () => {
     grid.remove();
   });
 });
+
+/// The responsive rules are media queries, which jsdom parses into the CSSOM but never applies to
+/// a layout (there is none). So these assert the rules as written: the four breakpoints exist
+/// with the widths the brief names, and each carries the rule the components rely on.
+describe("index.css breakpoints", () => {
+  const cssPath = path.resolve(process.cwd(), "src/index.css");
+  const raw = readFileSync(cssPath, "utf-8").split("\n").filter((line) => !line.trim().startsWith("@import")).join("\n");
+
+  function mediaRules(): Map<string, string> {
+    const style = document.createElement("style");
+    style.textContent = raw;
+    document.head.appendChild(style);
+    const rules = new Map<string, string>();
+    for (const rule of [...(style.sheet?.cssRules ?? [])]) {
+      if (rule instanceof CSSMediaRule) {
+        rules.set(rule.media.mediaText, [...rule.cssRules].map((inner) => inner.cssText).join("\n"));
+      }
+    }
+    style.remove();
+    return rules;
+  }
+
+  it("declares exactly the four named breakpoints plus reduced motion", () => {
+    const rules = mediaRules();
+    expect([...rules.keys()].sort()).toEqual(
+      ["(max-height: 720px)", "(max-width: 1100px)", "(max-width: 1280px)", "(min-width: 1600px)", "(prefers-reduced-motion: reduce)"].sort(),
+    );
+  });
+
+  it("collapses the header toolbar to icons at medium", () => {
+    const medium = mediaRules().get("(max-width: 1280px)") ?? "";
+    expect(medium).toContain(".header-toolbar .toolbar-label");
+    expect(medium).toContain("display: none");
+  });
+
+  it("caps the right rail to 40vw and narrows the sidebar at narrow", () => {
+    const narrow = mediaRules().get("(max-width: 1100px)") ?? "";
+    expect(narrow).toContain("min(var(--right-panel-width, 20rem), 40vw)");
+    expect(narrow).toContain("15rem minmax(0, 1fr)");
+    // The old rule hid the rail outright under 980px, which the window never reaches; nothing
+    // is hidden any more.
+    expect(narrow).not.toContain("display: none");
+  });
+
+  it("lets overlays and the wizard use more of a short window", () => {
+    const short = mediaRules().get("(max-height: 720px)") ?? "";
+    expect(short).toContain(".modal-card");
+    expect(short).toContain(".onboarding-page");
+  });
+
+  it("gives panel headers one shrinkable lead and one fixed action group", () => {
+    const style = document.createElement("style");
+    style.textContent = raw;
+    document.head.appendChild(style);
+    const header = document.createElement("div");
+    header.className = "panel-header";
+    const lead = document.createElement("div");
+    lead.className = "panel-header-lead";
+    const actions = document.createElement("div");
+    actions.className = "panel-header-actions";
+    header.append(lead, actions);
+    document.body.appendChild(header);
+    expect(getComputedStyle(header).minWidth).toBe("0");
+    expect(getComputedStyle(lead).minWidth).toBe("0");
+    expect(getComputedStyle(lead).flexShrink).toBe("1");
+    expect(getComputedStyle(actions).flexShrink).toBe("0");
+    header.remove();
+    style.remove();
+  });
+});

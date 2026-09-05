@@ -262,3 +262,42 @@ describe("the Repomind control room", () => {
     expect(dismissError).toHaveBeenCalled();
   });
 });
+
+describe("Repomind panel header at a narrow rail", () => {
+  // The screenshot that started this: at a narrow rail the Expand button was painted over the
+  // status pill. jsdom cannot measure, so this asserts the structure that makes overlap
+  // impossible: the leading group is the one shrinkable child (and the pill inside it may
+  // truncate), the actions never shrink, and Expand is an icon with its name in aria-label.
+  it("keeps the status pill fluid, the actions fixed, and Expand icon-only with a name", () => {
+    mockDaemon();
+    const onToggleFullscreen = vi.fn();
+    const { container } = render(() => (
+      <RepomindPanel
+        fleet={fleetStub(controllerLane([session()]))}
+        repomind={repomindStub(status())}
+        onToggleFullscreen={onToggleFullscreen}
+      />
+    ));
+
+    const expand = screen.getByRole("button", { name: "Expand Repomind to full screen" });
+    expect(expand.textContent).toBe("");
+    expect(expand.getAttribute("title")).toBeTruthy();
+    expect(expand.querySelector("svg")).toBeInTheDocument();
+    expect(expand.parentElement?.className).toContain("panel-header-actions");
+
+    const pill = container.querySelector<HTMLElement>(".lane-status")!;
+    expect(pill.className).toContain("is-fluid");
+    // The full word survives in the tooltip when the pill has to truncate it.
+    expect(pill.getAttribute("title")).toBe(pill.textContent);
+    expect(pill.parentElement?.className).toContain("panel-header-lead");
+
+    fireEvent.click(expand);
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the same button Collapse when the panel is full screen", () => {
+    mockDaemon();
+    render(() => <RepomindPanel fullscreen onToggleFullscreen={() => undefined} fleet={fleetStub(null)} repomind={repomindStub(status())} />);
+    expect(screen.getByRole("button", { name: "Collapse Repomind to the side rail" })).toBeInTheDocument();
+  });
+});

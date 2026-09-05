@@ -6,7 +6,7 @@ import type { ActionsStore } from "../stores/actions";
 import type { EditorStore } from "../stores/editor";
 import type { RepomindStore } from "../stores/repomind";
 import type { WorkspaceStore } from "../stores/workspace";
-import { IconClose, IconLayers, IconPlay, IconPlus, IconStop } from "./icons";
+import { IconClose, IconCollapse, IconExpand, IconLayers, IconPlay, IconPlus, IconStop } from "./icons";
 import RepomindControllers from "./RepomindControllers";
 import RepomindDuties from "./RepomindDuties";
 import RepomindMemory from "./RepomindMemory";
@@ -101,11 +101,11 @@ export default function RepomindPanel(props: RepomindPanelProps) {
 
   return (
     <div class="flex h-full flex-col bg-surface">
-      <div class="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-line bg-surface/95 px-3.5">
-        <div class="flex min-w-0 items-center gap-2">
+      <div class="panel-header">
+        <div class="panel-header-lead">
           <span class={`lane-pulse ${running() ? `is-${indicator().tone}` : ""}`} />
           <span class="shrink-0 text-xs font-semibold text-foreground">Repomind</span>
-          <span class={`lane-status is-${indicator().tone}`}>{indicator().label}</span>
+          <span class={`lane-status is-fluid is-${indicator().tone}`} title={indicator().label}>{indicator().label}</span>
           <Show when={controller().agents > 0}>
             <span
               class="inline-flex shrink-0 items-center gap-0.5 font-mono text-[10px] leading-none text-muted"
@@ -116,14 +116,19 @@ export default function RepomindPanel(props: RepomindPanelProps) {
             </span>
           </Show>
         </div>
-        <div class="flex shrink-0 items-center gap-1.5">
+        {/* Icon buttons only, so the group has one fixed width the leading group can plan around;
+            each carries its name for the keyboard, the screen reader, and the tooltip. The
+            lifecycle button keeps its word: Start and Stop are the row's one primary action. */}
+        <div class="panel-header-actions">
           <Show when={props.onToggleFullscreen}>
             <button
               type="button"
-              class="focus-ring flex h-6 items-center rounded border border-line bg-raised/50 px-2 text-[10px] font-medium text-muted hover:text-foreground"
+              class="focus-ring flex size-6 items-center justify-center rounded border border-line bg-raised/50 text-muted hover:text-foreground"
               onClick={props.onToggleFullscreen}
+              aria-label={props.fullscreen ? "Collapse Repomind to the side rail" : "Expand Repomind to full screen"}
+              title={props.fullscreen ? "Collapse to the side rail" : "Expand to full screen"}
             >
-              {props.fullscreen ? "Collapse" : "Expand"}
+              {props.fullscreen ? <IconCollapse size={12} /> : <IconExpand size={12} />}
             </button>
           </Show>
           <Show when={running() && controller().lane}>

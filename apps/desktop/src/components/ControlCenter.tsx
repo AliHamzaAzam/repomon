@@ -421,7 +421,7 @@ export default function ControlCenter(props: ControlCenterProps) {
         title={`Control (${chordFor("panel.control")})`}
       >
         <IconCommand size={13} />
-        <span>Control</span>
+        <span class="toolbar-label">Control</span>
       </button>
 
       {/* Command Palette Modal */}

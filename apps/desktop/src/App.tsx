@@ -539,7 +539,7 @@ function App(props: AppProps) {
           activateLabel="About Repomon"
         />
 
-        <div class="flex items-center">
+        <div class="header-toolbar flex min-w-0 items-center" role="toolbar" aria-label="Panels">
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -549,12 +549,13 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("git")}
             aria-pressed={repomindOpen() && rightPanelTab() === "git"}
+            aria-label="Git"
             title={`Git (${chordFor("panel.git")})`}
           >
             <IconGitBranch size={13} />
-            <span>Git</span>
+            <span class="toolbar-label">Git</span>
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <div class="flex items-center">
             <button
               type="button"
@@ -565,10 +566,11 @@ function App(props: AppProps) {
               }`}
               onClick={toggleEditor}
               aria-pressed={isEditorActive()}
+              aria-label="Editor"
               title="Editor workspace (center mode)"
             >
               <IconLayers size={13} />
-              <span>Editor</span>
+              <span class="toolbar-label">Editor</span>
             </button>
             <button
               type="button"
@@ -587,7 +589,7 @@ function App(props: AppProps) {
               <IconChevronDown size={10} />
             </button>
           </div>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -599,12 +601,13 @@ function App(props: AppProps) {
               setUsageOpen((open) => !open);
             }}
             aria-pressed={usageOpen()}
+            aria-label="Usage"
             title={`Usage (${chordFor("panel.usage")})`}
           >
             <IconMeter size={13} />
-            <span>Usage</span>
+            <span class="toolbar-label">Usage</span>
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <ControlCenter
             fleet={fleet}
             notifications={notifications}
@@ -612,7 +615,7 @@ function App(props: AppProps) {
             actions={actions}
             onPanelCommand={runPanelCommand}
           />
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -622,12 +625,13 @@ function App(props: AppProps) {
             }`}
             onClick={workspace.toggleMultitasking}
             aria-pressed={workspace.multitasking()}
+            aria-label="Multitasking"
             title={`Multitasking (${chordFor("panel.multitasking")})`}
           >
             <IconMultitask size={13} />
-            <span>Multitasking</span>
+            <span class="toolbar-label">Multitasking</span>
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -640,12 +644,13 @@ function App(props: AppProps) {
               setExtensionsOpen(!extensionsOpen());
             }}
             aria-pressed={extensionsOpen()}
+            aria-label="Extensions"
             title={`Extensions (${chordFor("panel.extensions")})`}
           >
             <IconExtensions size={13} />
-            <span>Extensions</span>
+            <span class="toolbar-label">Extensions</span>
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -655,12 +660,13 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("supervision")}
             aria-pressed={repomindOpen() && rightPanelTab() === "supervision"}
+            aria-label="Supervision"
             title={`Supervision (${chordFor("panel.supervision")})`}
           >
             <IconShield size={13} />
-            <span>Supervision</span>
+            <span class="toolbar-label">Supervision</span>
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -670,15 +676,16 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("mail")}
             aria-pressed={repomindOpen() && rightPanelTab() === "mail"}
+            aria-label="Repomail"
             title={`Repomail (${chordFor("panel.mail")})`}
           >
             <IconMail size={13} />
-            <span>Repomail</span>
+            <span class="toolbar-label">Repomail</span>
             <Show when={messages.unread() > 0}>
               <span class="rounded-full bg-signal/15 px-1 font-mono text-[9px] text-signal">{messages.unread()}</span>
             </Show>
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
@@ -688,13 +695,14 @@ function App(props: AppProps) {
             }`}
             onClick={() => openPanelTab("repomind")}
             aria-pressed={repomindOpen() && rightPanelTab() === "repomind"}
+            aria-label="Repomind"
             title={`Repomind (${chordFor("panel.repomind")})`}
           >
             <IconSparkles size={13} />
-            <span>Repomind</span>
+            <span class="toolbar-label">Repomind</span>
             <RepomindStateDot controller={fleet.controller()} />
           </button>
-          <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
+          <span class="toolbar-divider mx-1 h-3.5 w-px bg-line/60" aria-hidden="true" />
           <button
             type="button"
             class="focus-ring flex size-7 items-center justify-center text-muted transition-colors hover:text-foreground"
@@ -718,14 +726,14 @@ function App(props: AppProps) {
         >
           <span class="flex items-center gap-2 font-medium">
             <span class="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-attention" aria-hidden="true" />
-            Daemon unreachable — reconnecting…
+            Daemon unreachable, reconnecting
           </span>
           <button
             type="button"
             class="focus-ring rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-attention hover:bg-attention/20 transition-colors"
             onClick={() => actions.openSettingsTab("system")}
           >
-            Settings › System
+            Open System settings
           </button>
         </div>
       </Show>
@@ -738,7 +746,7 @@ function App(props: AppProps) {
           tabIndex={0}
           onKeyDown={navigateFleet}
         >
-          <div class="flex h-10 shrink-0 items-center justify-between border-b border-line bg-surface/95 px-3.5">
+          <div class="panel-header">
             <span class="section-label">Fleet</span>
             <span class="font-mono text-[10px] text-muted">
               {fleet.visibleRepos().length} repos · {fleet.fleetLanes().length} lanes

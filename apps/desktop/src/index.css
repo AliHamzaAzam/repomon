@@ -550,15 +550,103 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 25%, transparent);
 }
 
-@media (max-width: 980px) {
-  .mission-grid,
-  .mission-grid.is-repomind-open {
-    grid-template-columns: 13.5rem minmax(0, 1fr);
+/* Breakpoints. The window is a desktop window with a 1040 x 680 floor (tauri.conf.json), so
+   these are the widths it actually reaches rather than phone sizes:
+     narrow  max-width 1100px   the floor and a little above it
+     medium  max-width 1280px   a half-screen window on a 2560 display, or a 13" laptop
+     wide    min-width 1600px   a full-screen window on a large display
+     short   max-height 720px   the floor height, or a laptop with the dock showing
+   Every rule below names its breakpoint; there are no other media queries in the app. */
+
+/* medium: the header's nine toolbar words no longer fit beside the lockup and the traffic lights,
+   so the buttons collapse to their icons. Each keeps its accessible name (aria-label) and title
+   tooltip, so nothing is lost for the keyboard or the screen reader. */
+@media (max-width: 1280px) {
+  .header-toolbar .toolbar-label {
+    display: none;
   }
 
-  .repomind-panel {
-    display: none !important;
+  .header-toolbar .toolbar-divider {
+    margin-inline: 0.125rem;
   }
+}
+
+/* narrow: the fleet sidebar gives up a fifth of its width and the right rail is capped to 40% of
+   the window so the terminal bay always keeps the larger share, whatever width the rail was last
+   dragged to. */
+@media (max-width: 1100px) {
+  .mission-grid {
+    grid-template-columns: 15rem minmax(0, 1fr) 0;
+  }
+
+  .mission-grid.is-repomind-open {
+    grid-template-columns: 15rem minmax(0, 1fr) min(var(--right-panel-width, 20rem), 40vw);
+  }
+
+  .mission-grid.is-multitasking {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* wide: the sidebar earns back a little room for long branch names. */
+@media (min-width: 1600px) {
+  .mission-grid:not(.is-multitasking) {
+    grid-template-columns: 20rem minmax(0, 1fr) 0;
+  }
+
+  .mission-grid.is-repomind-open {
+    grid-template-columns: 20rem minmax(0, 1fr) var(--right-panel-width, 20rem);
+  }
+}
+
+/* short: overlays keep a wider band of the viewport, and the wizard's page padding tightens so a
+   step's primary action stays above the fold. */
+@media (max-height: 720px) {
+  .modal-card {
+    max-height: 94vh;
+  }
+
+  .onboarding-page {
+    padding-block: 1.25rem;
+  }
+}
+
+/* Panel header pattern: one row, a leading group that may truncate and a trailing action group
+   that never shrinks. The leading group is the only flex child allowed to give up width, which
+   is what stops the trailing buttons from ever being painted over it. */
+.panel-header {
+  display: flex;
+  min-width: 0;
+  height: 2.5rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  padding-inline: 0.875rem;
+}
+
+.panel-header-lead {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.panel-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+/* A status pill that sits in a header's leading group gives up its column floor and truncates
+   instead, so a narrow rail shortens "Waiting" to "Wai..." rather than pushing the actions over. */
+.lane-status.is-fluid {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 /* Two lines per lane: name plus status pill on top, branch plus counts below. The shared box

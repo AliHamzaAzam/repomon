@@ -202,7 +202,7 @@ export default function Onboarding(props: OnboardingProps) {
       <StepRail current={step()} onJump={goTo} />
 
       <div class="min-h-0 flex-1 overflow-y-auto">
-        <div class="mx-auto w-full max-w-[46rem] px-8 py-9">
+        <div class="onboarding-page mx-auto w-full max-w-[46rem] px-8 py-9">
           {/* Keyed on the step so the one authored motion in this screen (a short rise as the
               next step arrives) replays per step rather than once per mount. */}
           <div class="onboarding-step" data-step={step()}>
