@@ -73,4 +73,11 @@ describe("brand lockup", () => {
     fireEvent.click(button);
     expect(onActivate).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the wordmark for assistive technology when only the mark is drawn", () => {
+    const { container } = render(() => <BrandLockup heading markOnly />);
+    const wordmark = container.querySelector("h1")!;
+    expect(wordmark.textContent).toBe("Repomon");
+    expect(wordmark.className).toContain("sr-only");
+  });
 });

@@ -29,7 +29,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { BINDINGS, formatChord, matchChord, matchSidebarKey } from "./keymap";
+import { BINDINGS, formatChord, isMac, matchChord, matchSidebarKey } from "./keymap";
 import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
@@ -538,6 +538,7 @@ function App(props: AppProps) {
       <WindowChromeHeader>
         <BrandLockup
           heading
+          markOnly={isMac()}
           onActivate={() => actions.openSettingsTab("general")}
           activateLabel="About Repomon"
         />

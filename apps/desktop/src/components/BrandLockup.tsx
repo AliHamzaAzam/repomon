@@ -3,6 +3,9 @@ import { Dynamic } from "solid-js/web";
 import BrandMark from "./BrandMark";
 
 export interface BrandLockupProps {
+  /// Draw only the mark and keep the wordmark for assistive technology. The macOS title bar sits
+  /// under a menu bar that already prints the app name, so the wordmark there is redundant.
+  markOnly?: boolean;
   /// Render the wordmark as the page's `h1` rather than a plain span. The mission control shell
   /// passes this; the setup wizard does not, so the two never fight over the document outline.
   heading?: boolean;
@@ -38,7 +41,9 @@ export default function BrandLockup(props: BrandLockupProps) {
       <BrandMark size={size()} tight class="shrink-0" />
       <Dynamic
         component={props.heading ? "h1" : "span"}
-        class="font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.09em] text-foreground"
+        class={`font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.09em] text-foreground ${
+          props.markOnly ? "sr-only" : ""
+        }`}
       >
         Repomon
       </Dynamic>
