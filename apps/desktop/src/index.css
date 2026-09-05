@@ -12,6 +12,17 @@
   --attention: hsl(36 90% 48%);
   --fault: hsl(4 72% 50%);
   --shadow: hsl(222 24% 11% / 0.08);
+
+  /* Chart series, assigned in this fixed order and never cycled. Validated for the OKLCH
+     lightness band, a chroma floor, adjacent-pair separation under deuteranopia, protanopia and
+     tritanopia, and 3:1 against the chart surface. A seventh series folds into "Other" rather
+     than borrowing a colour that already means something else. */
+  --chart-1: hsl(176 92% 30%);
+  --chart-2: hsl(262 58% 50%);
+  --chart-3: hsl(32 88% 40%);
+  --chart-4: hsl(212 75% 44%);
+  --chart-5: hsl(338 70% 50%);
+  --chart-6: hsl(96 60% 25%);
 }
 
 .dark,
@@ -92,6 +103,22 @@
   --attention: hsl(36 90% 48%);
   --fault: hsl(4 72% 50%);
   --shadow: hsl(222 24% 11% / 0.08);
+}
+
+/* The dark themes share one set of chart steps: they are chosen against a dark chart surface and
+   fail the lightness band on a light one, so every dark theme names itself here rather than
+   inheriting the light steps from `:root`. */
+.dark,
+.theme-dark,
+.theme-midnight,
+.theme-nord,
+.theme-dracula {
+  --chart-1: hsl(168 58% 40%);
+  --chart-2: hsl(262 66% 60%);
+  --chart-3: hsl(36 82% 40%);
+  --chart-4: hsl(206 76% 54%);
+  --chart-5: hsl(332 72% 60%);
+  --chart-6: hsl(120 48% 36%);
 }
 
 @theme inline {

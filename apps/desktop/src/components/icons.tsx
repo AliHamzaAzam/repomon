@@ -945,6 +945,30 @@ export function IconRadar(props: IconProps): JSX.Element {
   );
 }
 
+/** Three ascending bars on a baseline: the Usage view's ledger of spend over time. */
+export function IconMeter(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 13;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M3 21h18" />
+      <path d="M6.5 21v-5" />
+      <path d="M12 21V9" />
+      <path d="M17.5 21v-8" />
+    </svg>
+  );
+}
+
 export function IconShield(props: IconProps): JSX.Element {
   const s = () => props.size ?? 14;
   return (

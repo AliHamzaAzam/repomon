@@ -2,8 +2,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AccountUsage,
-  ApprovalRule,
   AgentChoice,
+  ApprovalRule,
   BrowseResult,
   Commit,
   CommitShow,
@@ -20,15 +20,15 @@ import type {
   FileRenameResult,
   FileSearchResult,
   FileWriteResult,
+  FleetMessage,
   JournalEntry,
   Lane,
-  FleetMessage,
   MessagePage,
   PendingDialog,
   Playbook,
   PolicyAction,
-  RepomindStatus,
   Repo,
+  RepomindStatus,
   Schedule,
   SupervisionConfig,
   SupervisionEntry,
@@ -37,6 +37,14 @@ import type {
   SystemDoctorResult,
   TimelineData,
   TranscriptItem,
+  UsageBucket,
+  UsageFinding,
+  UsageGroupBy,
+  UsageRange,
+  UsageSessionRow,
+  UsageStatus,
+  UsageSummary,
+  UsageTimeline,
   WorkSession,
 } from "../bindings";
 
@@ -67,6 +75,13 @@ export interface DaemonEvent<T = unknown> {
 export type ExtScope = { scope: "global" } | { scope: "repo"; repo_id: number };
 /** Ext RPC params: a scope plus the Claude account (config dir) to target. Omitted = "default" (~/.claude). */
 export type ExtScopeParams = ExtScope & { account?: string };
+
+/** The window every ledger read takes: a named range, or `custom` with explicit RFC 3339 bounds. */
+export interface UsageWindowParams {
+  range: UsageRange;
+  since?: string | null;
+  until?: string | null;
+}
 
 export interface ConfigView {
   accent?: string | null;
@@ -347,6 +362,25 @@ interface RpcMap {
   "system.doctor": { params: undefined; result: SystemDoctorResult };
   "usage.get": { params: undefined; result: AccountUsage[] };
   "usage.refresh": { params: undefined; result: null };
+  "usage.summary": { params: UsageWindowParams & { group_by: UsageGroupBy }; result: UsageSummary };
+  "usage.timeline": {
+    params: UsageWindowParams & { group_by: UsageGroupBy; bucket: UsageBucket };
+    result: UsageTimeline;
+  };
+  "usage.sessions": {
+    params: UsageWindowParams & { lane_id?: number | null; limit?: number };
+    result: UsageSessionRow[];
+  };
+  "usage.findings": { params: UsageWindowParams; result: UsageFinding[] };
+  "usage.status": { params: undefined; result: UsageStatus };
+  "usage.export": {
+    params: UsageWindowParams & { format: "csv" | "json" };
+    result: { path: string; events: number; bytes: number };
+  };
+  "usage.ingest_now": {
+    params: undefined;
+    result: { listed: number; scanned: number; events: number; failed: number };
+  };
   "orchestrator.status": { params: undefined; result: OrchestratorStatus };
   "orchestrator.transcript": { params: { limit?: number }; result: TranscriptItem[] };
   "orchestrator.start": { params: { agent?: string; model?: string }; result: OrchestratorStatus };

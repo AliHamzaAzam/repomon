@@ -60,6 +60,7 @@ export const BINDINGS: Binding[] = [
     section: "Panels",
   },
   { id: "panel.supervision", chord: "mod+8", label: "Toggle the supervision panel", section: "Panels" },
+  { id: "panel.usage", chord: "mod+1", label: "Toggle the usage view", section: "Panels" },
   { id: "finder.open", chord: "mod+p", label: "Find file in workspace", section: "Panels", when: "lane" },
   {
     id: "search.project",

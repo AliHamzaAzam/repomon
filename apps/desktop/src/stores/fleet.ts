@@ -17,6 +17,9 @@ export interface FleetSnapshot {
   sortMode: string | null;
   /// Resolved per-lane agent tab sort mode ("activity" | "manual"). Null when config.get failed.
   tabSortMode: string | null;
+  /// Today's equivalent API cost from the usage ledger, for the sidebar's rate-limits card.
+  /// Optional: a source that does not read the ledger simply leaves the line off.
+  costToday?: number | null;
 }
 
 export interface FleetSource {
@@ -27,12 +30,13 @@ export interface FleetSource {
 
 export const daemonFleetSource: FleetSource = {
   async load() {
-    const [repos, lanes, usage, terminals, config] = await Promise.all([
+    const [repos, lanes, usage, terminals, config, today] = await Promise.all([
       daemonCall("repo.list"),
       daemonCall("lane.list"),
       daemonCall("usage.get").catch(() => []),
       daemonCall("terminal.list_all").catch(() => []),
       daemonCall("config.get").catch(() => null),
+      daemonCall("usage.summary", { range: "today", group_by: "kind" }).catch(() => null),
     ]);
     return {
       repos,
@@ -43,6 +47,7 @@ export const daemonFleetSource: FleetSource = {
       sortMode: config && typeof config.sort_mode === "string" ? config.sort_mode : null,
       tabSortMode:
         config && typeof config.tab_sort_mode === "string" ? config.tab_sort_mode : null,
+      costToday: today ? today.totals.cost_usd : null,
     };
   },
   refreshUsage: async () => {
@@ -516,6 +521,9 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     lanes().find((lane) => lane.id === selectedLaneId()) ?? null,
   );
 
+  // Today's ledger cost, shown as one line on the rate-limits card. Null until a load supplies it.
+  const [costToday, setCostToday] = createSignal<number | null>(null);
+
   // The usage pill follows the focused agent's account rather than always the first probe.
   const focusedUsage = createMemo(() => pickFocusedUsage(usage(), selectedLane(), focusedWindow()));
 
@@ -530,6 +538,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       setRepoStore(reconcile(snapshot.repos, { key: "id" }));
       setLaneStore(reconcile(withSessionKeys(snapshot.lanes), { key: "id" }));
       setUsage(snapshot.usage);
+      setCostToday(snapshot.costToday ?? null);
       setTerminals(snapshot.terminals);
       if (snapshot.sortMode !== null && isRepoSortMode(snapshot.sortMode)) {
         setSortMode(snapshot.sortMode);
@@ -619,6 +628,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     controller,
     usage,
     focusedUsage,
+    costToday,
     terminals,
     selectedLane,
     selectedLaneId,

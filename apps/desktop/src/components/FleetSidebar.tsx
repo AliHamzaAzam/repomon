@@ -5,6 +5,7 @@ import { fleetCounts, laneIndicator, laneIndicatorTitle, type FleetStore } from 
 import type { ActionsStore } from "../stores/actions";
 import type { RepomindStore } from "../stores/repomind";
 import type { WorkspaceStore } from "../stores/workspace";
+import { formatUsd } from "./usageMetrics";
 import {
   readAutoCollapseEmptyLanes,
   onAutoCollapseChanged,
@@ -1090,6 +1091,16 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   </button>
                 </span>
               </div>
+              {/* A partial fleet double in a test may not carry the ledger; the line simply
+                  does not render then. */}
+              <Show when={props.fleet.costToday?.() != null}>
+                <div class="mb-1.5 flex items-center justify-between font-mono text-[10px]">
+                  <span class="text-muted/90">Today</span>
+                  <span class="tabular-nums text-foreground" title="What today's tokens would cost at published API rates">
+                    {formatUsd(props.fleet.costToday?.() ?? 0)}
+                  </span>
+                </div>
+              </Show>
               <div class="space-y-1">
                 <For each={usage().report.windows}>
                   {(window) => {

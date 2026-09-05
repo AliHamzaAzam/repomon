@@ -4,6 +4,7 @@ import ActionModals from "./components/ActionModals";
 import FleetSidebar from "./components/FleetSidebar";
 import ControlCenter from "./components/ControlCenter";
 import ExtensionsView from "./components/ExtensionsView";
+import UsageView from "./components/UsageView";
 import Onboarding from "./components/Onboarding";
 import WindowChromeHeader from "./components/WindowChrome";
 import RepomindPanel from "./components/RepomindPanel";
@@ -31,6 +32,7 @@ import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
 import { createExtensionsStore } from "./stores/extensions";
+import { createUsageStore } from "./stores/usage";
 import { createEditorStore } from "./stores/editor";
 import { createFleetStore, type FleetSource } from "./stores/fleet";
 import { createNotificationStore } from "./stores/notifications";
@@ -49,7 +51,7 @@ import {
 import EditorWorkspace from "./components/EditorWorkspace";
 import FileFinder from "./components/FileFinder";
 import ShortcutsOverlay from "./components/ShortcutsOverlay";
-import { IconChevronDown, IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
+import { IconChevronDown, IconClose, IconExtensions, IconGitBranch, IconLayers, IconMail, IconMeter, IconMultitask, IconSettings, IconShield, IconSparkles } from "./components/icons";
 
 interface AppProps {
   connectionSource?: ConnectionSource;
@@ -118,6 +120,9 @@ function App(props: AppProps) {
   let panelTabRequestToken = 0;
   const [onboardingOpen, setOnboardingOpen] = createSignal(false);
   const [extensionsOpen, setExtensionsOpen] = createSignal(false);
+  // The Usage view takes the whole bay: a timeline, five breakdowns and a sessions table do not
+  // fit the right rail, and reading them is its own task rather than something done beside a lane.
+  const [usageOpen, setUsageOpen] = createSignal(false);
   const [update, setUpdate] = createSignal<AvailableUpdate | null>(null);
   const [appVersion, setAppVersion] = createSignal("");
   // Footer discoverability hint for the shortcuts guide, shown for a launch count decided once at
@@ -133,6 +138,7 @@ function App(props: AppProps) {
   const editor = createEditorStore(fleet);
   const actions = createActionsStore(fleet, workspace);
   const ext = createExtensionsStore();
+  const usage = createUsageStore();
   const repomind = createRepomindStore();
   const notifications = createNotificationStore((laneId) => fleet.setSelectedLaneId(laneId));
   const messages = createMessageStore((laneId, slot, sourceWindow) => {
@@ -322,7 +328,13 @@ function App(props: AppProps) {
       case "panel.multitasking": workspace.toggleMultitasking(); break;
       case "panel.extensions":
         workspace.setMultitasking(false);
+        setUsageOpen(false);
         setExtensionsOpen((open) => !open);
+        break;
+      case "panel.usage":
+        workspace.setMultitasking(false);
+        setExtensionsOpen(false);
+        setUsageOpen((open) => !open);
         break;
       case "panel.git": openPanelTab("git"); break;
       case "panel.editor": openPanelTab("editor"); break;
@@ -613,6 +625,22 @@ function App(props: AppProps) {
             <IconShield size={13} />
             <span>Supervision</span>
           </button>
+          <button
+            type="button"
+            class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
+              usageOpen() ? "text-signal font-semibold" : "text-muted hover:text-foreground"
+            }`}
+            onClick={() => {
+              workspace.setMultitasking(false);
+              setExtensionsOpen(false);
+              setUsageOpen((open) => !open);
+            }}
+            aria-pressed={usageOpen()}
+            title={`Usage (${chordFor("panel.usage")})`}
+          >
+            <IconMeter size={13} />
+            <span>Usage</span>
+          </button>
           <span class="h-3.5 w-px bg-line/60 mx-1" aria-hidden="true" />
           <button
             type="button"
@@ -742,6 +770,18 @@ function App(props: AppProps) {
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">
               <ExtensionsView store={ext} fleet={fleet} />
+            </div>
+          </Show>
+          <Show when={usageOpen()}>
+            <div class="absolute inset-0 z-10 bg-background">
+              <UsageView
+                store={usage}
+                fleet={fleet}
+                onOpenLane={(laneId) => {
+                  fleet.setSelectedLaneId(laneId);
+                  setUsageOpen(false);
+                }}
+              />
             </div>
           </Show>
           <Show when={workspace.editorWorkspace()}>

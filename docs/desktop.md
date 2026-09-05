@@ -90,6 +90,7 @@ macOS** and **Ctrl elsewhere**.
 | `mod+6` | Cycle theme (system, dark, light) |
 | `mod+7` | Toggle the compact in-app editor in the right rail |
 | `mod+8` | Toggle the supervision panel |
+| `mod+1` | Toggle the usage view |
 | `mod+p` | Find file in workspace |
 | `mod+shift+f` | Search project files in workspace (inside a focused terminal, this searches the terminal) |
 | `mod+shift+v` | Toggle preview (Markdown or SVG tab, whichever is active) |
@@ -543,6 +544,56 @@ It is account-aware. If you run more than one Claude account (a default `~/.clau
 such as `~/.claude-work`), an account picker appears and every listing and action targets the
 account you choose. Codex is listed too, but it uses a different extension model, so it shows an
 empty state rather than pretending to have Claude-style plugins.
+
+## Usage
+
+`mod+1`, or the Usage button in the header, opens the usage ledger: what every managed agent
+burned in tokens, what those tokens would cost at published API rates, and what is worth changing.
+
+The ledger is local and passive. A background pass reads the transcripts the agents already write
+to disk (Claude Code's `~/.claude/projects` and any `~/.claude-*` account root, Codex's
+`~/.codex/sessions`, Antigravity's brain transcripts, and OpenCode's SQLite store), records one row
+per billable turn, and attributes each row to a repo and lane by the directory the turn ran in.
+Nothing is sent anywhere and no API key is needed. Sessions repomon did not start still appear,
+marked as running outside a lane.
+
+The view carries:
+
+- Headline figures for the window: equivalent API cost, tokens, cache hit rate, the share of the
+  tokens that were estimated rather than reported, and the number of turns.
+- A timeline of cost per bucket, stacked by whichever dimension the "Split by" control names.
+  Fifteen-minute, hourly and daily buckets.
+- A breakdown table for that same dimension: agent, model, repo, lane or account.
+- Findings: the top cost drivers, models reading at a low cache hit rate, sessions that spent many
+  turns retrying, and light sessions that a cheaper model would have handled.
+- A sessions table with the task headline pulled from the transcript, turns, tool calls, retries,
+  duration, tokens and cost. Clicking a session's lane focuses it.
+- Export to CSV or JSON. The daemon writes the file under its data directory and names the path.
+
+Costs are what the tokens would have cost on the provider's API. On a subscription plan such as
+Claude Max or Google AI Pro that is the value the plan returned rather than an invoice, which is
+why the figure is labelled "equivalent API cost" and sits beside the plan's own quota percentages
+on the sidebar's rate-limits card. A model with no published rate still contributes its tokens and
+is named under the breakdown rather than quietly costing nothing.
+
+Antigravity keeps no token counts anywhere the CLI can read, so its rows are estimated from content
+length at four characters per token and counted in the "estimated" share.
+
+### Configuring the ledger
+
+The `[usage]` table in `~/.config/repomon/config.toml`:
+
+- `enabled` (default `true`) turns ingest on and off.
+- `scan_interval_secs` (default `600`) is the floor between full scans.
+- `max_files_per_scan` (default `200`) bounds the work in one pass, newest files first.
+- `refresh_prices` (default `false`) fetches a daily price snapshot from LiteLLM's public JSON and
+  caches it under the data directory. Off by default; the built-in rates need no network.
+- `[usage.price_overrides."<model>"]` corrects a rate. Every field is optional, so naming just
+  `input_per_mtok` leaves the rest of that model's rates alone. Cost is computed at query time, so
+  a correction re-prices history.
+
+`repomon usage today|week|month`, `repomon usage report`, `repomon usage ingest` and
+`repomon usage status` answer the same questions from a terminal, with `--group-by` and `--csv`.
 
 ## Known gaps
 
