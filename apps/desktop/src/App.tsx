@@ -530,8 +530,11 @@ function App(props: AppProps) {
     }
   };
 
+  // The footer row is sized by its content rather than fixed at 2rem: while the daemon is
+  // unreachable the connection rail grows a second line of recovery actions, and a fixed row
+  // clipped them at the bottom of the window.
   return (
-    <div class="grid h-screen min-h-[36rem] grid-rows-[35px_minmax(0,1fr)_2rem] overflow-hidden bg-background text-foreground">
+    <div class="grid h-screen min-h-[36rem] grid-rows-[35px_minmax(0,1fr)_auto] overflow-hidden bg-background text-foreground">
       <WindowChromeHeader>
         <BrandLockup
           heading
