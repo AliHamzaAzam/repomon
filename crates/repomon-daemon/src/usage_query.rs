@@ -357,11 +357,13 @@ mod tests {
                 key: repo_id.to_string(),
                 label: repo_id.to_string(),
                 totals: Default::default(),
+                unpriced: false,
             },
             UsageGroupRow {
                 key: lane_id.to_string(),
                 label: lane_id.to_string(),
                 totals: Default::default(),
+                unpriced: false,
             },
         ];
         labels.apply(GroupBy::Repo, &mut rows[..1]);
@@ -397,9 +399,53 @@ mod tests {
             key: String::new(),
             label: String::new(),
             totals: Default::default(),
+            unpriced: false,
         }];
         labels.apply(GroupBy::Repo, &mut rows);
         assert_eq!(rows[0].label, "unattributed");
+    }
+
+    #[tokio::test]
+    async fn an_unpriced_model_is_flagged_on_its_group_through_the_daemon_query() {
+        let (ctx, _, _) = ctx_with_repo().await;
+        let event = repomon_core::usage_ledger::UsageEvent {
+            at: Utc::now(),
+            agent_kind: "codex".to_string(),
+            model: "totally-unpublished-model".to_string(),
+            account: "codex".to_string(),
+            lane_id: None,
+            repo_id: None,
+            session_id: Some("s1".to_string()),
+            window: None,
+            cwd: None,
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            thinking_tokens: 0,
+            estimated: false,
+            external: true,
+            source_path: "t.jsonl".to_string(),
+            source_offset: 0,
+        };
+        ctx.store
+            .record_usage_events(vec![event.clone()])
+            .await
+            .unwrap();
+        let out = summary(
+            &ctx,
+            (event.at - chrono::Duration::minutes(1), event.at + chrono::Duration::minutes(1)),
+            GroupBy::Model,
+        )
+        .await
+        .unwrap();
+        assert!(out.unpriced_models.contains(&"totally-unpublished-model".to_string()));
+        let row = out
+            .groups
+            .iter()
+            .find(|g| g.key == "totally-unpublished-model")
+            .expect("the model's own group should be present");
+        assert!(row.unpriced, "the group itself should carry the flag");
     }
 
     #[tokio::test]

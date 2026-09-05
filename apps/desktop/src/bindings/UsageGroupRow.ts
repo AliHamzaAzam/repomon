@@ -12,4 +12,10 @@ key: string,
 /**
  * What to show for `key`. Equal to `key` until the daemon resolves repo and lane names.
  */
-label: string, totals: UsageTotals, };
+label: string, totals: UsageTotals, 
+/**
+ * True when at least one event in this group has no published price. Its tokens are still
+ * counted; its share of `cost_usd` reads as zero rather than an estimate. A free-tier id
+ * (which really does cost zero) never sets this.
+ */
+unpriced: boolean, };

@@ -33,8 +33,8 @@ const summary: UsageSummary = {
   group_by: "kind",
   totals,
   groups: [
-    { key: "claude-code", label: "claude-code", totals },
-    { key: "codex", label: "codex", totals: { ...totals, cost_usd: 0.4 } },
+    { key: "claude-code", label: "claude-code", totals, unpriced: false },
+    { key: "codex", label: "codex", totals: { ...totals, cost_usd: 0.4 }, unpriced: false },
   ],
   cache_hit_rate: 0.88,
   estimated_share: 0.02,

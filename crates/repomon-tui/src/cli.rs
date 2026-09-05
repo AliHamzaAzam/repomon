@@ -2522,11 +2522,13 @@ mod tests {
                     key: "claude-code".into(),
                     label: "claude-code".into(),
                     totals: totals(1.0, 200),
+                    unpriced: false,
                 },
                 UsageGroupRow {
                     key: "codex".into(),
                     label: "codex".into(),
                     totals: totals(0.5, 100),
+                    unpriced: false,
                 },
             ],
             cache_hit_rate: 0.42,

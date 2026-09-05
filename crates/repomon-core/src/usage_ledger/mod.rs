@@ -351,6 +351,10 @@ pub struct UsageGroupRow {
     /// What to show for `key`. Equal to `key` until the daemon resolves repo and lane names.
     pub label: String,
     pub totals: UsageTotals,
+    /// True when at least one event in this group has no published price. Its tokens are still
+    /// counted; its share of `cost_usd` reads as zero rather than an estimate. A free-tier id
+    /// (which really does cost zero) never sets this.
+    pub unpriced: bool,
 }
 
 /// The answer to `usage.summary`.
@@ -375,16 +379,21 @@ pub struct UsageSummary {
 pub fn summarize(events: &[UsageEvent], group_by: GroupBy, table: &PriceTable) -> UsageSummary {
     let mut totals = UsageTotals::default();
     let mut groups: BTreeMap<String, UsageTotals> = BTreeMap::new();
+    let mut group_unpriced: BTreeMap<String, bool> = BTreeMap::new();
     let mut unpriced: BTreeMap<String, ()> = BTreeMap::new();
     for e in events {
         totals.add(e, table);
-        groups.entry(group_by.key_of(e)).or_default().add(e, table);
+        let key = group_by.key_of(e);
+        groups.entry(key.clone()).or_default().add(e, table);
         // A free-tier id prices at zero, so it belongs in the totals and not in the warning.
-        if table.lookup(&e.model, e.at).is_none()
+        let has_no_price = table.lookup(&e.model, e.at).is_none()
             && !e.model.is_empty()
-            && !crate::pricing::is_free_tier(&e.model)
-        {
+            && !crate::pricing::is_free_tier(&e.model);
+        if has_no_price {
             unpriced.insert(e.model.clone(), ());
+            group_unpriced.insert(key, true);
+        } else {
+            group_unpriced.entry(key).or_insert(false);
         }
     }
     let read_side = totals.input_tokens + totals.cache_read_tokens;
@@ -400,10 +409,14 @@ pub fn summarize(events: &[UsageEvent], group_by: GroupBy, table: &PriceTable) -
     };
     let mut groups: Vec<UsageGroupRow> = groups
         .into_iter()
-        .map(|(key, totals)| UsageGroupRow {
-            label: key.clone(),
-            key,
-            totals,
+        .map(|(key, totals)| {
+            let unpriced = group_unpriced.get(&key).copied().unwrap_or(false);
+            UsageGroupRow {
+                label: key.clone(),
+                key,
+                totals,
+                unpriced,
+            }
         })
         .collect();
     groups.sort_by(|a, b| {
@@ -1141,6 +1154,29 @@ mod tests {
         assert_eq!(s.totals.cost_usd, 0.0);
         assert_eq!(s.totals.input_tokens, 1_000_000);
         assert!(s.unpriced_models.contains(&"some-local-model".to_string()));
+        assert!(
+            s.groups[0].unpriced,
+            "the group itself should carry the flag, not just the summary-wide list"
+        );
+    }
+
+    #[test]
+    fn gpt_6_prices_off_the_placeholder_and_is_not_flagged_unpriced() {
+        let mut e = row("codex", "gpt-6-astra", 1, 0, 1_000_000, 0, 0);
+        e.at = Utc::now();
+        let s = summarize(&[e], GroupBy::Model, &PriceTable::builtin());
+        assert!(s.totals.cost_usd > 0.0);
+        assert!(s.unpriced_models.is_empty());
+        assert!(!s.groups[0].unpriced);
+    }
+
+    #[test]
+    fn a_free_tier_model_prices_at_zero_without_the_unpriced_flag() {
+        let events = vec![row("opencode", "kimi-k2-thinking-free", 1, 0, 1_000_000, 0, 0)];
+        let s = summarize(&events, GroupBy::Model, &PriceTable::builtin());
+        assert_eq!(s.totals.cost_usd, 0.0);
+        assert!(s.unpriced_models.is_empty());
+        assert!(!s.groups[0].unpriced);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -68,6 +68,15 @@ fn builtin_effective_from() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
 }
 
+/// UTC midnight on the day the table is built, so a placeholder rate dated "today" still applies
+/// to every event from earlier today rather than only ones after this exact instant.
+fn today_utc_midnight() -> DateTime<Utc> {
+    let now = Utc::now();
+    Utc.with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()
+        .unwrap_or(now)
+}
+
 impl PriceTable {
     /// A table with no rows. Every lookup misses.
     pub fn empty() -> Self {
@@ -116,6 +125,18 @@ impl PriceTable {
                 effective_from: from,
             });
         }
+        // GPT-6 has no published rate card yet. This copies the GPT-5 row as a best-effort
+        // placeholder rather than leaving the family unpriced, dated from today so it never
+        // reprices something billed before the family existed. Replace it the moment a real rate
+        // is published, with `[usage.price_overrides."gpt-6"]`.
+        table.insert(ModelPrice {
+            model: "gpt-6".to_string(),
+            input_per_mtok: 1.25,
+            output_per_mtok: 10.0,
+            cache_read_per_mtok: 0.125,
+            cache_write_per_mtok: 1.25,
+            effective_from: today_utc_midnight(),
+        });
         table
     }
 
@@ -412,6 +433,18 @@ mod tests {
             )
             .unwrap();
         assert!(write > input);
+    }
+
+    #[test]
+    fn gpt_6_prices_off_the_placeholder_family_row() {
+        let table = PriceTable::builtin();
+        let price = table.lookup("gpt-6-astra", Utc::now()).unwrap();
+        assert_eq!(price.input_per_mtok, 1.25);
+        assert_eq!(price.output_per_mtok, 10.0);
+        assert!(
+            table.cost("gpt-6-astra", Utc::now(), &TokenCounts::default()).is_some(),
+            "a gpt-6 id should price rather than read as a gap in the table"
+        );
     }
 
     #[test]
