@@ -351,6 +351,12 @@ function LaneRow(props: {
           props.selected ? "is-selected" : ""
         }`}
         onClick={props.select}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          props.select();
+        }}
         role="button"
         tabIndex={0}
         aria-current={props.selected ? "true" : undefined}
