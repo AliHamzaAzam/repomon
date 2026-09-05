@@ -79,18 +79,19 @@ macOS** and **Ctrl elsewhere**.
 
 | Chord | Action |
 |---|---|
-| `mod+k` | Open the control center |
+| `mod+1` | Toggle the git explorer panel |
+| `mod+2` | Toggle the compact in-app editor in the right rail |
+| `mod+3` | Toggle the usage view |
+| `mod+4` | Open the control center |
+| `mod+5` | Toggle multitasking |
+| `mod+6` | Toggle extensions |
+| `mod+7` | Toggle the supervision panel |
+| `mod+8` | Toggle the repomail panel |
+| `mod+9` | Toggle repomind |
 | `mod+,` | Open settings |
-| `mod+9` | Toggle multitasking |
-| `mod+2` | Toggle the repomail panel |
-| `mod+3` | Toggle the git explorer panel |
-| `mod+4` | Toggle extensions |
-| `mod+5` | Toggle repomind |
-| `mod+shift+5` | Repomind full screen |
-| `mod+6` | Cycle theme (system, dark, light) |
-| `mod+7` | Toggle the compact in-app editor in the right rail |
-| `mod+8` | Toggle the supervision panel |
-| `mod+1` | Toggle the usage view |
+| `mod+k` | Open the control center (same as mod+4) |
+| `mod+shift+9` | Repomind full screen |
+| `mod+shift+t` | Cycle theme (system, dark, light) |
 | `mod+p` | Find file in workspace |
 | `mod+shift+f` | Search project files in workspace (inside a focused terminal, this searches the terminal) |
 | `mod+shift+v` | Toggle preview (Markdown or SVG tab, whichever is active) |
@@ -116,7 +117,7 @@ is running, amber (or red) when one wants you, and nothing at all when the home 
 The toolbar **Editor** button is a split button:
 - Clicking **Editor** opens the full center-pane Editor workspace, mutually exclusive with
   Multitasking.
-- Clicking the split chevron (or pressing `mod+7`) toggles the compact side-rail editor.
+- Clicking the split chevron (or pressing `mod+2`) toggles the compact side-rail editor.
 
 Both the center workspace and the rail editor share the same in-memory editor store. Open tabs,
 unsaved buffer edits, cursor positions, and scroll offsets remain intact when moving between
@@ -420,7 +421,7 @@ other standing.
 ## Repomind
 
 The repomind panel is one tab of the right-rail panel host (alongside git and the editor, above)
-and opens with `mod+5`. `mod+shift+5` blows it up to full screen, and Escape or **Exit** brings it
+and opens with `mod+9`. `mod+shift+9` blows it up to full screen, and Escape or **Exit** brings it
 back; going full screen opens the panel if it was closed, so it has somewhere to shrink back to.
 
 **Repomind lives in a lane.** Starting repomind creates (once) a home repo at `~/repomind` - its
@@ -507,7 +508,7 @@ per lane, from **Settings > Supervision**.
 
 ## Git explorer
 
-The git panel is another tab of the right-rail panel host (`mod+3`), scoped to the lane that is
+The git panel is another tab of the right-rail panel host (`mod+1`), scoped to the lane that is
 currently focused: branch status against the repo's base branch (commits ahead, with diffstat),
 the working-tree's changed and untracked files, and commit history. Clicking a working-tree file
 opens a unified diff for it; clicking a commit in Branch or History opens that commit's detail
@@ -517,7 +518,7 @@ the list.
 
 ## In-app editor
 
-The editor is the third tab of the right-rail panel host (`mod+7`): a lazy file tree over the
+The editor is the third tab of the right-rail panel host (`mod+2`): a lazy file tree over the
 focused lane's worktree, multi-file tabs with dirty tracking, and a CodeMirror 6 editor themed to
 match every Repomon theme. Saving is conflict-safe: if an agent (or anything else) changed the
 file on disk since it was opened, the save is rejected and a banner offers **reload** (discard
@@ -547,7 +548,7 @@ empty state rather than pretending to have Claude-style plugins.
 
 ## Usage
 
-`mod+1`, or the Usage button in the header, opens the usage ledger: what every managed agent
+`mod+3`, or the Usage button in the header, opens the usage ledger: what every managed agent
 burned in tokens, what those tokens would cost at published API rates, and what is worth changing.
 
 The ledger is local and passive. A background pass reads the transcripts the agents already write

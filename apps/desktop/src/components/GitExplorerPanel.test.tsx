@@ -671,24 +671,24 @@ describe("panel.git keybinding (App integration)", () => {
     const gitButton = within(container).getByRole("button", { name: "Git" });
     expect(toggle).toHaveAttribute("aria-pressed", "false");
 
-    fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", code: "Digit1", metaKey: true });
 
     // C1 shipped a visible tab strip inside the right rail; that strip was removed once the
-    // header buttons (+ mod+3/5/7) covered the same switching job, so "on the Git tab" is now
+    // header buttons (+ the numbered panel chords) covered the same switching job, so "on the Git tab" is now
     // asserted via the header buttons' own aria-pressed state rather than a `role="tab"` query.
     // Every header button's pressed state is tab-scoped: opening on Git must NOT light Repomind.
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
     expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("closes the panel when mod+3 is pressed again while already on Git", async () => {
+  it("closes the panel when mod+1 is pressed again while already on Git", async () => {
     const { container } = renderApp();
     const gitButton = within(container).getByRole("button", { name: "Git" });
 
-    fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", code: "Digit1", metaKey: true });
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
 
-    fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", code: "Digit1", metaKey: true });
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "false"));
   });
 
@@ -701,7 +701,7 @@ describe("panel.git keybinding (App integration)", () => {
     await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
     expect(gitButton).toHaveAttribute("aria-pressed", "false");
 
-    fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", code: "Digit1", metaKey: true });
 
     // Removed strip: assert the tab switch via the header buttons' own aria-pressed state.
     // Switching to Git un-lights Repomind (pressed state is tab-scoped, not rail-open-scoped).
@@ -781,15 +781,15 @@ describe("header Git/Editor buttons (App integration)", () => {
     expect(gitButton).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("keeps the header buttons in sync with the mod+3 / mod+7 shortcuts (shared openPanelTab plumbing)", async () => {
+  it("keeps the header buttons in sync with the mod+1 / mod+2 shortcuts (shared openPanelTab plumbing)", async () => {
     const { container } = renderApp();
     const gitButton = within(container).getByRole("button", { name: "Git" });
     const editorButton = within(container).getByRole("button", { name: "Editor" });
 
-    fireEvent.keyDown(window, { key: "3", code: "Digit3", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", code: "Digit1", metaKey: true });
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
 
-    fireEvent.keyDown(window, { key: "7", code: "Digit7", metaKey: true });
+    fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
     await waitFor(() => expect(editorButton).toHaveAttribute("aria-pressed", "true"));
     expect(gitButton).toHaveAttribute("aria-pressed", "false");
 

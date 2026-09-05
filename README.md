@@ -45,9 +45,9 @@ with one-click-copy install commands for anything missing.
   recent activity, and floats the ones waiting on you. A lane with more than one agent running
   shows a live roster on hover, so you can see who's doing what without opening it.
 - **Git explorer and editor, built in, side by side.** The right rail is a resizable (drag its
-  edge), multi-panel host. Git (`⌘3`): branch status against its base, working-tree changes with
+  edge), multi-panel host. Git (`⌘1`): branch status against its base, working-tree changes with
   per-file stats, commit history, a unified diff viewer, and clickable commit details (message,
-  author, full patch). Editor (`⌘7`): a file tree over the lane's worktree, multi-file tabs with
+  author, full patch). Editor (`⌘2`): a file tree over the lane's worktree, multi-file tabs with
   dirty tracking, and a full CodeMirror editor themed to match. If an agent changes a file you
   have open, you get a conflict banner (reload or keep mine) instead of a silent overwrite.
 - **Self-service recovery.** Settings can stop, start, or reset the daemon and bulk-restore
@@ -268,7 +268,7 @@ daemon-owned and gitignored; never hand-edit it.
 
 **Sidebar and panel.** A pinned Repomind row sits above the fleet sidebar's repo groups (brain
 icon, state, controller count, active-goal count); the repomind home itself is excluded from
-the ordinary repo groups and their counts. The Repomind panel (`⌘5`) is the detail view: agents,
+the ordinary repo groups and their counts. The Repomind panel (`⌘9`) is the detail view: agents,
 active plans, a journal tail, and mail.
 
 **CLI.**
@@ -280,7 +280,7 @@ repomon repomind export            # run the one-way export now instead of waiti
 repomon repomind open [--editor]   # print the home path, or open it in $EDITOR
 ```
 
-It's built into Mission Control (the repomind panel, `⌘5`) and started from the CLI:
+It's built into Mission Control (the repomind panel, `⌘9`) and started from the CLI:
 
 ```sh
 repomon orchestrate [--autonomy read-only|supervised|autonomous] [--max-agents N] [--model m] [prompt]

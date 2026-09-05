@@ -44,23 +44,29 @@ export interface Binding {
 }
 
 export const BINDINGS: Binding[] = [
-  { id: "panel.control", chord: "mod+k", label: "Open the control center", section: "Panels" },
-  { id: "panel.settings", chord: "mod+,", label: "Open settings", section: "Panels" },
-  { id: "panel.multitasking", chord: "mod+9", label: "Toggle multitasking", section: "Panels" },
-  { id: "panel.mail", chord: "mod+2", label: "Toggle the repomail panel", section: "Panels" },
-  { id: "panel.git", chord: "mod+3", label: "Toggle the git explorer panel", section: "Panels" },
-  { id: "panel.extensions", chord: "mod+4", label: "Toggle extensions", section: "Panels" },
-  { id: "panel.repomind", chord: "mod+5", label: "Toggle repomind", section: "Panels" },
-  { id: "panel.repomindFull", chord: "mod+shift+5", label: "Repomind full screen", section: "Panels" },
-  { id: "panel.theme", chord: "mod+6", label: "Cycle theme (system, dark, light)", section: "Panels" },
+  // The numbered chords run left to right along the header toolbar, so the row of buttons and the
+  // row of numbers are the same list. Adding a panel means renumbering from its position, not
+  // appending to the end.
+  { id: "panel.git", chord: "mod+1", label: "Toggle the git explorer panel", section: "Panels" },
   {
     id: "panel.editor",
-    chord: "mod+7",
+    chord: "mod+2",
     label: "Toggle the compact in-app editor in the right rail",
     section: "Panels",
   },
-  { id: "panel.supervision", chord: "mod+8", label: "Toggle the supervision panel", section: "Panels" },
-  { id: "panel.usage", chord: "mod+1", label: "Toggle the usage view", section: "Panels" },
+  { id: "panel.usage", chord: "mod+3", label: "Toggle the usage view", section: "Panels" },
+  { id: "panel.control", chord: "mod+4", label: "Open the control center", section: "Panels" },
+  { id: "panel.multitasking", chord: "mod+5", label: "Toggle multitasking", section: "Panels" },
+  { id: "panel.extensions", chord: "mod+6", label: "Toggle extensions", section: "Panels" },
+  { id: "panel.supervision", chord: "mod+7", label: "Toggle the supervision panel", section: "Panels" },
+  { id: "panel.mail", chord: "mod+8", label: "Toggle the repomail panel", section: "Panels" },
+  { id: "panel.repomind", chord: "mod+9", label: "Toggle repomind", section: "Panels" },
+  { id: "panel.settings", chord: "mod+,", label: "Open settings", section: "Panels" },
+  // The control center is the command palette, so it keeps the chord every command palette has.
+  // Same id, same behaviour: the dispatcher never sees the difference.
+  { id: "panel.control", chord: "mod+k", label: "Open the control center (same as mod+4)", section: "Panels" },
+  { id: "panel.repomindFull", chord: "mod+shift+9", label: "Repomind full screen", section: "Panels" },
+  { id: "panel.theme", chord: "mod+shift+t", label: "Cycle theme (system, dark, light)", section: "Panels" },
   { id: "finder.open", chord: "mod+p", label: "Find file in workspace", section: "Panels", when: "lane" },
   {
     id: "search.project",
@@ -178,6 +184,19 @@ export const CTRL_TERMINAL_CAVEAT =
 
 function bindingScope(binding: Binding): KeymapScope {
   return binding.scope ?? "global";
+}
+
+/// The `mod+<number>` panel chords in numeric order, which is also the order of the header
+/// toolbar. The command palette and the shortcuts overlay both read this, so neither can list
+/// them in registry order and leave the reader to sort nine chords by eye.
+export function numberedPanelBindings(bindings: Binding[] = BINDINGS): Binding[] {
+  const digitOf = (binding: Binding) => {
+    const match = /^mod\+(\d)$/.exec(binding.chord);
+    return match ? Number(match[1]) : null;
+  };
+  return bindings
+    .filter((binding) => bindingScope(binding) === "global" && digitOf(binding) !== null)
+    .sort((a, b) => (digitOf(a) ?? 0) - (digitOf(b) ?? 0));
 }
 
 /// Only globally-dispatched bindings participate in chord matching. Local bindings reuse the

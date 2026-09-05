@@ -118,10 +118,10 @@ describe("Repomon desktop shell", () => {
     fireEvent.keyDown(window, { key: "6", code: "Digit6" });
     expect(extensions).toHaveAttribute("aria-pressed", "false");
 
-    fireEvent.keyDown(window, { key: "4", code: "Digit4", metaKey: true });
+    fireEvent.keyDown(window, { key: "6", code: "Digit6", metaKey: true });
     await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "true"));
 
-    fireEvent.keyDown(window, { key: "4", code: "Digit4", metaKey: true });
+    fireEvent.keyDown(window, { key: "6", code: "Digit6", metaKey: true });
     await waitFor(() => expect(extensions).toHaveAttribute("aria-pressed", "false"));
   });
 
@@ -137,7 +137,7 @@ describe("Repomon desktop shell", () => {
     })} />);
 
     const extensions = within(container).getByRole("button", { name: "Extensions" });
-    expect(extensions).toHaveAttribute("title", `Extensions (${formatChord("mod+4")})`);
+    expect(extensions).toHaveAttribute("title", `Extensions (${formatChord("mod+6")})`);
 
     const settings = within(container).getByRole("button", { name: "Settings" });
     expect(settings).toHaveAttribute("title", `Settings (${formatChord("mod+,")})`);
@@ -155,7 +155,7 @@ describe("Repomon desktop shell", () => {
     expect(button).toHaveAttribute("aria-pressed", "false");
     expect(within(container).getByRole("navigation", { name: "Fleet" })).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "9", code: "Digit9", metaKey: true });
+    fireEvent.keyDown(window, { key: "5", code: "Digit5", metaKey: true });
     await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "true"));
     expect(within(container).queryByRole("navigation", { name: "Fleet" })).not.toBeInTheDocument();
     expect(within(container).getByText("Multitasking", { selector: ".section-label" })).toBeInTheDocument();
@@ -188,7 +188,7 @@ describe("Repomon desktop shell", () => {
     localStorage.setItem("repomon.repomind_open", "false");
   });
 
-  it("opens and closes the Repomail panel with mod+2", async () => {
+  it("opens and closes the Repomail panel with mod+8", async () => {
     localStorage.setItem("repomon.repomind_open", "false");
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "starting",
@@ -200,12 +200,12 @@ describe("Repomon desktop shell", () => {
     const button = within(container).getByRole("button", { name: "Repomail" });
     expect(button).toHaveAttribute("aria-pressed", "false");
 
-    fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
+    fireEvent.keyDown(window, { key: "8", code: "Digit8", metaKey: true });
     await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "true"));
     const panel = within(container).getByRole("complementary", { name: "Repomind" });
     expect(within(panel).getByText("Repomail", { selector: "span.text-xs.font-semibold" })).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
+    fireEvent.keyDown(window, { key: "8", code: "Digit8", metaKey: true });
     await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "false"));
   });
 
@@ -230,7 +230,7 @@ describe("Repomon desktop shell", () => {
     const preventer = (e: KeyboardEvent) => e.preventDefault();
     window.addEventListener("keydown", preventer, true);
     try {
-      fireEvent.keyDown(window, { key: "2", code: "Digit2", metaKey: true });
+      fireEvent.keyDown(window, { key: "8", code: "Digit8", metaKey: true });
     } finally {
       window.removeEventListener("keydown", preventer, true);
     }

@@ -9,6 +9,7 @@ import {
   keyCapParts,
   matchChord,
   matchSidebarKey,
+  numberedPanelBindings,
 } from "./keymap";
 
 function key(init: Partial<KeyboardEvent> & { key: string }): KeyboardEvent {
@@ -170,9 +171,46 @@ describe("matchChord", () => {
   });
 
   it("still matches unshifted digit chords", () => {
-    expect(matchChord(key({ key: "2", code: "Digit2", metaKey: true }), "mac")?.id).toBe("panel.mail");
-    expect(matchChord(key({ key: "4", code: "Digit4", metaKey: true }), "mac")?.id).toBe("panel.extensions");
-    expect(matchChord(key({ key: "9", code: "Digit9", metaKey: true }), "mac")?.id).toBe("panel.multitasking");
+    expect(matchChord(key({ key: "1", code: "Digit1", metaKey: true }), "mac")?.id).toBe("panel.git");
+    expect(matchChord(key({ key: "3", code: "Digit3", metaKey: true }), "mac")?.id).toBe("panel.usage");
+    expect(matchChord(key({ key: "8", code: "Digit8", metaKey: true }), "mac")?.id).toBe("panel.mail");
+  });
+});
+
+describe("numbered panel chords", () => {
+  it("runs left to right along the header toolbar", () => {
+    expect(numberedPanelBindings().map((binding) => binding.id)).toEqual([
+      "panel.git",
+      "panel.editor",
+      "panel.usage",
+      "panel.control",
+      "panel.multitasking",
+      "panel.extensions",
+      "panel.supervision",
+      "panel.mail",
+      "panel.repomind",
+    ]);
+  });
+
+  it("keeps mod+k as a second way into the control center", () => {
+    expect(matchChord(key({ key: "k", metaKey: true }), "mac")?.id).toBe("panel.control");
+    expect(matchChord(key({ key: "4", code: "Digit4", metaKey: true }), "mac")?.id).toBe(
+      "panel.control",
+    );
+  });
+
+  it("moves theme cycling off the number row", () => {
+    expect(matchChord(key({ key: "t", metaKey: true, shiftKey: true }), "mac")?.id).toBe(
+      "panel.theme",
+    );
+    expect(matchChord(key({ key: "6", code: "Digit6", metaKey: true }), "mac")?.id).toBe(
+      "panel.extensions",
+    );
+  });
+
+  it("has no two panels on one number", () => {
+    const chords = numberedPanelBindings().map((binding) => binding.chord);
+    expect(new Set(chords).size).toBe(chords.length);
   });
 });
 
