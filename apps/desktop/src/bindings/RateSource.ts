@@ -2,6 +2,6 @@
 
 /**
  * Where a resolved rate came from. Config overrides win over a LiteLLM snapshot, which wins over
- * the built-in table — the built-in table is the floor every model can fall back to.
+ * the built-in table; the built-in table is the floor every model can fall back to.
  */
 export type RateSource = "builtin" | "litellm" | "override";
