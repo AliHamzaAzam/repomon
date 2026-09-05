@@ -1,6 +1,8 @@
 //! The git layer: gix-backed reads ([`reader`]), worktree CRUD ([`worktree`]), and lane-vs-base
 //! diffing ([`diff`]).
 
+use std::path::PathBuf;
+
 pub mod diff;
 pub mod reader;
 pub mod worktree;
@@ -12,9 +14,45 @@ pub use reader::{
 };
 pub use worktree::{WorktreeEntry, parse_porcelain};
 
-/// Probe git availability, version, and path.
+/// The two locations the Git for Windows installer offers by default. A process started by the
+/// app before a re-login can still have the machine PATH from before the installer updated it,
+/// so `find_git` falls back to these once PATH search comes up empty.
+pub const WINDOWS_STANDARD_GIT_DIRS: [&str; 2] = [
+    r"C:\Program Files\Git\cmd",
+    r"C:\Program Files (x86)\Git\cmd",
+];
+
+/// Pure `git.exe` resolution: PATH first, then (when given) a list of standard install
+/// directories to check for `git.exe` directly. Takes the PATH value and candidate directories
+/// as parameters, so the Windows fallback is unit-testable on every OS without touching real
+/// environment state.
+pub fn find_git_from(path_var: Option<&std::ffi::OsStr>, standard_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let on_path = match path_var {
+        Some(p) => crate::exec::find_in(p, "git"),
+        None => crate::exec::find_in_path("git"),
+    };
+    if let Some(p) = on_path {
+        return Some(p);
+    }
+    for dir in standard_dirs {
+        let candidate = dir.join("git.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Probe git availability, version, and path. On Windows, falls back to the standard Git for
+/// Windows install locations when PATH search misses (see [`find_git_from`]).
 pub fn probe() -> crate::model::GitDoctorInfo {
-    let path = crate::exec::find_in_path("git");
+    let standard_dirs: Vec<PathBuf> =
+        if crate::model::DoctorPlatform::current() == crate::model::DoctorPlatform::Windows {
+            WINDOWS_STANDARD_GIT_DIRS.iter().map(PathBuf::from).collect()
+        } else {
+            Vec::new()
+        };
+    let path = find_git_from(std::env::var_os("PATH").as_deref(), &standard_dirs);
     match path {
         Some(p) => match std::process::Command::new(&p).arg("--version").output() {
             Ok(out) if out.status.success() => {
@@ -160,5 +198,51 @@ mod tests {
         assert!(probe.path.is_some());
         let version = probe.version.unwrap();
         assert!(version.starts_with("git version") || version.contains("git"));
+    }
+
+    #[test]
+    fn find_git_from_prefers_path_over_standard_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_path = dir.path().join("git");
+        std::fs::write(&on_path, b"fake").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&on_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
+
+        let standard_dir = dir.path().join("standard");
+        std::fs::create_dir_all(&standard_dir).unwrap();
+        std::fs::write(standard_dir.join("git.exe"), b"fake-standard").unwrap();
+
+        let found = find_git_from(Some(path_var.as_os_str()), &[standard_dir]);
+        assert_eq!(found, Some(on_path));
+    }
+
+    #[test]
+    fn find_git_from_falls_back_to_standard_windows_install_dirs() {
+        // The Git for Windows scenario: not (yet) on PATH, but installed at a standard location -
+        // `C:\Program Files\Git\cmd` in production, a temp stand-in here.
+        let dir = tempfile::tempdir().unwrap();
+        let standard_dir = dir.path().join("Git").join("cmd");
+        std::fs::create_dir_all(&standard_dir).unwrap();
+        let git_exe = standard_dir.join("git.exe");
+        std::fs::write(&git_exe, b"fake-git-for-windows").unwrap();
+
+        let empty_path = std::ffi::OsStr::new("");
+        let found = find_git_from(Some(empty_path), &[standard_dir]);
+        assert_eq!(found, Some(git_exe));
+    }
+
+    #[test]
+    fn find_git_from_returns_none_when_nowhere_to_find_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_standard_dir = dir.path().join("nothing-here");
+        std::fs::create_dir_all(&empty_standard_dir).unwrap();
+
+        let empty_path = std::ffi::OsStr::new("");
+        let found = find_git_from(Some(empty_path), &[empty_standard_dir]);
+        assert_eq!(found, None);
     }
 }
