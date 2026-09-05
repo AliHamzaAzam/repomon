@@ -24,6 +24,7 @@ export default function Modal(props: ModalProps) {
   }
 
   const onKey = (event: KeyboardEvent) => {
+    if (event.defaultPrevented) return;
     if (event.key === "Escape") {
       event.stopPropagation();
       props.onClose();
@@ -49,7 +50,7 @@ export default function Modal(props: ModalProps) {
 
   onMount(() => {
     previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onKey);
     queueMicrotask(() => {
       const initial = dialog.querySelector<HTMLElement>("[autofocus]") ?? focusableElements()[0] ?? dialog;
       initial.focus();
@@ -57,7 +58,7 @@ export default function Modal(props: ModalProps) {
   });
 
   onCleanup(() => {
-    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("keydown", onKey);
     if (previouslyFocused?.isConnected) queueMicrotask(() => previouslyFocused?.focus());
   });
 

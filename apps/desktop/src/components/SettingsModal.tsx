@@ -36,6 +36,7 @@ import KeyboardHelp from "./KeyboardHelp";
 import { translateError } from "../ipc/errors";
 import Modal from "./Modal";
 import SystemHealthView from "./SystemHealthView";
+import UsageSettingsView from "./UsageSettingsView";
 import {
   AGENT_ICON_CATALOG,
   AgentIcon,
@@ -49,13 +50,16 @@ import {
   IconTrash,
 } from "./icons";
 
-export type SettingsTab = "general" | "system" | "agents" | "notifications" | "appearance" | "remote" | "policies" | "keyboard";
+export type SettingsTab = "general" | "system" | "usage" | "agents" | "notifications" | "appearance" | "remote" | "policies" | "keyboard";
 
 interface SettingsModalProps {
   onClose: () => void;
   initialTab?: SettingsTab;
   /// Which sub-tab of the Policies tab to open on, when that is the initial tab.
   initialPolicySection?: PolicySection;
+  /// A model id to pre-fill the Usage tab's filter with, when that is the initial tab (the Usage
+  /// view's unpriced-model warning opens Settings this way).
+  initialUsageFilter?: string;
   onConfigSaved?: (config: ConfigView) => void;
   onPreviewSound?: (cue: SoundCue, volume: number, profile?: SoundProfile) => boolean;
   onUpdateAvailable?: (version: string) => void;
@@ -67,6 +71,7 @@ interface SettingsModalProps {
 const TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "General" },
   { id: "system", label: "System" },
+  { id: "usage", label: "Usage" },
   { id: "agents", label: "Agents" },
   { id: "notifications", label: "Notifications" },
   { id: "appearance", label: "Appearance" },
@@ -585,9 +590,9 @@ export default function SettingsModal(props: SettingsModalProps) {
   );
 
   return (
-    <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width="min(46rem, 95vw)" onClose={props.onClose} footer={footer()}>
+    <Modal title="Settings" subtitle="Preferences are stored by the daemon and shared with the TUI." width={tab() === "usage" ? "min(70rem, 95vw)" : "min(46rem, 95vw)"} onClose={props.onClose} footer={footer()}>
       <div class="sticky -top-4 z-10 -mx-5 -mt-4 mb-5 border-b border-line bg-surface/95 px-5 pt-3 pb-2.5 backdrop-blur">
-        <div class="flex items-center justify-between rounded-lg border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Settings sections">
+        <div class="flex items-center justify-between overflow-x-auto rounded-lg border border-line bg-raised/50 p-0.5" role="tablist" aria-label="Settings sections">
           <For each={TABS}>
             {(item) => (
               <button
@@ -884,6 +889,14 @@ export default function SettingsModal(props: SettingsModalProps) {
 
             <Show when={tab() === "system"}>
               <SystemHealthView onConfigureCustomAgents={() => setTab("agents")} />
+            </Show>
+
+            <Show when={tab() === "usage"}>
+              <UsageSettingsView
+                settings={settings()}
+                patch={patch}
+                initialFilter={props.initialUsageFilter}
+              />
             </Show>
 
             <Show when={tab() === "agents"}>
