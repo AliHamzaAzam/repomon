@@ -172,14 +172,9 @@ const SHELL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 #[cfg(not(windows))]
 fn probe_shell_path(shell: &std::ffi::OsStr) -> Option<String> {
-    let child = std::process::Command::new(shell)
-        .args(["-ilc", "printf %s \"$PATH\""])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let output = crate::boot::wait_with_timeout(child, SHELL_PROBE_TIMEOUT).ok()?;
+    let mut command = std::process::Command::new(shell);
+    command.args(["-ilc", "printf %s \"$PATH\""]);
+    let output = probe_output(&mut command)?;
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (output.status.success() && !path.is_empty()).then_some(path)
 }
@@ -212,19 +207,34 @@ fn installed_version(dir: &Path) -> Option<String> {
     if !exe.exists() {
         return None;
     }
-    let child = repomon_core::process::background_command(&exe)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let output = crate::boot::wait_with_timeout(child, SHELL_PROBE_TIMEOUT).ok()?;
+    let mut command = repomon_core::process::background_command(&exe);
+    command.arg("--version");
+    let output = probe_output(&mut command)?;
     if !output.status.success() {
         return None;
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!version.is_empty()).then_some(version)
+}
+
+/// A regular temporary file avoids pipe backpressure and EOF waits on background rc children.
+/// Reading at most 64 KiB also bounds unexpected shell startup chatter.
+fn probe_output(command: &mut std::process::Command) -> Option<std::process::Output> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut stdout = tempfile::tempfile().ok()?;
+    let child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout.try_clone().ok()?)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut output = crate::boot::wait_with_timeout(child, SHELL_PROBE_TIMEOUT).ok()?;
+    stdout.seek(SeekFrom::Start(0)).ok()?;
+    stdout
+        .take(64 * 1024)
+        .read_to_end(&mut output.stdout)
+        .ok()?;
+    Some(output)
 }
 
 /// Read the install directory and report what is there, without changing anything.
@@ -645,6 +655,22 @@ mod windows_path {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn shell_background_stdout_does_not_extend_probe_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("shell");
+        std::fs::write(&shell, "#!/bin/sh\nsleep 2 &\nprintf /usr/bin\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            super::probe_shell_path(shell.as_os_str()).as_deref(),
+            Some("/usr/bin")
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
     #[test]
     fn registry_path_read_only_treats_not_found_as_empty() {
         use std::io::{Error, ErrorKind};

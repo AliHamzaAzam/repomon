@@ -21,6 +21,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tempfile = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 tauri = { version = "~2.9.0", features = ["devtools", "protocol-asset"] }
@@ -45,5 +46,3 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-[dev-dependencies]
-tempfile = { workspace = true }
