@@ -3390,6 +3390,9 @@ pub async fn dispatch(
         "config.set" => {
             let p: ConfigSet = parse(params)?;
             // Validate the entire rate patch before mutating any live configuration.
+            if p.usage_price_override_upsert.is_some() && p.usage_price_override_reset.is_some() {
+                return Err(RpcError::invalid_params("upsert and reset cannot be combined"));
+            }
             if let Some(u) = &p.usage_price_override_upsert {
                 let rates = [u.input_per_mtok, u.output_per_mtok,
                     u.cache_read_per_mtok, u.cache_write_per_mtok];

@@ -272,6 +272,15 @@ async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() 
         assert!(cfg.usage.enabled);
         assert_eq!(cfg.usage.price_overrides["repomon-test-model"], over);
     }
+    let conflict = call(&mut stream, 10, "config.set", Some(json!({
+        "usage_enabled": false,
+        "usage_price_override_upsert": { "model": "repomon-test-model", "input_per_mtok": 50.0 },
+        "usage_price_override_reset": "repomon-test-model"
+    }))).await;
+    assert_eq!(conflict.error.unwrap().code, -32602);
+    assert!(ctx.config.read().await.usage.enabled);
+    assert_eq!(ctx.config.read().await.usage.price_overrides["repomon-test-model"], over);
+    assert_eq!(Config::load_from(&config_path).unwrap().usage.price_overrides["repomon-test-model"], over);
     let rates = call(&mut stream, 7, "usage.rates", None).await;
     assert_eq!(rates.result.unwrap()["source_counts"]["overrides"], 1);
     let reset = call(&mut stream, 8, "config.set", Some(json!({

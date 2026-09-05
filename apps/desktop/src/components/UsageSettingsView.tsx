@@ -319,7 +319,7 @@ export default function UsageSettingsView(props: UsageSettingsViewProps) {
   }): JSX.Element {
     return (
       <input
-        class="focus-ring h-7 w-20 rounded-md border border-line bg-background px-1.5 text-right text-xs tabular-nums text-foreground outline-none placeholder:text-foreground"
+        class="focus-ring h-7 w-20 rounded-md border border-line bg-background px-1.5 text-right text-xs tabular-nums text-foreground outline-none placeholder:text-muted"
         id={inputProps.id}
         disabled={!!busyModel()}
         aria-describedby="usage-rate-help"
