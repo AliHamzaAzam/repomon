@@ -17,8 +17,10 @@ the same directory.
 
 ## What CI now covers
 
-`.github/scripts/windows-smoke.ps1` runs on the `windows-latest` job of both desktop workflows,
-after the bundle step, and fails the job on any of four checks: `repomond.exe --version` runs (the
+`.github/scripts/windows-smoke.ps1` runs in a `windows-smoke` job that the publishing jobs of
+`desktop-preview.yml` and `desktop-release.yml` depend on (and in the manual
+`windows-artifact.yml`), so a failure stops the release and the updater feed from being touched.
+It builds an unpublished bundle and fails on any of four checks: `repomond.exe --version` runs (the
 one that catches a loader failure such as `0xC0000135`), the daemon binds a throwaway named pipe
 with a throwaway `REPOMON_DATA_DIR` and `repomon.exe` reads from it, the daemon shuts down when
 asked, and the NSIS installer run with `/S` leaves the three executables in one directory. It
@@ -51,8 +53,10 @@ Two things to know about the flag:
   the whole bundle (app plus the three sidecars) carries its own CRT.
 - **Always build with an explicit `--target`.** Flags under `[target.<triple>]` also reach build
   scripts and proc-macro dylibs when the build is not explicitly targeted, and a proc macro
-  cannot be linked with a static CRT. Both CI workflows and `apps/desktop/scripts/prepare-sidecar.ts`
-  pass `--target`, so the only way to hit this is a bare `cargo build` on a Windows host.
+  cannot be linked with a static CRT. The desktop workflows, the Windows leg of `ci.yml`,
+  `windows-artifact.yml`, and `apps/desktop/scripts/prepare-sidecar.ts` all pass `--target`, so
+  the only way to hit this is a bare `cargo build` on a Windows host. Any new Windows job must
+  pass it too.
 
 Verify on the VM after installing a bundle: `dumpbin /dependents repomond.exe` must not list
 `VCRUNTIME140.dll` or `MSVCP140.dll`, and `repomond.exe --version` must print a version on a

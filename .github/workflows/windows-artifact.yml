@@ -44,6 +44,7 @@ jobs:
         run: bun tauri build --target ${{ env.TARGET }} --bundles nsis --config src-tauri/tauri.preview.win.conf.json
       - name: Windows smoke test
         shell: pwsh
+        timeout-minutes: 5
         run: .github/scripts/windows-smoke.ps1 -Triple "${{ env.TARGET }}"
       - uses: actions/upload-artifact@v4
         with:
