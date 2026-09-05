@@ -225,7 +225,7 @@ describe("Settings auto-save persistence", () => {
     expect(screen.getByText("Nord Arctic")).toBeInTheDocument();
     expect(screen.getByText("Dracula")).toBeInTheDocument();
     expect(screen.getByText("Warm Paper")).toBeInTheDocument();
-    expect(screen.getByText("Modern Light")).toBeInTheDocument();
+    expect(screen.getByText("Repomon Light")).toBeInTheDocument();
 
     // Click Nord Arctic theme
     const nordButton = screen.getByRole("button", { name: /Nord Arctic/i });

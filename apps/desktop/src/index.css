@@ -2,41 +2,103 @@
 @import "@xterm/xterm/css/xterm.css";
 
 :root {
-  --background: hsl(220 18% 97%);
-  --foreground: hsl(222 24% 11%);
-  --surface: hsl(0 0% 100%);
-  --raised: hsl(220 14% 93%);
-  --line: hsl(220 13% 86%);
-  --muted: hsl(220 9% 46%);
-  --signal: hsl(168 60% 36%);
-  --attention: hsl(36 90% 48%);
-  --fault: hsl(4 72% 50%);
-  --shadow: hsl(222 24% 11% / 0.08);
+  /* Repomon brand palette, derived from the shipped mark (docs/brand/final): graphite ink
+     #253B47, orange command square #EF7846, and the warm-white tile #F6F5F0 the Windows icon sits
+     on. The light ground is that tile exactly; the ink is the graphite exactly. The accent is the
+     same orange hue tuned per theme so it clears WCAG AA as text (the swatch value itself is only
+     2.8:1 on white), which is also why `--brand-swatch` exists separately: it is the untuned brand
+     orange for places that show the color rather than set text in it. Attention moved from amber
+     to gold and fault to crimson so the three warm states stay separable beside an orange accent.
+     Ratios are printed by `node qa/contrast.mjs`. */
+  --background: hsl(48 23% 95%);
+  --foreground: hsl(203 31% 21%);
+  --surface: hsl(48 30% 99%);
+  --raised: hsl(46 20% 91%);
+  --line: hsl(44 14% 83%);
+  --muted: hsl(204 14% 39%);
+  --signal: hsl(18 82% 37%);
+  --attention: hsl(38 95% 29%);
+  --fault: hsl(352 70% 40%);
+  --shadow: hsl(203 31% 21% / 0.1);
+  /* The mark's stroke color. Graphite in light; a lifted graphite in dark, as the app icon's own
+     dark appearance does. Falls back to the foreground for themes that do not name one. */
+  --brand-ink: var(--foreground);
+  --brand-swatch: hsl(18 84% 61%);
 
-  /* Chart series, assigned in this fixed order and never cycled. Validated for the OKLCH
-     lightness band, a chroma floor, adjacent-pair separation under deuteranopia, protanopia and
-     tritanopia, and 3:1 against the chart surface. A seventh series folds into "Other" rather
-     than borrowing a colour that already means something else. */
-  --chart-1: hsl(176 92% 30%);
-  --chart-2: hsl(262 58% 50%);
-  --chart-3: hsl(32 88% 40%);
-  --chart-4: hsl(212 75% 44%);
-  --chart-5: hsl(338 70% 50%);
-  --chart-6: hsl(96 60% 25%);
+  /* Chart series, assigned in this fixed order and never cycled. Series 1 is the accent family so
+     the primary series reads as "this app"; the rest are spaced around the wheel from it (teal,
+     violet, blue, magenta, olive) so adjacent pairs stay apart under deuteranopia, protanopia and
+     tritanopia, and every step clears 3:1 against the chart surface (see qa/contrast.mjs). A
+     seventh series folds into "Other" rather than borrowing a colour that already means
+     something else. */
+  --chart-1: hsl(18 82% 40%);
+  --chart-2: hsl(188 70% 27%);
+  --chart-3: hsl(262 52% 50%);
+  --chart-4: hsl(210 72% 42%);
+  --chart-5: hsl(332 66% 44%);
+  --chart-6: hsl(92 55% 27%);
+
+  /* Per-lane accent stripes for the multitasking grid and the pane picker, assigned by a stable
+     hash in terminalTargets.ts. Eight steps around the wheel, starting from the brand orange. */
+  --pane-accent-1: hsl(18 84% 61%);
+  --pane-accent-2: hsl(196 70% 48%);
+  --pane-accent-3: hsl(268 60% 62%);
+  --pane-accent-4: hsl(346 74% 62%);
+  --pane-accent-5: hsl(42 90% 50%);
+  --pane-accent-6: hsl(96 55% 44%);
+  --pane-accent-7: hsl(176 60% 42%);
+  --pane-accent-8: hsl(226 70% 60%);
+
+  /* The 16 ANSI colours xterm draws agent output in. TerminalPane resolves these through the
+     browser (xterm cannot parse var()) so the terminal follows the theme like everything else. */
+  --ansi-black: hsl(204 22% 10%);
+  --ansi-red: hsl(4 70% 46%);
+  --ansi-green: hsl(150 45% 33%);
+  --ansi-yellow: hsl(38 85% 34%);
+  --ansi-blue: hsl(210 62% 42%);
+  --ansi-magenta: hsl(285 40% 46%);
+  --ansi-cyan: hsl(180 50% 32%);
+  --ansi-white: hsl(204 14% 62%);
+  --ansi-bright-black: hsl(204 12% 44%);
+  --ansi-bright-red: hsl(4 78% 54%);
+  --ansi-bright-green: hsl(150 44% 40%);
+  --ansi-bright-yellow: hsl(38 88% 42%);
+  --ansi-bright-blue: hsl(210 66% 52%);
+  --ansi-bright-magenta: hsl(285 46% 56%);
+  --ansi-bright-cyan: hsl(180 52% 40%);
+  --ansi-bright-white: hsl(203 31% 21%);
 }
 
 .dark,
 .theme-dark {
-  --background: hsl(224 20% 7%);
-  --foreground: hsl(210 20% 96%);
-  --surface: hsl(224 18% 11%);
-  --raised: hsl(224 16% 15%);
-  --line: hsl(224 12% 21%);
-  --muted: hsl(218 12% 64%);
-  --signal: hsl(168 62% 54%);
-  --attention: hsl(36 90% 64%);
-  --fault: hsl(4 82% 64%);
-  --shadow: hsl(224 35% 2% / 0.5);
+  --background: hsl(204 32% 8%);
+  --foreground: hsl(200 24% 94%);
+  --surface: hsl(203 30% 11%);
+  --raised: hsl(203 26% 16%);
+  --line: hsl(203 20% 24%);
+  --muted: hsl(205 14% 67%);
+  --signal: hsl(18 90% 66%);
+  --attention: hsl(42 90% 60%);
+  --fault: hsl(354 85% 70%);
+  --shadow: hsl(204 40% 3% / 0.55);
+  --brand-ink: hsl(204 22% 80%);
+
+  --ansi-black: hsl(204 22% 10%);
+  --ansi-red: hsl(4 72% 64%);
+  --ansi-green: hsl(150 45% 58%);
+  --ansi-yellow: hsl(40 72% 63%);
+  --ansi-blue: hsl(210 58% 64%);
+  --ansi-magenta: hsl(285 45% 67%);
+  --ansi-cyan: hsl(176 45% 58%);
+  --ansi-white: hsl(210 14% 87%);
+  --ansi-bright-black: hsl(210 10% 44%);
+  --ansi-bright-red: hsl(4 100% 73%);
+  --ansi-bright-green: hsl(150 58% 67%);
+  --ansi-bright-yellow: hsl(40 86% 70%);
+  --ansi-bright-blue: hsl(209 75% 72%);
+  --ansi-bright-magenta: hsl(282 61% 76%);
+  --ansi-bright-cyan: hsl(174 61% 68%);
+  --ansi-bright-white: hsl(210 22% 96%);
 }
 
 .theme-midnight {
@@ -50,6 +112,7 @@
   --attention: hsl(38 95% 58%);
   --fault: hsl(0 85% 62%);
   --shadow: hsl(0 0% 0% / 0.8);
+  --brand-ink: hsl(0 0% 82%);
 }
 
 .theme-nord {
@@ -61,8 +124,9 @@
   --muted: hsl(219 14% 71%);
   --signal: hsl(179 25% 65%);
   --attention: hsl(40 71% 73%);
-  --fault: hsl(354 42% 56%);
+  --fault: hsl(354 70% 76%);
   --shadow: hsl(220 30% 6% / 0.5);
+  --brand-ink: hsl(219 20% 80%);
 }
 
 .theme-dracula {
@@ -71,11 +135,12 @@
   --surface: hsl(232 14% 19%);
   --raised: hsl(231 15% 26%);
   --line: hsl(232 14% 34%);
-  --muted: hsl(228 10% 62%);
+  --muted: hsl(228 12% 68%);
   --signal: hsl(135 94% 65%);
   --attention: hsl(31 100% 71%);
-  --fault: hsl(0 100% 67%);
+  --fault: hsl(0 100% 76%);
   --shadow: hsl(231 35% 5% / 0.5);
+  --brand-ink: hsl(228 16% 80%);
 }
 
 .theme-sepia {
@@ -84,41 +149,53 @@
   --surface: hsl(36 33% 97%);
   --raised: hsl(36 22% 87%);
   --line: hsl(36 18% 78%);
-  --muted: hsl(30 12% 45%);
-  --signal: hsl(168 50% 32%);
-  --attention: hsl(28 85% 44%);
-  --fault: hsl(4 65% 46%);
+  --muted: hsl(30 12% 37%);
+  --signal: hsl(168 55% 26%);
+  --attention: hsl(28 90% 31%);
+  --fault: hsl(4 65% 39%);
   --shadow: hsl(30 25% 18% / 0.08);
 }
 
 .light,
 .theme-light {
-  --background: hsl(220 18% 97%);
-  --foreground: hsl(222 24% 11%);
-  --surface: hsl(0 0% 100%);
-  --raised: hsl(220 14% 93%);
-  --line: hsl(220 13% 86%);
-  --muted: hsl(220 9% 46%);
-  --signal: hsl(168 60% 36%);
-  --attention: hsl(36 90% 48%);
-  --fault: hsl(4 72% 50%);
-  --shadow: hsl(222 24% 11% / 0.08);
+  --background: hsl(48 23% 95%);
+  --foreground: hsl(203 31% 21%);
+  --surface: hsl(48 30% 99%);
+  --raised: hsl(46 20% 91%);
+  --line: hsl(44 14% 83%);
+  --muted: hsl(204 14% 39%);
+  --signal: hsl(18 82% 37%);
+  --attention: hsl(38 95% 29%);
+  --fault: hsl(352 70% 40%);
+  --shadow: hsl(203 31% 21% / 0.1);
+  --brand-ink: var(--foreground);
 }
 
 /* The dark themes share one set of chart steps: they are chosen against a dark chart surface and
    fail the lightness band on a light one, so every dark theme names itself here rather than
-   inheriting the light steps from `:root`. */
+   inheriting the light steps from `:root`. Same order and hue family as the light steps. */
 .dark,
 .theme-dark,
 .theme-midnight,
 .theme-nord,
 .theme-dracula {
-  --chart-1: hsl(168 58% 40%);
-  --chart-2: hsl(262 66% 60%);
-  --chart-3: hsl(36 82% 40%);
-  --chart-4: hsl(206 76% 54%);
-  --chart-5: hsl(332 72% 60%);
-  --chart-6: hsl(120 48% 36%);
+  --chart-1: hsl(18 88% 64%);
+  --chart-2: hsl(186 58% 50%);
+  --chart-3: hsl(262 70% 72%);
+  --chart-4: hsl(208 76% 62%);
+  --chart-5: hsl(332 72% 66%);
+  --chart-6: hsl(100 45% 50%);
+}
+
+/* Nord's ground is several stops lighter than the other dark themes, so the shared dark steps sit
+   under 3:1 on it; these are the same hues lifted until each clears the floor. */
+.theme-nord {
+  --chart-1: hsl(18 90% 72%);
+  --chart-2: hsl(186 62% 62%);
+  --chart-3: hsl(262 76% 80%);
+  --chart-4: hsl(208 80% 72%);
+  --chart-5: hsl(332 78% 76%);
+  --chart-6: hsl(100 50% 62%);
 }
 
 @theme inline {

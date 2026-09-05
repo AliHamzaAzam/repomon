@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  ACCENTS,
+  ACCENT_SWATCHES,
+  DEFAULT_ACCENT,
   DEFAULT_TERMINAL_APPEARANCE,
+  applyAccent,
   TERMINAL_CSS_VAR_TOKENS,
   TERMINAL_FONT_FALLBACK_STACK,
   terminalFontFamily,
@@ -67,5 +71,40 @@ describe("terminalSurfaceStyle", () => {
       TERMINAL_CSS_VAR_TOKENS,
     );
     expect(surface.background).toBe("color-mix(in srgb, var(--signal) 2%, var(--background))");
+  });
+});
+
+describe("applyAccent", () => {
+  const root = () => document.documentElement;
+  afterEach(() => root().style.removeProperty("--signal"));
+
+  it("leaves the theme's own signal token in charge for the brand default and for an unset accent", () => {
+    root().style.setProperty("--signal", "hsl(169 61% 49%)");
+    applyAccent(DEFAULT_ACCENT);
+    expect(root().style.getPropertyValue("--signal")).toBe("");
+
+    root().style.setProperty("--signal", "hsl(169 61% 49%)");
+    applyAccent(undefined);
+    expect(root().style.getPropertyValue("--signal")).toBe("");
+  });
+
+  it("still pins a named accent, a custom hex, and the monochrome escape hatch inline", () => {
+    applyAccent("cyan");
+    expect(root().style.getPropertyValue("--signal")).toBe(ACCENTS.cyan);
+    applyAccent("#ff8800");
+    expect(root().style.getPropertyValue("--signal")).toBe("#ff8800");
+    applyAccent("mono");
+    expect(root().style.getPropertyValue("--signal")).toBe("var(--muted)");
+  });
+
+  it("treats an unknown accent name like the default rather than falling back to cyan", () => {
+    applyAccent("cyan");
+    applyAccent("not-a-color");
+    expect(root().style.getPropertyValue("--signal")).toBe("");
+  });
+
+  it("lists the brand accent first so a fresh install's swatch row starts on the default", () => {
+    expect(ACCENT_SWATCHES[0].id).toBe(DEFAULT_ACCENT);
+    expect(Object.keys(ACCENTS)[0]).toBe(DEFAULT_ACCENT);
   });
 });

@@ -18,6 +18,7 @@ import {
   saveTerminalAppearance,
   terminalSurfaceStyle,
   ACCENT_SWATCHES,
+  DEFAULT_ACCENT,
   TERMINAL_CSS_VAR_TOKENS,
   TERMINAL_FONT_FAMILIES,
   THEME_PRESETS,
@@ -1374,7 +1375,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                   <div class="flex flex-wrap items-center gap-2">
                     <For each={ACCENT_SWATCHES}>
                       {(swatch) => {
-                        const isSelected = () => (settings().accent?.toLowerCase() ?? "cyan") === swatch.id;
+                        const isSelected = () => (settings().accent?.toLowerCase() ?? DEFAULT_ACCENT) === swatch.id;
                         return (
                           <button
                             type="button"

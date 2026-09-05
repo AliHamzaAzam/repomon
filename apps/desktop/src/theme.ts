@@ -23,22 +23,22 @@ export const THEME_PRESETS: ThemePreset[] = [
     description: "Follows your operating system color scheme",
     isDark: true,
     preview: {
-      bg: "hsl(224 20% 7%)",
-      surface: "hsl(224 18% 11%)",
-      line: "hsl(224 12% 21%)",
-      signal: "hsl(168 62% 54%)",
+      bg: "hsl(204 32% 8%)",
+      surface: "hsl(203 30% 11%)",
+      line: "hsl(203 20% 24%)",
+      signal: "hsl(18 90% 66%)",
     },
   },
   {
     id: "dark",
-    name: "Dark Default",
-    description: "Balanced slate dark theme with soft contrast",
+    name: "Repomon Dark",
+    description: "Graphite ground from the mark with the brand orange accent",
     isDark: true,
     preview: {
-      bg: "hsl(224 20% 7%)",
-      surface: "hsl(224 18% 11%)",
-      line: "hsl(224 12% 21%)",
-      signal: "hsl(168 62% 54%)",
+      bg: "hsl(204 32% 8%)",
+      surface: "hsl(203 30% 11%)",
+      line: "hsl(203 20% 24%)",
+      signal: "hsl(18 90% 66%)",
     },
   },
   {
@@ -86,24 +86,31 @@ export const THEME_PRESETS: ThemePreset[] = [
       bg: "hsl(36 30% 93%)",
       surface: "hsl(36 33% 97%)",
       line: "hsl(36 18% 78%)",
-      signal: "hsl(168 50% 32%)",
+      signal: "hsl(168 55% 26%)",
     },
   },
   {
     id: "light",
-    name: "Modern Light",
-    description: "Clean, high-clarity daylight interface",
+    name: "Repomon Light",
+    description: "The warm-white tile behind the mark, graphite ink, brand orange accent",
     isDark: false,
     preview: {
-      bg: "hsl(220 18% 97%)",
-      surface: "hsl(0 0% 100%)",
-      line: "hsl(220 13% 86%)",
-      signal: "hsl(168 60% 36%)",
+      bg: "hsl(48 23% 95%)",
+      surface: "hsl(48 30% 99%)",
+      line: "hsl(44 14% 83%)",
+      signal: "hsl(18 82% 37%)",
     },
   },
 ];
 
+/// The accent is what a swatch shows; `applyAccent` decides what the app sets. "brand" is the
+/// default and the one exception: it clears the inline override so each theme's own AA-tuned
+/// `--signal` applies (the brand orange as text needs a different lightness in light than in dark,
+/// which one fixed value cannot give). Every other key is one fixed color across themes, as before.
+export const DEFAULT_ACCENT = "brand";
+
 export const ACCENTS: Record<string, string> = {
+  brand: "hsl(18 84% 61%)",
   cyan: "hsl(169 61% 49%)",
   green: "hsl(145 56% 45%)",
   magenta: "hsl(300 55% 52%)",
@@ -114,6 +121,7 @@ export const ACCENTS: Record<string, string> = {
 };
 
 export const ACCENT_SWATCHES = [
+  { id: "brand", label: "Repomon", color: "hsl(18 84% 61%)" },
   { id: "cyan", label: "Cyan", color: "hsl(169 61% 49%)" },
   { id: "green", label: "Emerald", color: "hsl(145 56% 45%)" },
   { id: "blue", label: "Blue", color: "hsl(207 68% 52%)" },
@@ -186,12 +194,18 @@ export function nextTheme(theme: Theme): Theme {
 export function applyAccent(accent?: string | null): void {
   if (typeof document === "undefined") return;
   const value = accent?.trim().toLowerCase();
-  const color = value && /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(value)
+  const root = document.documentElement;
+  if (!value || value === DEFAULT_ACCENT || !(value in ACCENTS || value === "mono" || value === "none" || value === "off" || /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(value))) {
+    // Unset, the brand default, or an unknown name: the theme's own signal token applies.
+    root.style.removeProperty("--signal");
+    return;
+  }
+  const color = /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(value)
     ? value
     : value === "mono" || value === "none" || value === "off"
       ? "var(--muted)"
-      : ACCENTS[value ?? "cyan"] ?? ACCENTS.cyan;
-  document.documentElement.style.setProperty("--signal", color);
+      : ACCENTS[value];
+  root.style.setProperty("--signal", color);
 }
 
 export interface TerminalAppearance {
