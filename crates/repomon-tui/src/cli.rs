@@ -53,6 +53,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    /// Token usage and cost across the fleet, read from the local usage ledger.
+    Usage {
+        #[command(subcommand)]
+        cmd: UsageCmd,
+    },
     /// Remote access for companion apps (iOS): enable the bridge, pair a phone.
     Remote {
         #[command(subcommand)]
@@ -269,6 +274,257 @@ impl SpawnMode {
     }
 }
 
+/// How `repomon usage` splits its rows.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum UsageGroup {
+    Kind,
+    Model,
+    Repo,
+    Lane,
+    Account,
+}
+
+impl UsageGroup {
+    fn wire(self) -> &'static str {
+        match self {
+            UsageGroup::Kind => "kind",
+            UsageGroup::Model => "model",
+            UsageGroup::Repo => "repo",
+            UsageGroup::Lane => "lane",
+            UsageGroup::Account => "account",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum UsageCmd {
+    /// Today's tokens and cost.
+    Today {
+        #[arg(long, value_enum, default_value = "kind")]
+        group_by: UsageGroup,
+        /// Print comma-separated values instead of a table.
+        #[arg(long)]
+        csv: bool,
+    },
+    /// The last seven days.
+    Week {
+        #[arg(long, value_enum, default_value = "kind")]
+        group_by: UsageGroup,
+        #[arg(long)]
+        csv: bool,
+    },
+    /// The last thirty days.
+    Month {
+        #[arg(long, value_enum, default_value = "kind")]
+        group_by: UsageGroup,
+        #[arg(long)]
+        csv: bool,
+    },
+    /// A report over an explicit window, and what the ledger suggests looking at.
+    Report {
+        /// Start of the window, RFC 3339. Defaults to thirty days ago.
+        #[arg(long)]
+        since: Option<String>,
+        /// End of the window, RFC 3339. Defaults to now.
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, value_enum, default_value = "model")]
+        group_by: UsageGroup,
+        #[arg(long)]
+        csv: bool,
+    },
+    /// Read the transcripts now instead of waiting for the next scan.
+    Ingest,
+    /// Ingest cursors, the last scan, and any source that failed.
+    Status,
+}
+
+/// Token usage and cost, read from the daemon's ledger.
+///
+/// The ledger is local and passive: it reads what the agents already wrote to disk. A cost is
+/// what the same tokens would have cost on the provider's API, which is what a subscription plan
+/// is worth rather than what it billed.
+async fn handle_usage(cmd: UsageCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
+    let client = connect(socket, config).await?;
+    match cmd {
+        UsageCmd::Today { group_by, csv } => {
+            print_usage(&client, "today", None, None, group_by, csv).await?
+        }
+        UsageCmd::Week { group_by, csv } => {
+            print_usage(&client, "week", None, None, group_by, csv).await?
+        }
+        UsageCmd::Month { group_by, csv } => {
+            print_usage(&client, "month", None, None, group_by, csv).await?
+        }
+        UsageCmd::Report {
+            since,
+            until,
+            group_by,
+            csv,
+        } => {
+            let range = if since.is_some() || until.is_some() {
+                "custom"
+            } else {
+                "month"
+            };
+            print_usage(&client, range, since, until, group_by, csv).await?;
+            if !csv {
+                let findings: Vec<repomon_core::usage_ledger::UsageFinding> = client
+                    .call_typed("usage.findings", Some(json!({ "range": range })))
+                    .await
+                    .unwrap_or_default();
+                if !findings.is_empty() {
+                    println!();
+                    println!("what to look at");
+                    for f in findings.iter().take(6) {
+                        println!("  {}  {}", f.headline, f.detail);
+                    }
+                }
+            }
+        }
+        UsageCmd::Ingest => {
+            let res = client.call("usage.ingest_now", None).await?;
+            println!(
+                "read {} of {} source file(s), {} new event(s), {} failed",
+                res["scanned"].as_u64().unwrap_or(0),
+                res["listed"].as_u64().unwrap_or(0),
+                res["events"].as_u64().unwrap_or(0),
+                res["failed"].as_u64().unwrap_or(0),
+            );
+        }
+        UsageCmd::Status => {
+            let s: repomon_core::usage_ledger::UsageStatus =
+                client.call_typed("usage.status", None).await?;
+            println!("events   {}", s.events);
+            println!("sources  {}", s.sources);
+            println!(
+                "scanned  {}",
+                s.last_scan_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string())
+            );
+            if s.ingesting {
+                println!("a scan is running now");
+            }
+            for e in &s.errors {
+                println!(
+                    "error    {}  {}",
+                    e.source_path,
+                    e.error.clone().unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn print_usage(
+    client: &DaemonClient,
+    range: &str,
+    since: Option<String>,
+    until: Option<String>,
+    group_by: UsageGroup,
+    csv: bool,
+) -> Result<()> {
+    let params = json!({
+        "range": range,
+        "since": since,
+        "until": until,
+        "group_by": group_by.wire(),
+    });
+    let summary: repomon_core::usage_ledger::UsageSummary =
+        client.call_typed("usage.summary", Some(params)).await?;
+    print!(
+        "{}",
+        if csv {
+            render_usage_csv(&summary)
+        } else {
+            render_usage_table(&summary)
+        }
+    );
+    Ok(())
+}
+
+/// Render a summary as an aligned table.
+fn render_usage_table(s: &repomon_core::usage_ledger::UsageSummary) -> String {
+    use repomon_core::usage_ledger::money;
+    if s.totals.events == 0 {
+        return format!(
+            "no usage recorded between {} and {}\n",
+            s.from.format("%Y-%m-%d %H:%M"),
+            s.to.format("%Y-%m-%d %H:%M")
+        );
+    }
+    let width = s
+        .groups
+        .iter()
+        .map(|g| g.label.chars().count())
+        .chain(std::iter::once("TOTAL".len()))
+        .max()
+        .unwrap_or(5);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<width$}  {:>12}  {:>12}  {:>12}  {:>10}\n",
+        "GROUP", "IN", "OUT", "CACHED", "COST"
+    ));
+    for g in &s.groups {
+        out.push_str(&format!(
+            "{:<width$}  {:>12}  {:>12}  {:>12}  {:>10}\n",
+            g.label,
+            g.totals.input_tokens,
+            g.totals.output_tokens,
+            g.totals.cache_read_tokens,
+            money(g.totals.cost_usd),
+        ));
+    }
+    out.push_str(&format!(
+        "{:<width$}  {:>12}  {:>12}  {:>12}  {:>10}\n",
+        "TOTAL",
+        s.totals.input_tokens,
+        s.totals.output_tokens,
+        s.totals.cache_read_tokens,
+        money(s.totals.cost_usd),
+    ));
+    out.push_str(&format!(
+        "cache hit {:.0}%   estimated {:.0}%   {} turn(s)\n",
+        s.cache_hit_rate * 100.0,
+        s.estimated_share * 100.0,
+        s.totals.events,
+    ));
+    if !s.unpriced_models.is_empty() {
+        out.push_str(&format!(
+            "no price for: {}  (set [usage.price_overrides] to include them in the cost)\n",
+            s.unpriced_models.join(", ")
+        ));
+    }
+    out
+}
+
+/// Render a summary as comma-separated values, one line per group.
+fn render_usage_csv(s: &repomon_core::usage_ledger::UsageSummary) -> String {
+    let mut out = String::from(
+        "group,events,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd\n",
+    );
+    for g in &s.groups {
+        let label = if g.label.contains(',') {
+            format!("\"{}\"", g.label.replace('"', "\"\""))
+        } else {
+            g.label.clone()
+        };
+        out.push_str(&format!(
+            "{label},{},{},{},{},{},{},{:.6}\n",
+            g.totals.events,
+            g.totals.input_tokens,
+            g.totals.output_tokens,
+            g.totals.cache_read_tokens,
+            g.totals.cache_write_tokens,
+            g.totals.total_tokens,
+            g.totals.cost_usd,
+        ));
+    }
+    out
+}
+
 #[derive(Subcommand)]
 pub enum RemoteCmd {
     /// Turn the WebSocket bridge on: generate a token, detect the Tailscale address, write
@@ -368,6 +624,7 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
         Command::Lane { cmd } => handle_lane(cmd, config, socket).await?,
         Command::Msg { cmd } => handle_msg(cmd, config, socket).await?,
         Command::Daemon { cmd } => handle_daemon(cmd, config, socket).await?,
+        Command::Usage { cmd } => handle_usage(cmd, config, socket).await?,
         Command::Remote { cmd } => handle_remote(cmd, config, socket).await?,
         Command::Playbooks { cmd } => handle_playbooks(cmd, config, socket).await?,
         Command::Repomind { cmd } => handle_repomind(cmd, config, socket).await?,
@@ -2225,4 +2482,90 @@ mod tests {
         assert!(out.contains("  journal/2026-01-01.md\n"), "{out}");
         assert!(out.contains("  profile/approvals.md\n"), "{out}");
     }
+    #[test]
+    fn man_and_completions_include_the_usage_subcommand() {
+        use clap::CommandFactory;
+        let mut cmd = crate::Cli::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "repomon", &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("usage"), "zsh completions missing usage");
+        for verb in ["today", "week", "month", "report"] {
+            assert!(
+                out.contains(verb),
+                "zsh completions missing usage verb {verb:?}"
+            );
+        }
+    }
+
+    fn summary() -> repomon_core::usage_ledger::UsageSummary {
+        use repomon_core::usage_ledger::*;
+        let totals = |cost: f64, tokens: u64| UsageTotals {
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            thinking_tokens: 0,
+            total_tokens: tokens,
+            estimated_tokens: 0,
+            cost_usd: cost,
+            events: 1,
+        };
+        UsageSummary {
+            from: chrono::Utc::now(),
+            to: chrono::Utc::now(),
+            group_by: GroupBy::Kind,
+            totals: totals(1.5, 300),
+            groups: vec![
+                UsageGroupRow {
+                    key: "claude-code".into(),
+                    label: "claude-code".into(),
+                    totals: totals(1.0, 200),
+                },
+                UsageGroupRow {
+                    key: "codex".into(),
+                    label: "codex".into(),
+                    totals: totals(0.5, 100),
+                },
+            ],
+            cache_hit_rate: 0.42,
+            estimated_share: 0.0,
+            unpriced_models: vec!["local-model".into()],
+        }
+    }
+
+    #[test]
+    fn the_usage_table_shows_a_row_per_group_and_a_total() {
+        let out = super::render_usage_table(&summary());
+        assert!(out.contains("claude-code"));
+        assert!(out.contains("codex"));
+        assert!(out.contains("TOTAL"));
+        assert!(out.contains("42%"), "the cache hit rate is shown as a percentage");
+    }
+
+    #[test]
+    fn the_usage_table_names_models_it_could_not_price() {
+        let out = super::render_usage_table(&summary());
+        assert!(out.contains("local-model"));
+    }
+
+    #[test]
+    fn the_usage_table_says_so_when_there_is_nothing_to_show() {
+        let mut s = summary();
+        s.groups.clear();
+        s.totals = Default::default();
+        s.unpriced_models.clear();
+        let out = super::render_usage_table(&s);
+        assert!(out.contains("no usage recorded"));
+    }
+
+    #[test]
+    fn usage_csv_has_a_header_and_one_line_per_group() {
+        let out = super::render_usage_csv(&summary());
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "group,events,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].starts_with("claude-code,"));
+    }
+
 }
