@@ -42,7 +42,7 @@ function makeCountingPanel(id: string, label: string, mounts: Record<string, num
 }
 
 // The visible tab strip (rounded pill row, role="tablist") was removed once the header buttons
-// (+ the numbered panel chords, see App.tsx's `openPanelTab`) covered the same switching job — it was
+// (+ the numbered panel chords, see App.tsx's `openPanelTab`) covered the same switching job, so it was
 // redundant chrome duplicating a control that already existed one level up. RightPanelHost itself
 // has no more click surface of its own, so these tests drive tab switching the same way the real
 // header buttons do: by bumping the `requestTab` prop. The registry, active-tab state, and
@@ -174,7 +174,7 @@ describe("Right rail integration (App)", () => {
     const aside = within(container).getByRole("complementary", { name: "Repomind" });
     expect(within(aside).getByText("Repomind", { selector: "span.text-xs.font-semibold" })).toBeInTheDocument();
 
-    // mod+9 is the keymap binding for panel.repomind (src/keymap.ts) — toggling via keyboard
+    // mod+9 is the keymap binding for panel.repomind (src/keymap.ts): toggling via keyboard
     // must reach the same state as the header button.
     fireEvent.keyDown(window, { key: "9", code: "Digit9", metaKey: true });
     await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
