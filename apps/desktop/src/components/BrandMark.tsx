@@ -16,8 +16,10 @@ const TIGHT_VIEW_BOX = "37 37 182 182";
 /// the manually adjusted endpoints, stroke width, and central square are preserved exactly.
 ///
 /// It is drawn from theme tokens rather than the source file's fixed palette, so it follows the
-/// selected theme and accent. The source's graphite paths map to `--signal` and its orange
-/// command square maps to `--attention`. The transparent background sits directly on the title bar.
+/// selected theme and accent. The source's graphite paths map to `--brand-ink` (graphite in light,
+/// a lifted graphite in dark, as the app icon's own dark appearance does) and its orange command
+/// square maps to `--signal`, which is the brand orange by default and the chosen accent otherwise.
+/// The transparent background sits directly on the title bar.
 export default function BrandMark(props: BrandMarkProps) {
   const size = () => props.size ?? 26;
   return (
@@ -32,13 +34,13 @@ export default function BrandMark(props: BrandMarkProps) {
       aria-label={props.title}
       aria-hidden={props.title ? undefined : "true"}
     >
-      <g fill="none" fill-rule="nonzero" stroke="var(--signal)" stroke-width="22">
+      <g fill="none" fill-rule="nonzero" stroke="var(--brand-ink)" stroke-width="22">
         <path d="M108,48L56,48C50.667,48 48,50.667 48,56L48,120C48,125.333 50.667,128 56,128L80,128C85.333,128 88,130.667 88,136L88,168.125" />
         <path d="M87.727,88.04L144,88.04C149.333,88.04 152,85.373 152,80.04L152,56C152,50.667 154.667,48 160,48L200,48C205.333,48 208,50.667 208,56L208,200C208,205.333 205.333,208 200,208L160,208" />
         <path d="M157.091,128L208,128" />
         <path d="M48,172L48,200C48,205.333 50.667,208 56,208L120,208C125.333,208 128,205.333 128,200L128,176.125C128,170.792 130.667,168.125 136,168.125L168.188,168.125" />
       </g>
-      <rect x="112" y="112" width="32" height="32" fill="var(--attention)" />
+      <rect x="112" y="112" width="32" height="32" fill="var(--signal)" />
     </svg>
   );
 }

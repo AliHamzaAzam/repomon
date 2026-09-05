@@ -17,16 +17,8 @@ export interface PaneTarget {
   controller?: boolean;
 }
 
-const PANE_ACCENTS = [
-  "#2dd4bf",
-  "#60a5fa",
-  "#c084fc",
-  "#fb7185",
-  "#f59e0b",
-  "#84cc16",
-  "#22d3ee",
-  "#f97316",
-] as const;
+/// The eight `--pane-accent-N` tokens in index.css, so the stripes follow the theme's palette.
+const PANE_ACCENTS = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `var(--pane-accent-${n})`);
 
 /// Stable lane color for the fleet-wide workspace. Repo id carries most of the grouping signal;
 /// lane id breaks ties so sibling worktrees remain distinguishable without changing on refresh.

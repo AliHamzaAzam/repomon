@@ -14,8 +14,11 @@ describe("brand mark", () => {
     const { container } = render(() => <BrandMark />);
     const svg = container.querySelector("svg")!;
 
+    expect(svg.innerHTML).toContain("var(--brand-ink)");
     expect(svg.innerHTML).toContain("var(--signal)");
-    expect(svg.innerHTML).toContain("var(--attention)");
+    // The square is the accent, never the attention state: a mark that turned amber whenever a
+    // lane needed a human would read as a warning.
+    expect(svg.innerHTML).not.toContain("var(--attention)");
     expect(svg.innerHTML).not.toMatch(/#[0-9a-f]{3,6}/i);
     expect(svg.innerHTML).not.toContain("rgb(");
   });
