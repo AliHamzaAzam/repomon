@@ -3,12 +3,17 @@ import { describe, expect, it } from "vitest";
 import type { UsageTimeline } from "../bindings";
 import {
   MAX_SERIES,
+  bucketAxis,
+  formatDuration,
   formatTokens,
   formatUsd,
   foldTailSeries,
+  isWeekend,
+  narrowerBucket,
   niceMax,
   seriesVar,
   toStackedBars,
+  withContinuousAxis,
 } from "./usageMetrics";
 
 function series(key: string, points: [string, number, number][]) {
@@ -108,5 +113,56 @@ describe("usage chart reducers", () => {
     expect(formatUsd(12.487)).toBe("$12.49");
     expect(formatUsd(0.0031)).toBe("$0.0031");
     expect(formatUsd(0)).toBe("$0");
+  });
+
+  it("carries a token count up to the next unit rather than printing a trailing zero", () => {
+    expect(formatTokens(1_000)).toBe("1k");
+    expect(formatTokens(1_000_000)).toBe("1M");
+    expect(formatTokens(12_580_000_000)).toBe("12.6B");
+  });
+
+  it("prints whole dollars above a thousand and cents below a hundred", () => {
+    expect(formatUsd(12_580.4)).toBe("$12,580");
+    expect(formatUsd(523.45)).toBe("$523.5");
+    expect(formatUsd(12.5)).toBe("$12.50");
+  });
+
+  it("drops an empty unit from a duration so three hours reads as three hours", () => {
+    expect(formatDuration(3 * 3_600_000)).toBe("3h");
+    expect(formatDuration(3 * 3_600_000 + 20 * 60_000)).toBe("3h 20m");
+    expect(formatDuration(45 * 60_000)).toBe("45m");
+    expect(formatDuration(0)).toBe("");
+  });
+
+  it("enumerates every bucket in a window, including the empty ones", () => {
+    const axis = bucketAxis("2026-09-05T10:07:00Z", "2026-09-05T13:00:00Z", "hour");
+    expect(axis).toEqual([
+      "2026-09-05T10:00:00.000Z",
+      "2026-09-05T11:00:00.000Z",
+      "2026-09-05T12:00:00.000Z",
+      "2026-09-05T13:00:00.000Z",
+    ]);
+  });
+
+  it("gives a sparse timeline a continuous axis so three busy hours do not fill the plot", () => {
+    const sparse = timeline(
+      series("claude-code", [
+        ["2026-09-05T10:00:00.000Z", 10, 1],
+        ["2026-09-05T13:00:00.000Z", 20, 2],
+      ]),
+    );
+    const filled = withContinuousAxis(sparse, "2026-09-05T10:00:00Z", "2026-09-05T13:00:00Z");
+    expect(filled.buckets).toHaveLength(4);
+    const bars = toStackedBars(filled, "tokens");
+    expect(bars.map((bar) => bar.total)).toEqual([10, 0, 0, 20]);
+    expect(bars[1].segments).toHaveLength(0);
+  });
+
+  it("knows which day buckets are weekends and where a click can narrow to", () => {
+    expect(isWeekend("2026-09-05T00:00:00Z")).toBe(true);
+    expect(isWeekend("2026-09-07T00:00:00Z")).toBe(false);
+    expect(narrowerBucket("day")).toBe("hour");
+    expect(narrowerBucket("hour")).toBe("quarter");
+    expect(narrowerBucket("quarter")).toBeNull();
   });
 });

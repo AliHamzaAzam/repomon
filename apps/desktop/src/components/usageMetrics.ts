@@ -95,18 +95,114 @@ export function niceMax(value: number): number {
   return step * magnitude;
 }
 
-/** Token counts, abbreviated so an axis label stays short. */
+/**
+ * Token counts as k, M or B with one decimal and no trailing ".0", so "12580.0M" reads "12.6B".
+ * Mirrors `repomon_core::usage_ledger::tokens`, which formats the same numbers for the CLI.
+ */
 export function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return `${Math.round(n)}`;
+  const suffixes = ["", "k", "M", "B"];
+  let value = Math.max(0, n);
+  let unit = 0;
+  // 999.95 rather than 1000: a value that would render as "1000.0k" belongs one unit up.
+  while (value >= 999.95 && unit + 1 < suffixes.length) {
+    value /= 1000;
+    unit += 1;
+  }
+  if (unit === 0) return `${Math.round(value)}`;
+  return `${oneDecimal(value)}${suffixes[unit]}`;
 }
 
-/** Dollars, with enough places that a cent-scale figure is still readable. */
+/** One decimal place, with a trailing ".0" dropped so "3.0k" reads "3k". */
+function oneDecimal(value: number): string {
+  const text = value.toFixed(1);
+  return text.endsWith(".0") ? text.slice(0, -2) : text;
+}
+
+/**
+ * Dollars: whole dollars above a thousand, cents below a hundred, and enough places below a cent
+ * that a fraction of one still reads as a number. Mirrors `repomon_core::usage_ledger::money`.
+ */
 export function formatUsd(n: number): string {
   if (n === 0) return "$0";
-  if (n >= 1) return `$${n.toFixed(2)}`;
-  return `$${n.toFixed(4)}`;
+  const sign = n < 0 ? "-" : "";
+  const size = Math.abs(n);
+  if (size >= 1000) return `${sign}$${Math.round(size).toLocaleString("en-US")}`;
+  if (size >= 100) return `${sign}$${size.toFixed(1)}`;
+  if (size >= 0.01) return `${sign}$${size.toFixed(2)}`;
+  return `${sign}$${size.toFixed(4)}`;
+}
+
+/** How long something took, with an empty unit dropped so "3h 0m" reads "3h". */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days}d ${restHours}h` : `${days}d`;
+}
+
+/** How many milliseconds one bucket covers. */
+export const BUCKET_MS: Record<UsageBucket, number> = {
+  quarter: 15 * 60_000,
+  hour: 60 * 60_000,
+  day: 24 * 60 * 60_000,
+};
+
+/**
+ * The start of the bucket `ms` falls in. The daemon floors buckets in UTC, and every bucket length
+ * divides a UTC day evenly, so flooring the epoch lands on exactly the same instants.
+ */
+export function floorToBucket(ms: number, bucket: UsageBucket): number {
+  const step = BUCKET_MS[bucket];
+  return Math.floor(ms / step) * step;
+}
+
+/** Every bucket start in `[from, to]`, oldest first, empty ones included. */
+export function bucketAxis(from: string, to: string, bucket: UsageBucket): string[] {
+  const step = BUCKET_MS[bucket];
+  const start = floorToBucket(new Date(from).getTime(), bucket);
+  const end = floorToBucket(new Date(to).getTime(), bucket);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  // A window wider than this at the chosen bucket would draw more bars than there are pixels.
+  const MAX_BUCKETS = 800;
+  const count = Math.min(Math.floor((end - start) / step) + 1, MAX_BUCKETS);
+  const axis: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    axis.push(new Date(start + index * step).toISOString());
+  }
+  return axis;
+}
+
+/**
+ * Replace a timeline's axis with every bucket in `[from, to]`, so a window with three busy hours
+ * in it still draws as a continuous day rather than three bars stretched across the plot.
+ */
+export function withContinuousAxis(
+  timeline: UsageTimeline,
+  from: string,
+  to: string,
+): UsageTimeline {
+  const axis = bucketAxis(from, to, timeline.bucket);
+  if (axis.length === 0) return timeline;
+  return { ...timeline, buckets: axis };
+}
+
+/** Whether a bucket start falls on a Saturday or Sunday, which the day axis shades. */
+export function isWeekend(at: string): boolean {
+  const day = new Date(at).getUTCDay();
+  return day === 0 || day === 6;
+}
+
+/** The finer bucket a click on `bucket` narrows to, or null when there is nowhere further down. */
+export function narrowerBucket(bucket: UsageBucket): UsageBucket | null {
+  if (bucket === "day") return "hour";
+  if (bucket === "hour") return "quarter";
+  return null;
 }
 
 /** A bucket start, formatted for the width its axis has. */
@@ -117,4 +213,16 @@ export function bucketLabel(at: string, bucket: UsageBucket): string {
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+/** A bucket start and end, spelled out for a tooltip heading. */
+export function bucketSpanLabel(at: string, bucket: UsageBucket): string {
+  const start = new Date(at);
+  if (Number.isNaN(start.getTime())) return at;
+  if (bucket === "day") {
+    return start.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+  const end = new Date(start.getTime() + BUCKET_MS[bucket]);
+  const time = (d: Date) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return `${start.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time(start)} to ${time(end)}`;
 }
