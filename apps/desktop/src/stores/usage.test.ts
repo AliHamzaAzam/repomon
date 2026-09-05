@@ -2,7 +2,7 @@ import { createRoot } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RatesStatus, UsageSessionRow, UsageSummary, UsageTimeline } from "../bindings";
-import { createUsageStore, windowLabel, type UsageSource } from "./usage";
+import { createUsageStore, resolveWindow, windowLabel, type UsageSource } from "./usage";
 
 const totals = {
   input_tokens: 100,
@@ -113,7 +113,9 @@ describe("usage store", () => {
       expect(store.summary()?.totals.cost_usd).toBe(1.25);
       expect(store.timeline()?.series).toHaveLength(1);
       expect(store.sessions()).toHaveLength(1);
-      expect(s.summary).toHaveBeenCalledWith({ range: "week", group_by: "kind" });
+      expect(s.summary).toHaveBeenCalledWith(
+        expect.objectContaining({ range: "week", group_by: "kind" }),
+      );
       expect(store.rates()?.source_counts.litellm).toBe(12);
       dispose();
     });
@@ -154,17 +156,19 @@ describe("usage store", () => {
       await store.refresh();
       store.setGroupBy("model");
       await flush();
-      expect(s.summary).toHaveBeenLastCalledWith({ range: "week", group_by: "model" });
+      expect(s.summary).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: "week", group_by: "model" }),
+      );
       store.setRange("today");
       await flush();
-      expect(s.summary).toHaveBeenLastCalledWith({ range: "today", group_by: "model" });
+      expect(s.summary).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: "today", group_by: "model" }),
+      );
       store.setBucket("day");
       await flush();
-      expect(s.timeline).toHaveBeenLastCalledWith({
-        range: "today",
-        group_by: "model",
-        bucket: "day",
-      });
+      expect(s.timeline).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: "today", group_by: "model", bucket: "day" }),
+      );
       dispose();
     });
   });
@@ -388,6 +392,34 @@ describe("usage store", () => {
       await store.ingestNow();
       await flush();
       expect(s.summary).toHaveBeenCalledTimes(1);
+      dispose();
+    });
+  });
+
+  it("resolves a named range to local calendar days", () => {
+    const now = new Date(2026, 8, 5, 13, 30);
+    const { from, to } = resolveWindow({ range: "week" }, now);
+    expect(to).toEqual(now);
+    expect(from.getHours()).toBe(0);
+    expect(from.getMinutes()).toBe(0);
+    expect(from).toEqual(new Date(2026, 7, 30));
+  });
+
+  it("sends a named range as the explicit bounds it resolved locally", async () => {
+    await createRoot(async (dispose) => {
+      const s = source();
+      const store = createUsageStore(s);
+      await store.refresh();
+      await flush();
+      const calls = (s.summary as ReturnType<typeof vi.fn>).mock.calls;
+      const sent = calls[calls.length - 1][0];
+      expect(sent.range).toBe("week");
+      const since = new Date(sent.since);
+      expect(since.getHours()).toBe(0);
+      const expected = new Date();
+      expected.setHours(0, 0, 0, 0);
+      expected.setDate(expected.getDate() - 6);
+      expect(since.getTime()).toBe(expected.getTime());
       dispose();
     });
   });

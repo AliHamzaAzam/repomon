@@ -103,24 +103,31 @@ const RANGE_LABELS: Record<UsageRange, string> = {
   custom: "Custom",
 };
 
-/** Midnight UTC on the day `at` falls in, which is where the daemon starts a day-aligned range. */
-function utcMidnight(at: Date): Date {
-  return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
+/**
+ * Midnight `back` days before the day `at` falls in, in the browser's own zone.
+ *
+ * Day arithmetic goes through the calendar rather than through milliseconds, so a day that a
+ * daylight-saving change made 23 or 25 hours long still counts as one day.
+ */
+function localMidnight(at: Date, back = 0): Date {
+  return new Date(at.getFullYear(), at.getMonth(), at.getDate() - back);
 }
 
 /**
- * The `[from, to]` a window covers, resolved the way the daemon resolves it, so the header can
- * print the dates a named range actually means.
+ * The `[from, to]` a window covers. A day-aligned range means local calendar days: "today" is the
+ * day the operator is having, which is the day the agent CLIs report their own totals over.
+ *
+ * This is also what the store sends the daemon for a named range, so the two never disagree about
+ * where a day starts.
  */
 export function resolveWindow(step: UsageWindowParams, now = new Date()): { from: Date; to: Date } {
-  if (step.range === "custom" && step.since && step.until) {
+  if (step.since && step.until) {
     const since = new Date(step.since);
     const until = new Date(step.until);
     return since <= until ? { from: since, to: until } : { from: until, to: since };
   }
   const back = step.range === "week" ? 6 : step.range === "month" ? 29 : 0;
-  const from = new Date(utcMidnight(now).getTime() - back * BUCKET_MS.day);
-  return { from, to: now };
+  return { from: localMidnight(now, back), to: now };
 }
 
 /** The bucket a window of this length reads best at. */
@@ -165,11 +172,16 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
   const [error, setError] = createSignal<string | null>(null);
   const [lastExport, setLastExport] = createSignal<UsageExport | null>(null);
 
+  // A named range is sent as the two instants it resolves to here, not as its name alone: the
+  // daemon would resolve the name in its own zone, and only the client knows the one the operator
+  // is reading in. The name still travels, as the label the window is known by.
   const params = (): UsageWindowParams => {
     const current = step();
-    return current.range === "custom"
-      ? { range: "custom", since: current.since, until: current.until }
-      : { range: current.range };
+    if (current.range === "custom") {
+      return { range: "custom", since: current.since, until: current.until };
+    }
+    const { from, to } = resolveWindow({ range: current.range });
+    return { range: current.range, since: from.toISOString(), until: to.toISOString() };
   };
 
   // Every load carries a token; only the newest one may write to the signals. Without this a slow

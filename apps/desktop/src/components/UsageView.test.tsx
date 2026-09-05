@@ -242,7 +242,9 @@ describe("UsageView", () => {
     await flush();
     fireEvent.click(screen.getByText("Model"));
     await flush();
-    expect(s.summary).toHaveBeenLastCalledWith({ range: "week", group_by: "model" });
+    expect(s.summary).toHaveBeenLastCalledWith(
+      expect.objectContaining({ range: "week", group_by: "model" }),
+    );
   });
 
   it("reports where an export landed", async () => {

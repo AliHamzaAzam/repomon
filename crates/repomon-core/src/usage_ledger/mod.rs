@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{LaneId, RepoId};
@@ -293,20 +293,34 @@ pub enum Range {
 }
 
 impl Range {
-    /// The `[from, to]` window this range covers as of `now`. Day-aligned ranges start at UTC
-    /// midnight so a day's total does not shift as the clock moves.
+    /// The `[from, to]` window this range covers as of `now`.
+    ///
+    /// Day-aligned ranges start at local midnight, not UTC midnight: "today" is the operator's
+    /// day, and it is the same day the agent CLIs report their own totals over, so the two agree.
+    /// The daemon runs on the operator's machine, so its local zone is theirs; a client in another
+    /// zone sends explicit bounds instead of a name.
     pub fn window(self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
-        let midnight = Utc
-            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-            .single()
-            .unwrap_or(now);
         let back = match self {
             Range::Today => 0,
             Range::Week => 6,
             Range::Month => 29,
             Range::Custom => 0,
         };
-        (midnight - Duration::days(back), now)
+        let local = now.with_timezone(&Local);
+        let day = local.date_naive() - Duration::days(back);
+        // A day that has no midnight (a spring-forward transition at 00:00, as in Santiago) still
+        // has a first instant, and that is where its total starts.
+        let start = day
+            .and_hms_opt(0, 0, 0)
+            .and_then(|naive| {
+                Local
+                    .from_local_datetime(&naive)
+                    .earliest()
+                    .or_else(|| Local.from_local_datetime(&naive).latest())
+            })
+            .map(|at| at.with_timezone(&Utc))
+            .unwrap_or(now);
+        (start, now)
     }
 }
 
@@ -1422,14 +1436,22 @@ mod tests {
     }
 
     #[test]
-    fn range_today_starts_at_utc_midnight_and_week_covers_seven_days() {
+    fn a_named_range_starts_at_local_midnight_and_week_covers_seven_days() {
+        // The operator reads their own calendar, and so does the agent CLI they compare against,
+        // so a day-aligned range starts where their day starts rather than at UTC midnight.
+        use chrono::{Local, Timelike};
         let now = at(13, 30);
+        let today_local = now.with_timezone(&Local).date_naive();
         let (from, to) = Range::Today.window(now);
-        assert_eq!(from, Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap());
         assert_eq!(to, now);
-        let (from, _) = Range::Week.window(now);
-        assert_eq!(from, Utc.with_ymd_and_hms(2026, 8, 26, 0, 0, 0).unwrap());
-        let (from, _) = Range::Month.window(now);
-        assert_eq!(from, Utc.with_ymd_and_hms(2026, 8, 3, 0, 0, 0).unwrap());
+        let local = from.with_timezone(&Local);
+        assert_eq!(local.date_naive(), today_local);
+        assert_eq!((local.hour(), local.minute(), local.second()), (0, 0, 0));
+        for (range, back) in [(Range::Week, 6), (Range::Month, 29)] {
+            let (from, _) = range.window(now);
+            let local = from.with_timezone(&Local);
+            assert_eq!(local.date_naive(), today_local - Duration::days(back));
+            assert_eq!(local.hour(), 0);
+        }
     }
 }

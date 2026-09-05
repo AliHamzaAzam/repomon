@@ -578,6 +578,11 @@ The view carries:
   to. **Today**, **7 days** and **30 days** are the named ranges; **Custom** opens a calendar for
   any two days, with **This month** and **Last month** as presets. The calendar is keyboard
   navigable: arrows walk days and weeks, PageUp and PageDown walk months, Enter takes a day.
+  A named range means local calendar days, not UTC ones: "today" starts at midnight where you are,
+  and "7 days" is the six local days before it plus today, which is the same way the agent CLIs
+  report their own totals. The desktop resolves a named range in the browser's zone and sends the
+  two instants outright; a client that sends only the name gets it resolved in the daemon's zone,
+  which on a local install is the same one.
 - A timeline of cost or tokens per bucket, stacked by whichever dimension the "Split by" control
   names, with a measure toggle above it. Every bucket in the window is drawn, empty ones included,
   so the axis is a timeline rather than a list of the hours that happened to be busy. Weekends are

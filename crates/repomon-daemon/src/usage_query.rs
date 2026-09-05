@@ -20,6 +20,11 @@ use crate::Ctx;
 
 /// Turn a range and its optional explicit bounds into a `[from, to]` window.
 ///
+/// Explicit bounds always win, whatever the range is named. A day-aligned range means local
+/// calendar days, and the client is the one that knows which zone the operator is reading in, so
+/// a client that resolved its own preset sends the two instants and keeps the name only as a
+/// label. A range with no bounds is resolved here instead, in the daemon's own zone.
+///
 /// A custom range with no bounds is treated as today rather than as all of history: a client that
 /// forgot to send them gets a cheap answer, not the whole ledger.
 pub fn resolve_window(
@@ -28,10 +33,10 @@ pub fn resolve_window(
     until: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> (DateTime<Utc>, DateTime<Utc>) {
+    if let (Some(a), Some(b)) = (since, until) {
+        return if a <= b { (a, b) } else { (b, a) };
+    }
     if range == Range::Custom {
-        if let (Some(a), Some(b)) = (since, until) {
-            return if a <= b { (a, b) } else { (b, a) };
-        }
         if let Some(a) = since {
             return (a.min(now), now);
         }
@@ -313,10 +318,27 @@ mod tests {
     }
 
     #[test]
-    fn a_named_range_ignores_bounds_it_was_not_given() {
+    fn a_named_range_with_no_bounds_resolves_to_local_calendar_days() {
+        use chrono::{Local, Timelike};
         let (from, to) = resolve_window(Range::Week, None, None, now());
-        assert_eq!(from, Utc.with_ymd_and_hms(2026, 8, 30, 0, 0, 0).unwrap());
         assert_eq!(to, now());
+        let local = from.with_timezone(&Local);
+        assert_eq!(local.hour(), 0);
+        assert_eq!(
+            local.date_naive(),
+            now().with_timezone(&Local).date_naive() - chrono::Duration::days(6)
+        );
+    }
+
+    #[test]
+    fn a_named_range_takes_the_bounds_a_client_resolved_for_itself() {
+        // The desktop resolves its presets in the browser's zone and sends them outright, so a
+        // client in another zone than the daemon still reads the window it drew.
+        let since = Utc.with_ymd_and_hms(2026, 8, 29, 19, 0, 0).unwrap();
+        let until = Utc.with_ymd_and_hms(2026, 9, 5, 13, 30, 0).unwrap();
+        let (from, to) = resolve_window(Range::Week, Some(since), Some(until), now());
+        assert_eq!(from, since);
+        assert_eq!(to, until);
     }
 
     #[test]
@@ -330,8 +352,11 @@ mod tests {
 
     #[test]
     fn a_custom_range_missing_its_bounds_falls_back_to_today() {
+        use chrono::{Local, Timelike};
         let (from, to) = resolve_window(Range::Custom, None, None, now());
-        assert_eq!(from, Utc.with_ymd_and_hms(2026, 9, 5, 0, 0, 0).unwrap());
+        let local = from.with_timezone(&Local);
+        assert_eq!(local.date_naive(), now().with_timezone(&Local).date_naive());
+        assert_eq!(local.hour(), 0);
         assert_eq!(to, now());
     }
 
