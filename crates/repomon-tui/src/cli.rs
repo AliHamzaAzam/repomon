@@ -338,12 +338,49 @@ pub enum UsageCmd {
     /// Ingest cursors, the last scan, and any source that failed.
     Status,
     /// Where prices come from: LiteLLM freshness, override/built-in counts, and the last fetch's
-    /// error if it failed.
+    /// error if it failed. `set`/`reset` correct a model's rate the same way Settings > Usage's
+    /// inline editor does, through `config.set`.
     Rates {
-        /// Force an immediate LiteLLM fetch before printing, bypassing the daily cadence.
+        #[command(subcommand)]
+        cmd: Option<RatesCmd>,
+        /// Force an immediate LiteLLM fetch before printing, bypassing the daily cadence. Only
+        /// meaningful with no subcommand.
         #[arg(long)]
         refresh: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum RatesCmd {
+    /// Correct one model's rate. Every field is optional: an omitted one keeps whatever it
+    /// already resolves to (the LiteLLM snapshot or the built-in table), and an omitted field
+    /// that already has an override of its own keeps that override rather than clearing it.
+    Set {
+        /// The model id or family prefix to correct.
+        model: String,
+        #[arg(long, value_parser = parse_rate)]
+        input: Option<f64>,
+        #[arg(long, value_parser = parse_rate)]
+        output: Option<f64>,
+        #[arg(long = "cache-read", value_parser = parse_rate)]
+        cache_read: Option<f64>,
+        #[arg(long = "cache-write", value_parser = parse_rate)]
+        cache_write: Option<f64>,
+    },
+    /// Remove a model's override entirely, falling back to the LiteLLM snapshot or built-in
+    /// table.
+    Reset {
+        /// The model id or family prefix to reset.
+        model: String,
+    },
+}
+
+fn parse_rate(raw: &str) -> Result<f64, String> {
+    let rate: f64 = raw.parse().map_err(|_| "rate must be a number".to_string())?;
+    if !rate.is_finite() || rate < 0.0 {
+        return Err("rate must be a finite non-negative number".into());
+    }
+    Ok(rate)
 }
 
 /// Token usage and cost, read from the daemon's ledger.
@@ -421,7 +458,7 @@ async fn handle_usage(cmd: UsageCmd, config: &Config, socket: Option<PathBuf>) -
                 );
             }
         }
-        UsageCmd::Rates { refresh } => {
+        UsageCmd::Rates { cmd: None, refresh } => {
             let method = if refresh {
                 "usage.refresh_rates"
             } else {
@@ -431,8 +468,67 @@ async fn handle_usage(cmd: UsageCmd, config: &Config, socket: Option<PathBuf>) -
                 client.call_typed(method, None).await?;
             print!("{}", render_rates_table(&status, Utc::now()));
         }
+        UsageCmd::Rates {
+            cmd: Some(RatesCmd::Set {
+                model,
+                input,
+                output,
+                cache_read,
+                cache_write,
+            }),
+            ..
+        } => {
+            if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none() {
+                return Err(anyhow!(
+                    "usage rates set needs at least one of --input, --output, --cache-read, --cache-write"
+                ));
+            }
+            let patch = json!({
+                "usage_price_override_upsert": rates_override_patch(&model, input, output, cache_read, cache_write),
+            });
+            client.call("config.set", Some(patch)).await?;
+            println!("set override for {model}");
+        }
+        UsageCmd::Rates {
+            cmd: Some(RatesCmd::Reset { model }),
+            ..
+        } => {
+            client
+                .call(
+                    "config.set",
+                    Some(json!({ "usage_price_override_reset": model })),
+                )
+                .await?;
+            println!("reset override for {model}");
+        }
     }
     Ok(())
+}
+
+/// The `usage_price_override_upsert` param `config.set` expects: the model plus only the rate
+/// fields the operator actually named, so a field left off the command line neither sets nor
+/// clears anything for it.
+fn rates_override_patch(
+    model: &str,
+    input: Option<f64>,
+    output: Option<f64>,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+) -> Value {
+    let mut patch = json!({ "model": model });
+    if let Some(v) = input {
+        patch["input_per_mtok"] = json!(v);
+    }
+    if let Some(v) = output {
+        patch["output_per_mtok"] = json!(v);
+    }
+    if let Some(v) = cache_read {
+        patch["cache_read_per_mtok"] = json!(v);
+    }
+    if let Some(v) = cache_write {
+        patch["cache_write_per_mtok"] = json!(v);
+    }
+    patch
 }
 
 /// Render `usage.rates`' answer as the footnote line plus a small key/value table.
@@ -1978,6 +2074,96 @@ mod tests {
         let out = super::render_rates_table(&status, now);
         assert!(out.contains("failed"), "{out}");
         assert!(out.contains("error      connection timed out"), "{out}");
+    }
+
+    #[test]
+    fn usage_rates_set_binds_only_the_named_fields() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "repomon",
+            "usage",
+            "rates",
+            "set",
+            "claude-sonnet-5",
+            "--input",
+            "2.5",
+            "--output",
+            "10",
+        ])
+        .expect("usage rates set should parse");
+        match cli.command {
+            Some(super::Command::Usage {
+                cmd:
+                    super::UsageCmd::Rates {
+                        cmd:
+                            Some(super::RatesCmd::Set {
+                                model,
+                                input,
+                                output,
+                                cache_read,
+                                cache_write,
+                            }),
+                        ..
+                    },
+            }) => {
+                assert_eq!(model, "claude-sonnet-5");
+                assert_eq!(input, Some(2.5));
+                assert_eq!(output, Some(10.0));
+                assert_eq!(cache_read, None);
+                assert_eq!(cache_write, None);
+            }
+            _ => panic!("expected `usage rates set`"),
+        }
+    }
+
+    #[test]
+    fn usage_rates_reset_binds_the_model() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["repomon", "usage", "rates", "reset", "gpt-6"])
+            .expect("usage rates reset should parse");
+        match cli.command {
+            Some(super::Command::Usage {
+                cmd:
+                    super::UsageCmd::Rates {
+                        cmd: Some(super::RatesCmd::Reset { model }),
+                        ..
+                    },
+            }) => assert_eq!(model, "gpt-6"),
+            _ => panic!("expected `usage rates reset`"),
+        }
+    }
+
+    #[test]
+    fn usage_rates_with_no_subcommand_still_takes_the_refresh_flag() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["repomon", "usage", "rates", "--refresh"])
+            .expect("usage rates --refresh should parse");
+        match cli.command {
+            Some(super::Command::Usage {
+                cmd: super::UsageCmd::Rates { cmd: None, refresh },
+            }) => assert!(refresh),
+            _ => panic!("expected bare `usage rates --refresh`"),
+        }
+    }
+
+    #[test]
+    fn usage_rates_set_rejects_invalid_numbers() {
+        use clap::Parser;
+        for rate in ["NaN", "inf", "-1", "abc"] {
+            assert!(crate::Cli::try_parse_from([
+                "repomon", "usage", "rates", "set", "test-model", "--input", rate,
+            ]).is_err(), "accepted {rate}");
+        }
+    }
+
+    #[test]
+    fn rates_override_patch_includes_only_the_named_fields() {
+        let patch = super::rates_override_patch("claude-sonnet-5", Some(2.5), None, None, Some(3.75));
+        assert_eq!(patch["model"], "claude-sonnet-5");
+        assert_eq!(patch["input_per_mtok"], 2.5);
+        assert_eq!(patch["cache_write_per_mtok"], 3.75);
+        assert!(patch.get("output_per_mtok").is_none());
+        assert!(patch.get("cache_read_per_mtok").is_none());
     }
 
     #[test]
