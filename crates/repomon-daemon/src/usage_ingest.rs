@@ -318,6 +318,28 @@ fn rotated_window(sorted: &[(SystemTime, Source)], window: usize, offset: usize)
         .collect()
 }
 
+/// Keep the hottest half on every pass, rotating only through the older tail.
+fn scan_window(
+    sorted: &[(SystemTime, Source)],
+    budget: usize,
+    rotation: usize,
+) -> (Vec<Source>, usize) {
+    if sorted.len() <= budget {
+        return (rotated_window(sorted, budget, 0), 0);
+    }
+    let head = (budget / 2).max(1).min(budget);
+    let tail_budget = budget - head;
+    let tail = &sorted[head..];
+    let mut sources: Vec<_> = sorted[..head].iter().map(|(_, s)| s.clone()).collect();
+    sources.extend(rotated_window(tail, tail_budget, rotation));
+    let next = if tail_budget > 0 {
+        (rotation + tail_budget) % tail.len()
+    } else {
+        0
+    };
+    (sources, next)
+}
+
 fn read_dir(path: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(path)
         .map(|rd| rd.flatten().map(|e| e.path()).collect())
@@ -488,17 +510,11 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
     let mut by_recency = all.clone();
     by_recency.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
 
-    // Rotate the bounded walk so changed old files eventually get their normal append scan.
+    // Recent transcripts stay fresh on every pass while the archive still makes progress.
     let rotation = ctx
         .usage_scan_rotation
         .load(std::sync::atomic::Ordering::Relaxed);
-    let walked = rotated_window(&by_recency, budget, rotation);
-    let total = by_recency.len();
-    let next_rotation = if total > budget {
-        (rotation + budget) % total
-    } else {
-        0
-    };
+    let (walked, next_rotation) = scan_window(&by_recency, budget, rotation);
     ctx.usage_scan_rotation
         .store(next_rotation, std::sync::atomic::Ordering::Relaxed);
 
@@ -1144,6 +1160,41 @@ mod tests {
         assert!(second.iter().any(|s| s.path == Path::new("299.jsonl")));
         assert_eq!(rotated_window(&sources, 500, 0).len(), 300);
         assert!(rotated_window(&[], 200, 0).is_empty());
+    }
+
+    #[test]
+    fn newest_ten_are_scanned_every_pass_and_old_tail_is_reached() {
+        let sources: Vec<_> = (0..1000)
+            .map(|i| {
+                (
+                    SystemTime::UNIX_EPOCH,
+                    Source {
+                        path: PathBuf::from(format!("{i}.jsonl")),
+                        kind: SourceKind::Claude,
+                        account: "default".into(),
+                        cwd_hint: None,
+                        model_hint: String::new(),
+                    },
+                )
+            })
+            .collect();
+        let mut rotation = 0;
+        let mut visited_old = false;
+        for _ in 0..10 {
+            let (walked, next) = scan_window(&sources, 200, rotation);
+            rotation = next;
+            assert_eq!(walked.len(), 200);
+            let paths: std::collections::HashSet<_> =
+                walked.iter().map(|s| s.path.clone()).collect();
+            assert_eq!(paths.len(), 200, "head and tail must not overlap");
+            for i in 0..10 {
+                assert!(paths.contains(&PathBuf::from(format!("{i}.jsonl"))));
+            }
+            visited_old |= paths.contains(Path::new("900.jsonl"));
+        }
+        assert!(visited_old);
+        assert!(scan_window(&sources, 0, 0).0.is_empty());
+        assert_eq!(scan_window(&sources, 1, 10).0[0].path, Path::new("0.jsonl"));
     }
 
     #[tokio::test]

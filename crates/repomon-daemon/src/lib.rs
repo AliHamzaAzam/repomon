@@ -294,10 +294,8 @@ pub struct Ctx {
     pub usage_refresh_inflight: Mutex<Option<u64>>,
     /// Wakes the usage-ledger ingest loop for an immediate pass.
     pub usage_ingest_wake: Notify,
-    /// The newest-first ingest walk's rotation offset (see `usage_ingest::rotated_window`).
-    /// Advances by the scan budget each pass once there are more sources than fit one window, so
-    /// an old source outside the newest window is still eventually walked instead of being
-    /// permanently shadowed. Stays 0 forever while everything fits in one window.
+    /// Offset into the older tail of the ingest walk. The newest half of the scan budget is
+    /// visited on every pass; only the remaining half rotates.
     pub usage_scan_rotation: AtomicUsize,
     /// Held for the duration of an ingest pass, so `usage.ingest_now` reports honestly and two
     /// passes never read the same file at once.
