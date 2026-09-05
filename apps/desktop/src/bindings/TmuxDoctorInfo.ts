@@ -3,5 +3,16 @@ import type { TmuxDoctorSource } from "./TmuxDoctorSource";
 
 /**
  * Machine health and probe info for `tmux`.
+ *
+ * tmux is not a Windows dependency: Windows agents run through the bundled ConPTY
+ * `repomon-agent-host.exe` instead ([`AgentHostDoctorInfo`]). The field stays for wire
+ * compatibility, but on Windows [`Self::not_applicable`] is set and the probed values
+ * underneath it are meaningless — clients must not show a tmux row or count it toward an
+ * "all good" summary there.
  */
-export type TmuxDoctorInfo = { available: boolean, version: string | null, source: TmuxDoctorSource | null, path: string | null, };
+export type TmuxDoctorInfo = { available: boolean, version: string | null, source: TmuxDoctorSource | null, path: string | null, 
+/**
+ * True on Windows, where tmux plays no role. Older clients that don't know this field
+ * default it to `false` and keep their pre-Windows behavior.
+ */
+not_applicable: boolean, };
