@@ -337,6 +337,13 @@ pub enum UsageCmd {
     Ingest,
     /// Ingest cursors, the last scan, and any source that failed.
     Status,
+    /// Where prices come from: LiteLLM freshness, override/built-in counts, and the last fetch's
+    /// error if it failed.
+    Rates {
+        /// Force an immediate LiteLLM fetch before printing, bypassing the daily cadence.
+        #[arg(long)]
+        refresh: bool,
+    },
 }
 
 /// Token usage and cost, read from the daemon's ledger.
@@ -414,8 +421,42 @@ async fn handle_usage(cmd: UsageCmd, config: &Config, socket: Option<PathBuf>) -
                 );
             }
         }
+        UsageCmd::Rates { refresh } => {
+            let method = if refresh {
+                "usage.refresh_rates"
+            } else {
+                "usage.rates"
+            };
+            let status: repomon_core::pricing::RatesStatus =
+                client.call_typed(method, None).await?;
+            print!("{}", render_rates_table(&status, Utc::now()));
+        }
     }
     Ok(())
+}
+
+/// Render `usage.rates`' answer as the footnote line plus a small key/value table.
+fn render_rates_table(status: &repomon_core::pricing::RatesStatus, now: chrono::DateTime<Utc>) -> String {
+    let mut out = String::new();
+    out.push_str(&repomon_core::pricing::format_rates_footnote(status, now));
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&format!("litellm    {}\n", status.source_counts.litellm));
+    out.push_str(&format!("overrides  {}\n", status.source_counts.overrides));
+    out.push_str(&format!("builtin    {}\n", status.source_counts.builtin));
+    if let Some(at) = status.fetched_at {
+        out.push_str(&format!("fetched    {}\n", at.to_rfc3339()));
+    }
+    if let Some(at) = status.next_refresh_at {
+        out.push_str(&format!("next       {}\n", at.to_rfc3339()));
+    }
+    if let Some(etag) = &status.etag {
+        out.push_str(&format!("etag       {etag}\n"));
+    }
+    if let Some(err) = &status.last_error {
+        out.push_str(&format!("error      {err}\n"));
+    }
+    out
 }
 
 async fn print_usage(
@@ -1894,6 +1935,44 @@ pub fn shell_init(shell: clap_complete::Shell) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rates_table_reports_the_footnote_and_the_source_breakdown() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+        let status = repomon_core::pricing::RatesStatus {
+            source_counts: repomon_core::pricing::RateSourceCounts {
+                builtin: 4,
+                litellm: 12,
+                overrides: 2,
+            },
+            fetched_at: Some(now - chrono::Duration::hours(3)),
+            etag: Some("\"snap-1\"".to_string()),
+            next_refresh_at: Some(now + chrono::Duration::hours(21)),
+            last_error: None,
+            enabled: true,
+        };
+        let out = super::render_rates_table(&status, now);
+        assert!(out.contains("LiteLLM, updated 3h ago (12 models)"), "{out}");
+        assert!(out.contains("litellm    12"), "{out}");
+        assert!(out.contains("overrides  2"), "{out}");
+        assert!(out.contains("builtin    4"), "{out}");
+        assert!(out.contains("etag       \"snap-1\""), "{out}");
+    }
+
+    #[test]
+    fn rates_table_surfaces_a_last_error() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+        let status = repomon_core::pricing::RatesStatus {
+            last_error: Some("connection timed out".to_string()),
+            enabled: true,
+            ..Default::default()
+        };
+        let out = super::render_rates_table(&status, now);
+        assert!(out.contains("failed"), "{out}");
+        assert!(out.contains("error      connection timed out"), "{out}");
+    }
+
     #[test]
     fn completions_render_contains_binary_name() {
         use clap::CommandFactory;
