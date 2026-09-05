@@ -54,18 +54,18 @@
   --ansi-black: hsl(204 22% 10%);
   --ansi-red: hsl(4 70% 46%);
   --ansi-green: hsl(150 45% 33%);
-  --ansi-yellow: hsl(38 85% 34%);
+  --ansi-yellow: hsl(38 85% 30%);
   --ansi-blue: hsl(210 62% 42%);
   --ansi-magenta: hsl(285 40% 46%);
-  --ansi-cyan: hsl(180 50% 32%);
-  --ansi-white: hsl(204 14% 62%);
-  --ansi-bright-black: hsl(204 12% 44%);
-  --ansi-bright-red: hsl(4 78% 54%);
-  --ansi-bright-green: hsl(150 44% 40%);
-  --ansi-bright-yellow: hsl(38 88% 42%);
-  --ansi-bright-blue: hsl(210 66% 52%);
-  --ansi-bright-magenta: hsl(285 46% 56%);
-  --ansi-bright-cyan: hsl(180 52% 40%);
+  --ansi-cyan: hsl(180 50% 29%);
+  --ansi-white: hsl(204 14% 42%);
+  --ansi-bright-black: hsl(204 12% 40%);
+  --ansi-bright-red: hsl(4 78% 45%);
+  --ansi-bright-green: hsl(150 44% 32%);
+  --ansi-bright-yellow: hsl(38 88% 30%);
+  --ansi-bright-blue: hsl(210 66% 43%);
+  --ansi-bright-magenta: hsl(285 46% 46%);
+  --ansi-bright-cyan: hsl(180 52% 28%);
   --ansi-bright-white: hsl(203 31% 21%);
 }
 
@@ -91,7 +91,7 @@
   --ansi-magenta: hsl(285 45% 67%);
   --ansi-cyan: hsl(176 45% 58%);
   --ansi-white: hsl(210 14% 87%);
-  --ansi-bright-black: hsl(210 10% 44%);
+  --ansi-bright-black: hsl(210 10% 54%);
   --ansi-bright-red: hsl(4 100% 73%);
   --ansi-bright-green: hsl(150 58% 67%);
   --ansi-bright-yellow: hsl(40 86% 70%);
@@ -255,19 +255,20 @@
 /* One focus ring, in the accent, on every control that can take keyboard focus. `.focus-ring`
    is kept for the components that already opt in; the element rules below cover the ones that
    never did, so a keyboard user is never left guessing where they are. The terminal's hidden
-   textarea and the code editor's content surface draw their own cursors, so they are excluded,
-   and `.settings-input` keeps its border-and-shadow treatment (its own rule is more specific). */
+   textarea and the code editor's content surface draw their own cursors, `.settings-input` keeps
+   its border-and-shadow treatment, and the split handle draws its own bar, so those are excluded
+   here explicitly (this rule is unlayered and would otherwise outrank their opt-outs). */
 .focus-ring:focus-visible,
 button:focus-visible,
 a[href]:focus-visible,
-input:not(.xterm-helper-textarea):focus-visible,
+input:not(.xterm-helper-textarea):not(.settings-input):focus-visible,
 select:focus-visible,
 textarea:not(.xterm-helper-textarea):focus-visible,
 summary:focus-visible,
 [role="tab"]:focus-visible,
 [role="option"]:focus-visible,
 [role="menuitem"]:focus-visible,
-[tabindex]:not(.cm-content):not(.cm-editor):not(.xterm):focus-visible {
+[tabindex]:not(.cm-content):not(.cm-editor):not(.xterm):not(.resizable-split-handle):focus-visible {
   outline: 2px solid var(--signal);
   outline-offset: 1px;
 }
@@ -618,7 +619,8 @@ summary:focus-visible,
    step's primary action stays above the fold. */
 @media (max-height: 720px) {
   .modal-card {
-    max-height: 94vh;
+    /* The backdrop keeps 1.5rem of padding on each side, so the card fits inside it. */
+    max-height: calc(100vh - 3rem);
   }
 
   .onboarding-page {

@@ -239,7 +239,7 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                 return (
                   <button
                     type="button"
-                    class={`group/roster-row flex w-full items-start gap-2.5 rounded-lg border border-line/40 bg-raised/40 p-2 text-left transition-all duration-150 hover:bg-raised hover:border-line hover:shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-signal active:scale-[0.99] cursor-pointer ${
+                    class={`group/roster-row flex w-full items-start gap-2.5 rounded-lg border border-line/40 bg-raised/40 p-2 text-left transition-all duration-150 hover:bg-raised hover:border-line hover:shadow-xs active:scale-[0.99] cursor-pointer ${
                       props.reorderable ? "cursor-grab active:cursor-grabbing" : ""
                     }`}
                     {...(draggableRow() ? rowDrag.itemHandlers(agentSessionTargetId(agent)!) : {})}

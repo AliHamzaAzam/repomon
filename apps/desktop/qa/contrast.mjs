@@ -18,6 +18,7 @@ const css = readFileSync(path.resolve(here, "../src/index.css"), "utf-8");
 
 const TEXT_TOKENS = ["--foreground", "--muted", "--signal", "--attention", "--fault"];
 const GROUNDS = ["--background", "--surface", "--raised"];
+const ANSI_TOKENS = ["--ansi-black", "--ansi-red", "--ansi-green", "--ansi-yellow", "--ansi-blue", "--ansi-magenta", "--ansi-cyan", "--ansi-white", "--ansi-bright-black", "--ansi-bright-red", "--ansi-bright-green", "--ansi-bright-yellow", "--ansi-bright-blue", "--ansi-bright-magenta", "--ansi-bright-cyan", "--ansi-bright-white"];
 const CHART_TOKENS = ["--chart-1", "--chart-2", "--chart-3", "--chart-4", "--chart-5", "--chart-6"];
 
 function parseBlocks(source) {
@@ -82,8 +83,11 @@ let failures = 0;
 for (const [selector, vars] of blocks) {
   if (only && selector !== only) continue;
   if (!vars["--background"] && !vars["--chart-1"]) continue;
-  // A theme inherits :root, and every dark theme also inherits the shared dark chart steps.
-  const resolved = { ...root, ...vars };
+  // A theme inherits :root, and every dark theme is applied together with `.dark`, so its
+  // unset tokens (chart steps, the ANSI palette) resolve through that block, not :root.
+  const darkFamily = /^\.(dark|theme-(dark|midnight|nord|dracula))/.test(selector);
+  const dark = darkFamily && selector !== ".dark" ? (blocks.get(".dark") ?? {}) : {};
+  const resolved = { ...root, ...dark, ...vars };
   const color = (name) => parseColor(resolved[name] ?? "");
   if (!color("--background")) continue;
 
@@ -108,6 +112,20 @@ for (const [selector, vars] of blocks) {
     const ok = r >= 3;
     if (!ok) failures += 1;
     rows.push(`${ok ? "ok  " : "FAIL"} ${r.toFixed(2).padStart(5)}  ${token} on --surface (3:1 floor)`);
+  }
+  const background = color("--background");
+  for (let i = 0; i < ANSI_TOKENS.length; i += 1) {
+    const token = ANSI_TOKENS[i];
+    const a = color(token);
+    if (!a || !background) continue;
+    // ANSI black is the pane ground's own family by convention (TUIs paint it as a background,
+    // never as running text), so it is the one slot exempt from the text floor.
+    if (token === "--ansi-black") continue;
+    const r = ratio(a, background);
+    // The terminal draws these as text on the pane ground: 4.5:1 like any other body text.
+    const ok = r >= 4.5;
+    if (!ok) failures += 1;
+    rows.push(`${ok ? "ok  " : "FAIL"} ${r.toFixed(2).padStart(5)}  ${token} on --background`);
   }
   const focus = ratio(color("--signal"), color("--background"));
   const focusOk = focus >= 3;

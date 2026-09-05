@@ -542,7 +542,7 @@ function App(props: AppProps) {
           activateLabel="About Repomon"
         />
 
-        <div class="header-toolbar flex min-w-0 items-center" role="toolbar" aria-label="Panels">
+        <div class="header-toolbar flex min-w-0 items-center" role="group" aria-label="Panels">
           <button
             type="button"
             class={`focus-ring flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors ${
