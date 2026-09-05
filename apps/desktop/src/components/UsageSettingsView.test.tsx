@@ -148,6 +148,17 @@ describe("UsageSettingsView", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("does not reload model rates for unrelated config patches", async () => {
+    const [config, setConfig] = createSignal(settings);
+    render(() => <UsageSettingsView settings={config()} patch={vi.fn()} />);
+    await screen.findByRole("table");
+    setConfig({ ...settings, usage_enabled: false });
+    await Promise.resolve();
+    expect(rpc.mock.calls.filter(([m]) => m === "usage.models")).toHaveLength(1);
+    setConfig({ ...settings, usage_refresh_prices: false });
+    await waitFor(() => expect(rpc.mock.calls.filter(([m]) => m === "usage.models")).toHaveLength(2));
+  });
+
   it("ignores a stale rates read after the refresh preference changes", async () => {
     let resolveOld!: (value: ModelRateRow[]) => void;
     rpc.mockImplementation(async (method) => method === "usage.models" ? rows : status);

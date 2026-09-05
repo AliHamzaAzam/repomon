@@ -103,8 +103,9 @@ export default function UsageSettingsView(props: UsageSettingsViewProps) {
     }
   }
 
+  const refreshPrices = createMemo(() => props.settings.usage_refresh_prices);
   createEffect(() => {
-    props.settings.usage_refresh_prices;
+    refreshPrices();
     void load();
   });
   createEffect(() => setFilter(props.initialFilter ?? ""));

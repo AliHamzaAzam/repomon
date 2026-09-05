@@ -81,6 +81,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         27,
         include_str!("../../migrations/0027_usage_ingest_version.sql"),
     ),
+    (28, include_str!("../../migrations/0028_usage_events_model.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -5278,6 +5279,31 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].headline.is_none());
         assert_eq!(rows[0].turns, 0);
+    }
+
+    #[test]
+    fn migration_28_indexes_model_activity_on_fresh_and_existing_databases() {
+        for existing in [false, true] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            if existing {
+                for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 27) {
+                    conn.execute_batch(sql).unwrap();
+                    conn.pragma_update(None, "user_version", target).unwrap();
+                }
+                conn.execute("INSERT INTO usage_events(at, agent_kind, model, account, source_path, source_offset) VALUES ('2026-09-01T00:00:00Z', 'claude-code', 'test-model', 'default', 'fixture', 0)", []).unwrap();
+            }
+            init(&mut conn).unwrap();
+            // Reopening an already-migrated database is idempotent.
+            run_migrations(&mut conn).unwrap();
+            let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert!(version >= 28);
+            let mut stmt = conn.prepare("EXPLAIN QUERY PLAN SELECT model, MAX(at), SUM(CASE WHEN at >= ?1 THEN input_tokens + output_tokens + cache_read_tokens + cache_write_tokens ELSE 0 END) FROM usage_events GROUP BY model ORDER BY model ASC").unwrap();
+            let plan: Vec<String> = stmt.query_map(["2026-08-01T00:00:00Z"], |r| r.get(3)).unwrap().map(|r| r.unwrap()).collect();
+            assert!(plan.iter().any(|line| line.contains("idx_usage_events_model")), "{plan:?}");
+            assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+            let count: i64 = conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, i64::from(existing));
+        }
     }
 
     #[tokio::test]
