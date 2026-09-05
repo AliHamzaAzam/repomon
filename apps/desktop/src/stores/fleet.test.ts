@@ -576,3 +576,39 @@ describe("the repomind home", () => {
     expect(live.urgent).toBe(1);
   });
 });
+
+
+describe("manual usage refresh", () => {
+  it("waits for the RPC before reloading quota age and today's cost", async () => {
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => { complete = resolve; });
+    let fresh = false;
+    let loads = 0;
+    const source: FleetSource = {
+      load: async () => { loads += 1; return {
+        repos: [], lanes: [], terminals: [], sortMode: null, tabSortMode: null, sortReposByActivity: null,
+        usage: [{ key: "default", label: "main", age_secs: fresh ? 0 : 120, report: { windows: [] } }],
+        costToday: fresh ? 12 : 10,
+      }; },
+      refreshUsage: async () => { await pending; fresh = true; return { refreshed: true, reason: "ok", detail: null, snapshot: [] }; },
+      subscribe: async () => () => {},
+    };
+    const { fleet, teardown } = createRoot((dispose) => {
+      const fleet = createFleetStore(source);
+      fleet.start();
+      return { fleet, teardown: () => { fleet.stop(); dispose(); } };
+    });
+    try {
+      await fleet.refresh();
+      const before = loads;
+      const refresh = fleet.refreshUsage();
+      await Promise.resolve();
+      expect(loads).toBe(before);
+      expect(fleet.costToday()).toBe(10);
+      complete();
+      expect((await refresh)?.reason).toBe("ok");
+      expect(fleet.focusedUsage()?.age_secs).toBe(0);
+      expect(fleet.costToday()).toBe(12);
+    } finally { teardown(); }
+  });
+});

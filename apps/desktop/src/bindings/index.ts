@@ -84,3 +84,6 @@ export type { UsageSummary } from "./UsageSummary";
 export type { UsageTimeline } from "./UsageTimeline";
 export type { UsageTotals } from "./UsageTotals";
 export type { WorkSession } from "./WorkSession";
+
+export type { UsageRefreshResult } from "./UsageRefreshResult";
+export type { UsageRefreshReason } from "./UsageRefreshReason";

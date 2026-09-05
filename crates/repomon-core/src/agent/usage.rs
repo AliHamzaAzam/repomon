@@ -55,6 +55,44 @@ pub struct AccountUsage {
     pub age_secs: u64,
 }
 
+/// Why a manual `usage.refresh` did or did not change anything. A manual request bypasses the
+/// probe watcher's five-minute freshness cooldown (it never reports `Cooldown` for that reason);
+/// `Cooldown` here instead means a refresh was already in flight when this one arrived, so it was
+/// skipped rather than starting a second one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum UsageRefreshReason {
+    /// At least one account's usage was freshly probed.
+    Ok,
+    /// `[usage_probe]` is off in Settings.
+    ProbeDisabled,
+    /// No agent kind the probe knows how to read is currently running.
+    NoActiveKind,
+    /// A refresh was already in flight; this request did not start another probe round.
+    Cooldown,
+    /// The probe round did not finish inside the RPC's bounded wait; it may still be running.
+    Timeout,
+    /// Every eligible account's probe failed.
+    Error,
+}
+
+/// The outcome of a manually-triggered usage refresh, returned by `usage.refresh`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct UsageRefreshResult {
+    /// Whether this call's probe round actually refreshed at least one account.
+    pub refreshed: bool,
+    pub reason: UsageRefreshReason,
+    /// A short, human-readable elaboration, set for the non-`ok` reasons that benefit from one.
+    pub detail: Option<String>,
+    /// The usage snapshot after the round, same shape as `usage.get`. Present even when
+    /// `refreshed` is false, so a client can always re-render from the response.
+    pub snapshot: Vec<AccountUsage>,
+}
+
 /// Parse Claude's `/usage` screen. Sections: "Current session" (the 5-hour window), "Current week
 /// (all models)", and a model-specific weekly ("(Opus)"/"(Sonnet only)"). Returns `None` when no
 /// percentage is found anywhere (a blank/loading/trust screen yields nothing, never fake zeros).

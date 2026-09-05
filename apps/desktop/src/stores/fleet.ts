@@ -1,7 +1,7 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
-import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
+import type { AccountUsage, UsageRefreshResult, AgentSession, Lane, Repo } from "../bindings";
 import { daemonCall, subscribeDaemon, type DaemonEvent } from "../ipc/rpc";
 
 export interface FleetSnapshot {
@@ -24,7 +24,7 @@ export interface FleetSnapshot {
 
 export interface FleetSource {
   load(): Promise<FleetSnapshot>;
-  refreshUsage(): Promise<void>;
+  refreshUsage(): Promise<UsageRefreshResult | void>;
   subscribe(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
 }
 
@@ -51,7 +51,7 @@ export const daemonFleetSource: FleetSource = {
     };
   },
   refreshUsage: async () => {
-    await daemonCall("usage.refresh");
+    return daemonCall("usage.refresh");
   },
   subscribe: subscribeDaemon,
 };
@@ -529,12 +529,14 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   const counts = createMemo(() => fleetCounts(fleetLanes()));
 
+  let loadToken = 0;
   async function refresh() {
     if (!active) return;
+    const token = ++loadToken;
     setLoading(true);
     try {
       const snapshot = await source.load();
-      if (!active) return;
+      if (!active || token !== loadToken) return;
       setRepoStore(reconcile(snapshot.repos, { key: "id" }));
       setLaneStore(reconcile(withSessionKeys(snapshot.lanes), { key: "id" }));
       setUsage(snapshot.usage);
@@ -561,16 +563,17 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
         setSelectedLaneId([...ordinary].sort(byPriority)[0]?.id ?? null);
       }
     } catch (cause) {
-      if (active) setError(cause instanceof Error ? cause.message : String(cause));
+      if (active && token === loadToken) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      if (active) setLoading(false);
+      if (active && token === loadToken) setLoading(false);
     }
   }
 
   async function refreshUsage() {
     if (!active) return;
-    await source.refreshUsage();
+    const result = await source.refreshUsage();
     await refresh();
+    return result;
   }
 
   function queueRefresh() {

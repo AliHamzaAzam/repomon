@@ -354,3 +354,15 @@ that model's entire override; resetting a missing key is a no-op. Both operation
 updated config view, persist `[usage.price_overrides]`, and update the daemon's live config.
 The next usage query re-prices history without a restart. Rate edits emit `event.usage.changed`
 as well as `event.config.changed` so open views reload their costs.
+
+### Manual usage refresh
+
+`usage.refresh` (no params) wakes ledger ingest and waits up to 15 seconds for one
+manual probe pass. Manual probes bypass the five-minute freshness cooldown. The
+result is `{ refreshed, reason, detail, snapshot }`, where `snapshot` has the same
+shape as `usage.get`. `reason` is `ok`, `probe_disabled`, `no_active_kind`,
+`cooldown` (another manual request is waiting), `timeout`, or `error`. `detail`
+is a short explanation or null. A timed-out probe can finish in the background;
+request IDs prevent its late completion from satisfying a newer request.
+Clients keep their refresh indicator active until the response, then re-read the
+fleet and today's ledger cost, displaying a brief inline notice for non-ok results.

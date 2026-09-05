@@ -4874,20 +4874,7 @@ pub async fn dispatch(
         // ---- usage ----
         // Per-account Claude usage scraped from `/usage` (empty unless [usage_probe] is on and a
         // local UI is active). Clients match an entry's `key` to the focused agent's `config_dir`.
-        "usage.get" => {
-            let usage = ctx.usage.lock().await;
-            let mut out: Vec<agent::AccountUsage> = usage
-                .iter()
-                .map(|(key, e)| agent::AccountUsage {
-                    key: key.clone(),
-                    label: e.label.clone(),
-                    report: e.report.clone(),
-                    age_secs: e.fetched_at.elapsed().as_secs(),
-                })
-                .collect();
-            out.sort_by(|a, b| a.key.cmp(&b.key));
-            to_value(out)
-        }
+        "usage.get" => to_value(crate::usage_watch::snapshot(ctx).await),
         // The ledger: token counts per turn, priced at query time. Reads are cheap and safe;
         // `usage.ingest_now` is the only one that touches the disk on demand.
         "usage.summary" => {
@@ -4971,12 +4958,7 @@ pub async fn dispatch(
                 "redigested": redigested,
             }))
         }
-        "usage.refresh" => {
-            // The watcher owns probe IO and its active-kind/local-TUI gates. Wake it now so the
-            // next pass bypasses only the five-minute freshness cooldown.
-            ctx.usage_refresh.notify_one();
-            Ok(Value::Null)
-        }
+        "usage.refresh" => to_value(crate::usage_watch::refresh(ctx).await),
 
         // Set/clear a user label for an opaque surfaced-session identity. Legacy callers send a
         // transcript id; current desktop clients send `win:<tmux-window>` for managed sessions.
@@ -12887,16 +12869,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_refresh_rpc_wakes_the_probe_watcher() {
+    async fn usage_refresh_rpc_disabled_wakes_ingest() {
         let store = repomon_core::Store::open_in_memory().unwrap();
         let ctx = Ctx::new(store, repomon_core::Config::default(), None);
         let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
-        let wake = ctx.usage_refresh.notified();
+        let wake = ctx.usage_ingest_wake.notified();
 
-        dispatch(&ctx, &sess, "usage.refresh", None).await.unwrap();
+        let result = dispatch(&ctx, &sess, "usage.refresh", None).await.unwrap();
+        assert_eq!(result["reason"], "probe_disabled");
+        assert_eq!(result["refreshed"], false);
         tokio::time::timeout(std::time::Duration::from_millis(100), wake)
             .await
-            .expect("usage.refresh should wake the watcher");
+            .expect("usage.refresh should wake ingest");
     }
 
     #[tokio::test]

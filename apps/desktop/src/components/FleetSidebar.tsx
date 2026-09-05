@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
-import type { AgentSession, Lane, Repo } from "../bindings";
+import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import { fleetCounts, laneIndicator, laneIndicatorTitle, type FleetStore } from "../stores/fleet";
 import type { ActionsStore } from "../stores/actions";
 import type { RepomindStore } from "../stores/repomind";
@@ -574,6 +574,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   // `fleet.loading()`, which also flips on every 1.2s poll tick and would make the icon flicker
   // continuously instead of spinning only for the click the user actually made.
   const [usageRefreshing, setUsageRefreshing] = createSignal(false);
+  const [usageNotice, setUsageNotice] = createSignal<string | null>(null);
+  let usageRequest = 0;
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => { usageRequest += 1; clearTimeout(noticeTimer); });
   // How wide the filter row actually renders at, so the chips can drop their labels for icons
   // before the row runs out of room, rather than letting the text truncate mid-word.
   let filterRowRef: HTMLDivElement | undefined;
@@ -590,13 +594,38 @@ export default function FleetSidebar(props: FleetSidebarProps) {
     onCleanup(() => observer.disconnect());
   });
 
+  // Keep the card visible through a skip notice even if the re-snapshot has no cached quota.
+  const cardUsage = createMemo<AccountUsage | null>((previous) =>
+    props.fleet.focusedUsage() ?? (usageRefreshing() || usageNotice() ? previous : null), null);
+
   const refreshUsage = async () => {
     if (usageRefreshing()) return;
+    const token = ++usageRequest;
+    clearTimeout(noticeTimer);
+    setUsageNotice(null);
     setUsageRefreshing(true);
     try {
-      await props.fleet.refreshUsage();
+      const result = await props.fleet.refreshUsage();
+      if (token !== usageRequest) return;
+      if (result && result.reason !== "ok") {
+        const notices = {
+          probe_disabled: "Usage probe is off in Settings",
+          no_active_kind: "No agent running to probe",
+          cooldown: "A usage refresh is already running",
+          timeout: "Probe timed out",
+          error: "Usage probe failed; try again",
+        };
+        setUsageNotice(notices[result.reason]);
+      }
+    } catch {
+      if (token === usageRequest) setUsageNotice("Usage refresh failed; try again");
     } finally {
-      setUsageRefreshing(false);
+      if (token === usageRequest) {
+        setUsageRefreshing(false);
+        noticeTimer = setTimeout(() => {
+          if (token === usageRequest) setUsageNotice(null);
+        }, 5000);
+      }
     }
   };
 
@@ -1064,7 +1093,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         )}
       </Show>
 
-      <Show when={props.fleet.focusedUsage()}>
+      <Show when={cardUsage()}>
         {(usage) => (
           <div class="border-t border-line bg-surface/50 p-2.5">
             {/* Rate Limits & Usage Quota */}
@@ -1091,6 +1120,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   </button>
                 </span>
               </div>
+              <Show when={usageNotice()}><p role="status" class="mb-1.5 text-[10px] text-muted">{usageNotice()}</p></Show>
               {/* A partial fleet double in a test may not carry the ledger; the line simply
                   does not render then. */}
               <Show when={props.fleet.costToday?.() != null}>

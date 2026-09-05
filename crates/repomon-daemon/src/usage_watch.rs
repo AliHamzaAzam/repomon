@@ -82,6 +82,82 @@ pub struct UsageEntry {
     pub fetched_at: Instant,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UsageRefreshRound {
+    pub request: u64,
+    pub reason: Option<agent::UsageRefreshReason>,
+}
+
+pub async fn snapshot(ctx: &Ctx) -> Vec<agent::AccountUsage> {
+    let usage = ctx.usage.lock().await;
+    let mut out: Vec<_> = usage
+        .iter()
+        .map(|(key, e)| agent::AccountUsage {
+            key: key.clone(),
+            label: e.label.clone(),
+            report: e.report.clone(),
+            age_secs: e.fetched_at.elapsed().as_secs(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
+}
+
+pub async fn refresh(ctx: &Ctx) -> agent::UsageRefreshResult {
+    refresh_with_timeout(ctx, Duration::from_secs(15)).await
+}
+
+async fn refresh_with_timeout(ctx: &Ctx, timeout: Duration) -> agent::UsageRefreshResult {
+    use agent::UsageRefreshReason as Reason;
+    ctx.usage_ingest_wake.notify_one();
+    let reason = if !ctx.config.read().await.usage_probe {
+        Reason::ProbeDisabled
+    } else if let Ok(_held) = ctx.usage_refresh_inflight.try_lock() {
+        let mut rounds = ctx.usage_refresh_watch.subscribe();
+        let request = ctx.usage_refresh_request.fetch_add(1, Ordering::Relaxed) + 1;
+        ctx.usage_refresh.notify_one();
+        match tokio::time::timeout(timeout, async {
+            loop {
+                rounds.changed().await.map_err(|_| ())?;
+                let round = rounds.borrow_and_update().clone();
+                if round.request >= request {
+                    return round.reason.ok_or(());
+                }
+            }
+        })
+        .await
+        {
+            Ok(Ok(reason)) => reason,
+            Ok(Err(())) => Reason::Error,
+            Err(_) => Reason::Timeout,
+        }
+    } else {
+        Reason::Cooldown
+    };
+    agent::UsageRefreshResult {
+        refreshed: reason == Reason::Ok,
+        reason,
+        detail: match reason {
+            Reason::Ok => None,
+            Reason::ProbeDisabled => Some("Usage probe is off in Settings".into()),
+            Reason::NoActiveKind => Some("No agent running to probe".into()),
+            Reason::Cooldown => Some("A usage refresh is already running".into()),
+            Reason::Timeout => Some("Probe timed out".into()),
+            Reason::Error => Some("Usage probe failed; try again".into()),
+        },
+        snapshot: snapshot(ctx).await,
+    }
+}
+
+fn finish_round(ctx: &Ctx, request: u64, reason: agent::UsageRefreshReason) {
+    if request > 0 {
+        ctx.usage_refresh_watch.send_replace(UsageRefreshRound {
+            request,
+            reason: Some(reason),
+        });
+    }
+}
+
 pub async fn usage_watcher(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -93,14 +169,20 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
             _ = ctx.usage_refresh.notified() => true,
         };
 
+        let request = if forced {
+            ctx.usage_refresh_request.load(Ordering::Relaxed)
+        } else {
+            0
+        };
         if !ctx.config.read().await.usage_probe {
             ctx.usage.lock().await.clear();
             last_round = None;
+            finish_round(&ctx, request, agent::UsageRefreshReason::ProbeDisabled);
             continue;
         }
         let ui_active =
             (*ctx.local_watcher_seen.lock().await).is_some_and(|t| t.elapsed() < LOCAL_TTL);
-        if !ui_active {
+        if !ui_active && !forced {
             continue;
         }
         if !usage_round_due(last_round, forced) {
@@ -153,12 +235,16 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
             }
         };
 
+        let mut attempted = 0;
+        let mut refreshed = false;
+        let mut timed_out = false;
         for acct in accounts {
             if let Some(active) = &active {
                 if !account_is_active(&acct.key, active) {
                     continue;
                 }
             }
+            attempted += 1;
             let tmux = ctx.backend.clone();
             let window = probe_window(&acct.label);
             let cwd = probe_cwd();
@@ -175,6 +261,7 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
                     // blocking thread to stop at its next checkpoint, so abandoned probes don't pile
                     // up driving tmux. Keep this account's last reading and carry on.
                     cancel.abort();
+                    timed_out = true;
                     tracing::warn!(
                         "usage probe for {} timed out; skipping this round",
                         acct.key
@@ -183,6 +270,7 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
                 }
             };
             if let Some(report) = report {
+                refreshed = true;
                 ctx.usage.lock().await.insert(
                     acct.key,
                     UsageEntry {
@@ -199,6 +287,19 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
         // `~/.codex` is removed).
         ctx.usage.lock().await.retain(|k, _| live.contains(k));
         last_round = Some(Instant::now());
+        finish_round(
+            &ctx,
+            request,
+            if refreshed {
+                agent::UsageRefreshReason::Ok
+            } else if attempted == 0 {
+                agent::UsageRefreshReason::NoActiveKind
+            } else if timed_out {
+                agent::UsageRefreshReason::Timeout
+            } else {
+                agent::UsageRefreshReason::Error
+            },
+        );
     }
 }
 
@@ -554,6 +655,63 @@ fn trust_accept_keys(pane: &str) -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn manual_refresh_reports_each_completed_reason_and_snapshot() {
+        for reason in [
+            agent::UsageRefreshReason::Ok,
+            agent::UsageRefreshReason::NoActiveKind,
+            agent::UsageRefreshReason::Error,
+            agent::UsageRefreshReason::ProbeDisabled,
+        ] {
+            let mut config = repomon_core::Config::default();
+            config.usage_probe = true;
+            let ctx = Ctx::new(repomon_core::Store::open_in_memory().unwrap(), config, None);
+            ctx.usage.lock().await.insert(
+                "codex".into(),
+                UsageEntry {
+                    report: parse_codex_status("5h limit: 90% left")
+                        .unwrap_or(UsageReport { windows: vec![] }),
+                    label: "codex".into(),
+                    fetched_at: Instant::now(),
+                },
+            );
+            let complete = async {
+                ctx.usage_refresh.notified().await;
+                finish_round(
+                    &ctx,
+                    ctx.usage_refresh_request.load(Ordering::Relaxed),
+                    reason,
+                );
+            };
+            let (result, ()) =
+                tokio::join!(refresh_with_timeout(&ctx, Duration::from_secs(1)), complete);
+            assert_eq!(result.reason, reason);
+            assert_eq!(result.refreshed, reason == agent::UsageRefreshReason::Ok);
+            assert_eq!(result.snapshot[0].key, "codex");
+            assert_eq!(result.snapshot[0].age_secs, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_is_bounded_and_rejects_a_late_previous_round() {
+        let mut config = repomon_core::Config::default();
+        config.usage_probe = true;
+        let ctx = Ctx::new(repomon_core::Store::open_in_memory().unwrap(), config, None);
+        let result = refresh_with_timeout(&ctx, Duration::from_millis(5)).await;
+        assert_eq!(result.reason, agent::UsageRefreshReason::Timeout);
+        let late = async {
+            ctx.usage_refresh.notified().await;
+            finish_round(&ctx, 1, agent::UsageRefreshReason::Ok);
+        };
+        let (result, ()) =
+            tokio::join!(refresh_with_timeout(&ctx, Duration::from_millis(10)), late);
+        assert_eq!(result.reason, agent::UsageRefreshReason::Timeout);
+        let _held = ctx.usage_refresh_inflight.lock().await;
+        let result = refresh(&ctx).await;
+        assert_eq!(result.reason, agent::UsageRefreshReason::Cooldown);
+        assert!(!result.refreshed);
+    }
 
     /// Build a [`WindowMeta`] for the gating tests below - only `name` and `agent_kind` matter
     /// to [`active_kinds`].

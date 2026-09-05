@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSession, Lane, Repo } from "../bindings";
+import { createSignal } from "solid-js";
+import type { AccountUsage, AgentSession, Lane, Repo } from "../bindings";
 import type { ActionsStore } from "../stores/actions";
 import { controllerSummary, isControllerRepo, type FleetStore } from "../stores/fleet";
 import type { RepomindStore } from "../stores/repomind";
@@ -472,7 +473,7 @@ describe("fleet sidebar hiding", () => {
     const pending = new Promise<void>((resolve) => {
       resolveRefresh = resolve;
     });
-    (fleet as any).refresh = vi.fn().mockReturnValue(pending);
+    (fleet as any).refreshUsage = vi.fn().mockReturnValue(pending);
     (fleet as any).focusedUsage = () => ({
       label: "claude-3-5-sonnet",
       age_secs: 15,
@@ -707,5 +708,22 @@ describe("the pinned Repomind row", () => {
     expect(group).not.toBeNull();
     // The row is the sidebar's first stop; `fleet.moveSelection` walks the same order.
     expect(row.compareDocumentPosition(group as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+
+describe("manual usage outcomes", () => {
+  it("shows a short inline notice when the probe is disabled", async () => {
+    const { fleet, actions } = stubs([], []);
+    const [usage, setUsage] = createSignal<AccountUsage | null>({ key: "default", label: "main", age_secs: 90, report: { windows: [] } });
+    fleet.focusedUsage = usage;
+    fleet.refreshUsage = vi.fn().mockImplementation(async () => {
+      setUsage(null);
+      return { refreshed: false, reason: "probe_disabled", detail: null, snapshot: [] };
+    });
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+    fireEvent.click(screen.getByLabelText("Refresh rate limit data"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Usage probe is off in Settings"));
+    expect(screen.getByLabelText("Refresh rate limit data")).not.toBeDisabled();
   });
 });

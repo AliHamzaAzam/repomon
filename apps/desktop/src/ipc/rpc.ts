@@ -45,6 +45,7 @@ import type {
   UsageRange,
   UsageSessionRow,
   UsageStatus,
+  UsageRefreshResult,
   UsageSummary,
   UsageTimeline,
   WorkSession,
@@ -388,7 +389,7 @@ interface RpcMap {
   "remote.revoke": { params: { name: string }; result: { revoked: boolean } };
   "system.doctor": { params: undefined; result: SystemDoctorResult };
   "usage.get": { params: undefined; result: AccountUsage[] };
-  "usage.refresh": { params: undefined; result: null };
+  "usage.refresh": { params: undefined; result: UsageRefreshResult };
   "usage.summary": { params: UsageWindowParams & { group_by: UsageGroupBy }; result: UsageSummary };
   "usage.timeline": {
     params: UsageWindowParams & { group_by: UsageGroupBy; bucket: UsageBucket };

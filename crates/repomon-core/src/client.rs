@@ -41,6 +41,15 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// Per-RPC ceiling. A timeout means the daemon stopped responding mid-call.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
+// Leave transport headroom for the daemon's bounded 15-second manual probe response.
+fn call_timeout(method: &str) -> Duration {
+    if method == "usage.refresh" {
+        Duration::from_secs(20)
+    } else {
+        CALL_TIMEOUT
+    }
+}
+
 type Pending = Mutex<HashMap<u64, oneshot::Sender<Response>>>;
 
 /// A connected daemon client. Cheap to clone; all clones share one connection that reconnects
@@ -134,7 +143,7 @@ impl DaemonClient {
                 continue; // attempt == 1 falls through to the error below
             }
 
-            match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+            match tokio::time::timeout(call_timeout(method), rx).await {
                 Ok(Ok(resp)) => {
                     if let Some(err) = resp.error {
                         return Err(err.into());
@@ -335,6 +344,12 @@ async fn keepalive_loop(weak: Weak<Inner>, interval: Duration) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_refresh_timeout_leaves_room_for_the_daemon_outcome() {
+        assert!(super::call_timeout("usage.refresh") > std::time::Duration::from_secs(15));
+        assert_eq!(super::call_timeout("usage.get"), super::CALL_TIMEOUT);
+    }
+
     use super::*;
     use crate::protocol::write_message;
     use std::sync::atomic::AtomicUsize;

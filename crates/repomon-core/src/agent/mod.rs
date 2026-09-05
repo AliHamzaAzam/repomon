@@ -39,8 +39,8 @@ pub use tmux::{
     shell_quote, tmux_program,
 };
 pub use usage::{
-    AccountUsage, UsageReport, UsageWindow, parse_antigravity_usage, parse_codex_status,
-    parse_usage,
+    AccountUsage, UsageRefreshReason, UsageRefreshResult, UsageReport, UsageWindow,
+    parse_antigravity_usage, parse_codex_status, parse_usage,
 };
 #[cfg(windows)]
 pub use windows::WindowsBackend;

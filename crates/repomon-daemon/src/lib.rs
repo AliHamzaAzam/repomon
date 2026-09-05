@@ -39,7 +39,7 @@ use repomon_core::model::{Lane, LaneId};
 use repomon_core::protocol::Notification;
 use repomon_core::{Config, Lanes, Registry, Store, TmuxRuntime, Watcher, config};
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, RwLock, broadcast};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
 use conn::{ConnKind, ConnSession};
 
@@ -285,9 +285,17 @@ pub struct Ctx {
     /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
     /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a local UI is active.
     pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,
-    /// Wakes the usage watcher for a user-requested refresh, bypassing the normal five-minute
-    /// cadence while preserving its active-kind and local-UI gates.
+    /// Wakes a manual probe, bypassing freshness and UI-heartbeat checks while keeping the
+    /// opt-in and active-kind gates.
     pub usage_refresh: Notify,
+    /// Monotonic ticket for manual requests, including those whose bounded wait expired.
+    pub usage_refresh_request: AtomicU64,
+    /// Last completed manual pass, tagged so a late result cannot satisfy a newer request.
+    pub usage_refresh_watch: watch::Sender<usage_watch::UsageRefreshRound>,
+    /// Held for the duration of a manual `usage.refresh` RPC's wait. A second manual request
+    /// arriving while one is already in flight fails to acquire this and reports `Cooldown`
+    /// immediately instead of queuing another wait.
+    pub usage_refresh_inflight: Mutex<()>,
     /// Wakes the usage-ledger ingest loop for an immediate pass.
     pub usage_ingest_wake: Notify,
     /// Held for the duration of an ingest pass, so `usage.ingest_now` reports honestly and two
@@ -512,6 +520,9 @@ impl Ctx {
             quota_deadlines: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
             usage_refresh: Notify::new(),
+            usage_refresh_request: AtomicU64::new(0),
+            usage_refresh_watch: watch::channel(usage_watch::UsageRefreshRound::default()).0,
+            usage_refresh_inflight: Mutex::new(()),
             usage_ingest_wake: Notify::new(),
             usage_ingest_lock: Mutex::new(()),
             usage_rates: Mutex::new(usage_rates::RatesRuntime::new()),
