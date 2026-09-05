@@ -3,7 +3,7 @@ import { Portal } from "solid-js/web";
 
 import type { ActionsStore } from "../stores/actions";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
-import { BINDINGS, formatChord } from "../keymap";
+import { BINDINGS, formatChord, numberedPanelBindings } from "../keymap";
 import type { MessageStore } from "../stores/messages";
 import type { NotificationStore } from "../stores/notifications";
 import {
@@ -44,11 +44,13 @@ export interface ControlCenterProps {
   actions: ActionsStore;
   onToggleExtensions?: () => void;
   onToggleRepomind?: () => void;
+  /// Run a panel command by its keymap binding id. Absent in tests that only render the trigger.
+  onPanelCommand?: (id: string) => boolean;
 }
 
 interface PaletteItem {
   id: string;
-  category: "Actions" | "Lanes & Sessions" | "Repositories";
+  category: "Panels" | "Actions" | "Lanes & Sessions" | "Repositories";
   title: string;
   subtitle?: string;
   badge?: string;
@@ -105,6 +107,24 @@ export default function ControlCenter(props: ControlCenterProps) {
 
   const allItems = createMemo<PaletteItem[]>(() => {
     const items: PaletteItem[] = [];
+
+    // --- PANELS ---
+    // In chord order, which is toolbar order: the palette reads like the header it mirrors.
+    for (const binding of numberedPanelBindings()) {
+      items.push({
+        id: `panel-${binding.id}`,
+        category: "Panels",
+        title: binding.label,
+        icon: "command",
+        shortcut: formatChord(binding.chord),
+        run: () => {
+          // Running the control center from inside the control center would reopen the palette
+          // that just closed, so this row is simply where you already are.
+          if (binding.id === "panel.control") return;
+          props.onPanelCommand?.(binding.id);
+        },
+      });
+    }
 
     // --- ACTIONS ---
     items.push({
@@ -398,7 +418,7 @@ export default function ControlCenter(props: ControlCenterProps) {
         }`}
         onClick={() => (isOpen() ? closePalette() : openPalette())}
         aria-label="Command Palette"
-        title="Command Palette (⌘K)"
+        title={`Control (${chordFor("panel.control")})`}
       >
         <IconCommand size={13} />
         <span>Control</span>

@@ -6,6 +6,7 @@ import {
   findConflicts,
   formatChord,
   isMac,
+  numberedPanelBindings,
   type Binding,
   type KeymapScope,
   type KeymapSection,
@@ -94,7 +95,13 @@ export default function KeyboardHelp(props: KeyboardHelpProps) {
 
       <For each={SECTIONS}>
         {(section) => {
-          const rows = createMemo(() => matches().filter((binding) => binding.section === section));
+          // Numbered chords come first, in numeric order: the reader is looking up "what is
+          // mod+4", and a list sorted by anything else makes them scan for it.
+          const rows = createMemo(() => {
+            const inSection = matches().filter((binding) => binding.section === section);
+            const numbered = numberedPanelBindings(inSection);
+            return [...numbered, ...inSection.filter((binding) => !numbered.includes(binding))];
+          });
           return (
             <Show when={rows().length > 0}>
               <section class="space-y-1">

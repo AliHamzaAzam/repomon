@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRule, Lane, Playbook, Repo } from "../bindings";
 import { DaemonRpcError } from "../ipc/rpc";
-import { formatChord } from "../keymap";
+import { formatChord, numberedPanelBindings } from "../keymap";
 import type { ActionsStore } from "../stores/actions";
 import type { FleetStore } from "../stores/fleet";
 import { createMessageStore } from "../stores/messages";
@@ -219,6 +219,49 @@ describe("ControlCenter component UI", () => {
 
     return { fleet, actions, notifications, messages, setControlOpen };
   }
+
+  it("lists the numbered panel commands in numeric order", async () => {
+    const { fleet, actions, notifications, messages, setControlOpen } = setup();
+    render(() => (
+      <ControlCenter
+        fleet={fleet}
+        actions={actions}
+        notifications={notifications}
+        messages={messages}
+        onPanelCommand={() => true}
+      />
+    ));
+    setControlOpen(true);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    const expected = numberedPanelBindings().map((binding) => binding.label);
+    const rendered = Array.from(
+      screen.getByRole("listbox").querySelectorAll("[role='option']"),
+    ).map((node) => node.textContent ?? "");
+    const positions = expected.map((label) =>
+      rendered.findIndex((text) => text.startsWith(label)),
+    );
+    expect(positions.every((index) => index >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it("runs a panel command through the same handler the chord uses", async () => {
+    const { fleet, actions, notifications, messages, setControlOpen } = setup();
+    const onPanelCommand = vi.fn(() => true);
+    render(() => (
+      <ControlCenter
+        fleet={fleet}
+        actions={actions}
+        notifications={notifications}
+        messages={messages}
+        onPanelCommand={onPanelCommand}
+      />
+    ));
+    setControlOpen(true);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Toggle the usage view"));
+    expect(onPanelCommand).toHaveBeenCalledWith("panel.usage");
+  });
 
   it("opens palette via trigger button and renders search input", async () => {
     const { fleet, actions, notifications, messages } = setup();

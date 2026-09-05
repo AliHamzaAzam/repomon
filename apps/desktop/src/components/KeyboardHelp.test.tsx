@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BINDINGS, isMac } from "../keymap";
+import { BINDINGS, isMac, numberedPanelBindings } from "../keymap";
 import KeyboardHelp from "./KeyboardHelp";
 
 afterEach(() => {
@@ -14,6 +14,14 @@ describe("keyboard reference", () => {
     for (const binding of BINDINGS) {
       expect(screen.getByText(binding.label)).toBeInTheDocument();
     }
+  });
+
+  it("lists the numbered panel chords in numeric order", () => {
+    const { container } = render(() => <KeyboardHelp />);
+    const text = container.textContent ?? "";
+    const positions = numberedPanelBindings().map((binding) => text.indexOf(binding.label));
+    expect(positions.every((index) => index >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
   it("tags a non-global binding with its scope", () => {
