@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use repomon_core::client::DaemonClient;
+use repomon_core::launch::BOOT_WATCH_WINDOW;
 use repomon_core::service;
 use repomon_core::transport::{self, Endpoint};
 use serde::Serialize;
@@ -113,11 +114,31 @@ pub async fn daemon_start(app: AppHandle, state: State<'_, AppState>) -> Result<
         service::start().map_err(|e| e.to_string())?;
     } else {
         let socket = PathBuf::from(&endpoint);
-        repomon_core::launch::spawn_daemon(&socket).map_err(|e| e.to_string())?;
+        // Watch the child for its first seconds rather than firing and forgetting: a daemon that
+        // dies in the loader (no Visual C++ runtime) used to leave this button reporting success
+        // while the pill retried forever.
+        if let Err(error) =
+            repomon_core::launch::spawn_and_watch_boot(&socket, BOOT_WATCH_WINDOW).await
+        {
+            publish(
+                &app,
+                ConnectionSnapshot::retrying_from_launch(&endpoint, &error),
+            )
+            .await;
+            return Err(launch_message(&error));
+        }
     }
 
     publish(&app, ConnectionSnapshot::connecting(&endpoint)).await;
     Ok(())
+}
+
+/// The error plus its hint on one line, which is all a toast in the frontend can show.
+pub fn launch_message(error: &repomon_core::launch::DaemonLaunchError) -> String {
+    match error.hint() {
+        Some(hint) => format!("{error} {hint}"),
+        None => error.to_string(),
+    }
 }
 
 #[tauri::command]
@@ -144,7 +165,7 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
         service::start().map_err(|e| e.to_string())?;
     } else {
-        let _ = repomon_core::launch::spawn_daemon(&socket);
+        let _ = repomon_core::launch::spawn_and_watch_boot(&socket, BOOT_WATCH_WINDOW).await;
     }
 
     state.manual_stop.store(false, Ordering::SeqCst);
@@ -155,6 +176,28 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_message_appends_the_hint_when_there_is_one() {
+        let with_hint = repomon_core::launch::DaemonLaunchError::DaemonExited {
+            code: "exit code -1073741515 / 0xC0000135".into(),
+            log_tail: String::new(),
+            log_path: PathBuf::from("/tmp/logs/repomond.out.log"),
+        };
+        let message = launch_message(&with_hint);
+        assert!(message.contains("exited immediately"));
+        assert!(message.contains("Visual C++"));
+
+        let without_hint = repomon_core::launch::DaemonLaunchError::NotReachable {
+            endpoint: "/tmp/repomon-test.sock".into(),
+            detail: "could not connect to daemon at /tmp/repomon-test.sock".into(),
+            log_path: PathBuf::from("/tmp/logs/repomond.out.log"),
+        };
+        assert_eq!(
+            launch_message(&without_hint),
+            "could not connect to daemon at /tmp/repomon-test.sock"
+        );
+    }
 
     #[test]
     fn service_is_installed_classifies_correctly() {

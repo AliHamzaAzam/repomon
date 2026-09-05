@@ -19,7 +19,7 @@ use clap::Parser;
 use client::DaemonClient;
 use repomon_core::{Config, config};
 
-pub use repomon_core::launch::{connect_with_retry, ensure_daemon, spawn_daemon};
+pub use repomon_core::launch::{DaemonLaunchError, connect_with_retry, ensure_daemon, spawn_daemon};
 
 #[derive(Parser)]
 #[command(
@@ -63,6 +63,11 @@ pub async fn run_cli() -> Result<()> {
         match ensure_daemon(&config, cli.socket.clone()).await {
             Ok(c) => c,
             Err(e) => {
+                // The hint is the half of a Windows launch failure the message cannot carry: a
+                // missing Visual C++ runtime, or a pipe another session already owns.
+                if let Some(hint) = e.hint() {
+                    eprintln!("repomon: {hint}");
+                }
                 eprintln!("repomon: starting in-process daemon ({e})");
                 let (socket, guard) = start_embedded(&config).await?;
                 _embedded = Some(guard);

@@ -1870,8 +1870,15 @@ async fn stop_running(socket: &std::path::Path) -> bool {
 }
 
 async fn connect(socket: Option<PathBuf>, config: &Config) -> Result<DaemonClient> {
-    // Auto-start a detached daemon if one isn't already running.
-    crate::ensure_daemon(config, socket).await
+    // Auto-start a detached daemon if one isn't already running. The typed launch error carries
+    // a hint for the failures the message alone cannot explain; print it before flattening the
+    // error into anyhow for the usual CLI reporting.
+    crate::ensure_daemon(config, socket).await.map_err(|error| {
+        if let Some(hint) = error.hint() {
+            eprintln!("repomon: {hint}");
+        }
+        anyhow::Error::from(error)
+    })
 }
 
 async fn resolve_repo(client: &DaemonClient, key: &str) -> Result<Repo> {

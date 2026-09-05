@@ -659,6 +659,8 @@ describe("panel.git keybinding (App integration)", () => {
           phase: "starting",
           endpoint: "Resolving local daemon endpoint",
           message: null,
+          hint: null,
+          log_path: null,
           daemon: null,
         })}
       />
@@ -729,6 +731,8 @@ describe("header Git/Editor buttons (App integration)", () => {
           phase: "starting",
           endpoint: "Resolving local daemon endpoint",
           message: null,
+          hint: null,
+          log_path: null,
           daemon: null,
         })}
       />

@@ -3,6 +3,7 @@ import { For, Show, createEffect, createSignal } from "solid-js";
 import type { SystemDoctorResult } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
 import { isMac } from "../keymap";
+import DaemonBootRow from "./DaemonBootRow";
 import { AgentIcon, IconCheck, IconCopy, IconGitBranch, IconRefresh, IconTerminal } from "./icons";
 
 export function getSystemInstallCommand(tool: "tmux" | "git"): string {
@@ -140,6 +141,10 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
           <RecheckButton />
         </div>
       </Show>
+
+      {/* The one check that does not go through the daemon, so it still answers when the daemon
+          is the thing that is broken. */}
+      <DaemonBootRow />
 
       {/* Error Banner */}
       <Show when={doctorError()}>

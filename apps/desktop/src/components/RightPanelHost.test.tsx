@@ -152,6 +152,8 @@ describe("Right rail integration (App)", () => {
           phase: "starting",
           endpoint: "Resolving local daemon endpoint",
           message: null,
+          hint: null,
+          log_path: null,
           daemon: null,
         })}
       />

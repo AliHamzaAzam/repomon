@@ -17,6 +17,8 @@ import RightPanelHost, {
 import { ResizableSplit } from "./components/ResizableSplit";
 import TerminalWorkspace from "./components/TerminalWorkspace";
 import UpdateBanner from "./components/UpdateBanner";
+import ConnectionTrouble from "./components/ConnectionTrouble";
+import { daemonDiagnostics, openDaemonLog } from "./ipc/boot";
 import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate, type AvailableUpdate } from "./ipc/updater";
 import { createActionsStore } from "./stores/actions";
@@ -454,6 +456,8 @@ function App(props: AppProps) {
           phase: "retrying",
           endpoint: initialConnection.endpoint,
           message: error instanceof Error ? error.message : String(error),
+          hint: null,
+          log_path: null,
           daemon: null,
         });
       });
@@ -879,19 +883,30 @@ function App(props: AppProps) {
         aria-label="Daemon connection"
         class="connection-rail flex items-center justify-between border-t border-line bg-surface px-3.5 py-1.5 font-mono text-[11px] text-muted"
       >
-        <div class="flex items-center gap-2 min-w-0">
-          <button
-            type="button"
-            class="focus-ring flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -mx-1.5 text-foreground font-medium hover:bg-line/40 transition-colors cursor-pointer text-left"
-            title={`Daemon socket: ${connection().endpoint} · Click to view System Health`}
-            aria-label="View system health and daemon connection"
-            onClick={() => actions.openSettingsTab("system")}
-          >
-            <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
-            <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
-          </button>
-          <Show when={connection().message}>
-            {(msg) => <span class="truncate text-fault ml-2 font-sans text-xs">{msg()}</span>}
+        <div class="flex flex-col gap-0.5 min-w-0">
+          <div class="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              class="focus-ring flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -mx-1.5 text-foreground font-medium hover:bg-line/40 transition-colors cursor-pointer text-left"
+              title={`Daemon socket: ${connection().endpoint} · Click to view System Health`}
+              aria-label="View system health and daemon connection"
+              onClick={() => actions.openSettingsTab("system")}
+            >
+              <span class={`status-light is-${connection().phase}`} aria-hidden="true" />
+              <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
+            </button>
+            <Show when={connection().message}>
+              {(msg) => <span class="truncate text-fault ml-2 font-sans text-xs">{msg()}</span>}
+            </Show>
+          </div>
+          {/* Only while the daemon is unreachable: the hint, the real endpoint, and the two
+              controls that turn a stuck pill into something a user can act on or report. */}
+          <Show when={connection().phase === "retrying"}>
+            <ConnectionTrouble
+              snapshot={connection()}
+              onShowLog={openDaemonLog}
+              collectDiagnostics={daemonDiagnostics}
+            />
           </Show>
         </div>
 

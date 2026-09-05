@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use repomon_core::Config;
 use repomon_core::client::DaemonClient;
+use repomon_core::launch::DaemonLaunchError;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -29,6 +30,12 @@ pub struct ConnectionSnapshot {
     pub phase: String,
     pub endpoint: String,
     pub message: Option<String>,
+    /// One actionable line for a failure the message alone cannot explain (a missing Visual C++
+    /// runtime, a named pipe another session already owns). `None` whenever the message already
+    /// says everything there is to say.
+    pub hint: Option<String>,
+    /// The daemon log to offer behind "Show log", when this failure has one.
+    pub log_path: Option<String>,
     pub daemon: Option<DaemonStatus>,
 }
 
@@ -49,6 +56,18 @@ impl ConnectionSnapshot {
         Self::new("retrying", endpoint, Some(message.into()), None)
     }
 
+    /// The retrying state built from a typed launch failure, so the pill can carry the hint and
+    /// the log path instead of a bare sentence the user cannot act on.
+    pub fn retrying_from_launch(endpoint: impl Into<String>, error: &DaemonLaunchError) -> Self {
+        let mut snapshot = Self::new("retrying", endpoint, Some(error.to_string()), None);
+        snapshot.hint = error.hint();
+        snapshot.log_path = error
+            .log_path()
+            .map(|path| path.display().to_string())
+            .or_else(|| Some(repomon_core::service::log_file().display().to_string()));
+        snapshot
+    }
+
     pub fn stopped(endpoint: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new("stopped", endpoint, Some(message.into()), None)
     }
@@ -63,6 +82,8 @@ impl ConnectionSnapshot {
             phase: phase.into(),
             endpoint: endpoint.into(),
             message,
+            hint: None,
+            log_path: None,
             daemon,
         }
     }
@@ -110,7 +131,7 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
 
                 publish(
                     &app,
-                    ConnectionSnapshot::retrying(&endpoint, error.to_string()),
+                    ConnectionSnapshot::retrying_from_launch(&endpoint, &error),
                 )
                 .await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -177,8 +198,18 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
                 .await;
 
                 // Ensure a daemon is bound again. The OnceCell keeps the original shared client;
-                // its next status call transparently reconnects to the restored endpoint.
-                let _ = repomon_core::launch::ensure_daemon(&config, socket_override.clone()).await;
+                // its next status call transparently reconnects to the restored endpoint. A
+                // relaunch that fails outright is the more informative of the two failures, so it
+                // replaces the plain socket error in the pill.
+                if let Err(launch_error) =
+                    repomon_core::launch::ensure_daemon(&config, socket_override.clone()).await
+                {
+                    publish(
+                        &app,
+                        ConnectionSnapshot::retrying_from_launch(&endpoint, &launch_error),
+                    )
+                    .await;
+                }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
         }
@@ -206,6 +237,10 @@ mod tests {
 
     #[cfg(unix)]
     use super::fetch_daemon_status;
+    use std::path::PathBuf;
+
+    use repomon_core::launch::DaemonLaunchError;
+
     use super::{ConnectionSnapshot, DaemonStatus};
 
     #[test]
@@ -233,6 +268,42 @@ mod tests {
         let retrying = ConnectionSnapshot::retrying(endpoint, "socket closed");
         assert_eq!(retrying.phase, "retrying");
         assert_eq!(retrying.message.as_deref(), Some("socket closed"));
+        assert!(retrying.hint.is_none());
+        assert!(retrying.log_path.is_none());
+    }
+
+    #[test]
+    fn a_launch_failure_reaches_the_pill_with_its_hint_and_log() {
+        let error = DaemonLaunchError::DaemonExited {
+            code: "exit code -1073741515 / 0xC0000135".into(),
+            log_tail: "[launch] failed to connect".into(),
+            log_path: PathBuf::from("/tmp/logs/repomond.out.log"),
+        };
+        let snapshot = ConnectionSnapshot::retrying_from_launch(r"\\.\pipe\repomon-azama", &error);
+
+        assert_eq!(snapshot.phase, "retrying");
+        assert!(snapshot.message.unwrap().contains("exited immediately"));
+        assert!(snapshot.hint.unwrap().contains("Visual C++"));
+        assert_eq!(
+            snapshot.log_path.as_deref(),
+            Some("/tmp/logs/repomond.out.log")
+        );
+    }
+
+    #[test]
+    fn a_launch_failure_without_a_log_still_offers_the_daemon_log() {
+        let error = DaemonLaunchError::DaemonMissing {
+            path: PathBuf::from("/Applications/Repomon.app/Contents/MacOS/repomond"),
+        };
+        let snapshot = ConnectionSnapshot::retrying_from_launch("/tmp/repomon-test.sock", &error);
+
+        assert!(snapshot.hint.unwrap().contains("Reinstall Repomon"));
+        assert!(
+            snapshot
+                .log_path
+                .expect("a fallback log path")
+                .contains("repomond.out.log")
+        );
     }
 
     #[cfg(unix)]

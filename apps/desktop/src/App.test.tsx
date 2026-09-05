@@ -38,6 +38,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -53,6 +55,8 @@ describe("Repomon desktop shell", () => {
       phase: "connected",
       endpoint: "/tmp/repomon.sock",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: {
         uptime_secs: 3661,
         repos: 3,
@@ -71,17 +75,40 @@ describe("Repomon desktop shell", () => {
   });
 
   it("makes a lost connection actionable", async () => {
-    render(() => <App connectionSource={sourceFor({
+    const { container } = render(() => <App connectionSource={sourceFor({
       phase: "retrying",
-      endpoint: "/tmp/repomon.sock",
-      message: "daemon connection closed",
+      endpoint: "\\\\.\\pipe\\repomon-azama",
+      message: "the daemon started and exited immediately (exit code -1073741515 / 0xC0000135)",
+      hint: "The Visual C++ runtime is missing or is the wrong architecture, so the daemon dies before it starts.",
+      log_path: "C:\\logs\\repomond.out.log",
       daemon: null,
     })} />);
 
     await waitFor(() => {
       expect(screen.getByText("Retrying")).toBeInTheDocument();
-      expect(screen.getByText("daemon connection closed")).toBeInTheDocument();
+      expect(screen.getByText(/exited immediately/)).toBeInTheDocument();
     });
+    // The pill alone is a dead end; the retrying state has to carry the fix and a way to report it.
+    const trouble = within(container).getByTestId("connection-trouble");
+    expect(within(trouble).getByText(/Visual C\+\+ runtime is missing/)).toBeInTheDocument();
+    expect(within(trouble).getByRole("button", { name: "Show log" })).toBeInTheDocument();
+    expect(within(trouble).getByRole("button", { name: "Copy diagnostics" })).toBeInTheDocument();
+  });
+
+  it("keeps the trouble row out of the rail while the daemon is healthy", async () => {
+    const { container } = render(() => <App connectionSource={sourceFor({
+      phase: "connected",
+      endpoint: "/tmp/repomon.sock",
+      message: null,
+      hint: null,
+      log_path: null,
+      daemon: null,
+    })} />);
+
+    await waitFor(() => {
+      expect(within(container).getByText("Connected")).toBeInTheDocument();
+    });
+    expect(container.querySelector("[data-testid='connection-trouble']")).toBeNull();
   });
 
   it("surfaces fleet loading errors instead of failing silently", async () => {
@@ -94,6 +121,8 @@ describe("Repomon desktop shell", () => {
       phase: "connected",
       endpoint: "/tmp/repomon.sock",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} fleetSource={fleetSource} />);
 
@@ -107,6 +136,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -133,6 +164,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -148,6 +181,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -171,6 +206,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -194,6 +231,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -221,6 +260,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -245,6 +286,8 @@ describe("Repomon desktop shell", () => {
       phase: "connected",
       endpoint: "/tmp/repomon.sock",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -279,6 +322,8 @@ describe("Repomon desktop shell", () => {
           phase: "connected",
           endpoint: "/tmp/repomon.sock",
           message: null,
+          hint: null,
+          log_path: null,
           daemon: null,
         })}
         fleetSource={fleetSource}
@@ -324,6 +369,8 @@ describe("Repomon desktop shell", () => {
           phase: "connected",
           endpoint: "/tmp/repomon.sock",
           message: null,
+          hint: null,
+          log_path: null,
           daemon: null,
         })}
         fleetSource={fleetSource}
@@ -369,6 +416,8 @@ describe("Repomon desktop shell", () => {
           phase: "connected",
           endpoint: "/tmp/repomon.sock",
           message: null,
+          hint: null,
+          log_path: null,
           daemon: null,
         })}
         fleetSource={fleetSource}
@@ -393,6 +442,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -411,6 +462,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -437,6 +490,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -461,6 +516,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -481,6 +538,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -500,6 +559,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -514,6 +575,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -528,6 +591,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -544,6 +609,8 @@ describe("Repomon desktop shell", () => {
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -570,6 +637,8 @@ describe("Repomon desktop shell: Slash key shortcuts on a non-mac platform", () 
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
@@ -590,6 +659,8 @@ describe("Repomon desktop shell: Slash key shortcuts on a non-mac platform", () 
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
       message: null,
+      hint: null,
+      log_path: null,
       daemon: null,
     })} />);
 
