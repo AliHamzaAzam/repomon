@@ -194,6 +194,8 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "supervision": cfg.supervision,
     });
     value["message_hop_refresh_senders"] = json!(cfg.message_hop_refresh_senders);
+    value["usage_enabled"] = json!(cfg.usage.enabled);
+    value["usage_refresh_prices"] = json!(cfg.usage.refresh_prices);
     // Built outside the big literal above: one more nesting level there blows serde_json's
     // macro recursion limit.
     value["repomind"] = json!({
@@ -1018,6 +1020,36 @@ struct ConfigSet {
     agent_icons: Option<HashMap<String, String>>,
     #[serde(default)]
     supervision: Option<repomon_core::agent::supervision::SupervisionConfig>,
+    #[serde(default)]
+    usage_enabled: Option<bool>,
+    #[serde(default)]
+    usage_refresh_prices: Option<bool>,
+    /// Settings > Usage's inline rate editor: only the fields the operator typed are set, and any
+    /// fields already overridden for this model that were not typed keep whatever they were.
+    /// A model with no existing override yet is created with just the typed fields.
+    #[serde(default)]
+    usage_price_override_upsert: Option<UsagePriceOverrideUpsert>,
+    /// Settings > Usage's Reset action: drops the whole override for a model, falling back to the
+    /// LiteLLM snapshot / built-in table.
+    #[serde(default)]
+    usage_price_override_reset: Option<String>,
+}
+
+/// A sparse per-model rate correction from the Settings > Usage inline editor or
+/// `repomon usage rates set`. Every rate field is optional; a field left blank in the editor (or
+/// omitted from the CLI flags) is not sent at all, so it neither sets nor clears that field on an
+/// existing override; see the `config.set` handler for `usage_price_override_upsert`.
+#[derive(Deserialize)]
+struct UsagePriceOverrideUpsert {
+    model: String,
+    #[serde(default)]
+    input_per_mtok: Option<f64>,
+    #[serde(default)]
+    output_per_mtok: Option<f64>,
+    #[serde(default)]
+    cache_read_per_mtok: Option<f64>,
+    #[serde(default)]
+    cache_write_per_mtok: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -3357,8 +3389,25 @@ pub async fn dispatch(
         }
         "config.set" => {
             let p: ConfigSet = parse(params)?;
+            // Validate the entire rate patch before mutating any live configuration.
+            if let Some(u) = &p.usage_price_override_upsert {
+                let rates = [u.input_per_mtok, u.output_per_mtok,
+                    u.cache_read_per_mtok, u.cache_write_per_mtok];
+                if u.model.trim().is_empty() || u.model != u.model.trim() {
+                    return Err(RpcError::invalid_params("model must be non-empty with no surrounding whitespace"));
+                }
+                if rates.iter().all(Option::is_none) {
+                    return Err(RpcError::invalid_params("provide at least one rate"));
+                }
+                if rates.iter().flatten().any(|v| !v.is_finite() || *v < 0.0) {
+                    return Err(RpcError::invalid_params("rates must be finite non-negative numbers"));
+                }
+            }
             let injection_policy_changed =
                 p.message_inject_agents.is_some() || p.message_inject_operator.is_some();
+            let usage_prices_changed =
+                p.usage_price_override_upsert.is_some() || p.usage_price_override_reset.is_some()
+                    || p.usage_refresh_prices.is_some();
             {
                 let mut cfg = ctx.config.write().await;
                 let prev = cfg.clone();
@@ -3512,6 +3561,30 @@ pub async fn dispatch(
                 if let Some(s) = p.supervision {
                     cfg.supervision = s;
                 }
+                if let Some(b) = p.usage_enabled {
+                    cfg.usage.enabled = b;
+                }
+                if let Some(b) = p.usage_refresh_prices {
+                    cfg.usage.refresh_prices = b;
+                }
+                if let Some(u) = p.usage_price_override_upsert {
+                    let entry = cfg.usage.price_overrides.entry(u.model).or_default();
+                    if let Some(v) = u.input_per_mtok {
+                        entry.input_per_mtok = Some(v);
+                    }
+                    if let Some(v) = u.output_per_mtok {
+                        entry.output_per_mtok = Some(v);
+                    }
+                    if let Some(v) = u.cache_read_per_mtok {
+                        entry.cache_read_per_mtok = Some(v);
+                    }
+                    if let Some(v) = u.cache_write_per_mtok {
+                        entry.cache_write_per_mtok = Some(v);
+                    }
+                }
+                if let Some(model) = p.usage_price_override_reset {
+                    cfg.usage.price_overrides.remove(&model);
+                }
                 if let Err(e) = cfg.save_to(&ctx.config_path) {
                     *cfg = prev;
                     return Err(internal(e));
@@ -3523,6 +3596,11 @@ pub async fn dispatch(
             }
             if injection_policy_changed {
                 ctx.wake_mail_delivery();
+            }
+            if usage_prices_changed {
+                // Cost is computed at query time from the config's overrides, never stored, so a
+                // correction re-prices history the moment a live Usage view re-reads it.
+                ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, json!({}));
             }
             let cfg = ctx.config.read().await;
             let value = config_json(&cfg);

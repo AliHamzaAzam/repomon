@@ -137,6 +137,156 @@ async fn config_set_persists_every_sound_preference() {
     let _ = std::fs::remove_file(&sock);
 }
 
+/// U3 item 2: a `config.set` price override takes effect immediately, with no daemon restart;
+/// the same running daemon's next `usage.summary`/`usage.models` read must reflect it.
+#[tokio::test]
+async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let store = Store::open_in_memory().unwrap();
+    let at = chrono::Utc::now();
+    store
+        .record_usage_events(vec![repomon_core::usage_ledger::UsageEvent {
+            at,
+            agent_kind: "claude-code".to_string(),
+            model: "repomon-test-model".to_string(),
+            account: "default".to_string(),
+            lane_id: None,
+            repo_id: None,
+            session_id: Some("s1".to_string()),
+            window: None,
+            cwd: None,
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            thinking_tokens: 0,
+            estimated: false,
+            subagent: false,
+            external: true,
+            source_path: "t.jsonl".to_string(),
+            source_offset: 0,
+        }])
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.usage.refresh_prices = false;
+    let ctx = Ctx::new_with_config_path(store, config, None, config_path.clone());
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-price-override-it-{}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&sock);
+    let server = {
+        let ctx = ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+
+    let window = json!({
+        "range": "custom",
+        "since": (at - chrono::Duration::minutes(1)).to_rfc3339(),
+        "until": (at + chrono::Duration::minutes(1)).to_rfc3339(),
+    });
+
+    // Before the override: an unpublished model id has no price, so it costs nothing but is
+    // named as unpriced rather than silently reading as free.
+    let mut before_params = window.clone();
+    before_params["group_by"] = json!("model");
+    let before = call(&mut stream, 1, "usage.summary", Some(before_params)).await;
+    assert!(before.error.is_none(), "{:?}", before.error);
+    let before = before.result.unwrap();
+    assert_eq!(before["unpriced_models"], json!(["repomon-test-model"]));
+
+    // Set a $2/Mtok input override through the RPC, the same call path Settings > Usage's
+    // inline editor and `repomon usage rates set` both use.
+    let set = call(
+        &mut stream,
+        2,
+        "config.set",
+        Some(json!({
+            "usage_price_override_upsert": {
+                "model": "repomon-test-model",
+                "input_per_mtok": 2.0,
+            }
+        })),
+    )
+    .await;
+    assert!(set.error.is_none(), "config.set failed: {:?}", set.error);
+
+    // The daemon's config, and therefore its price table, is updated in place: the very next
+    // query re-prices the same events, no restart involved.
+    let mut after_params = window.clone();
+    after_params["group_by"] = json!("model");
+    let after = call(&mut stream, 3, "usage.summary", Some(after_params)).await;
+    assert!(after.error.is_none(), "{:?}", after.error);
+    let after = after.result.unwrap();
+    assert_eq!(after["unpriced_models"], json!([]));
+    assert_eq!(after["totals"]["cost_usd"].as_f64().unwrap(), 2.0);
+
+    let rates = call(&mut stream, 4, "usage.models", None).await;
+    assert!(rates.error.is_none(), "{:?}", rates.error);
+    let rows = rates.result.unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["model"] == "repomon-test-model")
+        .expect("the model should appear in usage.models");
+    assert_eq!(row["source"], json!("override"));
+    assert_eq!(row["input_per_mtok"].as_f64().unwrap(), 2.0);
+    assert_eq!(row["override"]["input_per_mtok"].as_f64().unwrap(), 2.0);
+
+    let saved = Config::load_from(&config_path).unwrap();
+    assert_eq!(
+        saved
+            .usage
+            .price_overrides
+            .get("repomon-test-model")
+            .and_then(|o| o.input_per_mtok),
+        Some(2.0),
+    );
+
+    // A sparse update keeps previously overridden fields.
+    let patch = call(&mut stream, 5, "config.set", Some(json!({
+        "usage_price_override_upsert": { "model": "repomon-test-model", "output_per_mtok": 9.0 }
+    }))).await;
+    assert!(patch.error.is_none());
+    let over = ctx.config.read().await.usage.price_overrides["repomon-test-model"].clone();
+    assert_eq!(over.input_per_mtok, Some(2.0));
+    assert_eq!(over.output_per_mtok, Some(9.0));
+    assert_eq!(over.cache_read_per_mtok, None);
+
+    // Validation happens before unrelated config changes, and never poisons the live config.
+    for invalid in [
+        json!({ "model": "repomon-test-model", "input_per_mtok": -1.0 }),
+        json!({ "model": "", "input_per_mtok": 2.0 }),
+        json!({ "model": "repomon-test-model" }),
+    ] {
+        let result = call(&mut stream, 6, "config.set", Some(json!({
+            "usage_enabled": false, "usage_price_override_upsert": invalid
+        }))).await;
+        assert!(result.error.is_some());
+        let cfg = ctx.config.read().await;
+        assert!(cfg.usage.enabled);
+        assert_eq!(cfg.usage.price_overrides["repomon-test-model"], over);
+    }
+    let rates = call(&mut stream, 7, "usage.rates", None).await;
+    assert_eq!(rates.result.unwrap()["source_counts"]["overrides"], 1);
+    let reset = call(&mut stream, 8, "config.set", Some(json!({
+        "usage_price_override_reset": "repomon-test-model"
+    }))).await;
+    assert!(reset.error.is_none());
+    assert!(!Config::load_from(&config_path).unwrap().usage.price_overrides.contains_key("repomon-test-model"));
+    let reset_rows = call(&mut stream, 9, "usage.models", None).await;
+    assert_eq!(reset_rows.result.unwrap()[0]["source"], "unpriced");
+
+    server.abort();
+    let _ = std::fs::remove_file(&sock);
+
+}
+
 #[tokio::test]
 async fn daemon_serves_repo_and_lane_methods() {
     let store = Store::open_in_memory().unwrap();

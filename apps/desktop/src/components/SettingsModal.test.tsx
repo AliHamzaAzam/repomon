@@ -101,6 +101,8 @@ vi.mock("../ipc/rpc", () => ({
 }));
 
 const config: ConfigView = {
+  usage_enabled: true,
+  usage_refresh_prices: true,
   worktree_template: "../{repo}-{branch}",
   auto_continue: true,
   auto_continue_message: "continue",

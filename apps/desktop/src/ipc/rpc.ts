@@ -135,7 +135,24 @@ export interface ConfigView {
   supervision: SupervisionConfig;
   /** The `[repomind]` table: the home repo and its controller lane. */
   repomind?: RepomindConfigView;
+  /** Whether the daemon ingests agent transcripts into the usage ledger at all. */
+  usage_enabled: boolean;
+  /** Whether the daily LiteLLM price refresh is on ([usage] refresh_prices). */
+  usage_refresh_prices: boolean;
   [key: string]: unknown;
+}
+
+/**
+ * A sparse per-model rate correction, as sent to `config.set`'s `usage_price_override_upsert`.
+ * Only the fields the operator actually typed are included; an omitted one neither sets nor
+ * clears whatever that field already resolves to (see `pricing.rs`'s `PriceOverride`).
+ */
+export interface UsagePriceOverrideUpsert {
+  model: string;
+  input_per_mtok?: number;
+  output_per_mtok?: number;
+  cache_read_per_mtok?: number;
+  cache_write_per_mtok?: number;
 }
 
 /** `config.get`'s `repomind` block. `home` is the raw setting, `home_path` its expanded form. */
@@ -354,7 +371,15 @@ interface RpcMap {
   timeline: { params: { from_iso: string; to_iso: string; bucket_secs: number }; result: TimelineData };
   sessions: { params: { from_iso: string; to_iso: string }; result: WorkSession[] };
   "config.get": { params: undefined; result: ConfigView };
-  "config.set": { params: Partial<ConfigView>; result: ConfigView };
+  "config.set": {
+    params: Partial<ConfigView> & {
+      /** Settings > Usage's inline editor / `repomon usage rates set`. */
+      usage_price_override_upsert?: UsagePriceOverrideUpsert;
+      /** Settings > Usage's Reset action / `repomon usage rates reset`: a model id to drop. */
+      usage_price_override_reset?: string;
+    };
+    result: ConfigView;
+  };
   "remote.pair": {
     params: { name: string };
     result: { name: string; token: string; url: string };
