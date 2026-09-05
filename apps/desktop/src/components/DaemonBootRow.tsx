@@ -54,12 +54,12 @@ export default function DaemonBootRow(props: DaemonBootRowProps) {
             onClick={() => void run()}
             aria-label="Re-run the daemon launch check"
           >
-            <IconRefresh size={13} class={busy() ? "animate-spin text-accent" : "text-muted"} />
+            <IconRefresh size={13} class={busy() ? "animate-spin text-signal" : "text-muted"} />
             <span>{busy() ? "Checking…" : "Check again"}</span>
           </button>
         </div>
 
-        <div class="rounded-lg border border-line/70 bg-background/50 p-3 space-y-1.5">
+        <div class="rounded-lg bg-background/50 p-3 space-y-1.5">
           <div class="flex items-start justify-between gap-3">
             <div class="flex min-w-0 items-center gap-2.5">
               <div class="flex size-6 shrink-0 items-center justify-center rounded-md border border-line bg-surface text-foreground">

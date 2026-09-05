@@ -620,7 +620,9 @@ export default function SettingsModal(props: SettingsModalProps) {
       </Show>
       <Show when={config()} fallback={<p class="text-xs text-muted">Loading settings…</p>}>
         {(settings) => (
-          <div class="space-y-6">
+          // A floor on the body height keeps the modal from collapsing and re-centering when a
+          // short tab (Policies with no rules, Remote with no devices) follows a tall one.
+          <div class="min-h-[26rem] space-y-6">
             <Show when={tab() === "general"}>
               <section class="space-y-4">
                 <p class="section-label">General Configuration</p>
@@ -921,7 +923,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                       <span class="text-xs font-semibold text-foreground">Register New Agent</span>
                       <Show when={customAgentSuccess()}>
                         {(msg) => (
-                          <span class="text-xs text-emerald-500 font-medium animate-in fade-in flex items-center gap-1">
+                          <span class="text-xs text-signal font-medium animate-in fade-in flex items-center gap-1">
                             <IconCheck size={12} />
                             {msg()}
                           </span>
@@ -1024,7 +1026,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                                 <div class="min-w-0 space-y-1">
                                   <div class="flex items-center gap-2 flex-wrap">
                                     <span class="truncate font-semibold text-xs text-foreground">{agent.name}</span>
-                                    <span class="rounded px-1.5 py-0.2 text-[9.5px] font-mono uppercase tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                    <span class="rounded px-1.5 py-0.2 text-[9.5px] font-mono uppercase tracking-wider bg-attention/10 text-attention border border-attention/25">
                                       Custom
                                     </span>
                                     <Show when={isDefault()}>
@@ -1388,7 +1390,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                             aria-pressed={isSelected()}
                           >
                             <span
-                              class="size-3 shrink-0 rounded-full border border-black/10 dark:border-white/10"
+                              class="size-3 shrink-0 rounded-full border border-line"
                               style={{ "background-color": swatch.color }}
                             />
                             <span>{swatch.label}</span>

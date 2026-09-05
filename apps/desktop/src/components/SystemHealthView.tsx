@@ -132,6 +132,17 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
     }
   }
 
+  /// One sentence for the wizard's header row: what the last probe found, or that it is running.
+  const summary = () => {
+    const doc = doctorResult();
+    if (!doc) return doctorLoading() ? "Checking git, tmux and your agent CLIs" : doctorError() ? "The check did not run" : "";
+    const found = doc.agents.filter((agent) => agent.detected).length;
+    const core = doc.tmux.not_applicable ? (doc.agent_host?.available ?? false) : doc.tmux.available;
+    const ready = core && doc.git.available;
+    const agents = `${found} of ${doc.agents.length} agent CLIs found`;
+    return ready ? `git and tmux ready, ${agents}` : `Something is missing below, ${agents}`;
+  };
+
   /// The re-check control. Declared once and placed twice: inside the title row for Settings,
   /// and on its own for the setup wizard, which draws its own heading.
   function RecheckButton() {
@@ -146,7 +157,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
       >
         <IconRefresh
           size={13}
-          class={doctorLoading() ? "animate-spin text-accent" : "text-muted"}
+          class={doctorLoading() ? "animate-spin text-signal" : "text-muted"}
         />
         <span>{doctorLoading() ? "Checking…" : "Check again"}</span>
       </button>
@@ -167,8 +178,11 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
           <RecheckButton />
         </div>
       </Show>
+      {/* The wizard draws its own heading, so the control shares a row with a one-line verdict
+          instead of floating alone under the lede. */}
       <Show when={!showTitle() && showRefresh()}>
-        <div class="flex justify-end">
+        <div class="flex items-center justify-between gap-3">
+          <p class="min-w-0 text-xs text-muted" role="status">{summary()}</p>
           <RecheckButton />
         </div>
       </Show>
@@ -242,17 +256,17 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                   <span class="section-label">Core Runtime Dependencies</span>
                   <span class="text-[11px] font-mono text-muted">
                     {runtimeReady() ? (
-                      <span class="inline-flex items-center gap-1 text-emerald-500 font-medium">
+                      <span class="inline-flex items-center gap-1 text-signal font-medium">
                         <IconCheck size={11} strokeWidth={2.5} />
                         Ready for sessions
                       </span>
                     ) : (
-                      <span class="text-amber-500 font-medium">Attention needed</span>
+                      <span class="text-attention font-medium">Attention needed</span>
                     )}
                   </span>
                 </div>
 
-                <div class="divide-y divide-line/60 rounded-lg border border-line/70 bg-background/50">
+                <div class="divide-y divide-line/60 rounded-lg bg-background/50">
                   {/* Agent host (ConPTY) Row — Windows only, replaces tmux */}
                   <Show when={tmuxInfo().not_applicable}>
                     <div class="p-3 space-y-1.5">
@@ -286,7 +300,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                           <Show
                             when={agentHostInfo()?.available}
                             fallback={
-                              <span class="rounded bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10.5px] font-medium text-amber-500">
+                              <span class="rounded bg-attention/10 border border-attention/30 px-2 py-0.5 text-[10.5px] font-medium text-attention">
                                 Missing
                               </span>
                             }
@@ -294,17 +308,17 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                             <Show
                               when={agentHostInfo()?.source === "bundled"}
                               fallback={
-                                <span class="flex items-center gap-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10.5px] font-medium text-emerald-500">
-                                  <span class="size-1.5 rounded-full bg-emerald-500" />
+                                <span class="flex items-center gap-1.5 rounded bg-signal/10 border border-signal/30 px-2 py-0.5 text-[10.5px] font-medium text-signal">
+                                  <span class="size-1.5 rounded-full bg-signal" />
                                   On PATH
                                 </span>
                               }
                             >
                               <span
-                                class="flex items-center gap-1.5 rounded bg-accent/15 border border-accent/30 px-2 py-0.5 text-[10.5px] font-medium text-accent font-mono"
+                                class="flex items-center gap-1.5 rounded bg-signal/15 border border-signal/30 px-2 py-0.5 text-[10.5px] font-medium text-signal font-mono"
                                 title="Using the ConPTY agent host bundled with this app"
                               >
-                                <span class="size-1.5 rounded-full bg-accent" />
+                                <span class="size-1.5 rounded-full bg-signal" />
                                 Bundled
                               </span>
                             </Show>
@@ -314,14 +328,14 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
 
                       {/* Bundled Reassurance Note */}
                       <Show when={agentHostInfo()?.available && agentHostInfo()?.source === "bundled"}>
-                        <div class="flex items-center gap-1.5 text-[10.5px] text-accent/90 bg-accent/8 rounded px-2 py-0.5 border border-accent/20">
+                        <div class="flex items-center gap-1.5 text-[10.5px] text-signal bg-signal/8 rounded px-2 py-0.5 border border-signal/20">
                           <span>Using the ConPTY agent host bundled with this app — no separate install needed.</span>
                         </div>
                       </Show>
 
                       {/* Missing agent host helper */}
                       <Show when={!agentHostInfo()?.available}>
-                        <div class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5 text-xs space-y-2">
+                        <div class="rounded-lg border border-attention/20 bg-attention/5 p-2.5 text-xs space-y-2">
                           <p class="text-foreground text-[11px]">
                             Repomon needs the bundled repomon-agent-host.exe to run Windows agent
                             sessions. Reinstalling the app should restore it.
@@ -361,7 +375,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                         <Show
                           when={tmuxInfo().available}
                           fallback={
-                            <span class="rounded bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10.5px] font-medium text-amber-500">
+                            <span class="rounded bg-attention/10 border border-attention/30 px-2 py-0.5 text-[10.5px] font-medium text-attention">
                               Missing
                             </span>
                           }
@@ -369,17 +383,17 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                           <Show
                             when={tmuxInfo().source === "bundled"}
                             fallback={
-                              <span class="flex items-center gap-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10.5px] font-medium text-emerald-500">
-                                <span class="size-1.5 rounded-full bg-emerald-500" />
+                              <span class="flex items-center gap-1.5 rounded bg-signal/10 border border-signal/30 px-2 py-0.5 text-[10.5px] font-medium text-signal">
+                                <span class="size-1.5 rounded-full bg-signal" />
                                 System PATH
                               </span>
                             }
                           >
                             <span
-                              class="flex items-center gap-1.5 rounded bg-accent/15 border border-accent/30 px-2 py-0.5 text-[10.5px] font-medium text-accent font-mono"
+                              class="flex items-center gap-1.5 rounded bg-signal/15 border border-signal/30 px-2 py-0.5 text-[10.5px] font-medium text-signal font-mono"
                               title="Using Repomon's standalone built-in tmux binary"
                             >
-                              <span class="size-1.5 rounded-full bg-accent" />
+                              <span class="size-1.5 rounded-full bg-signal" />
                               Repomon Built-in
                             </span>
                           </Show>
@@ -389,14 +403,14 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
 
                     {/* Bundled Reassurance Note */}
                     <Show when={tmuxInfo().available && tmuxInfo().source === "bundled"}>
-                      <div class="flex items-center gap-1.5 text-[10.5px] text-accent/90 bg-accent/8 rounded px-2 py-0.5 border border-accent/20">
+                      <div class="flex items-center gap-1.5 text-[10.5px] text-signal bg-signal/8 rounded px-2 py-0.5 border border-signal/20">
                         <span>Using Repomon's built-in standalone tmux — no separate Homebrew or system installation needed.</span>
                       </div>
                     </Show>
 
                     {/* Missing tmux helper */}
                     <Show when={!tmuxInfo().available}>
-                      <div class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5 text-xs space-y-2">
+                      <div class="rounded-lg border border-attention/20 bg-attention/5 p-2.5 text-xs space-y-2">
                         <p class="text-foreground text-[11px]">
                           Repomon needs tmux to run agent sessions and live terminal attachments.
                         </p>
@@ -411,7 +425,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                             aria-label="Copy tmux install command"
                           >
                             <Show when={copiedKey() === "tmux-install"} fallback={<IconCopy size={11} class="text-muted" />}>
-                              <IconCheck size={11} class="text-emerald-500" />
+                              <IconCheck size={11} class="text-signal" />
                             </Show>
                             <span>{copiedKey() === "tmux-install" ? "Copied" : "Copy"}</span>
                           </button>
@@ -450,13 +464,13 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                         <Show
                           when={gitInfo().available}
                           fallback={
-                            <span class="rounded bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10.5px] font-medium text-amber-500">
+                            <span class="rounded bg-attention/10 border border-attention/30 px-2 py-0.5 text-[10.5px] font-medium text-attention">
                               Missing
                             </span>
                           }
                         >
-                          <span class="flex items-center gap-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10.5px] font-medium text-emerald-500">
-                            <span class="size-1.5 rounded-full bg-emerald-500" />
+                          <span class="flex items-center gap-1.5 rounded bg-signal/10 border border-signal/30 px-2 py-0.5 text-[10.5px] font-medium text-signal">
+                            <span class="size-1.5 rounded-full bg-signal" />
                             Available
                           </span>
                         </Show>
@@ -465,7 +479,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
 
                     {/* Missing git helper */}
                     <Show when={!gitInfo().available}>
-                      <div class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5 text-xs space-y-2">
+                      <div class="rounded-lg border border-attention/20 bg-attention/5 p-2.5 text-xs space-y-2">
                         <p class="text-foreground text-[11px]">
                           Repomon requires git to manage worktree lanes, branches, and commit tracking.
                         </p>
@@ -480,7 +494,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                             aria-label="Copy git install command"
                           >
                             <Show when={copiedKey() === "git-install"} fallback={<IconCopy size={11} class="text-muted" />}>
-                              <IconCheck size={11} class="text-emerald-500" />
+                              <IconCheck size={11} class="text-signal" />
                             </Show>
                             <span>{copiedKey() === "git-install" ? "Copied" : "Copy"}</span>
                           </button>
@@ -500,7 +514,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                       CLI executables detected on PATH for spawning agent sessions.
                     </p>
                   </div>
-                  <span class="text-[10.5px] font-mono text-muted bg-surface-raised px-2 py-0.5 rounded border border-line">
+                  <span class="text-[10.5px] font-mono text-muted bg-raised px-2 py-0.5 rounded border border-line">
                     {detectedCount()} / {agentsList().length} detected
                   </span>
                 </div>
@@ -512,7 +526,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                       const agentKey = `agent-${agent.kind}-${agent.command}`;
 
                       return (
-                        <div class="flex flex-col justify-between rounded-lg border border-line/70 bg-background/50 p-2.5 space-y-1.5">
+                        <div class="flex flex-col justify-between rounded-lg bg-background/50 p-2.5 space-y-1.5">
                           <div class="flex items-start justify-between gap-2">
                             <div class="flex items-center gap-2 min-w-0">
                               <div class="flex size-6 items-center justify-center rounded-md border border-line bg-surface text-foreground shrink-0">
@@ -529,7 +543,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                             <span
                               class={`shrink-0 rounded px-1.5 py-0.2 text-[9.5px] font-medium ${
                                 agent.detected
-                                  ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-500"
+                                  ? "bg-signal/10 border border-signal/30 text-signal"
                                   : "bg-surface text-muted border border-line"
                               }`}
                             >
@@ -580,7 +594,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                                         aria-label={`Copy install command for ${agent.name}`}
                                       >
                                         <Show when={copiedKey() === agentKey} fallback={<IconCopy size={10} class="text-muted" />}>
-                                          <IconCheck size={10} class="text-emerald-500" />
+                                          <IconCheck size={10} class="text-signal" />
                                         </Show>
                                         <span>{copiedKey() === agentKey ? "Copied" : "Copy"}</span>
                                       </button>

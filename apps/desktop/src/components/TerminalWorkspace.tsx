@@ -435,7 +435,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     isTargetClosing(target)
                       ? "pointer-events-none opacity-40 scale-95 border-line/40 bg-raised/30 text-muted/60"
                       : activeWindow() === target.window
-                        ? "border-line bg-background text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/5"
+                        ? "border-line bg-background text-foreground shadow-sm ring-1 ring-line/60"
                         : "border-transparent bg-transparent text-muted hover:bg-raised/60 hover:text-foreground"
                   } ${tabsReorderable() && !target.shell && target.targetId !== null ? "cursor-grab active:cursor-grabbing" : ""}`}
                   {...(draggablePill() ? tabDrag.itemHandlers(target.targetId!) : {})}
@@ -644,7 +644,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               <div class="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl border border-line bg-raised text-signal">
                 <IconTerminal size={22} />
               </div>
-              <p class="section-label mb-1">Terminal Bay</p>
               <h2 class="text-lg font-semibold tracking-tight text-foreground">
                 {props.fleet.selectedLane()?.worktree.branch ?? "Select or create a lane"}
               </h2>

@@ -135,3 +135,36 @@ describe("SystemHealthView", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("SystemHealthView in the setup wizard", () => {
+  it("shares the re-check row with a one-line verdict instead of floating the button alone", async () => {
+    daemonResult.current = macDoctor({
+      agents: [
+        { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
+        { kind: "codex", name: "Codex", command: "codex", detected: false },
+      ] as SystemDoctorResult["agents"],
+    });
+    render(() => <SystemHealthView showTitle={false} showRefresh />);
+    const verdict = await screen.findByRole("status");
+    expect(verdict.textContent).toBe("git and tmux ready, 1 of 2 agent CLIs found");
+    expect(verdict.parentElement).toContainElement(screen.getByRole("button", { name: "Refresh system health status" }));
+  });
+
+  it("says something is missing when a core tool is absent", async () => {
+    daemonResult.current = macDoctor({
+      git: { available: false, version: null, path: null },
+    });
+    render(() => <SystemHealthView showTitle={false} showRefresh />);
+    const verdict = await screen.findByRole("status");
+    expect(verdict.textContent).toBe("Something is missing below, 0 of 0 agent CLIs found");
+  });
+
+  it("never reaches for a raw palette class: every state color is a theme token", async () => {
+    daemonResult.current = macDoctor({
+      agents: [{ kind: "codex", name: "Codex", command: "codex", detected: true }] as SystemDoctorResult["agents"],
+    });
+    const { container } = render(() => <SystemHealthView />);
+    await screen.findByText("Ready for sessions");
+    expect(container.innerHTML).not.toMatch(/emerald-|amber-|text-accent|bg-accent|surface-raised/);
+  });
+});

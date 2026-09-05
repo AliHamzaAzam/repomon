@@ -480,7 +480,7 @@ export default function ControlCenter(props: ControlCenterProps) {
                 <For each={groupedSections()}>
                   {(section) => (
                     <div class="space-y-1">
-                      <p class="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted/70">
+                      <p class="section-label px-2.5 py-1">
                         {section.category}
                       </p>
                       <For each={section.items}>

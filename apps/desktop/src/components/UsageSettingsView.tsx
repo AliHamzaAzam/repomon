@@ -44,7 +44,7 @@ const SOURCE_LABEL: Record<ModelRateRow["source"], string> = {
 
 const SOURCE_CLASS: Record<ModelRateRow["source"], string> = {
   builtin: "border-line bg-raised/50 text-muted",
-  litellm: "border-accent/30 bg-accent/10 text-accent",
+  litellm: "border-signal/30 bg-signal/10 text-signal",
   override: "border-signal/30 bg-signal/10 text-signal",
   unpriced: "border-attention/30 bg-attention/10 text-attention",
 };
@@ -386,7 +386,7 @@ export default function UsageSettingsView(props: UsageSettingsViewProps) {
           disabled={refreshing() || !!busyModel() || !!editing()}
           onClick={() => void load(true)}
         >
-          <IconRefresh size={13} class={refreshing() ? "animate-spin text-accent" : "text-muted"} />
+          <IconRefresh size={13} class={refreshing() ? "animate-spin text-signal" : "text-muted"} />
           <span>{refreshing() ? "Refreshing…" : "Refresh"}</span>
         </button>
       </div>

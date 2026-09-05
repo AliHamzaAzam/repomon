@@ -80,7 +80,7 @@ export default function CommandLineToolsCard(props: CommandLineToolsCardProps) {
           </div>
         </Show>
 
-        <div class="rounded-lg border border-line/70 bg-background/50 p-3 space-y-2">
+        <div class="rounded-lg bg-background/50 p-3 space-y-2">
           <div class="flex items-start justify-between gap-3">
             <div class="flex min-w-0 items-center gap-2.5">
               <div class="flex size-6 shrink-0 items-center justify-center rounded-md border border-line bg-surface text-foreground">
