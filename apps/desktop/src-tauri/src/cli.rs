@@ -655,6 +655,54 @@ mod windows_path {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn reinstall_replaces_an_executing_windows_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("cmd.exe");
+        let installed = dir.path().join("repomond.exe");
+        std::fs::copy(&source, &installed).unwrap();
+        let mut child = std::process::Command::new(&installed)
+            .args(["/D", "/Q", "/C", "set /p repomon_wait="])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let was_running = child.try_wait().unwrap().is_none();
+        let result = super::install_tool(&source, &installed, true);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(was_running);
+        result.unwrap();
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            std::fs::read(installed).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_restores_binary_and_install_never_overwrites_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("bundled");
+        let to = dir.path().join("repomon");
+        std::fs::write(&source, "new").unwrap();
+        std::fs::write(&to, "original").unwrap();
+        super::install_tool(&source, &to, false).unwrap();
+        super::uninstall_tool(&to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "original");
+        std::fs::write(super::backup_path(&to), "older backup").unwrap();
+        assert!(super::install_tool(&source, &to, false).is_err());
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(super::backup_path(&to)).unwrap(),
+            "older backup"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn shell_background_stdout_does_not_extend_probe_deadline() {
