@@ -20,6 +20,10 @@ pub const UNIX_TOOLS: [&str; 2] = ["repomon", "repomond"];
 
 /// The Windows set. The agent host joins them because the daemon spawns it by looking next to
 /// itself, so a `repomond.exe` installed alone could start agents nowhere.
+///
+/// Off Windows nothing but this module's own tests reads it. Keeping it compiled everywhere is
+/// the point: the Windows layout is decided here and checked on every platform's CI.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const WINDOWS_TOOLS: [&str; 3] = ["repomon.exe", "repomond.exe", "repomon-agent-host.exe"];
 
 /// The PATH entry separator for a platform. Passed in rather than read from a constant so the
@@ -47,6 +51,7 @@ pub fn unix_install_dir(home: &Path) -> PathBuf {
 
 /// Windows: `%LOCALAPPDATA%\repomon\bin`. Local rather than roaming, because these are machine
 /// specific binaries, and its own directory so uninstalling can empty it without guessing.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn windows_install_dir(local_app_data: &Path) -> PathBuf {
     local_app_data.join("repomon").join("bin")
 }
@@ -80,6 +85,7 @@ pub fn shell_rc_line(dir: &Path) -> String {
 
 /// The user PATH with `dir` prepended, or `None` when it is already there. `None` is the signal
 /// to leave the registry alone rather than rewrite an identical value.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn path_with_dir(existing: &str, dir: &Path) -> Option<String> {
     if path_lists_dir(existing, dir, WINDOWS_PATH_SEPARATOR) {
         return None;
@@ -94,6 +100,7 @@ pub fn path_with_dir(existing: &str, dir: &Path) -> Option<String> {
 /// The user PATH with `dir` removed, or `None` when it was not there. Every other entry keeps its
 /// original spelling: this rewrites a value the user may have edited by hand, so it removes one
 /// entry rather than normalising the rest.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn path_without_dir(existing: &str, dir: &Path) -> Option<String> {
     if !path_lists_dir(existing, dir, WINDOWS_PATH_SEPARATOR) {
         return None;
@@ -244,6 +251,7 @@ fn path_hint(dir: &Path) -> String {
 
 /// Windows updates the user PATH in the registry and broadcasts the change, but a console that is
 /// already open keeps the environment it was started with.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const WINDOWS_PATH_HINT: &str = "Open a new terminal to pick up the updated PATH. Windows keeps the old environment in windows that were already open.";
 
 #[tauri::command]

@@ -255,22 +255,20 @@ pub async fn spawn_and_watch_boot(
     let deadline = Instant::now() + window;
 
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let log_path = service::log_file();
-                let code = exit_code_label(&status);
-                append_daemon_log(&format!(
-                    "daemon exited immediately after launch ({code}); see the tail above"
-                ));
-                return Err(DaemonLaunchError::DaemonExited {
-                    code,
-                    log_tail: log_tail(&log_path, LOG_TAIL_LINES),
-                    log_path,
-                });
-            }
-            // Still running, or the child can no longer be observed (already reaped elsewhere).
-            // Either way the endpoint probe below is the authority on whether it came up.
-            Ok(None) | Err(_) => {}
+        // Anything but a real exit (still running, or a child that can no longer be observed
+        // because something else reaped it) falls through to the endpoint probe below, which is
+        // the authority on whether the daemon came up.
+        if let Ok(Some(status)) = child.try_wait() {
+            let log_path = service::log_file();
+            let code = exit_code_label(&status);
+            append_daemon_log(&format!(
+                "daemon exited immediately after launch ({code}); see the tail above"
+            ));
+            return Err(DaemonLaunchError::DaemonExited {
+                code,
+                log_tail: log_tail(&log_path, LOG_TAIL_LINES),
+                log_path,
+            });
         }
         if crate::transport::connect(&endpoint).await.is_ok() {
             return Ok(());
