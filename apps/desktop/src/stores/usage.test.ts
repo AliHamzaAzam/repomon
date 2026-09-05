@@ -1,7 +1,7 @@
 import { createRoot } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
-import type { UsageSessionRow, UsageSummary, UsageTimeline } from "../bindings";
+import type { RatesStatus, UsageSessionRow, UsageSummary, UsageTimeline } from "../bindings";
 import { createUsageStore, windowLabel, type UsageSource } from "./usage";
 
 const totals = {
@@ -80,6 +80,20 @@ function source(overrides: Partial<UsageSource> = {}): UsageSource {
     ingestNow: vi
       .fn()
       .mockResolvedValue({ listed: 4, scanned: 1, events: 3, failed: 0, redigested: 0 }),
+    rates: vi.fn().mockResolvedValue(rates()),
+    refreshRates: vi.fn().mockResolvedValue(rates()),
+    ...overrides,
+  };
+}
+
+function rates(overrides: Partial<RatesStatus> = {}): RatesStatus {
+  return {
+    source_counts: { builtin: 4, litellm: 12, overrides: 0 },
+    fetched_at: "2026-09-05T09:00:00Z",
+    etag: "\"snap-1\"",
+    next_refresh_at: "2026-09-06T09:00:00Z",
+    last_error: null,
+    enabled: true,
     ...overrides,
   };
 }
@@ -99,6 +113,35 @@ describe("usage store", () => {
       expect(store.timeline()?.series).toHaveLength(1);
       expect(store.sessions()).toHaveLength(1);
       expect(s.summary).toHaveBeenCalledWith({ range: "week", group_by: "kind" });
+      expect(store.rates()?.source_counts.litellm).toBe(12);
+      dispose();
+    });
+  });
+
+  it("carries on without rates when that read fails, rather than failing the whole refresh", async () => {
+    await createRoot(async (dispose) => {
+      const s = source({ rates: vi.fn().mockRejectedValue(new Error("offline")) });
+      const store = createUsageStore(s);
+      await store.refresh();
+      await flush();
+      expect(store.rates()).toBeNull();
+      expect(store.summary()?.totals.cost_usd).toBe(1.25);
+      expect(store.error()).toBeNull();
+      dispose();
+    });
+  });
+
+  it("refreshRates forces a fetch and reloads the window", async () => {
+    await createRoot(async (dispose) => {
+      const s = source();
+      const store = createUsageStore(s);
+      await store.refresh();
+      (s.rates as ReturnType<typeof vi.fn>).mockClear();
+      (s.summary as ReturnType<typeof vi.fn>).mockClear();
+      await store.refreshRates();
+      expect(s.refreshRates).toHaveBeenCalledTimes(1);
+      expect(s.summary).toHaveBeenCalledTimes(1);
+      expect(store.ratesRefreshing()).toBe(false);
       dispose();
     });
   });

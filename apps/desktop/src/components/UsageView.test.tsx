@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { UsageSessionRow, UsageSummary, UsageTimeline } from "../bindings";
+import type { RatesStatus, UsageSessionRow, UsageSummary, UsageTimeline } from "../bindings";
 import type { FleetStore } from "../stores/fleet";
 import { createUsageStore, type UsageSource } from "../stores/usage";
 import UsageView from "./UsageView";
@@ -85,6 +85,15 @@ const emptySummary: UsageSummary = {
   unpriced_models: [],
 };
 
+const rates: RatesStatus = {
+  source_counts: { builtin: 4, litellm: 12, overrides: 2 },
+  fetched_at: "2026-09-05T09:00:00Z",
+  etag: '"snap-1"',
+  next_refresh_at: "2026-09-06T09:00:00Z",
+  last_error: null,
+  enabled: true,
+};
+
 function source(overrides: Partial<UsageSource> = {}): UsageSource {
   return {
     summary: vi.fn().mockResolvedValue(summary),
@@ -112,6 +121,8 @@ function source(overrides: Partial<UsageSource> = {}): UsageSource {
     }),
     exportRows: vi.fn().mockResolvedValue({ path: "/data/usage.csv", events: 88, bytes: 4096 }),
     ingestNow: vi.fn().mockResolvedValue({ listed: 4, scanned: 0, events: 0, failed: 0, redigested: 0 }),
+    rates: vi.fn().mockResolvedValue(rates),
+    refreshRates: vi.fn().mockResolvedValue(rates),
     subscribe: vi.fn().mockResolvedValue(() => undefined),
     ...overrides,
   };
@@ -163,6 +174,37 @@ describe("UsageView", () => {
     fireEvent.click(screen.getByText("Model"));
     await flush();
     expect(screen.getByText("unknown model")).toBeTruthy();
+  });
+
+  it("shows where rates came from in the pricing footnote", async () => {
+    mount(source(), fleet());
+    await flush();
+    expect(screen.getByText(/LiteLLM, updated/)).toBeTruthy();
+    expect(screen.getByText(/12 models/)).toBeTruthy();
+    expect(screen.getByText(/2 from overrides/)).toBeTruthy();
+    expect(screen.getByText(/4 built-in/)).toBeTruthy();
+  });
+
+  it("flags a failed rate fetch in the footnote instead of showing a stale one", async () => {
+    mount(
+      source({
+        rates: vi.fn().mockResolvedValue({ ...rates, last_error: "connection timed out" }),
+      }),
+      fleet(),
+    );
+    await flush();
+    expect(screen.getByText(/fetch failed/)).toBeTruthy();
+    expect(screen.getByText(/connection timed out/)).toBeTruthy();
+  });
+
+  it("refreshes rates on demand from the footnote button", async () => {
+    const src = source();
+    mount(src, fleet());
+    await flush();
+    const button = screen.getByText("Refresh rates");
+    fireEvent.click(button);
+    await flush();
+    expect(src.refreshRates).toHaveBeenCalledTimes(1);
   });
 
   it("shows the findings the optimize panel was given", async () => {

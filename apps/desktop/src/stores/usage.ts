@@ -12,6 +12,7 @@
 import { createMemo, createSignal } from "solid-js";
 
 import type {
+  RatesStatus,
   UsageBucket,
   UsageFinding,
   UsageGroupBy,
@@ -64,6 +65,10 @@ export interface UsageSource {
   status(): Promise<UsageStatus>;
   exportRows(p: UsageWindowParams & { format: "csv" | "json" }): Promise<UsageExport>;
   ingestNow(): Promise<UsageIngestReport>;
+  /** Where prices come from right now: source counts, LiteLLM freshness, last fetch error. */
+  rates(): Promise<RatesStatus>;
+  /** Force an immediate LiteLLM fetch, bypassing the daily cadence. */
+  refreshRates(): Promise<RatesStatus>;
   subscribe?(onEvent: (event: DaemonEvent) => void): Promise<() => void>;
 }
 
@@ -75,6 +80,8 @@ export const daemonUsageSource: UsageSource = {
   status: () => daemonCall("usage.status"),
   exportRows: (p) => daemonCall("usage.export", p),
   ingestNow: () => daemonCall("usage.ingest_now"),
+  rates: () => daemonCall("usage.rates"),
+  refreshRates: () => daemonCall("usage.refresh_rates"),
   subscribe: subscribeDaemon,
 };
 
@@ -151,8 +158,10 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
   const [sessions, setSessions] = createSignal<UsageSessionRow[]>([]);
   const [findings, setFindings] = createSignal<UsageFinding[]>([]);
   const [status, setStatus] = createSignal<UsageStatus | null>(null);
+  const [rates, setRates] = createSignal<RatesStatus | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [scanning, setScanning] = createSignal(false);
+  const [ratesRefreshing, setRatesRefreshing] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [lastExport, setLastExport] = createSignal<UsageExport | null>(null);
 
@@ -173,19 +182,22 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
     setError(null);
     try {
       const window = params();
-      const [nextSummary, nextTimeline, nextSessions, nextFindings, nextStatus] = await Promise.all([
-        source.summary({ ...window, group_by: groupBy() }),
-        source.timeline({ ...window, group_by: groupBy(), bucket: step().bucket }),
-        source.sessions({ ...window, limit: SESSION_LIMIT }),
-        source.findings(window).catch(() => [] as UsageFinding[]),
-        source.status().catch(() => null),
-      ]);
+      const [nextSummary, nextTimeline, nextSessions, nextFindings, nextStatus, nextRates] =
+        await Promise.all([
+          source.summary({ ...window, group_by: groupBy() }),
+          source.timeline({ ...window, group_by: groupBy(), bucket: step().bucket }),
+          source.sessions({ ...window, limit: SESSION_LIMIT }),
+          source.findings(window).catch(() => [] as UsageFinding[]),
+          source.status().catch(() => null),
+          source.rates().catch(() => null),
+        ]);
       if (token !== loadToken) return;
       setSummary(nextSummary);
       setTimeline(nextTimeline);
       setSessions(nextSessions);
       setFindings(nextFindings);
       setStatus(nextStatus);
+      setRates(nextRates);
     } catch (cause) {
       if (token !== loadToken) return;
       setError(message(cause));
@@ -223,8 +235,10 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
     sessions,
     findings,
     status,
+    rates,
     loading,
     scanning,
+    ratesRefreshing,
     error,
     lastExport,
     setQuery,
@@ -335,6 +349,21 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
         return null;
       } finally {
         setScanning(false);
+      }
+    },
+    /**
+     * Force an immediate LiteLLM fetch, bypassing the daily cadence, then reload the window so
+     * the summary and sessions tables re-price against whatever just changed.
+     */
+    async refreshRates() {
+      setRatesRefreshing(true);
+      try {
+        setRates(await source.refreshRates());
+        await refresh();
+      } catch (cause) {
+        setError(message(cause));
+      } finally {
+        setRatesRefreshing(false);
       }
     },
     subscribe: source.subscribe,

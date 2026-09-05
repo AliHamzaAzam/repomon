@@ -610,14 +610,30 @@ The `[usage]` table in `~/.config/repomon/config.toml`:
 - `enabled` (default `true`) turns ingest on and off.
 - `scan_interval_secs` (default `600`) is the floor between full scans.
 - `max_files_per_scan` (default `200`) bounds the work in one pass, newest files first.
-- `refresh_prices` (default `false`) fetches a daily price snapshot from LiteLLM's public JSON and
-  caches it under the data directory. Off by default; the built-in rates need no network.
+- `refresh_prices` (default `true`) fetches LiteLLM's public price list once a day and caches it
+  under the data directory. Set it to `false` to keep the ledger fully offline; the built-in rate
+  table is always there as a floor either way.
 - `[usage.price_overrides."<model>"]` corrects a rate. Every field is optional, so naming just
   `input_per_mtok` leaves the rest of that model's rates alone. Cost is computed at query time, so
   a correction re-prices history.
 
 `repomon usage today|week|month`, `repomon usage report`, `repomon usage ingest` and
 `repomon usage status` answer the same questions from a terminal, with `--group-by` and `--csv`.
+
+### Where prices come from
+
+A price is resolved in this order: `[usage.price_overrides]` first, then the daily LiteLLM
+snapshot, and the rate table repomon ships with as the floor everything else falls back to. A few
+model ids a CLI logs (a Codex internal review model, a tiered Gemini label) don't match a LiteLLM
+key by name; a small alias table in `pricing.rs` maps those to the closest LiteLLM entry rather
+than leaving them on the generic built-in rate. A model unpriced right after a refresh gets one
+retry ten minutes later; if it's still unpriced after that, it stays flagged rather than being
+retried forever. The Usage view's pricing footnote and `repomon usage rates` both report where the
+active rates came from (LiteLLM, overrides, built-in, and how many of each), when the snapshot was
+last fetched, and the last fetch's error if one is in progress; a Refresh button (and
+`repomon usage rates --refresh`) forces an immediate fetch. Turn the daily fetch off entirely with
+`refresh_prices = false` in `[usage]` — no other change is needed, and nothing about the ledger
+itself requires network access.
 
 ## Known gaps
 

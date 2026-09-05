@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { UsageTimeline } from "../bindings";
+import type { RatesStatus, UsageTimeline } from "../bindings";
 import {
   MAX_SERIES,
   bucketAxis,
   formatDuration,
+  formatRatesFootnote,
   formatTokens,
   formatUsd,
   foldTailSeries,
@@ -253,5 +254,75 @@ describe("windowLine", () => {
 
   it("reads as unknown with no start time", () => {
     expect(windowLine(null, "30m")).toBe("unknown");
+  });
+});
+
+describe("formatRatesFootnote", () => {
+  const now = new Date("2026-09-05T12:00:00Z").getTime();
+
+  function status(overrides: Partial<RatesStatus> = {}): RatesStatus {
+    return {
+      source_counts: { builtin: 0, litellm: 0, overrides: 0 },
+      fetched_at: null,
+      etag: null,
+      next_refresh_at: null,
+      last_error: null,
+      enabled: true,
+      ...overrides,
+    };
+  }
+
+  it("reads as generic published rates before the first status arrives", () => {
+    expect(formatRatesFootnote(null, now)).toContain("published API rates");
+  });
+
+  it("reports LiteLLM freshness and the other sources", () => {
+    const line = formatRatesFootnote(
+      status({
+        source_counts: { builtin: 4, litellm: 12, overrides: 2 },
+        fetched_at: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+      }),
+      now,
+    );
+    expect(line).toContain("LiteLLM");
+    expect(line).toContain("3h ago");
+    expect(line).toContain("12 models");
+    expect(line).toContain("2 from overrides");
+    expect(line).toContain("4 built-in");
+  });
+
+  it("omits the overrides/built-in clauses when there are none", () => {
+    const line = formatRatesFootnote(
+      status({
+        source_counts: { builtin: 0, litellm: 20, overrides: 0 },
+        fetched_at: new Date(now).toISOString(),
+      }),
+      now,
+    );
+    expect(line).not.toContain("overrides");
+    expect(line).not.toContain("built-in");
+  });
+
+  it("surfaces a failed fetch rather than hiding it", () => {
+    const line = formatRatesFootnote(
+      status({ last_error: "connection timed out", source_counts: { builtin: 20, litellm: 0, overrides: 0 } }),
+      now,
+    );
+    expect(line).toContain("failed");
+    expect(line).toContain("connection timed out");
+  });
+
+  it("says refresh is off when it is, rather than implying a stale fetch", () => {
+    const line = formatRatesFootnote(
+      status({ enabled: false, source_counts: { builtin: 20, litellm: 0, overrides: 0 } }),
+      now,
+    );
+    expect(line).toContain("off");
+    expect(line).toContain("built-in");
+  });
+
+  it("says not fetched yet when enabled but nothing has landed", () => {
+    const line = formatRatesFootnote(status({ enabled: true }), now);
+    expect(line).toContain("not fetched yet");
   });
 });

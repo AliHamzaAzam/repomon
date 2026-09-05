@@ -27,6 +27,7 @@ import type {
   PendingDialog,
   Playbook,
   PolicyAction,
+  RatesStatus,
   Repo,
   RepomindStatus,
   Schedule,
@@ -373,6 +374,8 @@ interface RpcMap {
   };
   "usage.findings": { params: UsageWindowParams; result: UsageFinding[] };
   "usage.status": { params: undefined; result: UsageStatus };
+  "usage.rates": { params: undefined; result: RatesStatus };
+  "usage.refresh_rates": { params: undefined; result: RatesStatus };
   "usage.export": {
     params: UsageWindowParams & { format: "csv" | "json" };
     result: { path: string; events: number; bytes: number };

@@ -2,7 +2,8 @@
  * Pure reducers behind the usage chart. Kept out of the component so the shapes a chart depends on
  * (bucket order, stacking, the palette assignment, axis rounding) are testable without a DOM.
  */
-import type { UsageBucket, UsageGroupBy, UsageSeries, UsageTimeline } from "../bindings";
+import type { RatesStatus, UsageBucket, UsageGroupBy, UsageSeries, UsageTimeline } from "../bindings";
+import { formatRelativeTime } from "./relativeTime";
 
 /**
  * How many series the categorical palette holds. Colours are assigned in this fixed order and are
@@ -308,6 +309,33 @@ export function windowLine(startedAt: string | null, duration: string): string {
   const day = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const time = start.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   return duration ? `${day}, ${time} · ${duration}` : `${day}, ${time}`;
+}
+
+/**
+ * The Usage view's pricing footnote and the CLI's `repomon usage rates` summary line share this
+ * wording (see `format_rates_footnote` in `repomon-core/src/pricing.rs`) — kept as two small,
+ * independently-testable implementations (Rust and TypeScript can't share one function) rather
+ * than round-tripping a formatted string through the RPC, which would bake English into the wire
+ * format for no benefit.
+ */
+export function formatRatesFootnote(status: RatesStatus | null, now: number = Date.now()): string {
+  if (!status) return "Rates: published API rates.";
+  if (!status.enabled) {
+    return `Rates: built-in only (${totalModels(status)} models). LiteLLM refresh is off ([usage] refresh_prices).`;
+  }
+  if (status.last_error) {
+    return `Rates: LiteLLM fetch failed (${status.last_error}); using ${totalModels(status)} cached/built-in model(s).`;
+  }
+  let line = status.fetched_at
+    ? `Rates: LiteLLM, updated ${formatRelativeTime(status.fetched_at, now)} (${status.source_counts.litellm} models)`
+    : "Rates: LiteLLM not fetched yet";
+  if (status.source_counts.overrides > 0) line += `, ${status.source_counts.overrides} from overrides`;
+  if (status.source_counts.builtin > 0) line += `, ${status.source_counts.builtin} built-in`;
+  return line;
+}
+
+function totalModels(status: RatesStatus): number {
+  return status.source_counts.builtin + status.source_counts.litellm + status.source_counts.overrides;
 }
 
 /** A bucket start and end, spelled out for a tooltip heading. */

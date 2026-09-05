@@ -16,6 +16,7 @@ import UsageChart from "./UsageChart";
 import UsageRangePicker from "./UsageRangePicker";
 import {
   formatDuration,
+  formatRatesFootnote,
   formatTokens,
   formatUsd,
   groupRowLabel,
@@ -499,10 +500,27 @@ export default function UsageView(props: UsageViewProps) {
                 </tbody>
               </table>
             </Show>
-            <p class="mt-3 text-[11px] text-muted">
-              Priced at published API rates. On a subscription plan this is what the plan returned,
-              not what it billed.
-            </p>
+            <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+              <p
+                class="text-[11px]"
+                classList={{
+                  "text-attention": !!store.rates()?.last_error,
+                  "text-muted": !store.rates()?.last_error,
+                }}
+              >
+                {formatRatesFootnote(store.rates())} On a subscription plan this is what the plan
+                returned, not what it billed.
+              </p>
+              <button
+                type="button"
+                class="focus-ring flex h-6 shrink-0 items-center gap-1 rounded-lg border border-line bg-surface px-2 text-[11px] text-muted transition-colors hover:text-foreground disabled:opacity-50"
+                onClick={() => void store.refreshRates()}
+                disabled={store.ratesRefreshing()}
+              >
+                <IconRefresh size={11} />
+                <span>{store.ratesRefreshing() ? "Refreshing" : "Refresh rates"}</span>
+              </button>
+            </div>
           </div>
         </Show>
       </div>
