@@ -40,7 +40,7 @@ interface UsageViewProps {
   /** Focus the lane a session ran in. Absent when nothing can be focused. */
   onOpenLane?: (laneId: number) => void;
   /** Open the settings tab where a model price is set. Absent when settings cannot be opened. */
-  onOpenSettings?: () => void;
+  onOpenSettings?: (model?: string) => void;
 }
 
 const RANGES: { id: "today" | "week" | "month"; label: string }[] = [
@@ -425,7 +425,7 @@ export default function UsageView(props: UsageViewProps) {
                     <button
                       type="button"
                       class="focus-ring rounded-xs underline"
-                      onClick={() => props.onOpenSettings?.()}
+                      onClick={() => props.onOpenSettings?.(summary()?.unpriced_models[0])}
                     >
                       Settings
                     </button>

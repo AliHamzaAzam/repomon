@@ -25,6 +25,9 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
   // Which sub-tab of Settings > Automation to land on, for callers that mean one of them
   // specifically rather than the tab as a whole.
   const [policySection, setPolicySection] = createSignal<PolicySection | undefined>();
+  // A model id to pre-fill Settings > Usage's filter with, for the Usage view's unpriced-model
+  // warning.
+  const [usageFilter, setUsageFilter] = createSignal<string | undefined>();
   const [spawnLane, setSpawnLane] = createSignal<Lane | null>(null);
   const [newLaneOpen, setNewLaneOpen] = createSignal(false);
   const [newLaneRepoId, setNewLaneRepoId] = createSignal<number | null>(null);
@@ -271,14 +274,17 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     settingsOpen,
     settingsTab,
     policySection,
+    usageFilter,
     openSettings: () => {
       setSettingsTab("general");
       setPolicySection(undefined);
+      setUsageFilter(undefined);
       setSettingsOpen(true);
     },
-    openSettingsTab: (tab: SettingsTab, section?: PolicySection) => {
+    openSettingsTab: (tab: SettingsTab, section?: PolicySection, usageFilterValue?: string) => {
       setSettingsTab(tab);
       setPolicySection(section);
+      setUsageFilter(usageFilterValue);
       setSettingsOpen(true);
     },
     closeSettings: () => setSettingsOpen(false),

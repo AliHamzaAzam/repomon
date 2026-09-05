@@ -221,3 +221,23 @@ describe("shortcuts guide", () => {
     });
   });
 });
+
+
+describe("Usage settings navigation", () => {
+  it("preserves the warning filter and clears it on a normal settings open", () => {
+    createRoot((dispose) => {
+      const actions = createActionsStore(fleetStub());
+      actions.openSettingsTab("usage", undefined, "local-model");
+      expect(actions.settingsTab()).toBe("usage");
+      expect(actions.usageFilter()).toBe("local-model");
+      expect(actions.settingsOpen()).toBe(true);
+      actions.closeSettings();
+      actions.openSettingsTab("usage");
+      expect(actions.usageFilter()).toBeUndefined();
+      actions.openSettings();
+      expect(actions.settingsTab()).toBe("general");
+      expect(actions.usageFilter()).toBeUndefined();
+      dispose();
+    });
+  });
+});

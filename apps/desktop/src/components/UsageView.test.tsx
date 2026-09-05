@@ -164,6 +164,14 @@ describe("UsageView", () => {
     expect(screen.getByText(/No published rate for local-model/)).toBeTruthy();
   });
 
+  it("opens Usage settings with the first unpriced model as the filter", async () => {
+    const open = vi.fn();
+    render(() => <UsageView store={createUsageStore(source())} fleet={fleet()} onOpenSettings={open} />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(open).toHaveBeenCalledWith("local-model");
+  });
+
   it("renders a blank model key as 'unknown model' rather than a blank row", async () => {
     const withUnlabelledModel: UsageSummary = {
       ...summary,

@@ -23,6 +23,7 @@ export default function ActionModals(props: {
           onClose={actions.closeSettings}
           initialTab={actions.settingsTab()}
           initialPolicySection={actions.policySection()}
+          initialUsageFilter={actions.usageFilter()}
           onConfigSaved={props.notifications.setConfig}
           onPreviewSound={props.notifications.preview}
           onUpdateAvailable={(version) => void props.notifications.notifyUpdateReady(version)}
