@@ -252,7 +252,22 @@
   color: var(--muted);
 }
 
-.focus-ring:focus-visible {
+/* One focus ring, in the accent, on every control that can take keyboard focus. `.focus-ring`
+   is kept for the components that already opt in; the element rules below cover the ones that
+   never did, so a keyboard user is never left guessing where they are. The terminal's hidden
+   textarea and the code editor's content surface draw their own cursors, so they are excluded,
+   and `.settings-input` keeps its border-and-shadow treatment (its own rule is more specific). */
+.focus-ring:focus-visible,
+button:focus-visible,
+a[href]:focus-visible,
+input:not(.xterm-helper-textarea):focus-visible,
+select:focus-visible,
+textarea:not(.xterm-helper-textarea):focus-visible,
+summary:focus-visible,
+[role="tab"]:focus-visible,
+[role="option"]:focus-visible,
+[role="menuitem"]:focus-visible,
+[tabindex]:not(.cm-content):not(.cm-editor):not(.xterm):focus-visible {
   outline: 2px solid var(--signal);
   outline-offset: 1px;
 }
