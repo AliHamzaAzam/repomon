@@ -720,7 +720,11 @@ summary:focus-visible,
   white-space: nowrap;
   direction: rtl;
   text-align: left;
-  unicode-bidi: plaintext;
+  /* `isolate`, not `plaintext`: plaintext re-derives the base direction from the first strong
+     character, which for every branch name is Latin, so the box silently went back to LTR and
+     clipped the tail instead of the head. Isolating keeps the rtl base that puts the ellipsis
+     at the start while the Latin run inside still reads left to right. */
+  unicode-bidi: isolate;
 }
 
 .lane-pulse {
