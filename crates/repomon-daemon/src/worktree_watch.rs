@@ -52,17 +52,12 @@ pub fn start_lane_watcher(
         NoCache::new(),
         Config::default(),
     )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("watcher init: {e}")))?;
+    .map_err(|e| std::io::Error::other(format!("watcher init: {e}")))?;
 
     let mut watcher = debouncer;
     watcher
         .watch(&canonical_root, RecursiveMode::Recursive)
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("watch {}: {e}", canonical_root.display()),
-            )
-        })?;
+        .map_err(|e| std::io::Error::other(format!("watch {}: {e}", canonical_root.display())))?;
 
     let initial_paths: HashSet<String> = index_worktree(&canonical_root)
         .map(|(paths, _)| paths.into_iter().collect())
@@ -182,7 +177,7 @@ async fn process_debounced_events(
             let Some(rel_str) = rel_for_path(root, canonical_root, path) else {
                 continue;
             };
-            if check_ignored(root, &[rel_str.clone()]).contains(&rel_str) {
+            if check_ignored(root, std::slice::from_ref(&rel_str)).contains(&rel_str) {
                 continue;
             }
 

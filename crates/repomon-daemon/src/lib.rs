@@ -498,7 +498,7 @@ impl Ctx {
         watchers.retain(|lane_id, _| active_lanes.contains(lane_id));
 
         for lane_id in active_lanes {
-            if !watchers.contains_key(&lane_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = watchers.entry(lane_id) {
                 if let Ok(lane) = self.lanes.get(lane_id).await {
                     let root = lane.worktree.path.clone();
                     if let Ok(w) = worktree_watch::start_lane_watcher(
@@ -507,7 +507,7 @@ impl Ctx {
                         lane_id,
                         root,
                     ) {
-                        watchers.insert(lane_id, w);
+                        e.insert(w);
                     }
                 }
             }

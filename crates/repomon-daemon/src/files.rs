@@ -200,7 +200,7 @@ pub fn index_worktree(root: &Path) -> io::Result<(Vec<String>, bool)> {
         let ignored_dirs = check_ignored(root, &next_dir_rels);
         current_dirs = next_dirs
             .into_iter()
-            .zip(next_dir_rels.into_iter())
+            .zip(next_dir_rels)
             .filter_map(|(d, rel)| {
                 if ignored_dirs.contains(&rel) {
                     None

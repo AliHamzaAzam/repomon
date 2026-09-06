@@ -3821,7 +3821,7 @@ pub async fn dispatch(
                 "lane_id": p.lane_id,
                 "window": window,
                 "agent": p.agent,
-                "role": is_controller.then(|| crate::repomind::CONTROLLER_ROLE),
+                "role": is_controller.then_some(crate::repomind::CONTROLLER_ROLE),
             }))
         }
         "agent.adopt" => {

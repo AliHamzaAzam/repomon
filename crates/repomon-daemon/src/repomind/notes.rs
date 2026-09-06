@@ -144,7 +144,7 @@ mod tests {
         let (_d, home) = home();
         let r = repo(1, "Repomon");
         assert_eq!(
-            notes_path(&home, &r, &[r.clone()]),
+            notes_path(&home, &r, std::slice::from_ref(&r)),
             home.join("fleet/repomon/notes.md")
         );
     }
@@ -190,7 +190,7 @@ mod tests {
     fn read_is_none_when_the_repo_has_no_notes_file() {
         let (_d, home) = home();
         let r = repo(1, "repomon");
-        assert_eq!(read(&home, &r, &[r.clone()]).unwrap(), None);
+        assert_eq!(read(&home, &r, std::slice::from_ref(&r)).unwrap(), None);
     }
 
     #[test]
@@ -201,7 +201,9 @@ mod tests {
         std::fs::write(home.join("fleet/repomon/notes.md"), "just prose\n").unwrap();
 
         assert_eq!(
-            read(&home, &r, &[r.clone()]).unwrap().as_deref(),
+            read(&home, &r, std::slice::from_ref(&r))
+                .unwrap()
+                .as_deref(),
             Some("just prose\n")
         );
     }
@@ -217,7 +219,7 @@ mod tests {
         )
         .unwrap();
 
-        let body = read(&home, &r, &[r.clone()]).unwrap().unwrap();
+        let body = read(&home, &r, std::slice::from_ref(&r)).unwrap().unwrap();
 
         assert!(body.ends_with(TRUNCATION_MARKER), "{}", &body[..40]);
     }
@@ -226,7 +228,13 @@ mod tests {
     fn write_rejects_a_body_over_the_cap() {
         let (_d, home) = home();
         let r = repo(1, "repomon");
-        let err = write(&home, &r, &[r.clone()], &"x".repeat(MAX_NOTES_BYTES + 1)).unwrap_err();
+        let err = write(
+            &home,
+            &r,
+            std::slice::from_ref(&r),
+            &"x".repeat(MAX_NOTES_BYTES + 1),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("cap"), "{err}");
     }
 

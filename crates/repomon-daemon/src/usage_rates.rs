@@ -431,9 +431,10 @@ mod tests {
 
     /// Serve one HTTP/1.1 response per accepted connection, in order, and report each request's
     /// `If-None-Match` header (empty string when absent) back over the channel.
-    fn spawn_http(
-        responses: Vec<(u16, Vec<(&'static str, String)>, Vec<u8>)>,
-    ) -> (String, mpsc::Receiver<String>) {
+    /// One scripted HTTP reply: status, headers, body.
+    type ScriptedResponse = (u16, Vec<(&'static str, String)>, Vec<u8>);
+
+    fn spawn_http(responses: Vec<ScriptedResponse>) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -450,9 +451,13 @@ mod tests {
                     .lines()
                     .find_map(|l| {
                         let lower = l.to_ascii_lowercase();
-                        lower
-                            .starts_with("if-none-match:")
-                            .then(|| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
+                        lower.starts_with("if-none-match:").then(|| {
+                            l.split_once(':')
+                                .map(|x| x.1)
+                                .unwrap_or("")
+                                .trim()
+                                .to_string()
+                        })
                     })
                     .unwrap_or_default();
                 let _ = tx.send(inm);

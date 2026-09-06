@@ -10,8 +10,10 @@ use std::sync::Mutex as StdMutex;
 fn fixture() -> (tempfile::TempDir, Arc<Ctx>, Arc<ScriptedBackend>) {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(ScriptedBackend::new());
-    let mut config = repomon_core::Config::default();
-    config.usage_probe = true;
+    let mut config = repomon_core::Config {
+        usage_probe: true,
+        ..Default::default()
+    };
     config.repomind.home = dir.path().join("home").to_string_lossy().into_owned();
     let ctx = Ctx::new_with_backend(
         repomon_core::Store::open_in_memory().unwrap(),
