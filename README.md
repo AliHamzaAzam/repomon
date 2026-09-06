@@ -16,8 +16,10 @@
 </p>
 
 <p align="center">
-  <img alt="Repomon desktop app" src="docs/preview.png" width="860">
+  <img alt="Repomon desktop app" src="docs/gui-demo.gif" width="860">
 </p>
+
+<p align="center"><sub>If Repomon is useful to you, a <a href="https://github.com/AliHamzaAzam/repomon">star on GitHub</a> helps others find it.</sub></p>
 
 Repomon is a desktop app and a terminal UI for people who run coding agents (Claude Code, Codex,
 Antigravity, OpenCode, Cursor, Aider) in several projects at once. A local daemon owns the fleet:
@@ -93,6 +95,15 @@ repomon daemon install      # optional: run the daemon as a user service
 
 In the desktop app the same actions live in the fleet sidebar and the command palette
 (`Cmd K` on macOS, `Ctrl K` elsewhere). Press `?` for the shortcut guide.
+
+## Terminal UI
+
+The `repomon` TUI is the original interface and stays a first-class client: the same fleet, the
+same daemon, usable over SSH or alongside the app.
+
+<p align="center">
+  <img alt="Repomon terminal UI" src="docs/preview.png" width="860">
+</p>
 
 ## Documentation
 
