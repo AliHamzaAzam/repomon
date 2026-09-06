@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # scripts/record-gui-demo.sh - records docs/gui-demo.gif, the desktop app's hero GIF.
 #
-#   Usage:  scripts/record-gui-demo.sh [--keep-sandbox] [--skip-build]
+#   Usage:  scripts/record-gui-demo.sh [--keep-sandbox] [--skip-build] [--still]
+#
+#   --still captures one PNG of the hero frame (the same sandbox fleet, before the tour) to
+#   docs/preview.png instead of recording the GIF, then cleans up as usual.
 #
 # What it does, in order:
 #   1. Builds the release daemon + desktop binaries if missing (or --skip-build to reuse).
@@ -67,10 +70,12 @@ cd "$REPO_ROOT"
 
 KEEP_SANDBOX=0
 SKIP_BUILD=0
+STILL=0
 for arg in "$@"; do
   case "$arg" in
     --keep-sandbox) KEEP_SANDBOX=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
+    --still) STILL=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 1 ;;
   esac
 done
@@ -854,6 +859,21 @@ if best:
     print(best[0])
 PYEOF
 )"
+if [[ "$STILL" == 1 ]]; then
+  # One frame of the hero shot: the pinned claude lane's idle terminal with the fleet beside it.
+  sleep 3
+  STILL_RAW="$OUT_DIR/preview-raw.png"
+  if [[ -n "${DEMO_WIN_ID:-}" ]]; then
+    screencapture -x -o -l "$DEMO_WIN_ID" "$STILL_RAW"
+  else
+    screencapture -x -o -R "${WIN_X},${WIN_Y},${WIN_W},${WIN_H}" "$STILL_RAW"
+  fi
+  [[ -s "$STILL_RAW" ]] || { log "still capture failed (screen-recording permission?)"; exit 1; }
+  # Retina capture is 2x; bring it to the window's logical width so the README stays light.
+  sips --resampleWidth 1440 "$STILL_RAW" --out "$REPO_ROOT/docs/preview.png" >/dev/null
+  log "wrote docs/preview.png ($(stat -f%z "$REPO_ROOT/docs/preview.png") bytes)"
+  exit 0
+fi
 log "recording ~${REC_SECONDS}s to $MOV_PATH"
 if [[ -n "${DEMO_WIN_ID:-}" ]]; then
   log "capturing window id $DEMO_WIN_ID (window-only recording, no shadow)"
