@@ -8,6 +8,7 @@ use serde::Serialize;
 
 /// What a terminal needs on unix: the CLI itself, plus the daemon, because `repomon daemon
 /// install` writes a launchd plist or systemd unit that names `repomond` by path.
+#[cfg_attr(windows, allow(dead_code))]
 pub const UNIX_TOOLS: [&str; 2] = ["repomon", "repomond"];
 
 /// Includes the Windows agent host beside the daemon so installed commands can launch agents.
@@ -33,6 +34,7 @@ pub fn tools() -> &'static [&'static str] {
 
 /// macOS and Linux: `~/.local/bin`, the XDG-blessed per-user bin directory that most shells
 /// already put on PATH.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn unix_install_dir(home: &Path) -> PathBuf {
     home.join(".local").join("bin")
 }
@@ -67,6 +69,7 @@ fn normalize_entry(entry: &str) -> String {
 
 /// The exact line to add to a shell rc file. Quoted so a home directory with a space in it works,
 /// and prepended so the installed copy wins over an older one further down PATH.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn shell_rc_line(dir: &Path) -> String {
     format!("export PATH=\"{}:$PATH\"", dir.display())
 }
@@ -394,10 +397,7 @@ fn install_tool(from: &Path, to: &Path, copy: bool) -> Result<Option<String>, St
         }
     }
     if let Err(error) = link_or_copy(from, to, copy) {
-        #[cfg(unix)]
-        if note.is_some() {
-            let _ = std::fs::rename(backup_path(to), to);
-        }
+        restore_backup(to, note.is_some());
         return Err(error);
     }
     Ok(note)
@@ -425,6 +425,17 @@ fn retire_copy(path: &Path) -> Result<Option<String>, String> {
 
 /// Copy where symlinks are unavailable or the bundle path is temporary; links otherwise follow app
 /// upgrades automatically.
+/// Put a `.bak` back after a failed link or copy. Windows renames the old copy aside instead of
+/// backing it up, so there is nothing to restore there.
+fn restore_backup(to: &Path, had_backup: bool) {
+    #[cfg(unix)]
+    if had_backup {
+        let _ = std::fs::rename(backup_path(to), to);
+    }
+    #[cfg(not(unix))]
+    let _ = (to, had_backup);
+}
+
 fn link_or_copy(from: &Path, to: &Path, copy: bool) -> Result<(), String> {
     if copy {
         std::fs::copy(from, to)
