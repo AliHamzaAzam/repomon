@@ -9,6 +9,7 @@ Download the app, then add one repository. This guide covers the desktop fleet, 
 | Task | Go to |
 |---|---|
 | Install | [Open section](#install) |
+| Permissions for agents | [Open section](#permissions-for-agents) |
 | The app icon | [Open section](#the-app-icon) |
 | Keyboard control | [Open section](#keyboard-control) |
 | Settings | [Open section](#settings) |
@@ -1401,3 +1402,46 @@ Match the symptom below to its workaround.
 - The iOS companion app is built but unreleased.
 
 </details>
+
+## Permissions for agents
+
+On macOS, grant Accessibility and Screen Recording to the app responsible for launching an
+agent. A command that works in Terminal can still fail in a Repomon lane because Terminal's
+grant is separate. In a measured Repomon lane, macOS attributed both requests to Repomon.app,
+even though the lane's tmux server had detached under launchd.
+
+1. Open **System Settings > Privacy & Security > Accessibility** and enable the installed
+   **Repomon.app**. Use the add button if it is missing.
+2. Open **Screen & System Audio Recording** and enable Repomon for screen recording. Older
+   macOS versions call this **Screen Recording**. If macOS asks for **Automation > System
+   Events**, allow that separately for UI scripting.
+3. Quit and reopen Repomon if macOS requests it, then test from a Repomon lane:
+
+   ```sh
+   osascript -e 'tell application "System Events"' -e 'set frontApp to first application process whose frontmost is true' -e 'tell frontApp to get count of windows' -e 'end tell'
+   screencapture -x /tmp/repomon-permission-probe.png
+   rm -f /tmp/repomon-permission-probe.png
+   ```
+
+   The first command returns a window count when Accessibility access works. The second
+   creates a screen image; the third removes it. Merely asking System Events for a process
+   name does not prove Accessibility access.
+
+A locally rebuilt or replaced app can retain an enabled settings entry whose stored signing
+requirement belongs to an older executable. If permission still fails, remove the stale
+Repomon entry from each affected permission list and add the current app again. Detached
+agent sessions can also retain the previous app's responsibility after its window closes.
+Save work and finish active commands before restarting the fleet or logging out and back in;
+reopening the window alone does not restart an existing tmux server.
+
+| Launch context | Grant to check |
+|---|---|
+| Repomon app launched the lane's process tree | The current Repomon.app |
+| Terminal started a fresh tmux server | Terminal |
+| An independently installed daemon or another launcher started the fleet | The responsible app or executable reported for that process tree; do not assume Terminal's grant applies |
+
+The observed failure was a stale ad hoc signing requirement, not evidence that tmux always
+loses app attribution. Stable signed releases avoid tying the app's identity to one local
+build. See Apple's [Accessibility](https://support.apple.com/en-gb/guide/mac-help/mh43185/mac)
+and [Screen Recording](https://support.apple.com/en-mide/guide/mac-help/mchld6aa7d23/mac)
+permission instructions and its [responsible-code and signing explanation](https://developer.apple.com/forums/thread/678819).
