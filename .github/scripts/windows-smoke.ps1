@@ -23,11 +23,11 @@
 
 [CmdletBinding()]
 param(
-  # The Rust target triple whose release directory holds the binaries, e.g. x86_64-pc-windows-msvc.
+
   [Parameter(Mandatory = $true)][string]$Triple,
-  # Repository root. Defaults to the current directory, which is where GitHub Actions runs steps.
+
   [string]$RepoRoot = (Get-Location).Path,
-  # Where to unpack the installer. Defaults to a fresh directory under the runner's temp space.
+
   [string]$InstallDir = (Join-Path ([System.IO.Path]::GetTempPath()) ("repomon-smoke-install-" + [System.Guid]::NewGuid().ToString("N")))
 )
 
@@ -47,8 +47,6 @@ foreach ($exe in @($daemonExe, $cliExe)) {
   if (-not (Test-Path -LiteralPath $exe)) { Fail "expected a built binary at $exe" }
 }
 
-# ---------------------------------------------------------------- 1. it runs at all
-
 Write-Host "== repomond.exe --version"
 $version = & $daemonExe --version 2>&1
 if ($LASTEXITCODE -ne 0) {
@@ -56,8 +54,6 @@ if ($LASTEXITCODE -ne 0) {
   Fail "repomond.exe --version exited with $LASTEXITCODE ($code): $version. 0xC0000135 means a missing DLL (the Visual C++ runtime), 0xC000007B means a wrong-architecture one."
 }
 Write-Host $version
-
-# ---------------------------------------------------------- 2. it serves a private pipe
 
 $smokeId = [System.Guid]::NewGuid().ToString("N").Substring(0, 12)
 $pipe = "\\.\pipe\repomon-smoke-$smokeId"
@@ -81,9 +77,8 @@ function Show-DaemonLogs {
   }
 }
 
-# Wait for the pipe itself, not for the CLI to succeed: `repomon` auto-starts a daemon when it
-# cannot connect, and a poll loop that leans on that would quietly spawn a second daemon rather
-# than testing the one this script started.
+# Probe the pipe directly: the CLI can auto-start another daemon and mask failure of this script’s
+# child.
 $deadline = (Get-Date).AddSeconds(60)
 $bound = $false
 while ((Get-Date) -lt $deadline) {
@@ -114,8 +109,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "== repomon.exe reached the daemon on $pipe"
 
-# ------------------------------------------------------------------- 3. it shuts down
-
 Write-Host "== repomon.exe --socket $pipe daemon stop"
 & $cliExe --socket $pipe daemon stop *> $null
 if (-not $daemon.WaitForExit(20000)) {
@@ -124,8 +117,6 @@ if (-not $daemon.WaitForExit(20000)) {
   Fail "repomond.exe ignored daemon stop and had to be killed"
 }
 Write-Host "== the daemon shut down cleanly"
-
-# -------------------------------------------------------- 4. the installer lays out four exes
 
 $bundleDir = Join-Path $releaseDir "bundle\nsis"
 if (-not (Test-Path -LiteralPath $bundleDir)) { Fail "no NSIS bundle directory at $bundleDir" }

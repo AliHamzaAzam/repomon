@@ -1,16 +1,6 @@
-# Self-contained Windows binaries.
-#
-# Nothing in the MSVC toolchain links the C runtime statically by default, so `repomond.exe`,
-# `repomon-agent-host.exe`, and `repomon.exe` all resolve `VCRUNTIME140.dll` at process start.
-# On a Windows box without the Visual C++ redistributable that resolution fails before `main`
-# runs: the process dies with STATUS_DLL_NOT_FOUND (0xC0000135) and the GUI, which spawns the
-# daemon detached and windowless, sees nothing but a connection that never arrives. Linking the
-# CRT into each executable removes the dependency, at the cost of a few hundred KB per binary.
-#
-# Caveat: these flags reach every artifact built for the triple, including build scripts and
-# proc-macro dylibs when the build is not explicitly targeted. Always pass
-# `--target x86_64-pc-windows-msvc` (CI does, and so does `sidecar:prepare`) so cargo builds host
-# artifacts with the host's own flag set instead.
+# Link the Windows CRT statically so executables run without a redistributable. Always pass an
+# explicit --target x86_64-pc-windows-msvc so these target flags do not reach host build scripts or
+# proc-macro dylibs.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 

@@ -1,9 +1,6 @@
 name: desktop preview
 
-# Signed, installable preview bundles for testers, plus the in-app updater feed. Decoupled from
-# the production `v*` release (which also runs the CLI + Homebrew pipeline): this lane fires on
-# its own `desktop-v*` tag and publishes to a fixed moving `desktop-preview` release so the
-# updater has a stable endpoint (releases/download/desktop-preview/latest.json).
+# Publish desktop tags to a fixed preview release so the updater retains a stable metadata endpoint.
 on:
   push:
     tags: ["desktop-v*"]
@@ -16,9 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Build and smoke Windows without release metadata before any publishing job starts.
-  # A draft flag cannot protect an already-public moving release. This prerequisite also
-  # leaves the publishing matrix's serialized latest.json updates unchanged.
+  # Gate publication on Windows smoke results; a draft flag cannot protect an already-public moving
+  # release.
   windows-smoke:
     runs-on: windows-latest
     steps:
@@ -50,10 +46,7 @@ jobs:
         shell: pwsh
         run: .github/scripts/windows-smoke.ps1 -Triple "x86_64-pc-windows-msvc"
 
-  # Reset the moving release so the matrix rebuilds every asset + latest.json from scratch. Without
-  # this the version-less .app.tar.gz is not reliably replaced and latest.json's per-platform
-  # signatures go stale — which cryptographically breaks the macOS updater (a fresh artifact served
-  # against a stale signature). Runs before the (now serialized) matrix.
+  # Rebuild the moving release to keep versionless artifacts and updater signatures matched.
   reset:
     needs: windows-smoke
     runs-on: ubuntu-latest
@@ -67,14 +60,11 @@ jobs:
     needs: [reset, windows-smoke]
     strategy:
       fail-fast: false
-      # Serialize the platforms: each job read-modify-writes the SAME latest.json on the moving
-      # release, so running them in parallel clobbers each other's signatures. One at a time, each
-      # merges its platform onto the previous job's fresh result.
+      # Serialize metadata updates because each platform read-modify-writes the same latest.json.
       max-parallel: 1
       matrix:
         include:
-          # One universal macOS build: a single dmg + one .app.tar.gz updater artifact that
-          # serves both Apple Silicon and Intel (avoids the per-arch updater-name collision).
+          # A universal macOS artifact avoids per-architecture updater-name collisions.
           - platform: macos-14
             target: universal-apple-darwin
             bundles: app,dmg
@@ -84,7 +74,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bundles: appimage,deb,rpm
             config: src-tauri/tauri.preview.conf.json
-          # Windows bundles both sidecars: the daemon plus the per-agent ConPTY host it spawns.
+          # Windows uses the bundled ConPTY host instead of tmux.
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: nsis
@@ -119,15 +109,14 @@ jobs:
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: bun install --frozen-lockfile
-      # Two sidecars on every platform: the daemon, and the `repomon` CLI that Settings > System
-      # installs from the bundle (so "download the app" is the only step a CLI user needs).
+      # Bundle the daemon and CLI so command-line installation needs no separate download.
       - name: Build daemon and CLI sidecars
         shell: bash
         run: |
           mkdir -p apps/desktop/src-tauri/binaries
           if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
-            # The universal build compiles each arch slice (needs the per-arch sidecar) and then
-            # copies the universal-named one when bundling, so provide all three.
+            # Provide both architecture slices for compilation and the universal name for final
+            # bundling.
             cargo build --release --locked -p repomon-daemon -p repomon-tui --target aarch64-apple-darwin
             cargo build --release --locked -p repomon-daemon -p repomon-tui --target x86_64-apple-darwin
             for bin in repomond repomon; do
@@ -152,12 +141,8 @@ jobs:
         run: |
           cargo build --release --locked -p repomon-host --target "${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/repomon-agent-host.exe" "apps/desktop/src-tauri/binaries/repomon-agent-host-${{ matrix.target }}.exe"
-      # tauri.preview.conf.json lists `binaries/tmux` as an externalBin on macOS/Linux, so tauri
-      # build fails with "resource path ... doesn't exist" unless it's prepared here. Reuses
-      # prepare-sidecar.ts (also relied on by desktop-release.yml) rather than duplicating the
-      # acquisition logic: downloads a static binary on Linux, source-builds a portable one on
-      # macOS (once per arch slice, since the universal build needs both to lipo together), and
-      # no-ops on Windows (ConPTY host is used instead of tmux there).
+      # Prepare declared tmux artifacts before bundling; the shared script builds macOS sources,
+      # downloads Linux binaries, and skips Windows.
       - name: Install macOS build tools for bundled tmux
         if: matrix.apple_universal
         run: brew install autoconf automake pkg-config
@@ -170,8 +155,7 @@ jobs:
           if [[ "${{ matrix.apple_universal }}" == "true" ]]; then
             TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin bun run sidecar:prepare
             TAURI_ENV_TARGET_TRIPLE=x86_64-apple-darwin bun run sidecar:prepare
-            # The final bundling step (as opposed to each arch's compile step) looks for the
-            # universal-suffixed external binary directly, same as the daemon sidecar below.
+            # Final bundling resolves the universal-suffixed artifact directly.
             lipo -create -output src-tauri/binaries/tmux-universal-apple-darwin \
               src-tauri/binaries/tmux-aarch64-apple-darwin \
               src-tauri/binaries/tmux-x86_64-apple-darwin
@@ -179,12 +163,7 @@ jobs:
           else
             TAURI_ENV_TARGET_TRIPLE=${{ matrix.target }} bun run sidecar:prepare
           fi
-      # tauri.preview.conf.json (shared by macOS/Linux) has createUpdaterArtifacts: false, so
-      # those two platforms never emit a .sig and tauri-action's uploadVersionJSON silently
-      # skips them -- latest.json ends up with only the Windows entry and the cleanup job's
-      # all-three-platforms check fails. It was `true` (and working) before eeb1819 flipped it
-      # while wiring up tmux; patched here at build time rather than in the committed config so
-      # this fix stays scoped to the workflow file.
+      # Enable updater artifacts so macOS and Linux produce signatures and appear in latest.json.
       - name: Enable updater artifacts for this platform's config
         if: runner.os != 'Windows'
         working-directory: apps/desktop
@@ -198,8 +177,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
-          # Fixed moving release so the in-app updater has a stable endpoint
-          # (releases/download/desktop-preview/latest.json). Each desktop-v* tag refreshes it.
+
           tagName: desktop-preview
           releaseName: Repomon Desktop (preview)
           releaseBody: |

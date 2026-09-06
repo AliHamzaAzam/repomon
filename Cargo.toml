@@ -17,10 +17,8 @@ authors = ["Ali Hamza Azam"]
 rust-version = "1.86"
 repository = "https://github.com/AliHamzaAzam/repomon"
 
-# Centralized, pinned versions. Crates opt in with `<dep> = { workspace = true }`.
-# (Declared here but only resolved/downloaded once a crate actually depends on them.)
 [workspace.dependencies]
-# --- core: git, persistence, model ---
+
 gix = "0.84"
 rusqlite = { version = "0.40", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
@@ -43,7 +41,7 @@ candle-core = "0.8"
 candle-transformers = "0.8"
 tokenizers = "0.21"
 hf-hub = "0.4"
-# --- daemon: async, ipc, cli ---
+
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
@@ -58,11 +56,7 @@ tokio = { version = "1", features = [
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-tungstenite = "0.29"
 httparse = "1"
-# Rustls-backed HTTP client for the daily LiteLLM price refresh (crates/repomon-daemon/src/usage_rates.rs).
-# `hf-hub` already pulls ureq transitively with its default "tls" (rustls) feature on, so this adds
-# no new crate to the dependency graph: it only names an existing one as a direct dependency.
-# native-tls is dropped explicitly: the daemon never needs it and default-features would pull it in
-# from ureq's own defaults on some platforms.
+# Use rustls for daily price refreshes without enabling native-tls.
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip", "json"] }
 a2 = { version = "0.10", default-features = false, features = ["ring"] }
 futures = "0.3"
@@ -70,18 +64,18 @@ plist = "1"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 clap_mangen = "0.2"
-# --- tui ---
+
 ratatui = "0.29"
 ansi-to-tui = "7"
 vt100 = "0.15"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
-# --- cli / app ergonomics ---
+
 anyhow = "1"
-# --- dev ---
+
 tempfile = "3"
 insta = "1"
-# --- internal ---
+
 repomon-core = { path = "crates/repomon-core" }
 repomon-daemon = { path = "crates/repomon-daemon" }
 repomon-mcp = { path = "crates/repomon-mcp" }
@@ -91,8 +85,7 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# Dev builds run the daemon, agent hosts, and desktop app people actually interact with
-# during development; -O0 dependencies (vt100 parsing, gix, serde, tokio) dominate their
-# runtime cost. Optimize dependencies only — workspace crates stay -O0 for fast rebuilds.
+# Optimize dependencies used by interactive development builds while keeping workspace crates
+# unoptimized for fast rebuilds.
 [profile.dev.package."*"]
 opt-level = 2

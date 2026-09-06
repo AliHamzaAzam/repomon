@@ -3,8 +3,7 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # Manual dispatch on a branch ref runs only build-windows (the other jobs are
-  # tag-gated) so the Windows packaging can be validated before a real release.
+  # Branch dispatch validates Windows packaging without running tag-gated release jobs.
   workflow_dispatch:
 
 permissions:
@@ -12,8 +11,7 @@ permissions:
 
 jobs:
   build:
-    # Both macOS arches build on the arm64 runner via cross-compilation (macOS clang is a
-    # universal toolchain). Avoids depending on the scarce/slow macos-13 Intel runners.
+    # Cross-build both macOS architectures on the ARM runner to avoid requiring an Intel runner.
     if: github.ref_type == 'tag'
     strategy:
       matrix:
@@ -23,8 +21,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show                              # installs the rust-toolchain.toml version
       - run: rustup target add ${{ matrix.target }}  # add the cross std for this toolchain
-      # Scoped to the two release binaries: a full workspace build also compiles the desktop
-      # Tauri app, which needs system UI toolkit deps this job doesn't install (see build-linux).
+      # Limit builds to release binaries because the full workspace requires desktop UI
+      # dependencies.
       - run: cargo build --release --locked --target ${{ matrix.target }} -p repomon-tui -p repomon-daemon
       - name: Package
         run: |
@@ -43,7 +41,7 @@ jobs:
             repomon-*.tar.gz.sha256
 
   build-linux:
-    # Each Linux arch builds natively on its own runner (no cross C toolchain needed).
+
     if: github.ref_type == 'tag'
     strategy:
       matrix:
@@ -57,8 +55,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: rustup target add ${{ matrix.target }}
-      # Scoped to the two release binaries — a full workspace build also pulls in the desktop
-      # Tauri app's Linux UI toolkit deps (glib-sys, gtk-sys, ...), which this runner lacks.
+      # Exclude the desktop crate, whose Linux UI dependencies are not installed here.
       - run: cargo build --release --locked --target ${{ matrix.target }} -p repomon-tui -p repomon-daemon
       - name: Package
         run: |
@@ -77,12 +74,7 @@ jobs:
             repomon-*.tar.gz.sha256
 
   build-windows:
-    # Runs on tag pushes AND on workflow_dispatch from any branch, so the Windows
-    # packaging can be exercised before the release flow is finalized.
-    #
-    # The native Windows port has landed and the workspace builds and tests green on
-    # x86_64-pc-windows-msvc, so that leg is required. aarch64-pc-windows-msvc stays
-    # best-effort (stretch target, allowed to fail).
+    # Require x86_64 Windows builds while allowing the experimental ARM64 target to fail.
     strategy:
       fail-fast: false
       matrix:
@@ -97,8 +89,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: rustup target add ${{ matrix.target }}
-      # Scoped to the release binaries (repomon-host adds the optional agent-host exe) — a full
-      # workspace build also pulls in the desktop Tauri app, unneeded for this CLI/daemon release.
+      # Exclude the desktop app from CLI and daemon packaging.
       - run: cargo build --release --locked --target ${{ matrix.target }} -p repomon-tui -p repomon-daemon -p repomon-host
       - name: Package
         shell: pwsh
@@ -112,8 +103,7 @@ jobs:
           New-Item -ItemType Directory -Path $dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/repomon.exe", `
             "target/${{ matrix.target }}/release/repomond.exe" -Destination $dist
-          # repomon-agent-host (crates/repomon-host, Track C) may not have landed
-          # yet; include it in the zip whenever the workspace produced it.
+
           $agentHost = "target/${{ matrix.target }}/release/repomon-agent-host.exe"
           if (Test-Path $agentHost) { Copy-Item $agentHost -Destination $dist }
           Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"
@@ -127,8 +117,7 @@ jobs:
             repomon-*.zip.sha256
 
   universal:
-    # Merge the two thin binaries into one fat (arm64+x86_64) archive for a
-    # one-download-fits-all manual install. lipo is macOS-only, so this runs on macOS.
+    # Use macOS lipo to provide one archive for both architectures.
     if: github.ref_type == 'tag'
     needs: build
     runs-on: macos-14
@@ -171,8 +160,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # nullglob: the Windows zips are best-effort while build-windows is
-          # continue-on-error; a release without them must still succeed.
+          # Allow absent optional zip artifacts without passing unmatched globs to the release
+          # command.
           shopt -s nullglob
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip dist/*.zip.sha256 \
             install.sh install.ps1 \

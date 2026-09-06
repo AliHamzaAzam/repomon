@@ -105,7 +105,7 @@ def seed_usage(root, repo, paths):
 
                 for line in source.read_text().splitlines():
                     row = transform(json.loads(line))
-                    # The fixture's deliberate error/noise cases belong in tests, not the hero.
+
                     if row.get("message", {}).get("model") == "<synthetic>" or row.get("type") == "system":
                         continue
                     rows.append(json.dumps(row))

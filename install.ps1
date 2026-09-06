@@ -1,14 +1,7 @@
-# repomon installer for Windows. Downloads prebuilt binaries from GitHub Releases.
-# No Rust toolchain required. Works on Windows PowerShell 5.1 and PowerShell 7+.
-#
-#   irm https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.ps1 | iex
-#
-# Env overrides:
-#   REPOMON_INSTALL_DIR   install location (default: %LOCALAPPDATA%\Programs\repomon)
-#   REPOMON_VERSION       version tag to install (default: latest), e.g. v0.5.0
-#
-# No param() block and no exit calls: this script must be safe to pipe into
-# Invoke-Expression from an interactive shell. Errors throw instead.
+# Downloads Windows release binaries without a Rust toolchain. REPOMON_INSTALL_DIR overrides the
+# default %LOCALAPPDATA%\Programs\repomon destination; REPOMON_VERSION selects a tag instead of
+# latest. Omit param() and exit so piping into Invoke-Expression remains safe for an interactive
+# shell.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest is much faster without the progress bar
@@ -34,7 +27,6 @@ $target = switch ($env:PROCESSOR_ARCHITECTURE) {
     default { throw "unsupported Windows architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 
-# Resolve the release tag (latest unless REPOMON_VERSION pins one).
 if (-not $env:REPOMON_VERSION -or $env:REPOMON_VERSION -eq 'latest') {
     $tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers).tag_name
 } else {
@@ -86,7 +78,6 @@ try {
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# Add the install dir to the user PATH if it isn't there yet.
 $destNorm = $dest.TrimEnd('\')
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $onPath = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }) -contains $destNorm
@@ -97,7 +88,7 @@ if (-not $onPath) {
     Write-Host "Added $dest to your user PATH (already active in this session; new terminals pick it up automatically)."
 }
 
-# Runtime dependency check. repomon needs git; no tmux on Windows (native agent hosts).
+# Windows agents use the native host; git remains a runtime dependency.
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "Warning: 'git' is not installed. repomon needs it. Install Git for Windows:"
     Write-Host '    winget install --id Git.Git'

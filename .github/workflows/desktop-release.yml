@@ -1,22 +1,15 @@
 name: desktop release
 
-# Disabled for now: every run fails on missing Apple code-signing secrets
-# (APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD, plus the Windows signing
-# equivalents) that haven't been provisioned yet. Re-enable the `push` trigger
-# once those repo secrets are set; `workflow_dispatch` is left so it can still
-# be run by hand to check.
+# Manual dispatch keeps release builds available while automatic signing remains unconfigured.
 on:
-  # push:
-  #   tags: ["v*"]
+
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  # Build and smoke Windows without release metadata before any publishing job starts.
-  # A draft flag cannot protect an already-public moving release. This prerequisite also
-  # leaves the publishing matrix's serialized latest.json updates unchanged.
+  # Complete Windows smoke checks before publishing artifacts.
   windows-smoke:
     runs-on: windows-latest
     steps:

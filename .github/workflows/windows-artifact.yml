@@ -1,8 +1,6 @@
 name: windows artifact
 
-# A manual Windows-only build for testing on a VM before a preview or release tag. It builds the
-# same sidecars and NSIS installer as the preview lane, runs the Windows smoke test, and uploads
-# the installer as a workflow artifact. It never touches a release or the updater feed.
+# Build and smoke-test Windows installers as workflow artifacts without updating a release feed.
 on:
   workflow_dispatch:
 

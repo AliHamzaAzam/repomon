@@ -1,12 +1,6 @@
 #!/bin/sh
-# repomon installer. Downloads prebuilt binaries from GitHub Releases.
-# No Homebrew, no Rust, no Xcode required.
-#
-#   curl -fsSL https://github.com/AliHamzaAzam/repomon/releases/latest/download/install.sh | sh
-#
-# Env overrides:
-#   REPOMON_INSTALL_DIR   install location (default: ~/.local/bin)
-#   REPOMON_VERSION       version tag to install (default: latest), e.g. v0.1.0
+# Downloads release binaries without a build toolchain. REPOMON_INSTALL_DIR overrides ~/.local/bin;
+# REPOMON_VERSION selects a tag instead of latest.
 set -eu
 
 REPO="AliHamzaAzam/repomon"
@@ -54,13 +48,11 @@ mkdir -p "$DEST"
 install -m 0755 "$tmp/repomon" "$tmp/repomond" "$DEST/"
 echo "Installed repomon and repomond to $DEST"
 
-# PATH hint
 case ":$PATH:" in
   *":$DEST:"*) ;;
   *) echo "Note: $DEST is not on your PATH. Add this to your shell rc:"; echo "    export PATH=\"$DEST:\$PATH\"" ;;
 esac
 
-# Runtime dependency checks. repomon needs tmux (agents run in it) and git.
 install_hint() { # $1 = package; prints the install command for this OS
   case "$os" in
     Darwin) echo "  brew install $1" ;;
