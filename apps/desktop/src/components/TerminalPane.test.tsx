@@ -438,12 +438,12 @@ describe("TerminalPane clickable path links", () => {
         onEnsureEditorOpen={onEnsureEditorOpen}
       />
     ));
-    await flushMicrotasks();
-
-    expect(ensureIndex).toHaveBeenCalledWith(1);
+    await vi.waitFor(() => {
+      expect(ensureIndex).toHaveBeenCalledWith(1);
+      expect((terminalInstances[terminalInstances.length - 1] as any)?.linkProviders.length).toBeGreaterThan(0);
+    });
 
     const termInstance = terminalInstances[terminalInstances.length - 1] as any;
-    expect(termInstance.linkProviders.length).toBeGreaterThan(0);
 
     const provider = termInstance.linkProviders[0];
 
