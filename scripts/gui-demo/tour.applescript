@@ -311,9 +311,14 @@ on opening()
     my activateDemo()
     tell application "System Events"
         tell (first process whose unix id is demoPID)
-            set position of front window to {40, 40}
+            -- Top-left corner: macOS clamps the window under the menu bar and above the Dock, so
+            -- a 1440x900 request on a 1512x982 laptop display may come back shorter. Accept the
+            -- largest size that fits; the recorder crops to the window's real bounds.
+            set position of front window to {0, 0}
             set size of front window to {1440, 900}
-            if size of front window is not {1440, 900} then error "Display cannot accommodate the 1440x900 demo window"
+            set actualSize to size of front window
+            if (item 1 of actualSize) < 1280 or (item 2 of actualSize) < 760 then error "Display cannot accommodate a demo window of at least 1280x760 (got " & (item 1 of actualSize) & "x" & (item 2 of actualSize) & "); hide the Dock or use a larger display"
+            log "demo window size " & (item 1 of actualSize) & "x" & (item 2 of actualSize)
         end tell
     end tell
     my waitForFleet()

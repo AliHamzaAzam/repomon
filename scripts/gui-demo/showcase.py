@@ -334,7 +334,7 @@ def capture(root, window_id, tour, still, children):
     destination = REPO / "docs" / ("preview.png" if still else "gui-demo.gif")
     # Window-ID-only input. Normalize Retina scale, then take the top-left content rectangle.
     # There is deliberately no whole-display fallback on a permission or window failure.
-    content = "scale=1440:-1:flags=lanczos,crop=1440:900:0:0,setsar=1"
+    content = "scale=1440:-1:flags=lanczos,setsar=1"
     if still:
         run(["screencapture", "-x", "-o", "-l", window_id, raw])
         run(["ffmpeg", "-y", "-v", "error", "-i", raw, "-vf", content, "-frames:v", "1", root / "out/content.png"])
