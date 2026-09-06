@@ -1,16 +1,39 @@
 # Desktop end-to-end test
 
-`isolated.sh` follows the repository verify protocol: it creates a private config home, data
-directory, Unix socket, git fixture, and tmux server name. It never connects to the default daemon
-or the live `repomon` tmux server.
+Run the isolated Linux test from `apps/desktop`. The harness creates its own config, data, Unix socket, Git fixture, Repomind home, basic-memory config and tmux server, and never connects to the default daemon or live tmux server.
 
-On Linux, install `tauri-driver`, WebKitWebDriver, tmux, and Xvfb, build the debug desktop binary,
-then run:
+## Run the test
 
-```sh
-xvfb-run -a bun run e2e
-```
+Prepare the Linux tools before starting. **Time: 10-20 minutes for first setup and build; about 2 minutes for a warm test run.**
 
-The test waits for the connected mission-control UI, confirms the registered fixture lane, opens
-an interactive shell tile, sends a command through xterm, verifies the streamed output, and opens
-the control center. Cleanup stops the private daemon and tmux server and removes its temporary root.
+1. Install `tauri-driver`, WebKitWebDriver, tmux and Xvfb on Linux.
+2. Install and build the frontend from `apps/desktop`.
+
+   ```sh
+   bun install
+   bun run build
+   ```
+
+3. Build the debug desktop, CLI and daemon binaries from the repository root.
+
+   ```sh
+   cargo build -p repomon-desktop -p repomon-tui -p repomon-daemon
+   ```
+
+4. Enter the desktop directory and run the test.
+
+   ```sh
+   cd apps/desktop
+   xvfb-run -a bun run e2e
+   ```
+
+**You know it worked when:** the test reports success after checking the connected UI, fixture lane, interactive shell, streamed xterm output and Control Center.
+
+<details>
+<summary>Details: isolation and cleanup</summary>
+
+[isolated.sh](isolated.sh) follows the repository verify protocol.
+
+Cleanup stops the private daemon and tmux server and removes the temporary root.
+
+</details>

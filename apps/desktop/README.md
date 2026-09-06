@@ -1,39 +1,79 @@
 # Repomon Desktop
 
-The multiplatform mission-control client for Repomon. The Tauri host is the only daemon protocol
-peer; the Solid frontend talks to it through a small typed IPC surface.
+Run the development checks from `apps/desktop`. The Tauri host is the daemon protocol peer; the Solid frontend uses its typed IPC surface.
 
-## Development
+## Develop the desktop app
 
-```sh
-bun install --frozen-lockfile
-bun run check
-bun run test
-bun run build
-bun run tauri dev
-```
+Use an isolated daemon endpoint when testing against a fleet. **Time: 5-10 minutes with Rust and Bun installed; the first native compile can take 10-20 minutes.**
 
-Set `REPOMON_SOCKET` to point the host at an isolated daemon endpoint. Without it, the app uses
-the endpoint resolved by `repomon_core::config::socket_path` and starts `repomond` when needed.
+1. Open this directory and install locked dependencies.
 
-The user guide, current keyboard map, and branding workflow are in
-[docs/desktop.md](../../docs/desktop.md). Brand sources are maintainer-local; builds consume
-the tracked rendered icons under `src-tauri/icons` and `src-tauri/macos/Assets.car`.
+   ```sh
+   cd apps/desktop
+   bun install --frozen-lockfile
+   ```
 
-## Packaging
+2. Check types, run tests and build the frontend.
 
-`bun run tauri:build` prepares the daemon, CLI, and platform session sidecars in
-`src-tauri/binaries`, then builds the native bundle. Native bundle formats are dmg on macOS,
-NSIS on Windows, and AppImage plus deb/rpm on Linux. The Linux packages declare `tmux` as a runtime
-dependency.
+   ```sh
+   bun run check
+   bun run test
+   bun run build
+   ```
 
-Signed updater artifacts are produced by `.github/workflows/desktop-release.yml`. Configure these
-repository secrets before tagging a release:
+3. Point `REPOMON_SOCKET` at your isolated daemon endpoint, then start the app.
 
-- `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-- `TAURI_SIGNING_PUBLIC_KEY`
-- Apple certificate, password, signing identity, Apple ID, team ID, and app-specific password for
-  notarized macOS releases
+   ```sh
+   bun run tauri dev
+   ```
 
-The release workflow injects the public key into a temporary Tauri config. The checked-in config
-contains the preview verification key and updater endpoint; artifacts must have a matching signature.
+**You know it worked when:** all checks exit successfully and the connected desktop window shows the isolated fleet.
+
+<details>
+<summary>Details: endpoint and user documentation</summary>
+
+Without `REPOMON_SOCKET`, the app uses `repomon_core::config::socket_path` and starts `repomond` when needed.
+
+The [desktop user guide](../../docs/desktop.md) covers keyboard shortcuts, settings and the branding workflow.
+
+Brand sources are maintainer-local. Builds consume the tracked icons in `src-tauri/icons` and `src-tauri/macos/Assets.car`.
+
+</details>
+
+## Package a release
+
+Configure signing before tagging a release. **Time: 10-20 minutes to build after dependencies and credentials are ready; notarization time varies.**
+
+1. Configure the repository secrets listed below.
+2. From `apps/desktop`, prepare sidecars and build the native bundle.
+
+   ```sh
+   bun run tauri:build
+   ```
+
+3. Use the [desktop release workflow](../../.github/workflows/desktop-release.yml) for signed updater artifacts.
+
+**You know it worked when:** the native bundle exists and its updater artifact has a signature matching the configured public key.
+
+<details>
+<summary>Details: formats, sidecars and signing</summary>
+
+The packaging command prepares the daemon, CLI and platform session sidecars in `src-tauri/binaries` before building.
+
+| Platform | Bundle formats |
+|---|---|
+| macOS | dmg |
+| Windows | NSIS |
+| Linux | AppImage, deb and rpm; Linux packages declare a tmux runtime dependency |
+
+| Secret group | Required values |
+|---|---|
+| Updater private key | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
+| Updater public key | `TAURI_SIGNING_PUBLIC_KEY` |
+| macOS notarization | Apple certificate, password, signing identity, Apple ID, team ID and app-specific password |
+
+The release workflow injects the public key into a temporary Tauri config.
+
+The checked-in config contains the preview verification key and updater endpoint. Artifacts must have a matching signature.
+
+</details>
