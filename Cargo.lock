@@ -6140,6 +6140,7 @@ dependencies = [
  "regex",
  "repomon-core",
  "repomon-mcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

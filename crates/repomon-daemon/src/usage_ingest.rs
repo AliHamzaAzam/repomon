@@ -462,9 +462,9 @@ pub fn price_cache_path() -> PathBuf {
 }
 
 /// Build the repo and lane index, and the lane-to-window map, from the store.
-async fn fleet(ctx: &Arc<Ctx>) -> (FleetIndex, HashMap<i64, String>) {
-    let repos = ctx.store.list_repos().await.unwrap_or_default();
-    let lanes = ctx.store.list_lane_meta().await.unwrap_or_default();
+async fn fleet(ctx: &Arc<Ctx>) -> repomon_core::Result<(FleetIndex, HashMap<i64, String>)> {
+    let repos = ctx.store.list_repos().await?;
+    let lanes = ctx.store.list_lane_meta().await?;
     let windows = lanes
         .iter()
         .filter_map(|l| l.tmux_window.clone().map(|w| (l.id, w)))
@@ -476,7 +476,7 @@ async fn fleet(ctx: &Arc<Ctx>) -> (FleetIndex, HashMap<i64, String>) {
             .map(|l| (l.id, l.repo_id, l.worktree_path.clone()))
             .collect(),
     );
-    (index, windows)
+    Ok((index, windows))
 }
 
 /// Attribute a scanned turn and turn it into a stored ledger row.
@@ -512,6 +512,9 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
     if !config.enabled {
         return Ok(IngestReport::default());
     }
+    // Attribution is required even when recount only retires a missing source's cursor.
+    let (index, windows) = fleet(ctx).await?;
+
     let budget = config.max_files_per_scan;
     let all = tokio::task::spawn_blocking(discover_all_sources)
         .await
@@ -537,8 +540,6 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
             sources.push(source);
         }
     }
-
-    let (index, windows) = fleet(ctx).await;
 
     let mut report = IngestReport {
         listed: sources.len(),
@@ -979,7 +980,10 @@ mod tests {
     }
 
     async fn seeded_ctx(root: &Path) -> Arc<Ctx> {
-        let store = Store::open_in_memory().unwrap();
+        seeded_ctx_with_store(root, Store::open_in_memory().unwrap()).await
+    }
+
+    async fn seeded_ctx_with_store(root: &Path, store: Store) -> Arc<Ctx> {
         let repo = store
             .add_repo(root.join("repos/demo"), "demo".to_string(), None)
             .await
@@ -1395,7 +1399,9 @@ mod tests {
     async fn unreadable_stale_source_retires_on_third_failure_preserving_events_and_error() {
         let dir = tempfile::tempdir().unwrap();
         let _env = with_seeded_sources(dir.path());
-        let ctx = seeded_ctx(dir.path()).await;
+        let db = dir.path().join("recount.db");
+        let ctx = seeded_ctx_with_store(dir.path(), Store::open(&db).unwrap()).await;
+        let connection = rusqlite::Connection::open(&db).unwrap();
         let path = dir.path().join("unreadable.jsonl");
         fs::create_dir(&path).unwrap();
         let path = path.to_string_lossy().to_string();
@@ -1408,6 +1414,16 @@ mod tests {
             .await
             .unwrap();
         for attempt in 1..=3 {
+            // Advance the persisted observation time instead of sleeping in the test.
+            connection
+                .execute(
+                    "UPDATE usage_ingest_cursors SET scanned_at = ?1 WHERE source_path = ?2",
+                    rusqlite::params![
+                        (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(),
+                        path
+                    ],
+                )
+                .unwrap();
             let report = ingest_once(&ctx).await.unwrap();
             assert_eq!(report.failed, 1);
             assert_eq!(report.recount_attempts, 1);
@@ -1419,6 +1435,13 @@ mod tests {
             );
             assert_eq!(cursor.offset, 4096);
             assert!(cursor.error.is_some());
+            if attempt < 3 {
+                ingest_once(&ctx).await.unwrap();
+                assert_eq!(
+                    ctx.store.usage_cursor(path.clone()).await.unwrap().unwrap(),
+                    cursor
+                );
+            }
             assert!(
                 ctx.store
                     .usage_source_event(path.clone())
@@ -1809,6 +1832,74 @@ mod tests {
             99.0
         );
     }
+
+    #[tokio::test]
+    async fn attribution_read_errors_preserve_cursors_and_recover_without_unassigned_events() {
+        for table in ["repos", "lanes"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = with_seeded_sources(dir.path());
+            let db = dir.path().join("failure.db");
+            let store = Store::open(&db).unwrap();
+            let repo = store
+                .add_repo(dir.path().join("repos/demo"), "demo".into(), None)
+                .await
+                .unwrap();
+            store
+                .get_or_create_lane(repo.id, "/repos/demo".into())
+                .await
+                .unwrap();
+            let mut config = Config {
+                tmux_session: format!("usage-errors-{}-{table}", std::process::id()),
+                ..Config::default()
+            };
+            config.repomind.home = dir.path().join("repomind").to_string_lossy().into_owned();
+            let ctx = Ctx::new_with_paths(
+                store,
+                config,
+                Some(db.clone()),
+                dir.path().join("config.toml"),
+                dir.path().join("notes"),
+            );
+            let missing = dir
+                .path()
+                .join("missing.jsonl")
+                .to_string_lossy()
+                .into_owned();
+            ctx.store
+                .set_usage_cursor(missing.clone(), 123, 1, None, 0)
+                .await
+                .unwrap();
+            let before = ctx.store.usage_cursors().await.unwrap();
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} RENAME TO unavailable"))
+                .unwrap();
+            assert!(ingest_once(&ctx).await.is_err());
+            assert_eq!(ctx.store.usage_cursors().await.unwrap(), before);
+            assert!(all_events(&ctx).await.is_empty());
+            connection
+                .execute_batch(&format!("ALTER TABLE unavailable RENAME TO {table}"))
+                .unwrap();
+            ingest_once(&ctx).await.unwrap();
+            let events = all_events(&ctx).await;
+            let claude: Vec<_> = events
+                .iter()
+                .filter(|e| e.agent_kind == "claude-code")
+                .collect();
+            assert!(!claude.is_empty());
+            assert!(claude.iter().all(|e| e.lane_id.is_some() && !e.external));
+            assert_eq!(
+                ctx.store
+                    .usage_cursor(missing)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .ingest_version,
+                INGEST_VERSION
+            );
+        }
+    }
+
     #[tokio::test]
     async fn ingest_does_not_fetch_prices_when_refresh_is_enabled() {
         let dir = tempfile::tempdir().unwrap();
