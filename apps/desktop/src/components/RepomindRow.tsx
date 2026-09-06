@@ -29,14 +29,37 @@ export function RepomindRowMenu(props: {
   onAction: (action: RepomindMenuAction) => void;
   onClose: () => void;
 }) {
+  let menuRef: HTMLDivElement | undefined;
+  let previouslyFocused: HTMLElement | null = null;
+
   function onKey(event: KeyboardEvent) {
-    if (event.key !== "Escape") return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      props.onClose();
+      previouslyFocused?.focus();
+      return;
+    }
+    const items = [...(menuRef?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
+    const index = items.findIndex((item) => item === document.activeElement);
+    let next: number;
+    if (event.key === "ArrowDown") next = (index + 1) % items.length;
+    else if (event.key === "ArrowUp") next = (index - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else return;
+    event.preventDefault();
     event.stopPropagation();
-    props.onClose();
+    items[next]?.focus();
   }
-  onMount(() => window.addEventListener("keydown", onKey, true));
+  onMount(() => {
+    previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menuRef?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    window.addEventListener("keydown", onKey, true);
+  });
   onCleanup(() => window.removeEventListener("keydown", onKey, true));
 
+  const left = () => Math.max(8, Math.min(props.x, window.innerWidth - 224 - 8));
   const top = () => Math.max(8, Math.min(props.y, window.innerHeight - 180));
   const item =
     "focus-ring flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium transition-colors hover:bg-raised";
@@ -50,8 +73,9 @@ export function RepomindRowMenu(props: {
     <>
       <div class="fixed inset-0 z-40" onClick={() => props.onClose()} />
       <div
+        ref={menuRef}
         class="fixed z-50 w-56 rounded-xl border border-line bg-surface p-1.5 shadow-[0_12px_40px_var(--shadow)]"
-        style={{ left: `${props.x}px`, top: `${top()}px` }}
+        style={{ left: `${left()}px`, top: `${top()}px` }}
         role="menu"
         aria-label="Repomind"
       >
@@ -137,8 +161,17 @@ export default function RepomindRow(props: RepomindRowProps) {
       onClick={() => props.onSelect()}
       onContextMenu={(event) => {
         event.preventDefault();
+        event.currentTarget.focus();
         props.onContextMenu(event.clientX, event.clientY);
       }}
+      onKeyDown={(event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const bounds = event.currentTarget.getBoundingClientRect();
+        props.onContextMenu(bounds.left, bounds.bottom);
+      }}
+      aria-haspopup="menu"
       aria-current={props.selected ? "true" : undefined}
       title={rowTitle()}
     >

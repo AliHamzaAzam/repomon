@@ -55,6 +55,23 @@ function mockDaemon(overrides: Record<string, unknown> = {}) {
 }
 
 describe("the plans board", () => {
+  it.each(["Escape", "Cancel"])("returns focus to Add goal after %s cancellation", async (action) => {
+    mockDaemon();
+    render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "Add goal" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const field = screen.getByRole("textbox", { name: "Goal title" });
+    expect(field).toHaveFocus();
+    if (action === "Escape") fireEvent.keyDown(field, { key: "Escape" });
+    else fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("form", { name: "Add goal" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("textbox", { name: "Goal title" })).toHaveFocus();
+    expect(daemonCall).not.toHaveBeenCalledWith("file.write", expect.anything());
+  });
+
   it("lists a goal with its next step and owner, skipping the directory README", async () => {
     mockDaemon();
     render(() => <RepomindPlans laneId={90} onOpen={vi.fn()} />);

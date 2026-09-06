@@ -1,12 +1,13 @@
-import { cleanup, render, screen } from "@solidjs/testing-library";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
 import { controllerSummary } from "../stores/fleet";
-import { RepomindStateDot } from "./RepomindRow";
+import RepomindRow, { RepomindRowMenu, RepomindStateDot } from "./RepomindRow";
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 const home: Repo = {
@@ -101,5 +102,51 @@ describe("the Repomind toolbar state dot", () => {
     render(() => <RepomindStateDot controller={controllerSummary([lane])} />);
     const dot = screen.getByRole("img", { name: "Repomind: stalled" });
     expect(dot.className).toContain("bg-fault");
+  });
+});
+
+
+describe("the Repomind row menu", () => {
+  it("opens from the keyboard without selecting or starting the controller", () => {
+    const onContextMenu = vi.fn();
+    const onSelect = vi.fn();
+    render(() => <RepomindRow controller={controllerSummary([controllerLane([])])} activePlans={0}
+      home="/Users/pat/repomind" selected={false} onSelect={onSelect} onContextMenu={onContextMenu} />);
+    const row = screen.getByRole("button");
+    row.focus();
+    fireEvent.keyDown(row, { key: "F10", shiftKey: true });
+    expect(onContextMenu).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(row, { key: "ContextMenu" });
+    expect(onContextMenu).toHaveBeenCalledTimes(2);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("focuses its actions, walks them with arrows, and returns focus on Escape", () => {
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    const onClose = vi.fn();
+    render(() => <RepomindRowMenu running={false} x={100} y={100} onAction={vi.fn()} onClose={onClose} />);
+    const items = screen.getAllByRole("menuitem");
+    expect(items[0]).toHaveFocus();
+    fireEvent.keyDown(items[0], { key: "ArrowUp" });
+    expect(items[2]).toHaveFocus();
+    fireEvent.keyDown(items[2], { key: "ArrowDown" });
+    expect(items[0]).toHaveFocus();
+    fireEvent.keyDown(items[0], { key: "End" });
+    expect(items[2]).toHaveFocus();
+    fireEvent.keyDown(items[2], { key: "Home" });
+    expect(items[0]).toHaveFocus();
+    fireEvent.keyDown(items[0], { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it("keeps the context menu inside the right viewport edge", () => {
+    vi.stubGlobal("innerWidth", 1040);
+    render(() => <RepomindRowMenu running={false} x={1038} y={100} onAction={vi.fn()} onClose={vi.fn()} />);
+    const menu = screen.getByRole("menu", { name: "Repomind" });
+    expect(Number.parseFloat(menu.style.left) + 224).toBeLessThanOrEqual(1032);
   });
 });

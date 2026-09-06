@@ -1,4 +1,4 @@
-import { Show, type JSX } from "solid-js";
+import { Show, onMount, type JSX } from "solid-js";
 
 /// The furniture every section of the Repomind control room is built from: one heading, one
 /// count, its controls, and its body.
@@ -126,6 +126,12 @@ export function InlineForm(props: {
   onCancel: () => void;
   children: JSX.Element;
 }) {
+  const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const cancel = () => {
+    props.onCancel();
+    if (trigger?.isConnected) trigger.focus();
+  };
+
   return (
     <form
       class="mb-2 space-y-1.5 rounded-lg border border-line bg-raised/40 p-2"
@@ -136,8 +142,9 @@ export function InlineForm(props: {
       }}
       onKeyDown={(event) => {
         if (event.key !== "Escape") return;
+        event.preventDefault();
         event.stopPropagation();
-        props.onCancel();
+        cancel();
       }}
     >
       {props.children}
@@ -145,7 +152,7 @@ export function InlineForm(props: {
         <button
           type="button"
           class="focus-ring rounded px-1.5 py-0.5 font-mono text-[10px] text-muted hover:text-foreground"
-          onClick={() => props.onCancel()}
+          onClick={cancel}
         >
           Cancel
         </button>
@@ -170,16 +177,19 @@ export function InlineField(props: {
   autofocus?: boolean;
   onInput: (value: string) => void;
 }) {
+  let inputRef!: HTMLInputElement;
+  onMount(() => {
+    if (props.autofocus) inputRef.focus();
+  });
+
   return (
     <input
+      ref={inputRef}
       type="text"
       aria-label={props.label}
       placeholder={props.placeholder}
       class="focus-ring w-full rounded border border-line bg-background px-2 py-1 text-xs text-foreground outline-none placeholder:text-muted/60"
       value={props.value}
-      // eslint-disable-next-line jsx-a11y/no-autofocus -- the form only exists because the
-      // operator just asked for it, so the caret belongs in its first field.
-      autofocus={props.autofocus}
       onInput={(event) => props.onInput(event.currentTarget.value)}
     />
   );
