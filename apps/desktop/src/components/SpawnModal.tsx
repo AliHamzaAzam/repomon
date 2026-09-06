@@ -76,51 +76,55 @@ export default function SpawnModal(props: {
           <div class="grid gap-2 sm:grid-cols-2">
             <For each={choices()}>
               {(choice) => (
-                <button
-                  type="button"
-                  class={`focus-ring flex items-center justify-between rounded-xl border p-3 text-left transition-all ${
+                <div
+                  class={`flex min-w-0 items-stretch rounded-xl border transition-colors ${
                     agent() === choice.name
                       ? "border-signal bg-signal/5 ring-1 ring-signal/20 text-foreground"
                       : "border-line bg-surface text-muted hover:border-muted/50 hover:bg-raised/40"
                   }`}
-                  onClick={() => setAgent(choice.name)}
                 >
-                  <div class="flex items-center gap-2">
-                    <span class={agent() === choice.name ? "text-signal" : "text-muted"}>
-                      <AgentIcon agent={choice.name} size={15} />
+                  <button
+                    type="button"
+                    class="focus-ring flex min-w-0 flex-1 items-center justify-between gap-2 rounded-xl p-3 text-left"
+                    aria-label={`Select ${choice.name}`}
+                    aria-pressed={agent() === choice.name}
+                    title={choice.name}
+                    onClick={() => setAgent(choice.name)}
+                  >
+                    <span class="flex min-w-0 items-center gap-2">
+                      <span class={`shrink-0 ${agent() === choice.name ? "text-signal" : "text-muted"}`}>
+                        <AgentIcon agent={choice.name} size={15} />
+                      </span>
+                      <span class="min-w-0 truncate text-xs font-medium">{choice.name}</span>
                     </span>
-                    <span class="text-xs font-medium">{choice.name}</span>
-                  </div>
-                  <div class="flex items-center gap-1">
-                    <Show when={!choice.detected}>
-                      <Show
-                        when={props.onOpenSettingsTab}
-                        fallback={
-                          <span class="rounded bg-fault/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault">
-                            missing
-                          </span>
-                        }
-                      >
-                        <button
-                          type="button"
-                          class="focus-ring rounded bg-fault/10 hover:bg-fault/20 border border-fault/30 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault transition-colors cursor-pointer"
-                          title="View installation instructions in Settings > System"
-                          aria-label={`View install instructions for ${choice.name} in System Health`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            props.onClose();
-                            props.onOpenSettingsTab?.("system");
-                          }}
-                        >
-                          missing ↗
-                        </button>
-                      </Show>
-                    </Show>
                     <Show when={choice.default}>
-                      <span class="rounded bg-signal/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-signal">default</span>
+                      <span class="shrink-0 rounded bg-signal/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-signal">default</span>
                     </Show>
-                  </div>
-                </button>
+                  </button>
+                  <Show when={!choice.detected}>
+                    <Show
+                      when={props.onOpenSettingsTab}
+                      fallback={
+                        <span class="mr-3 self-center rounded bg-fault/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault">
+                          missing
+                        </span>
+                      }
+                    >
+                      <button
+                        type="button"
+                        class="focus-ring mr-3 shrink-0 self-center rounded bg-fault/10 hover:bg-fault/20 border border-fault/30 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault transition-colors cursor-pointer"
+                        title="View installation instructions in Settings > System"
+                        aria-label={`View install instructions for ${choice.name} in System Health`}
+                        onClick={() => {
+                          props.onClose();
+                          props.onOpenSettingsTab?.("system");
+                        }}
+                      >
+                        missing ↗
+                      </button>
+                    </Show>
+                  </Show>
+                </div>
               )}
             </For>
           </div>
@@ -136,7 +140,7 @@ export default function SpawnModal(props: {
         </label>
         <Show when={error()}>
           {(err) => (
-            <div class="rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault space-y-1.5">
+            <div role="alert" class="break-words rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault space-y-1.5">
               <div class="flex items-start gap-2">
                 <span class="mt-0.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-fault" />
                 <p class="flex-1 font-medium leading-snug">{err().friendly}</p>

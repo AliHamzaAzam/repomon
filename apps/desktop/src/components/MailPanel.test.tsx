@@ -137,6 +137,19 @@ function fixture() {
 afterEach(cleanup);
 
 describe("MailPanel", () => {
+  it("keeps full addresses available and message bodies keyboard-scrollable", () => {
+    const { store, fleet } = fixture();
+    render(() => <MailPanel messages={store} fleet={fleet} />);
+    const reply = screen.getByText("agent reply").closest("article")!;
+    expect(within(reply).getByTitle("lane-2/1")).toHaveTextContent("lane-2/1");
+    expect(within(reply).getByTitle("operator")).toHaveTextContent("operator");
+    const body = within(reply).getByRole("region", { name: "Message from lane-2/1 to operator" });
+    expect(body.tabIndex).toBe(0);
+    body.focus();
+    expect(body).toHaveFocus();
+    expect(body).toHaveClass("overflow-y-auto", "focus-ring");
+  });
+
   it("groups a thread and exposes delivery, failure, read, and source-lane actions", async () => {
     const { store, fleet, failedReply, open, markRead } = fixture();
     render(() => <MailPanel messages={store} fleet={fleet} />);

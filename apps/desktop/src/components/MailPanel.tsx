@@ -134,7 +134,7 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
   }
 
   return (
-    <div class="flex h-full min-h-0 flex-col bg-surface">
+    <div class="flex h-full min-h-0 min-w-0 flex-col bg-surface">
       <div class="panel-header">
         <div class="panel-header-lead">
           <IconMail size={14} class="shrink-0 text-foreground" />
@@ -230,9 +230,9 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
                     <div class="mb-1.5 flex min-w-0 items-center justify-between gap-2 px-1">
                       <div class="min-w-0">
                         <div class="flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted">
-                          <span class="max-w-[7rem] truncate">{root().sender.address}</span>
+                          <span class="max-w-[7rem] truncate" title={root().sender.address}>{root().sender.address}</span>
                           <IconChevronRight size={9} class="shrink-0 text-muted/60" />
-                          <span class="max-w-[7rem] truncate">{root().recipient.address}</span>
+                          <span class="max-w-[7rem] truncate" title={root().recipient.address}>{root().recipient.address}</span>
                           <span class="shrink-0 text-muted/60">· {thread.messages.length} {thread.messages.length === 1 ? "message" : "messages"}</span>
                         </div>
                         <Show when={laneLabel()} keyed>
@@ -252,16 +252,21 @@ export default function MailPanel(props: MailPanelProps): JSX.Element {
                             <article class="p-3 text-xs">
                               <div class="flex min-w-0 items-start justify-between gap-2">
                                 <div class="flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted">
-                                  <span class="max-w-[8rem] truncate font-semibold text-foreground">{message.sender.address}</span>
+                                  <span class="max-w-[8rem] truncate font-semibold text-foreground" title={message.sender.address}>{message.sender.address}</span>
                                   <IconChevronRight size={9} class="shrink-0 text-muted/60" />
-                                  <span class="max-w-[8rem] truncate">{message.recipient.address}</span>
+                                  <span class="max-w-[8rem] truncate" title={message.recipient.address}>{message.recipient.address}</span>
                                 </div>
                                 <span class={`shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase ${deliveryClass(message)}`}>
                                   {deliveryLabel(message)}
                                 </span>
                               </div>
 
-                              <p class="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/90">
+                              <p
+                                tabIndex={0}
+                                role="region"
+                                aria-label={`Message from ${message.sender.address} to ${message.recipient.address}`}
+                                class="focus-ring mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/90"
+                              >
                                 {message.body}
                               </p>
 

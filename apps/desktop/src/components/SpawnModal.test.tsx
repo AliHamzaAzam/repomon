@@ -45,6 +45,27 @@ describe("SpawnModal error rendering", () => {
     agent_sessions: [],
   };
 
+  it("keeps runtime selection and install help as separate keyboard controls", async () => {
+    state.agents = [
+      { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
+      { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
+    ];
+    const onOpenSettingsTab = vi.fn();
+    const { container } = render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} onOpenSettingsTab={onOpenSettingsTab} />);
+    const claude = await screen.findByRole("button", { name: "Select claude-code" });
+    const cursor = screen.getByRole("button", { name: "Select cursor" });
+    expect(claude).toHaveAttribute("aria-pressed", "true");
+    expect(cursor).toHaveAttribute("aria-pressed", "false");
+    expect(container.querySelector("button button")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /View install instructions for cursor/ }));
+    expect(onOpenSettingsTab).toHaveBeenCalledWith("system");
+    expect(claude).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(cursor);
+    expect(cursor).toHaveAttribute("aria-pressed", "true");
+    expect(claude).toHaveAttribute("aria-pressed", "false");
+    expect(state.spawnCalls).toEqual([]);
+  });
+
   it("renders friendly error and details when spawn fails with missing tmux", async () => {
     state.spawnError = "failed to spawn child: No such file or directory (os error 2)";
 

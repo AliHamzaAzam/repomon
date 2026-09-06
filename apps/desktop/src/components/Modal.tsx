@@ -76,11 +76,11 @@ export default function Modal(props: ModalProps) {
         aria-labelledby={titleId}
         aria-describedby={props.subtitle ? subtitleId : undefined}
         tabIndex={-1}
-        class="modal-card flex max-h-[88vh] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_24px_80px_var(--shadow)]"
+        class="modal-card flex max-h-[88vh] max-w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_24px_80px_var(--shadow)]"
         style={{ width: props.width ?? "min(34rem, 94vw)" }}
       >
-        <header class="flex items-start justify-between border-b border-line px-5 py-4">
-          <div>
+        <header class="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+          <div class="min-w-0 flex-1 break-words">
             <h2 id={titleId} class="text-sm font-semibold tracking-tight text-foreground">{props.title}</h2>
             <Show when={props.subtitle}>
               <p id={subtitleId} class="mt-1 text-xs text-muted leading-normal">{props.subtitle}</p>
@@ -88,7 +88,7 @@ export default function Modal(props: ModalProps) {
           </div>
           <button
             type="button"
-            class="focus-ring -mr-1 -mt-1 flex size-7 items-center justify-center rounded-lg text-muted transition-colors hover:bg-raised hover:text-foreground"
+            class="focus-ring -mr-1 -mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-raised hover:text-foreground"
             aria-label={`Close ${props.title}`}
             onClick={props.onClose}
           >
@@ -97,7 +97,7 @@ export default function Modal(props: ModalProps) {
         </header>
         <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">{props.children}</div>
         <Show when={props.footer}>
-          <footer class="flex items-center justify-end gap-2 border-t border-line bg-surface px-5 py-3.5">
+          <footer class="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-surface px-5 py-3.5">
             {props.footer}
           </footer>
         </Show>
