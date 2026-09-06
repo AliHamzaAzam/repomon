@@ -678,3 +678,76 @@ describe("ticketed manual refresh events", () => {
     } finally { f.stop(); vi.useRealTimers(); }
   });
 });
+
+describe("serialized fleet refresh", () => {
+  function harness() {
+    const pending: Array<{ resolve: (snapshot: Awaited<ReturnType<FleetSource["load"]>>) => void; reject: (error: Error) => void }> = [];
+    const source: FleetSource = {
+      load: vi.fn(() => new Promise((resolve, reject) => pending.push({ resolve, reject }))),
+      refreshUsage: async () => {},
+      subscribe: async () => () => {},
+    };
+    const view = createRoot((dispose) => ({ fleet: createFleetStore(source), dispose }));
+    const snapshot = (id: number) => ({ repos: [repo(id, String(id))], lanes: [], usage: [], terminals: [], sortReposByActivity: null, sortMode: null, tabSortMode: null });
+    return { ...view, pending, source, snapshot };
+  }
+
+  it("applies slow loads while heartbeats coalesce into one follow-up", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      h.fleet.start();
+      await vi.advanceTimersByTimeAsync(3600);
+      expect(h.source.load).toHaveBeenCalledTimes(1);
+      const followup = h.fleet.refresh();
+      h.pending[0].resolve(h.snapshot(1));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.fleet.synced()).toBe(true);
+      expect(h.fleet.repos()[0].id).toBe(1);
+      expect(h.source.load).toHaveBeenCalledTimes(2);
+      h.pending[1].resolve(h.snapshot(2));
+      await followup;
+      expect(h.fleet.repos()[0].id).toBe(2);
+      expect(h.fleet.loading()).toBe(false);
+      expect(h.source.load).toHaveBeenCalledTimes(2);
+    } finally { h.fleet.stop(); h.dispose(); vi.useRealTimers(); }
+  });
+
+  it("discards a stopped load and starts only one fresh load after restart", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      h.fleet.start();
+      void h.fleet.refresh();
+      h.fleet.stop();
+      h.fleet.start();
+      const fresh = h.fleet.refresh();
+      expect(h.source.load).toHaveBeenCalledTimes(1);
+      h.pending[0].resolve(h.snapshot(1));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.fleet.synced()).toBe(false);
+      expect(h.fleet.repos()).toHaveLength(0);
+      expect(h.source.load).toHaveBeenCalledTimes(2);
+      h.pending[1].resolve(h.snapshot(2));
+      await fresh;
+      expect(h.fleet.repos()[0].id).toBe(2);
+    } finally { h.fleet.stop(); h.dispose(); vi.useRealTimers(); }
+  });
+
+  it("runs the coalesced load after an error and clears the error on recovery", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      h.fleet.start();
+      const recovered = h.fleet.refresh();
+      h.pending[0].reject(new Error("offline"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.fleet.error()).toBe("offline");
+      expect(h.source.load).toHaveBeenCalledTimes(2);
+      h.pending[1].resolve(h.snapshot(2));
+      await recovered;
+      expect(h.fleet.error()).toBeNull();
+      expect(h.fleet.synced()).toBe(true);
+    } finally { h.fleet.stop(); h.dispose(); vi.useRealTimers(); }
+  });
+});

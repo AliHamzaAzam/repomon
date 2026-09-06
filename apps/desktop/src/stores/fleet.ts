@@ -486,7 +486,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   let active = false;
   let interval: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: (() => void) | undefined;
-  let refreshQueued = false;
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Mirrors the daemon's repo sort mode, refreshed with every poll so a change made in the TUI
   // lands here too. Falls back to the legacy boolean for daemons that predate `sort_mode`.
@@ -540,9 +540,30 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const counts = createMemo(() => fleetCounts(fleetLanes()));
 
   let loadToken = 0;
-  async function refresh() {
-    if (!active) return;
-    const token = ++loadToken;
+  let loadPromise: Promise<void> | undefined;
+  let followupPromise: Promise<void> | undefined;
+
+  function refresh(): Promise<void> {
+    if (!active) return Promise.resolve();
+    if (loadPromise) {
+      if (!followupPromise) {
+        const token = loadToken;
+        const next = loadPromise.then(() => {
+          if (followupPromise === next) followupPromise = undefined;
+          if (active && token === loadToken) return refresh();
+        });
+        followupPromise = next;
+      }
+      return followupPromise;
+    }
+    const pending = load(loadToken).finally(() => {
+      if (loadPromise === pending) loadPromise = undefined;
+    });
+    loadPromise = pending;
+    return pending;
+  }
+
+  async function load(token: number) {
     setLoading(true);
     try {
       const snapshot = await source.load();
@@ -650,10 +671,9 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   }
 
   function queueRefresh() {
-    if (refreshQueued) return;
-    refreshQueued = true;
-    setTimeout(() => {
-      refreshQueued = false;
+    if (refreshTimer !== undefined) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
       void refresh();
     }, 60);
   }
@@ -661,13 +681,14 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   function start() {
     if (active) return;
     active = true;
+    const token = loadToken;
     void refresh();
     // Heartbeat poll at 1.2s cadence to ensure fast UI updates without excessive overhead.
     interval = setInterval(() => void refresh(), 1200);
     subscriptionReady = source
       .subscribe(usageEvent)
       .then((stop) => {
-        if (active) unsubscribe = stop;
+        if (active && token === loadToken) unsubscribe = stop;
         else stop();
       })
       .catch(() => undefined);
@@ -675,6 +696,11 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   function stop() {
     active = false;
+    loadToken += 1;
+    followupPromise = undefined;
+    if (refreshTimer !== undefined) clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+    setLoading(false);
     if (usageWait) settleUsage(usageWait, undefined);
     if (interval) clearInterval(interval);
     interval = undefined;
