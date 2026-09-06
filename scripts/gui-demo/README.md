@@ -43,6 +43,42 @@ An investigation with the operator's identical binary hashes found the app conne
 
 </details>
 
+## Diagnose a missing fleet without Accessibility
+
+Run the guarded WebKit probe first. **Time: about 1 minute per run.** It uses the supplied app binary and compiles a small diagnostic library with Xcode command-line tools; it does not rebuild or bundle Repomon.
+
+1. Run the storage and DOM check.
+
+   ```sh
+   scripts/record-gui-demo.sh --dry-run --diagnose-webview --keep-sandbox --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
+   ```
+
+2. Read `out/webview-check.json` in the printed sandbox. It must show a sandbox Cocoa home/Library, successful localStorage and IndexedDB writes/reads, eight rendered lane buttons and populated status chips.
+3. Read `out/webview.jsonl` for JavaScript errors, rejected promises, console messages and button text/bounds. `out/sandbox-denials.json` contains the system log query; `out/sandbox-denials-status.json` records query errors and its exact predicate.
+4. To compare the operator's AX failure, run the rehearsal once with the default guard, then repeat with `--no-guard`.
+
+   ```sh
+   scripts/record-gui-demo.sh --dry-run --tour --diagnose-webview --keep-sandbox --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
+   scripts/record-gui-demo.sh --dry-run --tour --diagnose-webview --no-guard --keep-sandbox --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
+   ```
+
+**You know it worked when:** the console probe reports both storage checks and all eight lane buttons. A successful DOM check establishes layout and text; the tour separately tests native accessibility. Compare both runs' `webview-check.json`, `desktop-connection.json`, `tour.log` and any `ax-dump.txt`.
+
+<details>
+<summary>Details: probe isolation and the storage hypothesis</summary>
+
+`CFFIXED_USER_HOME` already redirects Cocoa's home to the disposable `cocoa` directory. The recorder prepares its Library/WebKit, Library/Containers, Library/Caches, Library/Preferences and Library/Application Support directories. The normal guard allows these paths because they are outside the denied personal home. The probe checks the app's actual `NSHomeDirectory` and Library results, resolving macOS's `/tmp` alias before comparing paths. No global home or preferences are changed.
+
+The opt-in diagnostic library attaches a WKUserScript before app scripts run. A native WKScriptMessageHandler writes console events and DOM samples into `out/webview.jsonl`. Storage checks use temporary namespaced entries and delete them. The diagnostic variables are passed after `sandbox-exec` because macOS strips DYLD variables at protected system executables. No inspector port opens, and no product source or binary is patched. A supplied hardened binary may reject library loading; the 30-second check fails with the retained logs in that case.
+
+`--no-guard` disables the desktop's entire OS guard for an explicit A/B comparison, including its real-home, outbound-IP and daemon-spawn denials. It retains the same disposable app configuration, Cocoa/XDG roots, endpoint observer, fake agents and PID checks. The daemon and mock agents stay guarded. Normal runs retain every deny rule. `out/launch.json` records which mode ran; an unguarded run does not claim that the desktop spawn-denial probe passed.
+
+The system log query only selects sandbox/kernel messages mentioning this demo app PID or unique sandbox path. An empty query is not proof that no denials occurred: macOS may omit reports, and the log command can be unavailable under an outer sandbox. The status file makes this limitation explicit.
+
+The operator's failing sandbox already contained saved theme and launch-count preferences under its private WebKit directory. In a guarded reproduction with the same supplied app, the console probe also found the full fleet and populated chips without a storage exception. This refutes storage starvation in that reproduction. It does not establish why the operator's native AX dump omitted those rows; the guarded/unguarded rehearsal supplies the next comparison.
+
+</details>
+
 ## Rehearse after a lookup failure
 
 Run the rehearsal from the operator's terminal before capturing again. **Time: about 2-3 minutes, including the 90-second tour.**
@@ -127,7 +163,7 @@ Isolation is enforced by a unique daemon socket, a valid unique tmux label, **a 
 `TMUX_TMPDIR`**, disposable XDG/Cocoa/config/data/usage roots, explicit `[repomind] home` and
 `BASIC_MEMORY_CONFIG_DIR`, and a macOS sandbox profile denying real-home file access and all
 outbound IP connections. Executables are copied into the sandbox so the home deny rule needs
-no exception. The guard is tested before daemon launch. No HOME or CODEX_HOME override is used.
+no exception. The guard is tested before daemon launch. The opt-in `--no-guard` comparison disables only the desktop guard, as described above. No HOME or CODEX_HOME override is used.
 The production daemon PID set is read before and after; its socket and database are never used.
 Cleanup terminates tracked child PIDs and only the private tmux server. Git fixture commands
 ignore the operator's global and system Git configuration.
@@ -142,3 +178,5 @@ scaling suggests about 2.0 MB for 90 seconds; the extra views and motion can inc
 The encoder's 15 MB check, rather than that estimate, decides whether to replace the asset.
 
 Tour-fix verification on 2026-09-06: the capture-free dry run passed with the same fleet and usage totals above. Shell syntax, shellcheck, Python compilation and AppleScript compilation passed. Synthetic AX tests passed for a generic description with a meaningful name, static-text parent selection, exact and role matching, and a complete dump with a 40-line log preview. These tests use synthetic nodes; the live tour and capture still require the operator's permissions.
+
+Webview-probe verification on 2026-09-06: guarded and desktop-unguarded dry runs both passed with the same supplied binary hashes. Each reported successful localStorage and IndexedDB round trips, eight rendered lane buttons, Needs you 2, Running 4, a 1440x900 webview and no captured JavaScript errors. The kernel peer checks passed and no second daemon appeared. The guarded system-log query returned ten provenance messages for sandbox daemon execution attempts, with no WebKit/Library denial reported; this is limited log evidence, not proof of zero denials. Eight negative/acceptance checker tests, shell syntax, shellcheck, Python/JavaScript syntax and Objective-C compilation passed. Native AX rehearsal remains for the operator.

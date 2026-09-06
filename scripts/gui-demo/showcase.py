@@ -16,6 +16,7 @@ import time
 from fixtures import git, seed, seed_usage, write
 from rpc import call
 from connection_probe import DesktopProbe
+import webview_probe
 
 HELPERS = Path(__file__).resolve().parent
 REPO = HELPERS.parent.parent
@@ -89,6 +90,10 @@ def eventually(check, label, seconds=60):
 def prepare(root, bin_dir):
     for directory in ("bin", "data", "config/repomon", "cocoa", "cache", "xdg-data", "memory", "mail", "out", "claude"):
         (root / directory).mkdir(parents=True)
+    # Cocoa resolves NSHomeDirectory through CFFIXED_USER_HOME. All Library stores are
+    # inside the allowed disposable root, including WebKit data and container/cache paths.
+    for directory in ("WebKit", "Caches", "Containers", "Application Support", "Preferences"):
+        (root / "cocoa/Library" / directory).mkdir(parents=True)
     for name in ("repomond", "repomon-desktop", "repomon"):
         shutil.copy2(bin_dir / name, root / "bin" / name)
     for name in ("fake_agent.py", "rpc.py"):
@@ -277,7 +282,9 @@ def main():
     parser.add_argument("--tour", action="store_true", help="also rehearse the tour during --dry-run")
     parser.add_argument("--still", action="store_true", help="capture the GIF opening hero frame")
     parser.add_argument("--keep-sandbox", action="store_true", help="keep fixtures and validation logs after stopping all demo processes")
-    parser.add_argument("--skip-build", action="store_true", help="compatibility flag; this script never builds")
+    parser.add_argument("--diagnose-webview", action="store_true", help="compile a recorder-only console/DOM probe; verify WebKit storage without AX or capture")
+    parser.add_argument("--no-guard", action="store_true", help="A/B only: disable the desktop OS guard; daemon and fake-agent guards remain active")
+    parser.add_argument("--skip-build", action="store_true", help="compatibility flag; this script never builds the app")
     parser.add_argument("--bin-dir", type=Path, default=REPO / "target/release", help="directory containing matching repomond, repomon-desktop and repomon binaries")
     args = parser.parse_args()
     if sys.platform != "darwin":
@@ -287,7 +294,7 @@ def main():
     for name in ("repomond", "repomon-desktop", "repomon"):
         if not (args.bin_dir / name).is_file():
             parser.error(f"Missing {name}; pass --bin-dir with existing matching binaries. No builds are run.")
-    for tool in ("tmux", "git", "python3") + (() if args.dry_run else ("ffmpeg", "ffprobe", "swift")):
+    for tool in ("tmux", "git", "python3") + (("xcrun",) if args.diagnose_webview else ()) + (() if args.dry_run else ("ffmpeg", "ffprobe", "swift")):
         if not shutil.which(tool):
             parser.error(f"Missing tool: {tool}")
     before = production_pids()
@@ -299,6 +306,7 @@ def main():
     env = None
     completed = False
     desktop_probe = None
+    app = None
     try:
         prepare(root, args.bin_dir.resolve())
         env = environment(root)
@@ -333,23 +341,34 @@ except PermissionError:
 else:
     raise SystemExit("Desktop guard allowed a second repomond execution")
 """
-        run(app_guard + [sys.executable, "-c", spawn_probe, root / "bin/repomond"], env=env, cwd=root)
-        log("PASS desktop guard denies spawning repomond")
+        if args.no_guard:
+            app_guard = []
+            log("A/B mode: desktop OS guard disabled; disposable environment and daemon guard retained")
+        else:
+            run(app_guard + [sys.executable, "-c", spawn_probe, root / "bin/repomond"], env=env, cwd=root)
+            log("PASS desktop guard denies spawning repomond")
         desktop_probe = DesktopProbe(root, daemon.pid)
         app_env = {**env, "REPOMON_SOCKET": str(desktop_probe.endpoint)}
         baseline_pids = daemon_pids()
         write(root / "out/launch.json", json.dumps({
             "app_endpoint": app_env["REPOMON_SOCKET"], "daemon_endpoint": str(root / "demo.sock"),
             "config": str(root / "config/repomon/config.toml"),
+            "desktop_guard": not args.no_guard, "diagnose_webview": args.diagnose_webview,
+            "cocoa_home": env["CFFIXED_USER_HOME"],
             "binary_sha256": {name: hashlib.sha256((root / "bin" / name).read_bytes()).hexdigest()
                               for name in ("repomon-desktop", "repomond")},
         }, indent=2))
+        command = webview_probe.launch_command(root, HELPERS) if args.diagnose_webview else [root / "bin/repomon-desktop"]
         app_log = (root / "out/app.log").open("w")
-        app = sp.Popen([str(a) for a in app_guard + [root / "bin/repomon-desktop"]], env=app_env, cwd=root, stdout=app_log, stderr=sp.STDOUT)
+        app = sp.Popen([str(a) for a in app_guard + command], env=app_env, cwd=root, stdout=app_log, stderr=sp.STDOUT)
         children.append(app)
         desktop_probe.expect_app(app.pid)
         verify_desktop(root, app, desktop_probe, baseline_pids)
         log(f"PASS isolated app launched (PID {app.pid})")
+        if args.diagnose_webview:
+            result = webview_probe.verify(root, app)
+            log(f"PASS WebKit localStorage and IndexedDB; Cocoa Library: {result['library']}")
+            log(f"PASS WebKit DOM: 8 rendered lane buttons; chips {result['chips']}; see {root}/out/webview-check.json")
         if args.dry_run and not args.tour:
             log("Dry run complete. No screen capture or permission probe was performed.")
             completed = True
@@ -366,6 +385,13 @@ else:
         capture(root, window_id, tour, args.still, children)
         completed = True
     finally:
+        if args.diagnose_webview and app:
+            try:
+                status = webview_probe.collect_denials(root, app.pid)
+                log(f"Sandbox denial query exit: {status.get('exit_code', 'unavailable')}; see {root}/out/sandbox-denials-status.json")
+            except OSError as error:
+                log(f"Could not retain denial-query diagnostics: {error}")
+            log(f"WebKit console and DOM: {root}/out/webview.jsonl")
         for child in reversed(children):
             if child.poll() is None:
                 child.terminate()
