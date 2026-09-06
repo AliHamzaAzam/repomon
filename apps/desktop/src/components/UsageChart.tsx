@@ -37,6 +37,8 @@ const BAR_RADIUS = 4;
 const FALLBACK_WIDTH = 960;
 /** Past this many buckets the bars stop being individual tab stops. */
 const MAX_FOCUSABLE_BARS = 60;
+/** Keep the readout inside the measured chart even when a series has a long name. */
+const TOOLTIP_WIDTH = 256;
 
 /**
  * Tokens or cost over time, stacked by group.
@@ -304,11 +306,13 @@ export default function UsageChart(props: UsageChartProps) {
         <Show when={hoveredBar()}>
           {(bar) => (
             <div
-              class="pointer-events-none absolute z-40 min-w-44 rounded-lg border border-line bg-surface p-2 text-xs shadow-lg"
+              class="pointer-events-none absolute z-40 rounded-lg border border-line bg-surface p-2 text-xs shadow-lg"
+              role="tooltip"
               style={{
+                width: `${Math.min(TOOLTIP_WIDTH, width())}px`,
                 left: `${Math.min(
                   slotX(hover() ?? 0) + slot() / 2 + 10,
-                  Math.max(0, width() - 190),
+                  Math.max(0, width() - TOOLTIP_WIDTH),
                 )}px`,
                 top: `${PLOT.top}px`,
               }}
@@ -326,8 +330,8 @@ export default function UsageChart(props: UsageChartProps) {
                         style={{ "background-color": segment.color }}
                         aria-hidden="true"
                       />
-                      <span class="min-w-0 flex-1 truncate text-foreground">{segment.label}</span>
-                      <span class="tabular-nums text-muted">{format(segment.value)}</span>
+                      <span class="min-w-0 flex-1 break-words text-foreground">{segment.label}</span>
+                      <span class="shrink-0 tabular-nums text-muted">{format(segment.value)}</span>
                     </div>
                   )}
                 </For>

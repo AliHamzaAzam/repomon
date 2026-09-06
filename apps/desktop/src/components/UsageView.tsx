@@ -373,7 +373,7 @@ export default function UsageView(props: UsageViewProps) {
 
           <div class="flex flex-wrap items-start gap-4 border-t border-line px-4 py-4">
             <Card title="Where it went">
-              <div class="overflow-x-auto">
+              <div class="focus-ring overflow-x-auto" tabindex="0" role="region" aria-label="Usage breakdown">
                 <table class="usage-table w-full min-w-100 table-fixed text-xs" aria-label="Where it went">
                   <colgroup>
                     <col />

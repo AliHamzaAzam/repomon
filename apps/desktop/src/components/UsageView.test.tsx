@@ -479,6 +479,16 @@ describe("UsageView table layout", () => {
     expect(table.querySelectorAll("tbody td")[7].textContent).toBe("-");
   });
 
+  it("lets keyboard users reach the horizontally scrollable breakdown", async () => {
+    mount(source());
+    await flush();
+    const region = screen.getByRole("region", { name: "Usage breakdown" });
+    expect(region).toHaveAttribute("tabindex", "0");
+    region.focus();
+    expect(region).toHaveFocus();
+    expect(region).toContainElement(screen.getByRole("table", { name: "Where it went" }));
+  });
+
   it("uses matching gutters and numeric alignment in Where it went", async () => {
     mount(source());
     await flush();
