@@ -27,9 +27,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$config_home/repomon" "$data_dir" "$fixture_repo" "$repomind_home" "$basic_memory_dir"
-# The repomind home and the basic-memory config are per-run throwaways. Without both, a daemon
-# start would create and commit inside the operator's real ~/repomind and register a project in
-# their real ~/.basic-memory/config.json.
+# Isolate both home and memory registration so daemon startup cannot write to the operator’s
+# repositories or vault configuration.
 printf 'tmux_session = "%s"\ndefault_agent = "fake"\nspawn_prompt = false\n\n[repomind]\nhome = "%s"\nbasic_memory_config = "%s/config.json"\n' \
   "$tmux_server" "$repomind_home" "$basic_memory_dir" > "$config_home/repomon/config.toml"
 

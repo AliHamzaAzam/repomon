@@ -1,10 +1,5 @@
-/// Regenerates the chord tables inside docs/desktop.md's "Keyboard control" section from
-/// src/keymap.ts's BINDINGS, so the two can never quietly drift apart. Run it and paste the
-/// output over the matching table in the doc, or just diff it against what is there:
-///
-///   bun scripts/print-shortcuts-doc.ts
-///
-/// A test (src/keymap.doc.test.ts) asserts the doc already matches this output.
+/// Prints keyboard tables from BINDINGS for docs/desktop.md; keymap.doc.test.ts checks the
+/// published tables for drift.
 
 import { BINDINGS, formatChord, type Binding } from "../src/keymap";
 

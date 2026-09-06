@@ -1,13 +1,6 @@
 #!/usr/bin/env node
-// Reads the theme tokens in src/index.css and prints WCAG contrast ratios for every text and
-// chart pairing the app relies on. Exit code 1 when any required pair misses its floor.
-//
-//   node qa/contrast.mjs            # every theme block
-//   node qa/contrast.mjs .dark      # one block by selector
-//
-// Floors: 4.5:1 for body text tokens (foreground, muted, signal, attention, fault) against each
-// ground (background, surface, raised); 3:1 for chart series against the chart surface and for
-// the focus ring (signal) against the background it is drawn on.
+// Checks text contrast at 4.5:1 and chart/focus contrast at 3:1 against their theme grounds; an
+// optional selector limits the check to one theme.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";

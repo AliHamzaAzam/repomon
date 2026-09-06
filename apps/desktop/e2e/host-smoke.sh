@@ -28,7 +28,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$config_home/repomon" "$data_dir" "$fixture_repo" "$repomind_home" "$basic_memory_dir"
-# Same isolation as isolated.sh: never the operator's real ~/repomind or ~/.basic-memory.
+# Isolate repomind and basic-memory paths so tests cannot modify operator memory.
 printf 'tmux_session = "%s"\n\n[repomind]\nhome = "%s"\nbasic_memory_config = "%s/config.json"\n' \
   "$tmux_server" "$repomind_home" "$basic_memory_dir" > "$config_home/repomon/config.toml"
 git -C "$fixture_repo" init -b main >/dev/null

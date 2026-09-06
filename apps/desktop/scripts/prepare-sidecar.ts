@@ -24,13 +24,8 @@ const isStrict = Boolean(
   process.env.GITHUB_ACTIONS
 );
 
-/**
- * Pinned source artifacts and checksums.
- *
- * NOTE:
- * - Linux ships static standalone tmux 3.6b binaries from mjakob-gh/build-static-tmux.
- * - macOS builds tmux 3.4 from official sources with statically linked libevent and macOS system dylibs.
- */
+/** Linux uses pinned static tmux artifacts; macOS builds pinned sources with static libevent and
+ * system dylibs. */
 const PINNED = {
   linuxX64StaticTmux: {
     url: "https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6b/tmux.linux-amd64.gz",
@@ -268,13 +263,11 @@ async function acquireTmuxForMacOs(destination: string): Promise<void> {
     rmSync(buildRoot, { recursive: true, force: true });
     mkdirSync(buildRoot, { recursive: true });
 
-    // Extract libevent
     const untarLibevent = Bun.spawnSync(["tar", "-xzf", libeventTar, "-C", buildRoot]);
     if (untarLibevent.exitCode !== 0) {
       throw new Error(`Failed to extract libevent: ${untarLibevent.stderr.toString()}`);
     }
 
-    // Extract tmux
     const untarTmux = Bun.spawnSync(["tar", "-xzf", tmuxTar, "-C", buildRoot]);
     if (untarTmux.exitCode !== 0) {
       throw new Error(`Failed to extract tmux: ${untarTmux.stderr.toString()}`);
@@ -285,7 +278,6 @@ async function acquireTmuxForMacOs(destination: string): Promise<void> {
     const depsInstallDir = resolve(buildRoot, "deps");
     const numCpus = String(Math.max(1, cpus().length));
 
-    // Arch flags if cross-targeting macOS
     const archFlags: string[] = [];
     if (target.startsWith("aarch64")) {
       archFlags.push("CFLAGS=-arch arm64", "LDFLAGS=-arch arm64");
