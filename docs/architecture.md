@@ -55,6 +55,18 @@ protocol is identical on both.
   `message_send` / `message_inbox` / `message_mark_read` surface managed worker agents get for
   fleet mail (see [messaging.md](messaging.md)).
 
+## Usage ledger
+
+The daemon passively ingests local agent transcripts into `usage_events`, with per-source
+reader revisions and cursors. Summary, timeline, session, and model-rate queries price
+events at query time, so Settings > Usage rate corrections also re-price history. A new
+reader revision triggers a bounded recount; missing or unreadable sources retain existing
+events and leave the queue. `usage.status.stale_sources` drives desktop progress.
+The optional account quota probe is separate from this ledger.
+
+The desktop bundle contains its daemon and CLI, portable tmux on macOS/Linux, and the
+ConPTY host on Windows. Settings > System exposes CLI installation and boot diagnostics.
+
 ## Key flows
 
 **Fleet refresh.** The TUI calls `lane.list`; the daemon enumerates worktrees (porcelain),
@@ -82,7 +94,7 @@ removed repo stops churning fsevents instead of being watched until the next res
 **Desktop notifications.** A `notify_watch` task runs the shared edge-detection over the fleet
 and fires an alert on each meaningful agent transition. Remote clients get an `event.notification`
 broadcast (and APNs push) while `[remote]` is enabled; locally, the daemon fires desktop popups
-itself only once the TUI stops covering them — it watches the TUI's ~1 s `lane.list` heartbeat
+itself only once the TUI stops covering them - it watches the TUI's ~1 s `lane.list` heartbeat
 and, after 3 s of silence (the TUI parked in a full-screen attach or closed), takes over so an
 alert still reaches you when you're heads-down in an agent pane.
 
@@ -150,13 +162,13 @@ write and the day-file removal ride the ordinary export commit.
 `repomon-mcp` (invoked as `repomond mcp`) is a stdio MCP server the orchestrator agent launches
 as a subprocess and wires up as a tool server; it connects back to the same daemon socket as an
 ordinary client and keeps a fleet snapshot refreshed by poll-and-diff (`lane.list` on a ~1.5s
-cadence, woken early on a structural event — a lane created/deleted). Because the orchestrator
+cadence, woken early on a structural event - a lane created/deleted). Because the orchestrator
 session pre-approves its own fleet tool calls (`--allowedTools` on Claude, the approval policy
-on Codex — no permission dialog to intercept, unlike a worker agent), the MCP server's own
-policy layer — autonomy level, a per-session action cap, a send-dedupe window, two-phase
-confirm tokens for destructive actions — is the *sole* gate on what repomind can do. The
+on Codex - no permission dialog to intercept, unlike a worker agent), the MCP server's own
+policy layer - autonomy level, a per-session action cap, a send-dedupe window, two-phase
+confirm tokens for destructive actions - is the *sole* gate on what repomind can do. The
 daemon's `notify_watch` tick, the same one that fires desktop alerts for lane agents, also
-classifies repomind's own attention (a pending dialog, or — Claude only — an idle end-of-turn)
+classifies repomind's own attention (a pending dialog, or - Claude only - an idle end-of-turn)
 each pass and broadcasts it as `event.orchestrator.status`.
 
 ## Session backends (tmux on Unix, host processes on Windows)
@@ -255,7 +267,7 @@ scan is reserved for explicit use to keep refresh fast.
 
 The CPU figures are post-optimization. The daemon previously pegged a core (~150 % sustained,
 all fork/exec overhead from a flat-10 Hz multi-fork pane streamer and a per-call worktree-walk
-storm — the tmux server itself idled at 0.3 %); the streamer backoff, single-fork captures, and
+storm - the tmux server itself idled at 0.3 %); the streamer backoff, single-fork captures, and
 the overlay/status caches above brought it down to the numbers shown.
 
 See [protocol.md](protocol.md) for the wire API and [agents.md](agents.md) for agent

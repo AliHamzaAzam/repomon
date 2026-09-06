@@ -8,11 +8,11 @@ repomon.
 
 **This checklist is the remaining manual gate. It requires a physical (or full-VM) Windows 11
 machine** with Windows Terminal, Git for Windows, and native Claude Code installed. Until it
-passes end to end, no Windows release should be tagged, and the binaries stay unsigned (so
-SmartScreen will warn; see the README's Windows platform notes).
+passes end to end, Windows remains less validated than macOS/Linux. Windows binaries already
+ship in releases; code signing remains a separate gate (see the README's Windows notes).
 
-Run it against a build from `release/windows-preview` (`cargo build --release`, or `install.ps1`
-once a preview zip exists). Keep `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe` in
+Run it against the release candidate from `main` or the existing release installer. For a
+source build use `cargo build --release --target x86_64-pc-windows-msvc`. Keep `repomon.exe`, `repomond.exe`, and `repomon-agent-host.exe` in
 the same directory.
 
 ## What CI now covers
@@ -64,6 +64,13 @@ freshly imaged Windows install with no redistributable.
 
 ## Checklist
 
+- [ ] **Brand and window chrome.** The installer, Start menu, taskbar, and app window show the
+      new graphite/orange mark. Exactly one title bar is visible; minimize, maximize/restore,
+      dragging, and close work.
+- [ ] **Usage settings.** Settings > Usage edits and resets model rates without a restart.
+      Toggle today's sidebar cost off and on, then relaunch to verify persistence. Recount
+      progress clears when old sources have been processed, including missing sources.
+
 - [ ] **No VC redistributable needed.** On a Windows image that has never had a Visual C++
       redistributable installed, `repomond.exe --version` prints a version (see "Self-contained
       binaries" above).
@@ -102,7 +109,7 @@ freshly imaged Windows install with no redistributable.
       image to a temp PNG and inserts its path.
 - [ ] **Toast on needs-you.** A `needs-you` transition fires a Windows toast notification when
       the TUI is not already looking at that agent (including with the TUI closed).
-- [ ] **Shell-init cd-on-exit.** `repomon shell-init powershell | iex` in `$PROFILE`; pressing
+- [ ] **Shell-init cd-on-exit.** `repomon shell-init powershell | Out-String | Invoke-Expression` in `$PROFILE`; pressing
       `c` on a lane exits repomon and `cd`s the PowerShell session into that worktree (via the
       `REPOMON_CD_FILE` temp file).
 - [ ] **iOS pairing against the Windows daemon.** Enable the remote bridge, pair the iOS
@@ -112,7 +119,7 @@ freshly imaged Windows install with no redistributable.
 
 ## After it passes
 
-1. Tag a Windows release (see "Cutting a Windows release" in [../STATUS.md](../STATUS.md)) and
-   test the `install.ps1` one-liner on a clean VM.
+1. Record the release candidate, OS version, and checklist results, then test the published
+   `install.ps1` one-liner on a clean VM before the next release is approved.
 2. Code-sign the three binaries so SmartScreen stops warning; drop the unsigned-binary note from
    the README once signing ships.

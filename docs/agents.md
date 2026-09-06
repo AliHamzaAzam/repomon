@@ -23,8 +23,8 @@ server or a detached host), the agent survives the daemon and the TUI. The spawn
 recorded on the lane so repomon can identify it later.
 
 Several agents can run in the **same** worktree at once: a second spawn (or adopting an
-external session into an occupied lane) takes the next slot — `lane-<id>-2`, `lane-<id>-3`,
-… — and they run side by side. Fleet and the sidebar mark such a lane with an `×N` badge,
+external session into an occupied lane) takes the next slot - `lane-<id>-2`, `lane-<id>-3`,
+… - and they run side by side. Fleet and the sidebar mark such a lane with an `×N` badge,
 and `Tab`/`⇧Tab` cycle the cursor between a lane's agents in Split/Focus; input and attach
 route to the cursored one.
 
@@ -32,30 +32,30 @@ route to the cursored one.
 
 New Lane lists the **auto-detected** built-ins (claude-code / codex / hermes / opencode /
 antigravity / aider / cursor, marked ✓ if on
-PATH) plus any **custom agents** you define — cycle them with Tab (Shift+Tab to go back). The
+PATH) plus any **custom agents** you define - cycle them with Tab (Shift+Tab to go back). The
 **default** agent (marked ★) is preselected.
 
 ### Multiple Claude accounts
 
 Claude keeps each account's data in a config dir (`~/.claude` by default; a second account is
-typically run with `CLAUDE_CONFIG_DIR=~/.claude-work`). repomon scans for these — the default
-`~/.claude` plus any `~/.claude-*` holding a `projects/` dir, and `$CLAUDE_CONFIG_DIR` — and
+typically run with `CLAUDE_CONFIG_DIR=~/.claude-work`). repomon scans for these - the default
+`~/.claude` plus any `~/.claude-*` holding a `projects/` dir, and `$CLAUDE_CONFIG_DIR` - and
 offers **one agent per account**: `claude-code` (default) and e.g. `claude-work`
 (→ `CLAUDE_CONFIG_DIR=~/.claude-work claude`). No custom config needed. Detection and adopt
 are account-aware: a work-account session is read from `~/.claude-work/projects` and adopting
 it resumes against that account. (A shell *alias* like `claude-work` isn't a real binary, so a
-custom agent pointing at `claude-work` won't launch — use the autodetected entry instead.)
+custom agent pointing at `claude-work` won't launch - use the autodetected entry instead.)
 
 ## Managing agents in-app
 
 Press **`A`** from Fleet (or **`Ctrl+A`** from New Lane) to open the agent manager:
 
-- **`n`** — add a custom agent: a *name* (what you pick in New Lane) and a *command* (the
+- **`n`** - add a custom agent: a *name* (what you pick in New Lane) and a *command* (the
   launch command line, run in the lane's worktree). Tab switches fields, `↵` saves.
-- **`e`** — edit the selected custom agent (built-ins are read-only). Renaming is handled
+- **`e`** - edit the selected custom agent (built-ins are read-only). Renaming is handled
   transparently.
-- **`d`** — delete the selected custom agent.
-- **`*`** — set (or clear) the selected agent as the default; built-ins can be the default too.
+- **`d`** - delete the selected custom agent.
+- **`*`** - set (or clear) the selected agent as the default; built-ins can be the default too.
 
 Changes are written straight to `~/.config/repomon/config.toml`. You can still hand-edit it:
 
@@ -79,21 +79,21 @@ to its custom command (if any) or the built-in binary, appends an optional task,
 
 There are two ways to drive an agent, and they trade off fidelity vs. staying in repomon's chrome.
 
-### Open it as a real terminal (the native way) — `↵`/`→`/`a`
+### Open it as a real terminal (the native way) - `↵`/`→`/`a`
 
 Pressing **`↵`** (Split/Grid), or **`↵` / `→` / `a`** (Focus), **attaches** to the agent's own
-tmux pane. This is a *genuine terminal* — there is **no difference** from running the agent in a
+tmux pane. This is a *genuine terminal* - there is **no difference** from running the agent in a
 plain terminal window: native wheel scrolling and scrollback, character-precise mouse
 selection, **⌘V image paste** straight into Claude, full color, every key.
 
-**To come back to repomon, press `F12`** (single key) — or `Ctrl-b d`, or `Ctrl-b q`. A thin
+**To come back to repomon, press `F12`** (single key) - or `Ctrl-b d`, or `Ctrl-b q`. A thin
 status bar along the bottom of the attached pane always shows this. Detaching leaves the agent
 **running in the background**; don't type `exit` or `Ctrl-C` unless you actually want to end it.
 
 repomon configures its tmux server to feel native: `mouse on` (wheel scroll + drag-select),
 `set-clipboard on` (OSC-52 passthrough), a 50k-line scrollback, drag-select copies straight to
 the system clipboard via `pbcopy`, and a status bar showing the detach key. Because you're in
-the real process, anything the agent supports in a terminal — including image paste — works
+the real process, anything the agent supports in a terminal - including image paste - works
 exactly as it would standalone.
 
 > Why attach rather than emulate? The in-app view is a `capture-pane` *picture* plus
@@ -113,19 +113,19 @@ the pane. **Press `F12` to detach** (tmux-parity); detaching leaves the agent ru
 host process. If Windows Terminal (`wt.exe`) is not available the client falls back to a new
 console window.
 
-### Quick mediated type — `i`
+### Quick mediated type - `i`
 
 For a fast one-liner without the attach context-switch, **`i`** enters **insert** mode and
-forwards each keystroke via `send-keys` — printable chars, Enter, Backspace, arrows,
+forwards each keystroke via `send-keys` - printable chars, Enter, Backspace, arrows,
 **Shift+Tab** (Claude's mode cycling), `Ctrl-<key>` (e.g. `Ctrl-C`), and **`Esc`** (the agent
 needs it to interrupt/clear). Because `Esc` is forwarded, leave insert with **`Ctrl-O`**.
-**Option/Alt + Arrow** (word jump) and **Alt + Backspace** (word delete) forward too — set
+**Option/Alt + Arrow** (word jump) and **Alt + Backspace** (word delete) forward too - set
 Terminal.app → Profiles → Keyboard → "Use Option as Meta key". This view is a snapshot, so:
 
 - **Scroll back** with **`PgUp`/`PgDn`** (work in both modes; always reach repomon). Typing or
   `↵`/`esc` returns to the live tail.
-- **Select & copy**: drag over lines — copied to the clipboard on release (line-granular).
-- **Paste an image**: press **`v`** — repomon saves the clipboard image to a temp PNG and inserts
+- **Select & copy**: drag over lines - copied to the clipboard on release (line-granular).
+- **Paste an image**: press **`v`** - repomon saves the clipboard image to a temp PNG and inserts
   its path (Claude reads images referenced by path).
 
 For anything the snapshot can't do (precise selection, wheel scroll, ⌘V image paste), just open
@@ -148,37 +148,45 @@ the real terminal with `↵`.
 
 When a Claude agent hits its usage limit it prints "limit reached · resets at <time>" and stops
 mid-work. repomon **auto-continues** it: a background watcher in the daemon scans each managed
-agent's pane (~every 20 s), and when it sees the blocking message it schedules a resume — at the
-parsed reset time (+60 s), or on a 5-minute periodic retry if the time can't be read — then types
-the continue message (`continue` + Enter). The lane shows **`⏳ rate-limited · resume 3:00 PM`**
+agent's pane (~every 20 s), and when it sees the blocking message it schedules a resume - at the
+parsed reset time (+60 s), or on a 5-minute periodic retry if the time can't be read - then types
+the continue message (`continue` + Enter). The lane shows **` rate-limited · resume 3:00 PM`**
 while it waits. This runs even with the TUI closed, so durable agents you left running get
 resumed on their own.
 
 - **On by default** for every repomon-managed agent. The transcript doesn't record limit info, so
   detection reads the tmux pane; the "approaching usage limit" warning never triggers it.
 - **Per-lane off:** press **`C`** on a lane to disable auto-continue for it this session (it then
-  shows the normal `⏸ needs you` when paused). **Globally:** set `auto_continue = false` in
+  shows the normal `! needs you` when paused). **Globally:** set `auto_continue = false` in
   `config.toml`. Change the typed message with `auto_continue_message` (default `"continue"`).
 - **Give-up:** after 6 attempts that don't take, it stops and flags the lane **needs you** so you
   can step in.
-- Only **managed** agents (with a tmux window) are touched — external sessions have no window to
+- Only **managed** agents (with a tmux window) are touched - external sessions have no window to
   type into. The detection/parse and the state machine are pure and unit-tested
   (`agent/limit.rs`, `auto_continue.rs`).
+
+## Usage and cost tracking
+
+The desktop Usage view (`mod+3`) reads local transcripts into a per-turn token ledger,
+separately from the optional quota probe below. Settings > Usage controls tracking and price
+refresh, edits model rates, and shows or hides today's equivalent API cost in the sidebar.
+A reader revision recounts older sources in bounded batches; the view shows progress until
+the totals settle. See [desktop.md](desktop.md#usage) for supported readers and pricing.
 
 ## Usage corner (usage probe)
 
 With `usage_probe = true` (a Settings toggle, **off by default**), the TUI shows agent usage in the
-**bottom-right corner** — e.g. `5h 38% · wk 12% · 3:00 PM` (limit windows + the soonest reset) —
+**bottom-right corner** - e.g. `5h 38% · wk 12% · 3:00 PM` (limit windows + the soonest reset) -
 for the **account the focused agent runs under**. It's provider-aware and per-account: a Claude
 agent shows its account's `/usage` (`~/.claude` vs `~/.claude-work`), a Codex agent shows its
 `/status`; switch focus and the corner follows.
 
-Subscription usage has no CLI flag, file, or supported endpoint — the only source is an interactive
+Subscription usage has no CLI flag, file, or supported endpoint - the only source is an interactive
 command (Claude `/usage`, Codex `/status`). So a daemon watcher (`usage_watch.rs`), **only while a
-TUI is attached**, spawns a hidden throwaway session per account every ~5 minutes, sends the usage
+local desktop or TUI client is active**, spawns a hidden throwaway session per account every ~5 minutes, sends the usage
 command, captures and parses the pane (`agent/usage.rs`, fixture-tested), then dismisses (`Esc`) and
 kills the window. It never sends a model prompt. Numbers are normalized to **% used** across agents
-(Codex reports "% left"); windows shown are whatever the tool reports — Claude's 5-hour + weekly,
+(Codex reports "% left"); windows shown are whatever the tool reports - Claude's 5-hour + weekly,
 Codex's 5-hour/weekly or (Free plan) monthly. Caveats, by design:
 
 - It **spawns a background agent process** briefly per probe (hence opt-in). The probe window is
@@ -188,7 +196,7 @@ Codex's 5-hour/weekly or (Free plan) monthly. Caveats, by design:
   (`~/.codex` exists).
 - The `/usage` and `/status` layouts are undocumented and change between versions. The parsers
   anchor on labels (not positions) and return nothing rather than wrong numbers; when usage can't
-  be read, the corner **falls back** to the focused lane's rate-limit countdown (`⏳ resume 3:00
+  be read, the corner **falls back** to the focused lane's rate-limit countdown (` resume 3:00
   PM`), or shows nothing. If a tool restyles its screen, recapture the fixture
   (`crates/repomon-core/src/agent/fixtures/`) and adjust the parser.
 
@@ -196,7 +204,7 @@ Codex's 5-hour/weekly or (Free plan) monthly. Caveats, by design:
 
 By default a lane running several agents shows as one sidebar row with an `×N` badge. Turn on
 **`expand agent rows`** in Settings (`,`) to instead show the lane as a small tree: the lane header
-(keeping `×N`) with one indented row per agent — `↳ <summary>  <status>`. The summary is auto-derived
+(keeping `×N`) with one indented row per agent - `↳ <summary>  <status>`. The summary is auto-derived
 (the first 1–4 words of that agent's opening prompt), and each agent's own status glyph is shown, so
 you can see and select individual agents directly in the Fleet/Split sidebars. Up/down navigate the
 rows; selecting an agent row makes it the active agent (Enter/focus/attach/stop/keys target it).
@@ -204,7 +212,7 @@ rows; selecting an agent row makes it the active agent (Enter/focus/attach/stop/
 Press **`R`** on a selected agent row to **rename** it inline (Enter saves, Esc cancels; an empty
 name clears the custom label). The label persists in the daemon keyed by the agent's transcript id,
 so it survives refreshes and daemon restarts, and never bleeds onto a different agent that later
-reuses the slot. (Sessions without a transcript id yet — a just-spawned placeholder — can't be
+reuses the slot. (Sessions without a transcript id yet - a just-spawned placeholder - can't be
 renamed until their transcript appears.) See `session.rename` in `docs/protocol.md`.
 
 ## Fleet mail for managed agents
@@ -306,11 +314,11 @@ variables are still set so such a wrapper can use them.
 ## External sessions (running in another terminal)
 
 Because status comes from the transcript, a `claude` you start in any other terminal inside a
-registered repo's worktree is **detected automatically** — its status and "needs you" show up
+registered repo's worktree is **detected automatically** - its status and "needs you" show up
 on that lane, tagged `·ext` (external: repomon didn't spawn it, so it has no tmux window).
 
 If you run **several** Claude sessions in one worktree, each (a distinct `<session-id>.jsonl`,
-active within the last few hours) shows as its own entry in the lane detail — `Tab`/`⇧Tab`
+active within the last few hours) shows as its own entry in the lane detail - `Tab`/`⇧Tab`
 move the cursor (`‣`) between them.
 
 repomon can't type into a plain terminal process, so to drive an external session press
@@ -323,7 +331,7 @@ session-resume flag, so adopting one of those relaunches the same command fresh 
 rather than resuming the prior conversation. The original terminal window is left as-is, so close
 it once you've adopted. repomon can manage several agents in the same worktree, each in its own
 tmux window (`lane-<id>`, `lane-<id>-2`, …), so adopting an external session adds a managed
-agent alongside any already running — and you can observe every external session in the lane
+agent alongside any already running - and you can observe every external session in the lane
 detail and choose which to adopt.
 
 ## How status is detected
@@ -332,26 +340,26 @@ Each agent kind has an `AgentMonitor` (`crates/repomon-core/src/agent/`). Monito
 in priority order; the first to return a summary wins. If none does, the daemon falls back to
 "is the repomon-spawned tmux window alive?" and shows the recorded kind as **Running**.
 
-### Claude Code — rich status
+### Claude Code - rich status
 
 Transcripts live at `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, where the directory
 name is the working directory with `/` and `.` replaced by `-`. repomon derives:
 
-- **tool-call count** — `tool_use` blocks across assistant messages,
-- **status** — *Waiting* (the last entry is an assistant turn with no tool call → **needs you**),
+- **tool-call count** - `tool_use` blocks across assistant messages,
+- **status** - *Waiting* (the last entry is an assistant turn with no tool call → **needs you**),
   *Running* (mid tool-loop), or *Idle* (no activity for 10 min),
-- **title** — first user message or a `summary` entry.
+- **title** - first user message or a `summary` entry.
 
 The encoding scheme has changed before, so it's isolated in `claude::encode_project_dir` and
 fixture-tested; matching also falls back to the `cwd` recorded inside each transcript.
 
-### Aider — coarse status
+### Aider - coarse status
 
 Aider writes `.aider.chat.history.md` into the working directory. repomon uses that file's
 modification time: **Running** if it changed in the last two minutes, else **Idle**. (There's
 no reliable "needs you" signal yet.)
 
-### Codex — tmux-only for now
+### Codex - tmux-only for now
 
 Codex's on-disk session format isn't stable enough to parse reliably, so `CodexMonitor`
 returns nothing and repomon relies on the tmux-alive fallback for Codex agents it spawned.

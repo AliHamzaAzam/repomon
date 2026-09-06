@@ -29,15 +29,15 @@ create a message.
 
 | `to` | Meaning |
 |------|---------|
-| `"lane-2/1"` | A single address — unchanged pre-existing behavior. Returns a bare `FleetMessage`. |
+| `"lane-2/1"` | A single address - unchanged pre-existing behavior. Returns a bare `FleetMessage`. |
 | `["lane-2/1", "lane-3/1"]` | Fan out one message to each address, deduplicated. Returns a per-recipient summary (below). |
 | `"lane-2/*"` | Every active agent session in lane 2. |
 | `"*"` | Every active agent session in the fleet. |
 
-Wildcard expansion always excludes the sender's own session — a broadcast never mails itself — but
+Wildcard expansion always excludes the sender's own session - a broadcast never mails itself - but
 an *explicit* self-address (in a plain single `to`, or listed by name inside an array) still
 delivers normally. A single plain address is the only shape that returns a bare `FleetMessage`;
-every list or wildcard `to` — even one that expands to a single recipient — returns:
+every list or wildcard `to` - even one that expands to a single recipient - returns:
 
 ```json
 {
@@ -51,10 +51,10 @@ every list or wildcard `to` — even one that expands to a single recipient — 
 ```
 
 `status` is one of `sent`, `no_such_session` (the address didn't resolve to a live session), or
-`delivery_error` (the address resolved, but the store rejected the send — most commonly the
+`delivery_error` (the address resolved, but the store rejected the send - most commonly the
 existing sender rate limit, or an explicit `reply_to` that doesn't reverse that particular
-recipient's thread). Each recipient reuses the single-delivery path — the same validation,
-threading, and rate limiting described below — as if it had been sent to individually; one
+recipient's thread). Each recipient reuses the single-delivery path - the same validation,
+threading, and rate limiting described below - as if it had been sent to individually; one
 recipient's rejection never blocks the others.
 
 ## Persistence and threads
@@ -177,7 +177,9 @@ and slot when that target still exists. Mail remains readable if the target sess
 
 ## Desktop behavior
 
-Control Center places the fleet message feed beside the notification feed. It shows unread counts
+The Repomail panel (`mod+8`) manages fleet mail in the right rail; Control Center also
+shows the message feed beside notifications. Repomail supports composing mail, per-recipient
+delivery results, force-send, and deletion. It shows unread counts
 per recipient lane, delivery and read state, and click-to-jump behavior. A newly stored message uses
 its message ID as the sole deduplication key, produces one native notification, and schedules the
 incoming-message cue from the sound service when sound policy permits it. Reconnects and repeated
@@ -199,6 +201,7 @@ inbox-only delivery, and unsupported behavior based on live verification.
 | Backend | Managed spawn | Durable MCP mail | Idle or attention | Exact resume | Repomind |
 |---------|---------------|------------------|-------------------|--------------|----------|
 | Claude Code | Yes | Yes | Transcript and pane | `--resume` | Yes |
+| Hermes Agent | Yes | Yes, runtime MCP configuration | Pane fallback | Session resume | Yes, pane-only |
 | Codex | Yes | Yes | Pane fallback | CLI session behavior only | Yes, pane-only |
 | OpenCode 1.15.5 | Yes | Yes, verified without approval | SQLite finish and tool state | `--session` | Yes, pane-only |
 | Antigravity 1.1.12 | Yes | Yes, global `~/.gemini/config/mcp_config.json` registration | Pane dialogs and cache identity | `--conversation` | Yes, pane-only |

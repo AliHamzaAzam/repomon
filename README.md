@@ -10,7 +10,7 @@ Many repos × many worktrees × many agents, on one screen. Durable across resta
 waiting on you float to the top, and you can approve a prompt from your phone.
 
 <p>
-  <a href="https://github.com/AliHamzaAzam/repomon/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AliHamzaAzam/repomon?color=00b3b3&label=release"></a>
+  <a href="https://github.com/AliHamzaAzam/repomon/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AliHamzaAzam/repomon?color=orange&label=release"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue">
   <img alt="Platforms: macOS · Linux · Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-555">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange">
@@ -19,13 +19,8 @@ waiting on you float to the top, and you can approve a prompt from your phone.
 
 **Install now:** [download the app](https://github.com/AliHamzaAzam/repomon/releases/latest), open it, add a repo. Nothing else to set up. Details below.
 
-<!-- Hero demo GIF: docs/gui-demo.gif, produced by scripts/record-gui-demo.sh from a
-     sandboxed instance of the desktop app with throwaway fake repos (no real data ever
-     appears in it). If this image is missing or blank, the gif hasn't been recorded yet on
-     this checkout, run the script (it needs macOS Screen Recording permission for your
-     terminal app, granted once in System Settings > Privacy & Security > Screen Recording). -->
 <p align="center">
-  <img src="docs/gui-demo.gif" alt="Mission Control: browsing the fleet, the git explorer, and the in-app editor across several repos" width="900">
+  <img src="docs/gui-demo.gif" alt="Repomon desktop demonstration with sample repositories" width="900">
 </p>
 
 Other tools run parallel agents in *one repo, many worktrees* (Claude Squad, Conductor,
@@ -35,8 +30,8 @@ steered from one place, in a desktop app or a terminal, whichever you reach for.
 
 ## Mission Control
 
-Download the app, add a repo, and there's nothing left to configure: the daemon and a portable
-`tmux` ship inside the bundle, so agents run durably (survive closing the window, reattach with
+Repomon 0.9.0 bundles the daemon and, on macOS and Linux, a portable `tmux`. Agents run durably
+(survive closing the window, reattach with
 full scrollback) with no separate install. First launch walks you through a short onboarding
 flow, and **Settings > System** shows a live health check for tmux, git, and every agent CLI,
 with one-click-copy install commands for anything missing.
@@ -50,6 +45,11 @@ with one-click-copy install commands for anything missing.
   author, full patch). Editor (`⌘2`): a file tree over the lane's worktree, multi-file tabs with
   dirty tracking, and a full CodeMirror editor themed to match. If an agent changes a file you
   have open, you get a conflict banner (reload or keep mine) instead of a silent overwrite.
+- **Usage and model rates.** The Usage view (`mod+3`) tracks tokens and equivalent API cost.
+  Settings > Usage edits model rates and controls the sidebar Today cost row. Reader updates
+  recount old transcripts in bounded batches, with progress shown until totals settle.
+- **Native Windows chrome.** One custom title bar holds window controls and the app toolbar.
+  Settings > System installs the bundled CLI and reports its version and PATH status.
 - **Self-service recovery.** Settings can stop, start, or reset the daemon and bulk-restore
   orphaned agent sessions, without a terminal.
 - **Fleet mail between agents.** Address one agent, a whole lane (`lane-12/*`), or the whole
@@ -66,7 +66,7 @@ See [docs/desktop.md](docs/desktop.md) for the full keyboard reference and every
 |---|---|---|---|---|
 | **Scope** | many repos × worktrees × agents | one repo, many worktrees | one repo, many worktrees | one tool, flat list |
 | **Interface** | desktop app or TUI, same fleet | terminal only | GUI only | inside the CLI |
-| **Runtime** | durable tmux: survives close, reattach | tmux | app process | inside the CLI |
+| **Runtime** | tmux or ConPTY: survives close, reattach | tmux | app process | inside the CLI |
 | **Triage** | needs-you float to top, jump-to-next | flat list | varies | grouped by state |
 | **Usage limits** | live usage corner + auto-continue | ✗ | ✗ | ✗ |
 | **Remote** | open WebSocket bridge + APNs over Tailscale (iOS app soon) | ✗ | ✗ | ✗ |
@@ -369,13 +369,13 @@ FLEET   8 agents · 4 repos · 3 need you                    ↑ sorted: needs-y
 ─────────────────────────────────────────────────────────────────────────
 
   pos-saas ────────────────────────────────────────────────────────────
-  ⏸ wt-checkout  hotfix/checkout-bug     claude  needs you   89↻   3m
-  ▶ main         feat/supabase-migration claude  running    142↻  18m
+  ! wt-checkout  hotfix/checkout-bug     claude  needs you   89↻   3m
+  > main         feat/supabase-migration claude  running    142↻  18m
   ○ wt-ui        spike/new-pos-ui                idle              2h
 
   montage-ai ──────────────────────────────────────────────────────────
-  ⏸ wt-mcp       spike/mcp-batch         codex   needs you   44↻   8m
-  ▶ main         phase-2-studio-floor    claude  running    201↻   2m
+  ! wt-mcp       spike/mcp-batch         codex   needs you   44↻   8m
+  > main         phase-2-studio-floor    claude  running    201↻   2m
 
   ↑↓ select   ↵/→ open   spc babysit   n new-lane   / filter   g needs-you   q
 ```
@@ -391,7 +391,7 @@ repomon is one tool with four **zoom levels**, one selection that follows you th
 - **Babysit grid**: live tiles auto-sized to your window; watch and nudge several at once.
 - **Focus**: one agent full-screen with full live terminal, input, and controls.
 
-Arrow keys drive everything (`↵`/`→` zoom in, `esc`/`←` zoom out, `space` the grid). `⏸` flags
+Arrow keys drive everything (`↵`/`→` zoom in, `esc`/`←` zoom out, `space` the grid). `!` flags
 an agent that needs you; `g` jumps to the next one. Beyond the live views, three dashboards
 (keys `2`/`3`/`4`): a per-repo **timeline** of commit density with cross-repo correlations,
 detected **work sessions** (focused vs parallel, exportable to Markdown), and global commit
@@ -425,7 +425,7 @@ repomon shell-init powershell | Out-String | Invoke-Expression
 ## Status
 
 **Done:** Mission Control (fleet, git explorer, in-app editor, onboarding, System Health,
-self-service daemon recovery), the TUI (fleet/today, the agent multiplexer, the history
+self-service daemon recovery, usage and model rates, native Windows title bar), the TUI (fleet/today, the agent multiplexer, the history
 dashboard), the remote access layer (WebSocket bridge + APNs + pairing). All on macOS, Linux,
 and Windows, each with native service/notification/clipboard/liveness paths.
 

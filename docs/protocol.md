@@ -15,7 +15,7 @@ CLI which speaks this protocol.
 ## Remote transport (WebSocket)
 
 Companion apps (the iOS client) reach the daemon over a **WebSocket bridge** speaking the
-exact same JSON-RPC envelopes — one WS *text frame* per message, no length prefix. Disabled by
+exact same JSON-RPC envelopes - one WS *text frame* per message, no length prefix. Disabled by
 default; `repomon remote enable` generates the legacy shared bearer token, detects the
 Tailscale address, and writes `[remote] enabled/bind/token` to the config (apply with a daemon
 restart).
@@ -24,14 +24,14 @@ restart).
   named, individually revocable token (re-running it for the same name re-shows the same
   token rather than minting a second one; capped at 16 paired devices) and renders a
   `repomon://<host:port>#<token>&name=<device>` QR. `repomon remote devices` lists paired
-  devices (name, role, created/last-seen — never the token); `repomon remote revoke <name>`
+  devices (name, role, created/last-seen - never the token); `repomon remote revoke <name>`
   revokes one, and a live connection authenticated with that token is kicked on its very next
   request with `-32000` `"device revoked"`. The legacy shared `[remote] token` from config
-  still authenticates exactly as before (it isn't a row in `remote.devices`'s list — the CLI
+  still authenticates exactly as before (it isn't a row in `remote.devices`'s list - the CLI
   calls it out separately as the shared config token). `remote.pair`, `remote.devices`, and
   `remote.revoke` are themselves local-socket only: no client can mint or enumerate tokens
   over the same network it authenticates onto.
-- **Checked before the WS upgrade completes** — `Authorization: Bearer <token>` header or a
+- **Checked before the WS upgrade completes** - `Authorization: Bearer <token>` header or a
   `?token=<token>` query parameter; anything else gets a 401 and no connection.
 - **Bind it privately** (the Tailscale IP). Any paired device's token exercises the full
   allowlist below.
@@ -54,12 +54,12 @@ restart).
   and its pane geometry stay local), and credential minting (`remote.*`). Anything else answers
   `-32601` `"not permitted over remote bridge"`.
 - **Per-connection viewports and byte watches.** Each connection (Unix socket or WebSocket)
-  owns its own `viewport.set` state and its own `agent.watch_bytes` windows — an iPhone, an
+  owns its own `viewport.set` state and its own `agent.watch_bytes` windows - an iPhone, an
   iPad, and the Mac TUI can each hold a different view (or watch the same window) at once
   without clobbering one another. The daemon polls and streams the *union* of every live
   connection's viewport. `event.agent.bytes` is delivered only to the connections watching
   that window; `event.agent.output` only to connections whose viewport covers the event's
-  lane, or names its terminal window — a connection that never calls `viewport.set` receives
+  lane, or names its terminal window - a connection that never calls `viewport.set` receives
   no `event.agent.output` at all.
 - **`agent.watch_bytes` is per-window and refcounted, not single-watch.** `on:true` starts (or
   joins) the shared backend stream for that window and always acks with `{ cols, rows }`, the pane's
@@ -96,22 +96,22 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 
 | Method | Params | Result |
 |---|---|---|
-| `repo.list` | — | `[Repo]` |
+| `repo.list` | - | `[Repo]` |
 | `repo.add` | `{ path }` | `Repo` |
 | `repo.remove` | `{ repo_id }` | `null` |
 | `repo.discover` | `{ root, max_depth=4 }` | `[String]` (repo paths) |
-| `lane.list` | — | `[Lane]` (each lane carries `role`: `null` for an ordinary work lane, `"controller"` for the repomind home lane. Agent sessions overlaid; each session may carry `pending_dialog`, `stale`/`stalled_since`, and `gate` — the worktree's latest dxkit stop-gate verdict `{ allowed, net_new_findings, at, session_id? }`, tailed from `.dxkit/loop/ledger.jsonl` when the lane runs dxkit's loop pack. A fresh `allowed` grants the done-candidate attention; a fresh block vetoes it) |
+| `lane.list` | - | `[Lane]` (each lane carries `role`: `null` for an ordinary work lane, `"controller"` for the repomind home lane. Agent sessions overlaid; each session may carry `pending_dialog`, `stale`/`stalled_since`, and `gate` - the worktree's latest dxkit stop-gate verdict `{ allowed, net_new_findings, at, session_id? }`, tailed from `.dxkit/loop/ledger.jsonl` when the lane runs dxkit's loop pack. A fresh `allowed` grants the done-candidate attention; a fresh block vetoes it) |
 | `lane.get` | `{ lane_id }` | `Lane` |
 | `lane.create` | `CreateLaneParams` | `Lane` |
 | `lane.delete` | `{ lane_id, also_delete_branch=false }` | `null` |
 | `lane.focus` | `{ lane_id }` | `{ path }` |
 | `lane.merge` | `{ lane_id, into? }` | `{ message }` |
-| `lane.diff` | `{ lane_id, include_patch=false, max_patch_chars=8000 }` | `LaneDiff` — commits ahead of the repo's base branch (with diffstat) plus uncommitted state; see below |
-| `message.send` | `{ to: string \| string[], body, reply_to? }` — `to` also accepts `"lane-N/*"` or `"*"` | `FleetMessage` for a single plain address; a per-recipient fan-out summary (`{ recipient_count, sent_count, results: [{ to, status, message_id?, thread_id?, error? }] }`) for a list or wildcard `to` (local socket only; see `docs/messaging.md`) |
+| `lane.diff` | `{ lane_id, include_patch=false, max_patch_chars=8000 }` | `LaneDiff` - commits ahead of the repo's base branch (with diffstat) plus uncommitted state; see below |
+| `message.send` | `{ to: string \| string[], body, reply_to? }` - `to` also accepts `"lane-N/*"` or `"*"` | `FleetMessage` for a single plain address; a per-recipient fan-out summary (`{ recipient_count, sent_count, results: [{ to, status, message_id?, thread_id?, error? }] }`) for a list or wildcard `to` (local socket only; see `docs/messaging.md`) |
 | `message.inbox` | `{ unread_only=false, limit=50, before? }` | `MessagePage`; returned queued rows become delivered (local socket only) |
 | `message.mark_read` | `{ id }` | `FleetMessage` (local socket only) |
 | `message.list` | `{ lane_id?, unread_only=false, limit=50, before? }` | `MessagePage`, newest first (local socket only) |
-| `commit.today` | — | `[Commit]` (live, all repos) |
+| `commit.today` | - | `[Commit]` (live, all repos) |
 | `commit.range` | `{ from_iso, to_iso, repo_ids? }` | `[Commit]` |
 | `commit.search` | `{ query, limit=50 }` | `[Commit]` (indexed) |
 | `commit.recent` | `{ lane_id? \| repo_id?, limit=8 }` | `[Commit]` (latest on the worktree/repo HEAD, any date) |
@@ -125,24 +125,24 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `agent.set_default` | `{ name? }` | `null` (set/clear the New Lane default; `name` may be a built-in or custom) |
 | `agent.spawn` | `{ lane_id, agent, task?, effort?, mode?, model?, identity_token? }` | `{ lane_id, window, agent, role? }`. `role` is `"controller"` when `lane_id` is the repomind controller lane, and absent otherwise. A controller is launched with `REPOMON_MCP_MODE=orchestrator` (the full fleet catalog) and counted against `[repomind] max_controllers`; `identity_token` is the caller's own MCP identity, and a caller whose identity belongs to another lane is refused with `invalid_params` when it targets the controller lane. |
 | `agent.capture` | `{ lane_id, lines?, window?, include_state=false }` | `{ content }` normally. With `include_state=true`, also returns `{ alternate, cols, rows, cursor?, generation?, sequence?, stable }` as a terminal checkpoint. A sequenced client must only resume with stream chunks after the checkpoint cursor and recapture when `stable=false`. |
-| `agent.transcript` | `{ lane_id, session_id?, limit=50 }` | `[TranscriptItem]` — `{ role, text, at? }` with role `user`/`assistant`/`tools`; full unwrapped message text for clients that lay text out themselves (the mobile chat view). Claude sessions only (empty otherwise). |
+| `agent.transcript` | `{ lane_id, session_id?, limit=50 }` | `[TranscriptItem]` - `{ role, text, at? }` with role `user`/`assistant`/`tools`; full unwrapped message text for clients that lay text out themselves (the mobile chat view). Claude sessions only (empty otherwise). |
 | `agent.transcript_page` | `{ lane_id, session_id?, before? }` | `{ items: [TranscriptItem], next_before: number? }` - reads one bounded Claude transcript page backwards on JSONL boundaries. Omit `before` for the newest page, then pass `next_before` to load older pages without skipping messages. A known `session_id` is resolved directly regardless of age. |
 | `agent.send_input` | `{ lane_id, text, enter=true, window? }` | `null` (types text, then Enter unless `enter=false`; `window` targets one agent in a multi-agent lane) |
 | `agent.key` | `{ lane_id, key, literal=false, window? }` | `null` (one keystroke: literal char or key name; `window` targets one agent in a multi-agent lane) |
 | `agent.signal` | `{ lane_id, key, window? }` | `null` |
 | `agent.watch_bytes` | `{ lane_id, window?, on }` | on `on: true`, `{ cols, rows, generation, sequence }`; `null` on `off`. Streams the pane's raw PTY bytes as `event.agent.bytes`, delivered only to connections watching that window. Every chunk carries the same generation and a contiguous sequence. A gap or generation change invalidates cursor-relative emulator state and requires a fresh sequenced `agent.capture` checkpoint. Per-connection and refcounted, not single-watch: a window has one shared backend stream no matter how many connections watch it; this connection may watch several windows at once. `on:false` with a `window` releases just that one; `on:false` without a `window` releases every window this connection watches for the lane. A matching `event.agent.stream_closed` means the target window died and the client must release its local watch. Render at the authoritative grid from the ack or `agent.fit`. |
-| `agent.prompt` | `{ lane_id, window? }` | `{ dialog: PendingDialog\|null }` — fresh pane capture parsed for the interactive dialog actually on screen right now (never the sniff cache). `PendingDialog` = `{ title?, question, body?: [String], options: [{ number?, text }], selected? }`; `lane.list` carries the same object on `AgentSession.pending_dialog` alongside the `pending_prompt` summary. |
-| `agent.answer` | `{ lane_id, choice, window?, expect_summary? }` | `{ answered, sent }` — re-captures the pane, verifies a dialog is still up (and, when `expect_summary` is set, that it still summarizes to that string), then steers to `choice` (0-based) and confirms. On a stale view it does NOT send anything: error `-32010` (`no pending dialog` / `dialog changed`) with `error.data.dialog` carrying what's actually on screen (possibly `null`) so the client re-renders instead of re-fetching. Any input path (`send_input`/`key`/`signal`/`answer`) drops the window's sniff-cache entry, so an answered dialog can't be re-advertised for the rest of its TTL. |
+| `agent.prompt` | `{ lane_id, window? }` | `{ dialog: PendingDialog\|null }` - fresh pane capture parsed for the interactive dialog actually on screen right now (never the sniff cache). `PendingDialog` = `{ title?, question, body?: [String], options: [{ number?, text }], selected? }`; `lane.list` carries the same object on `AgentSession.pending_dialog` alongside the `pending_prompt` summary. |
+| `agent.answer` | `{ lane_id, choice, window?, expect_summary? }` | `{ answered, sent }` - re-captures the pane, verifies a dialog is still up (and, when `expect_summary` is set, that it still summarizes to that string), then steers to `choice` (0-based) and confirms. On a stale view it does NOT send anything: error `-32010` (`no pending dialog` / `dialog changed`) with `error.data.dialog` carrying what's actually on screen (possibly `null`) so the client re-renders instead of re-fetching. Any input path (`send_input`/`key`/`signal`/`answer`) drops the window's sniff-cache entry, so an answered dialog can't be re-advertised for the rest of its TTL. |
 | `agent.stop` | `{ lane_id, window? }` | `null` (stops one specific agent window; `None` = the lane's first slot) |
 | `agent.pin` | `{ lane_id, pinned }` | `null` |
 | `session.rename` | `{ session_id, label? }` | `null` (set/clear a user label for a session, keyed by its durable transcript id; empty/absent `label` clears it; overlaid onto `AgentSession.custom_label`) |
-| `agent.target` | `{ lane_id, window? }` | `{ target, available, attach? }` (also resets the window to follow the attaching client's size; `attach` — optional, additive — is `{ program, args }`, the exact command to run in a real terminal to attach; clients without it keep deriving the tmux invocation from `target`) |
+| `agent.target` | `{ lane_id, window? }` | `{ target, available, attach? }` (also resets the window to follow the attaching client's size; `attach` - optional, additive - is `{ program, args }`, the exact command to run in a real terminal to attach; clients without it keep deriving the tmux invocation from `target`) |
 | `agent.resize` | `{ lane_id, cols, rows, window? }` | `null` (resize the agent's pane so the mediated view reflows to fit; clamped to a floor) |
-| `agent.fit` | `{ lane_id, cols, rows, window? }` | `{ applied, cols, rows }` — the arbitrated resize for remote viewers: reflows the shared pane to the caller's grid ONLY while no live local viewport focus owns the window (the TUI heartbeats its viewport every ~5s; ownership lapses 15s after the last beat, and a clean TUI quit releases it immediately) AND no other remote session that's also focused on this window right now drove the agent more recently than the caller (last-interaction-wins among remotes; an applied fit counts as an interaction). Refused (`applied: false`) it answers with the pane's current grid so the caller renders pinned at the shared size instead of fighting. Poll it (~10s) to adapt when the TUI starts or stops viewing. |
-| `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen — the client then scrolls the captured buffer itself) |
+| `agent.fit` | `{ lane_id, cols, rows, window? }` | `{ applied, cols, rows }` - the arbitrated resize for remote viewers: reflows the shared pane to the caller's grid ONLY while no live local viewport focus owns the window (the TUI heartbeats its viewport every ~5s; ownership lapses 15s after the last beat, and a clean TUI quit releases it immediately) AND no other remote session that's also focused on this window right now drove the agent more recently than the caller (last-interaction-wins among remotes; an applied fit counts as an interaction). Refused (`applied: false`) it answers with the pane's current grid so the caller renders pinned at the shared size instead of fighting. Poll it (~10s) to adapt when the TUI starts or stops viewing. |
+| `agent.scroll` | `{ lane_id, up, ticks=1, window? }` | `{ forwarded }` (forward `ticks` wheel events to a full-screen agent so it scrolls its own history; `forwarded:false` when the pane isn't on the alternate screen - the client then scrolls the captured buffer itself) |
 | `terminal.open` | `{ lane_id }` | `{ id, target, attach? }` (a new plain shell window in the worktree; `attach` as in `agent.target`) |
 | `terminal.list` | `{ lane_id }` | `[String]` (open terminal window names for the lane) |
-| `terminal.list_all` | — | `[{ lane_id, id }]` (every lane's open terminals, sorted — what the Grid tiles) |
+| `terminal.list_all` | - | `[{ lane_id, id }]` (every lane's open terminals, sorted - what the Grid tiles) |
 | `terminal.close` | `{ id }` | `null` |
 | `terminal.target` | `{ id }` | `{ target, available, attach? }` (`attach` as in `agent.target`) |
 | `fs.browse` | `{ path? }` | `BrowseResult` (subdirs, repos, added flags) |
@@ -156,30 +156,30 @@ Error codes: `-32700` parse error, `-32601` method not found, `-32602` invalid p
 | `file.delete` | `{ lane_id, path, recursive? }` | `FileDeleteResult`: `{ path }`; deletes file or directory. Refuses root and `.git`. Non-empty directory requires `recursive: true` or rejects with `-32008`. Broadcasts `event.file.changed` with `op: "removed"`. Local socket only. |
 | `file.search` | `{ lane_id, query, regex?, case_sensitive?, glob?, max_results? }` | `FileSearchResult`: `{ query, hits: [{ path, line, column, preview }], truncated }`; search file contents across non-ignored worktree files, skipping binaries and files over 2 MiB. Cap at `max_results` (default 200, hard cap 2000). Local socket only. |
 | `file.diff_base` | `{ lane_id, path }` | `FileDiffBaseResult`: `{ content: string | null, kind: "text" \| "binary" \| "missing" }`; returns the HEAD version of the path via `git show HEAD:<path>` in the lane worktree (`missing` for untracked or newly added files, `binary` by the same null-byte sniff as `file.read`, same 8 MiB cap). Local socket only. |
-| `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows — `term-{lane}-{n}` — to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored. Per-connection: each connection owns its own viewport and focus; the capture loop streams the union across every live connection, and `event.agent.output` is filtered to the connections whose viewport actually covers it) |
+| `viewport.set` | `{ lane_ids, focus_lane?, focus_window?, windows? }` | `null` (`focus_lane`/`focus_window` pick which agent window the focused lane streams; others stream their first slot. `windows` names plain-terminal windows - `term-{lane}-{n}` - to stream as extra panes alongside the lanes, e.g. the Grid's shell tiles; non-terminal names are ignored. Per-connection: each connection owns its own viewport and focus; the capture loop streams the union across every live connection, and `event.agent.output` is filtered to the connections whose viewport actually covers it) |
 | `subscribe` | `{ topics? }` | `null` |
-| `ping` | — | `"pong"` (remote keep-alive / connectivity probe) |
-| `remote.pair` | `{ name }` | `{ name, token, url }` — mints (or, for a name already paired, re-shows) that device's own revocable token and its `repomon://` pairing URL. Capped at 16 paired devices. Local socket only. |
-| `remote.devices` | — | `[{ name, role, created_at, last_seen_at? }]` — never includes the token. Local socket only. |
-| `remote.revoke` | `{ name }` | `{ revoked }` — `true` if a device by that name existed; drops it from the auth cache so live connections holding its token are kicked on their next request. Local socket only. |
+| `ping` | - | `"pong"` (remote keep-alive / connectivity probe) |
+| `remote.pair` | `{ name }` | `{ name, token, url }` - mints (or, for a name already paired, re-shows) that device's own revocable token and its `repomon://` pairing URL. Capped at 16 paired devices. Local socket only. |
+| `remote.devices` | - | `[{ name, role, created_at, last_seen_at? }]` - never includes the token. Local socket only. |
+| `remote.revoke` | `{ name }` | `{ revoked }` - `true` if a device by that name existed; drops it from the auth cache so live connections holding its token are kicked on their next request. Local socket only. |
 | `push.register` | `{ device_token }` | `null` (register an APNs device for push; idempotent) |
 | `push.unregister` | `{ device_token }` | `null` |
 | `daemon.status` | - | `{ uptime_secs, repos, lanes, db_size_bytes, version, protocol_revision, capabilities }`; terminal checkpoint and stream-sequence support is advertised in `capabilities`. |
-| `daemon.shutdown` | — | `null` |
+| `daemon.shutdown` | - | `null` |
 | `system.doctor` | - | `SystemDoctorResult`: `{ tmux: TmuxDoctorInfo, git: GitDoctorInfo, agents: [AgentDoctorInfo] }`, a machine-health snapshot backing Settings > System. `TmuxDoctorInfo` = `{ available, version?, source?, path? }` with `source` one of `"system"`/`"bundled"` (the portable tmux sidecar shipped with the app); `GitDoctorInfo` = `{ available, version?, path? }`; `AgentDoctorInfo` = `{ kind, name, command, detected }` per configured/built-in agent CLI. Local socket only. |
-| `usage.get` | — | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a TUI is attached) |
-| `orchestrator.status` | — | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (the daemon-owned repomind orchestrator; reconciles against tmux, so a window killed externally reports `running:false`) |
+| `usage.get` | - | `[AccountUsage]` (per agent account, scraped from Claude `/usage` and Codex `/status`; empty unless `usage_probe` is enabled and a local desktop or TUI client is active) |
+| `orchestrator.status` | - | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (the primary controller in the repomind lane; reconciles against its session backend, so a window killed externally reports `running:false`) |
 | `orchestrator.transcript` | `{ limit? }` | `[TranscriptItem]` (repomind's conversation, same `{ role, text, at? }` shape as `agent.transcript`, so a client can render it as a chat instead of mirroring the pane; pinned to the orchestrator's own `session_id` when known, else falls back to the newest `$HOME` Claude transcript with real content across accounts. Always `[]` while `backend` is `"codex"`, `"antigravity"`, or `"opencode"` (none of their on-disk session formats are parsed); treat it as "no chat view for this backend" and render the `event.orchestrator.output` pane stream instead, never as an error/loading state) |
 | `orchestrator.start` | `{ agent?, model?, autonomy?, max_agents?, prompt? }` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` (ensure the repomind home repo and its controller lane, then spawn or adopt the primary controller in that lane's window, wired to the repomon MCP server with `REPOMON_MCP_MODE=orchestrator`; idempotent; re-spawns if the prior window died. `agent` picks the backend: a Claude account / custom agent name, `codex`, `antigravity`/`agy`, or `opencode`/`open-code`, defaulting to `[repomind] primary_agent` then `orchestrator_agent`; an agent with no MCP client for orchestration (e.g. `aider` or `cursor`) is rejected with `invalid_params` instead of spawning a broken window) |
-| `orchestrator.stop` | — | `{ running:false, attention:"none", headline:null, … }` (**deprecated** alias: kill the controller lane's window) |
-| `orchestrator.target` | — | `{ target, available, attach? }` (**deprecated** alias: attach target for the controller window; resets it to follow the attaching client's size; `attach` as in `agent.target`) |
+| `orchestrator.stop` | - | `{ running:false, attention:"none", headline:null, … }` (**deprecated** alias: kill the controller lane's window) |
+| `orchestrator.target` | - | `{ target, available, attach? }` (**deprecated** alias: attach target for the controller window; resets it to follow the attaching client's size; `attach` as in `agent.target`) |
 | `orchestrator.send_input` | `{ text, enter=true }` | `null` (**deprecated** alias for `agent.send_input` on the controller window: type an instruction to repomind, then Enter unless `enter=false`) |
 | `orchestrator.key` | `{ key, literal=false }` | `null` (**deprecated** alias for `agent.key`: one keystroke to repomind, literal char or key name) |
 | `orchestrator.watch` | `{ on }` | `null` (**deprecated** alias: gate the pane stream; the TUI sets it `true` while the command-center view is open and `false` on leaving) |
 | `orchestrator.resize` | `{ cols, rows }` | `null` (**deprecated** alias: size the controller window to the viewer's pane so its capture reflows to fit; clamped to a floor) |
-| `repomind.status` | — | [`RepomindStatus`](../apps/desktop/src/bindings/RepomindStatus.ts): `{ home, exists, repo_id?, lane_id?, window?, max_controllers, export, counts, boot }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. `export` is `{ last_run?, pending, last_error? }`: when the one-way export last ran, whether a write is waiting for its 5 s debounce, and the last failure. `counts` is `{ active_plans, standing, playbooks, drafts }`, read from `plans/active/`, `plans/standing/`, `playbooks/`, and `playbooks/drafts/` (each directory's own `README.md` never counts). `boot` is `{ generated_at?, tokens_estimate, trimmed }`: when `.repomind/boot.md` was last assembled, its size in the budget's four-characters-per-token units, and the home-relative paths the budget forced out of it (all zero/empty before the first regeneration). Never creates anything) |
-| `repomind.boot` | — | `{ path, bytes, tokens_estimate, trimmed }` (**local-only**: reassemble the daemon-owned boot context at `<home>/.repomind/boot.md` and report what it produced. `path` is absolute, `bytes` the document's size on disk, `tokens_estimate` its size in the budget's units, and `trimmed` the home-relative paths the budget forced out, least important first. Every spawn into the controller lane regenerates it too, so this is for seeing what a controller would be handed right now) |
-| `repomind.export` | — | `{ files, kinds }` (**local-only**: run the one-way export now instead of waiting out the debounce. `files` are the home-relative paths written or removed, `kinds` the record kinds they belong to (`journal`, `schedules`, `approvals`, `notes`, `playbooks`), which also form the commit subject `chore(repomind): export <kinds>`. Empty when nothing changed. Silently a no-op when the home does not exist) |
+| `repomind.status` | - | [`RepomindStatus`](../apps/desktop/src/bindings/RepomindStatus.ts): `{ home, exists, repo_id?, lane_id?, window?, max_controllers, export, counts, boot }` (read-only: where the repomind home repo lives, whether it is on disk yet, which repo/lane represent it, the controller lane's last recorded tmux window, and the controller cap. `export` is `{ last_run?, pending, last_error? }`: when the one-way export last ran, whether a write is waiting for its 5 s debounce, and the last failure. `counts` is `{ active_plans, standing, playbooks, drafts }`, read from `plans/active/`, `plans/standing/`, `playbooks/`, and `playbooks/drafts/` (each directory's own `README.md` never counts). `boot` is `{ generated_at?, tokens_estimate, trimmed }`: when `.repomind/boot.md` was last assembled, its size in the budget's four-characters-per-token units, and the home-relative paths the budget forced out of it (all zero/empty before the first regeneration). Never creates anything) |
+| `repomind.boot` | - | `{ path, bytes, tokens_estimate, trimmed }` (**local-only**: reassemble the daemon-owned boot context at `<home>/.repomind/boot.md` and report what it produced. `path` is absolute, `bytes` the document's size on disk, `tokens_estimate` its size in the budget's units, and `trimmed` the home-relative paths the budget forced out, least important first. Every spawn into the controller lane regenerates it too, so this is for seeing what a controller would be handed right now) |
+| `repomind.export` | - | `{ files, kinds }` (**local-only**: run the one-way export now instead of waiting out the debounce. `files` are the home-relative paths written or removed, `kinds` the record kinds they belong to (`journal`, `schedules`, `approvals`, `notes`, `playbooks`), which also form the commit subject `chore(repomind): export <kinds>`. Empty when nothing changed. Silently a no-op when the home does not exist) |
 | `repomind.instruct` | `{ text }` | `{ outcome, window, entry_id?, reason? }` (**local-only**: type one instruction into the primary controller's composer, using the same verified injection as fleet mail and the boot line. The text is squashed onto one line and framed as `[REPOMIND] <text> [END REPOMIND]`, whose closing sentinel is the delivery marker. `outcome` is `"sent"`, `"skipped"` (the composer was busy or a dialog was up, with `reason` naming which), or `"failed"`. Refuses with `invalid_params` when the text is empty, when the home has no controller lane, or when no controller is running: an instruction that went nowhere is reported, never dropped quietly) |
 | `playbook.reject` | `{ name }` | `{ name, path, status }` (**local-only**: the other half of the human approval gate. Moves `playbooks/drafts/<name>.md` to `playbooks/rejected/<name>.md` with `status: rejected` and a `rejected` stamp in its frontmatter. It never deletes: the text stays on disk and in the home's git history, and rejecting a revision leaves the approved playbook standing. `path` is home-relative. `invalid_params` when no draft by that name exists) |
 
@@ -249,12 +249,12 @@ never reports `"end_of_turn"` (pane dialogs may still surface `permission`/`deci
 
 `autonomy` is the level the running session was actually started with (the value passed to, or
 defaulted by, `orchestrator.start`). It is `null` when the daemon *adopted* a window that
-survived a restart of a previous daemon process — the adopting process has no record of what
+survived a restart of a previous daemon process - the adopting process has no record of what
 autonomy that window was originally launched with, so it reports unknown rather than guessing.
 
 `session_id` is the UUID the running session's `claude` was launched with (`--session-id`,
 minted fresh by the daemon at spawn time), which pins `orchestrator.transcript` and the
-end-of-turn attention check to *this* session's own transcript file — instead of guessing "the
+end-of-turn attention check to *this* session's own transcript file - instead of guessing "the
 newest `$HOME` transcript", which misattributes any other active Claude session on the machine as
 repomind's. Like `autonomy`, it is `null` when the daemon *adopted* a surviving window: the prior
 process's session id lived only in its own memory, so an adopted session falls back to the old
@@ -265,7 +265,7 @@ unrelated Claude session's transcript).
 
 **Remote bridge:** of the orchestrator methods above, `status`/`transcript`/`send_input`/`key`
 are allowed over the WebSocket bridge (read + interact, like their `agent.*` equivalents);
-`start`/`stop`/`watch`/`resize` are Unix-socket only — spawning or killing repomind, and its
+`start`/`stop`/`watch`/`resize` are Unix-socket only - spawning or killing repomind, and its
 pane-geometry plumbing, stay local.
 
 `CreateLaneParams`: `{ repo_id, branch, source_branch?, path?, copy_files? }`.
@@ -277,17 +277,17 @@ main checkout's current branch name; `merge_base` a short hash of `git merge-bas
 (`commits_truncated: true` present only when there were more). `committed_stat` is `git diff
 --stat <merge_base>..HEAD`; `uncommitted_stat` is `git diff HEAD --stat` (staged + unstaged).
 `untracked` is the lane's untracked-file *count* only, computed live alongside the stats (one
-snapshot is self-consistent) — untracked file **contents** never appear in `patch` or either
+snapshot is self-consistent) - untracked file **contents** never appear in `patch` or either
 `*_stat` field. `patch` (`git diff HEAD` text, capped at
 `max_patch_chars`, char-boundary safe) and `patch_truncated: true` are present only when
 `include_patch: true` and the patch was actually cut; `max_patch_chars` is server-clamped to a
 ceiling of 20000. Errors (`-32000`) when the base branch shares no common history with `HEAD`,
 or the repo's main checkout has no current branch (detached HEAD). Allowed over the remote
-bridge — it joined the allowlist with the rest of fleet control (see "Remote transport" above).
+bridge - it joined the allowlist with the rest of fleet control (see "Remote transport" above).
 
-`AccountUsage`: `{ key, label, report: UsageReport, age_secs }` — `key` is how a client attributes
+`AccountUsage`: `{ key, label, report: UsageReport, age_secs }` - `key` is how a client attributes
 usage to the focused agent: a Claude agent's config dir (`"default"` for `~/.claude`), or `"codex"`.
-`UsageReport`: `{ windows: [UsageWindow] }`. `UsageWindow`: `{ label, pct_used, reset_at? }` — one
+`UsageReport`: `{ windows: [UsageWindow] }`. `UsageWindow`: `{ label, pct_used, reset_at? }` - one
 limit window, normalized to **% used** across agents (Codex's "% left" is converted). `label` is a
 short tag (`5h`, `wk`, `mo`, or a model name); windows are ordered shortest-first and only present
 when readable (a partial parse still returns what it could).
@@ -302,17 +302,32 @@ when readable (a partial parse still returns what it could).
 | `event.lane.created` | `{ lane }` |
 | `event.lane.deleted` | `{ lane_id }` |
 | `event.agent.status` | `{ lane_id, status }` |
-| `event.agent.output` | `{ lane_id, window, content, cursor? }` (`window` names the tmux window the capture came from — a `lane-*` agent pane or a `term-*` plain terminal, so one lane can stream both without colliding; `cursor` is `[col, row]` — the pane's text-cursor position, 0-based from the pane's top-left — sent only for the focused pane when its cursor is visible; `null`/absent otherwise) |
+| `event.agent.output` | `{ lane_id, window, content, cursor? }` (`window` names the tmux window the capture came from - a `lane-*` agent pane or a `term-*` plain terminal, so one lane can stream both without colliding; `cursor` is `[col, row]` - the pane's text-cursor position, 0-based from the pane's top-left - sent only for the focused pane when its cursor is visible; `null`/absent otherwise) |
 | `event.agent.bytes` | `{ lane_id, window, data, generation, sequence }` - raw PTY bytes (base64) from the byte-watched pane. Chunks are arbitrary byte boundaries, so feed them to a terminal emulator rather than parsing them as individual UTF-8 strings. Sequence values are contiguous within one generation. |
 | `event.agent.stream_closed` | `{ lane_id, window, generation }` - the backend stream ended because the watched target disappeared. Release local watch state only when `generation` matches the active stream; delayed notifications from an older generation are stale. |
 | `event.agent.changed` | `{ name }` or `{ default }` (a custom agent was added/removed, or the default changed) |
 | `event.file.changed` | `{ lane_id, path }`, a worktree file was saved through `file.write` (so other viewers of the same file can reload). |
-| `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt?, attention, dialog? }` — daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`, `stalled`; `prompt` is the agent's pending question verbatim). `attention` refines `needs_you`: `permission` (routine tool-call ask) / `decision` (a real question) / `done_candidate` (turn finished on a clean lane with a this-turn commit — ready to review) / `end_of_turn` (turn finished, no dialog) / `none`; `dialog` is the full `PendingDialog` when one is on screen, so an actionable client can offer its real options. `stalled` fires once when a managed agent's pane and transcript both freeze mid-work for ~5 min while its process lives (see `AgentSession.stale`/`stalled_since` on `lane.list` — additive overlay fields, with `stalled_since` marking the pane's last change). Emitted to every subscribed client. When `[remote]` is enabled, the same alert also goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
+| `event.notification` | `{ lane_id, session_id?, kind, title, body, prompt?, attention, dialog? }` - daemon-side agent alert (kinds: `needs_you`, `rate_limited`, `resumed`, `idle`, `stalled`; `prompt` is the agent's pending question verbatim). `attention` refines `needs_you`: `permission` (routine tool-call ask) / `decision` (a real question) / `done_candidate` (turn finished on a clean lane with a this-turn commit - ready to review) / `end_of_turn` (turn finished, no dialog) / `none`; `dialog` is the full `PendingDialog` when one is on screen, so an actionable client can offer its real options. `stalled` fires once when a managed agent's pane and transcript both freeze mid-work for ~5 min while its process lives (see `AgentSession.stale`/`stalled_since` on `lane.list` - additive overlay fields, with `stalled_since` marking the pane's last change). Emitted to every subscribed client. When `[remote]` is enabled, the same alert also goes to APNs devices with category `AGENT_PROMPT` (actionable) or `AGENT_ALERT`. |
 | `event.message.stored` | `{ id, lane_id?, from, body, message }` for one newly accepted durable fleet message. Clients deduplicate only by `id`. |
-| `event.orchestrator.output` | `{ content, cursor? }` — the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
-| `event.orchestrator.status` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` — broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
+| `event.orchestrator.output` | `{ content, cursor? }` - the repomind pane's text (and `[col, row]` cursor) streamed while watched; same shape as `event.agent.output` without `lane_id`. |
+| `event.orchestrator.status` | `{ running, agent?, model?, backend?, window?, autonomy?, session_id?, attention, headline? }` - broadcast when the orchestrator starts, stops, is reconciled to stopped after its window died, or its `attention` changes. |
 
 Object ids travel as lowercase hex strings; timestamps as RFC3339 UTC.
+
+### Usage ledger and recount
+
+The ledger stores per-turn `usage_events`; it does not store pre-priced daily totals.
+`usage.summary`, `usage.timeline`, `usage.sessions`, and `usage.findings` query a time window;
+`usage.export` writes CSV or JSON under the daemon data directory. `usage.status` reports
+`sources`, `stale_sources`, `ingesting`, and `last_scan_at`, along with ledger totals.
+
+A reader revision marks previously read sources stale. Ingest recounts at most 25 sources per
+pass, replacing the successfully reread source's events instead of adding duplicates.
+Missing or unsupported old sources preserve existing events and leave the recount queue.
+Unreadable sources preserve their events and offset, retiring after three failed attempts
+at least a minute apart. `event.usage.changed` prompts clients to reload both totals and progress.
+`usage.ingest_now` requests a local ingest pass and redigests stale session headlines.
+Account quota refresh (`usage.refresh`) is a separate operation, described below.
 
 ### Usage model rates
 

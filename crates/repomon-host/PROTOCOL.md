@@ -1,4 +1,4 @@
-# repomon-agent-host control protocol (v1) — FROZEN
+# repomon-agent-host control protocol (v1) - FROZEN
 
 This document is the inter-track contract for repomon's native Windows session model.
 `repomon-agent-host.exe` (Track C) implements it; the daemon's `WindowsBackend` (Track I) and
@@ -12,7 +12,7 @@ MUST produce an `err` response, never a disconnect.
 
 ## 1. Roles and lifecycle
 
-One host process per agent window — the Windows equivalent of one tmux window on the tmux
+One host process per agent window - the Windows equivalent of one tmux window on the tmux
 server. The host:
 
 1. Spawns the agent child on a ConPTY (via `portable-pty`), with a structured
@@ -26,7 +26,7 @@ server. The host:
 The host is spawned **detached** (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`) and keeps
 running when its parent (the daemon) dies. Durability parity: agents survive daemon restarts.
 
-**Exit semantics (tmux parity — the window disappears):** when the agent child exits, or when
+**Exit semantics (tmux parity - the window disappears):** when the agent child exits, or when
 a `kill` request is served, the host removes its registry file and exits with status 0. There
 is no idle host without a child.
 
@@ -69,7 +69,7 @@ protected (no inheritance): SDDL shape `O:<sid>G:<sid>D:P(A;;GA;;;<sid>)`. The f
 MUST be created with `FILE_FLAG_FIRST_PIPE_INSTANCE` so a squatter cannot pre-claim the name.
 The default (permissive) named-pipe DACL is not acceptable. The registry directory inherits
 the per-user protection of `<data_dir>` (under `%APPDATA%`); the owner token is a liveness /
-identity check, **not** the security boundary — the DACL is.
+identity check, **not** the security boundary - the DACL is.
 
 ## 4. Framing
 
@@ -103,7 +103,7 @@ is the only unsubscribe.
 Parity with the tmux `@repomon-owner` server option. The token is an opaque string fixed at
 spawn (`--owner`, or host-generated). It appears in the registry file and in every `hello`
 response. Adoption rule (Track I): after connecting and reading `hello`, a daemon compares
-`owner` with its own identity — on mismatch the daemon MUST back off (not adopt, not reap,
+`owner` with its own identity - on mismatch the daemon MUST back off (not adopt, not reap,
 not kill). There is no way to change a host's owner after spawn.
 
 ## 7. Requests
@@ -146,7 +146,7 @@ Response: `{"id": 2, "ok": {"text": "…"}}`
 
 Parity with `tmux capture-pane -e -p [-S -<lines>]`: the visible screen's rows, preceded by
 up to `lines` rows of scrollback when `lines` is present, joined with `\n`, each row carrying
-inline SGR escape sequences. Rendered from the host's vt100 screen (the source of truth —
+inline SGR escape sequences. Rendered from the host's vt100 screen (the source of truth -
 ConPTY-synthesized quirks do not leak into capture).
 
 ### 7.3 `cursor`
@@ -179,7 +179,7 @@ Request: `{"id": 6, "op": "resize", "cols": 190, "rows": 45}`
 
 Response: `{"id": 6, "ok": {}}`
 
-Resizes the ConPTY and the vt100 screen. **Last client wins** — no arbitration; the most
+Resizes the ConPTY and the vt100 screen. **Last client wins** - no arbitration; the most
 recent `resize` from any connection is in effect.
 
 ### 7.7 `send_literal`
@@ -197,7 +197,7 @@ Request: `{"id": 8, "op": "send_text", "text": "continue"}`
 
 Response: `{"id": 8, "ok": {}}`
 
-Writes the UTF-8 bytes of `text`, then a carriage return (`\r`) — parity with
+Writes the UTF-8 bytes of `text`, then a carriage return (`\r`) - parity with
 `send-keys -l <text>` + `send-keys Enter`.
 
 ### 7.9 `send_key`
@@ -287,7 +287,7 @@ Schema (v1):
 - Removed by the host on clean exit (child exit or `kill`).
 - **Stale-entry GC (Track I):** a scanner that fails to connect to `pipe` (file gone /
   refused) may treat the entry as stale and delete the JSON file. `last_activity` is NOT in
-  the registry — it changes constantly; read it via `hello`.
+  the registry - it changes constantly; read it via `hello`.
 - Unknown JSON fields MUST be ignored; additions bump nothing (additive-only, `v` stays 1).
 
 ## 9. Mapping to `SessionBackend` (informative)

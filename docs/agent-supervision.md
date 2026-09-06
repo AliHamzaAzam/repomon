@@ -92,7 +92,7 @@ command or edit falls back to a hold even if its class says auto-approve (see
 
 Supervision is a two-key lock: it only actually acts on a lane when **both** the global master
 switch (`config.toml`'s `[supervision] enabled = true`, editable from the desktop app's
-Settings → Automation → Supervision sub-tab) **and** that lane's own opt-in (a `lane_policies`
+Settings > Policies > Supervision sub-tab) **and** that lane's own opt-in (a `lane_policies`
 row with `enabled = true`, editable from the lane's own Supervision panel) are on. Flipping the
 master switch off holds every lane's actions regardless of its own `enabled` flag; a lane with
 no stored `lane_policies` row at all is treated as not enabled. This is enforced twice: once at
@@ -122,8 +122,8 @@ class. Overrides are stored in SQLite (the `lane_policies` table), not in `confi
 
 The two GUI paths:
 
-- **Global defaults**: Settings → Automation → Supervision sub-tab
-  (`apps/desktop/src/components/AutomationSettings.tsx`). The master switch, the same nine-row
+- **Global defaults**: Settings > Policies > Supervision sub-tab
+  (`apps/desktop/src/components/PolicySettings.tsx`). The master switch, the same nine-row
   class grid, default nudge text, default mail mode, default stall minutes, and default nudge
   retries. Writes go through `config.set { supervision: <full object> }` (read-modify-write on
   the whole nested struct). A footnote points at the per-lane panel for overrides.
@@ -315,7 +315,7 @@ Four short walkthroughs, each exercising a distinct part of the feature end to e
 
 ### 1. Turn on supervision and watch a repo-scoped command auto-approve
 
-1. Settings → Automation → Supervision → **Enable supervision**.
+1. Settings > Policies > Supervision → **Enable supervision**.
 2. Open a lane's own Supervision panel and toggle **Supervise this lane**. Leave
    `command_exec` and `file_write` on their default `Auto-approve`.
 3. Ask the agent to run something in-worktree, e.g. `cargo test -p repomon-core`. The dialog is

@@ -6,7 +6,8 @@ the desktop app, and the iOS client can all watch one fleet at once.
 
 ## Install
 
-Preview builds are published to the moving
+Download published builds from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest).
+Previews are also published to the moving
 [`desktop-preview`](https://github.com/AliHamzaAzam/repomon/releases/tag/desktop-preview) release
 for macOS, Windows, and Linux:
 
@@ -37,11 +38,14 @@ the footer, Enter continues, and Skip setup (or Esc) leaves for the app at any p
 written to local storage, so quitting mid-way to install a CLI or clone a repo resumes on the same
 step rather than at the start. Settings > General > Replay Onboarding reopens it from the top.
 
+On Windows, one custom title bar contains the app toolbar and native-style minimize, maximize,
+and close controls. There is no second system title bar above it.
+
 ## The app icon
 
 The brand sources are kept outside version control (`docs/brand/` is gitignored and lives on the
-maintainer's machine); the repository ships only the rendered icons under `src-tauri/icons` and
-`src-tauri/macos/Assets.car`. The approved geometry is `docs/brand/repo-logo-final.svg`, including the user's manual path
+maintainer's machine); the repository ships only the rendered icons under `apps/desktop/src-tauri/icons` and
+`apps/desktop/src-tauri/macos/Assets.car`. The approved geometry is `docs/brand/repo-logo-final.svg`, including the user's manual path
 adjustments. Preserve that file's paths, stroke widths, openings, and central square. The macOS
 Icon Composer bundle at `docs/brand/final/macos/Repomon.icon` expands the source strokes into closed
 filled outlines and separates the mesh and square into two SVG layers. This avoids the macOS 26
@@ -370,7 +374,8 @@ notifies under its own identity while it is running, and the TUI still pops its 
 screen. The trade is that a machine running neither UI stops notifying at the OS level, which is
 why it ships on.
 
-**Appearance** sets the accent from a swatch or a custom hex value, picks the repomind agent and
+**Appearance** defaults to the brand orange accent with graphite ink and a warm light ground
+(or lifted graphite on a dark ground). It sets the accent from a swatch or a custom hex value, picks the repomind agent and
 model, and holds **Sort projects by activity**: with it on, sidebar project groups order by their
 most recent lane activity so whatever you are working in floats to the top. Only the groups move.
 Lane order inside a group is deliberately left alone, because sorting lanes by activity makes them
@@ -386,8 +391,9 @@ share both a chord and a scope), a warning on Windows and Linux about the Ctrl-r
 caveat (see Known gaps), and a **Print cheat sheet** button that opens a plain, printable page
 listing every shortcut.
 
-Settings are stored by the daemon and shared with the TUI, so a change here shows up there too.
-Nothing saves until you press **Save**.
+Most settings are stored by the daemon and shared with the TUI; the modal saves those with
+**Save**. Usage tracking, price refresh, and model-rate edits apply immediately. The sidebar
+cost switch is a local desktop preference and also applies immediately.
 
 If the daemon connection drops for more than a few seconds, a banner appears rather than letting
 the UI sit silently stale; it clears as soon as the connection is restored.
@@ -640,7 +646,11 @@ A correction to how a transcript is counted also corrects the history already re
 source carries the reader revision that read it, and ingest re-reads the ones an older revision
 wrote, replacing what they produced. That runs a bounded number of sources per pass, so a fresh
 version converges over a few minutes rather than in one stall; `usage.status` says how many sources
-are still waiting.
+are still waiting. The Usage view shows "Recounting N of M transcripts" while that queue is
+nonempty. Each pass attempts at most 25 old sources and promptly schedules another pass when
+a full batch leaves work. Missing or unsupported sources retain previous events and leave the queue. Unreadable
+sources retain their events and resume offset; after three failed attempts at least a minute
+apart they also leave the queue, so progress cannot stay stuck forever.
 
 The view carries:
 
