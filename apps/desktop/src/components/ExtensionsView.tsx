@@ -114,6 +114,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                         ? "border-signal/50 bg-signal/10 text-signal font-semibold shadow-xs"
                         : "border-line bg-surface text-muted hover:border-line hover:bg-raised hover:text-foreground"
                     }`}
+                    aria-pressed={isSelected()}
                     onClick={() => {
                       props.store.setAccount(acct.key);
                       if (acct.claude === false && props.store.filter() === "marketplaces") {
@@ -138,6 +139,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                 ? "border-signal/50 bg-signal/10 text-signal font-semibold"
                 : "border-line bg-surface text-muted hover:text-foreground"
             }`}
+            aria-pressed={props.store.scope().scope === "global"}
             onClick={() => props.store.setScope({ scope: "global" })}
           >Global</button>
           <For each={props.fleet.visibleRepos()}>
@@ -149,15 +151,18 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                     ? "border-signal/50 bg-signal/10 text-signal font-semibold"
                     : "border-line bg-surface text-muted hover:text-foreground"
                 }`}
+                aria-pressed={scopeIsRepo(repo.id)}
+                title={repo.name}
                 onClick={() => props.store.setScope({ scope: "repo", repo_id: repo.id })}
               >{repo.name}</button>
             )}
           </For>
         </div>
-        <div class="flex items-center gap-2">
-          <div class="relative min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="relative min-w-48 flex-1">
             <input
               class="focus-ring h-8 w-full rounded-lg border border-line bg-surface pl-8 pr-3 text-xs text-foreground outline-none placeholder:text-muted/60"
+              aria-label="Search extensions and skills"
               placeholder="Search extensions & skills…"
               value={props.store.query()}
               onInput={(event) => props.store.setQuery(event.currentTarget.value)}
@@ -166,7 +171,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
               <IconSearch size={13} />
             </span>
           </div>
-          <div class="flex items-center rounded-lg border border-line bg-raised/50 p-0.5" role="group" aria-label="Extension filters">
+          <div class="flex shrink-0 items-center rounded-lg border border-line bg-raised/50 p-0.5" role="group" aria-label="Extension filters">
             <For each={availableFilters()}>
               {(filter) => (
                 <button
@@ -176,6 +181,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                       ? "bg-surface text-foreground shadow-xs font-semibold"
                       : "text-muted hover:text-foreground"
                   }`}
+                  aria-pressed={props.store.filter() === filter}
                   onClick={() => props.store.setFilter(filter)}
                 >{filter}</button>
               )}
@@ -187,6 +193,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
               class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-3 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
               disabled={props.store.busy() || !props.store.cliAvailable()}
               title={cliTitle()}
+              aria-expanded={installOpen()}
               onClick={() => setInstallOpen((open) => !open)}
             >
               <IconPlus size={12} />
@@ -197,6 +204,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             type="button"
             class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-3 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground disabled:opacity-40"
             disabled={props.store.busy()}
+            aria-expanded={newSkillOpen()}
             onClick={() => setNewSkillOpen((open) => !open)}
           >
             <IconPlus size={12} />
@@ -207,6 +215,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
           <form class="flex items-center gap-2 rounded-xl border border-line bg-surface p-2" onSubmit={submitInstall}>
             <input
               class="focus-ring h-8 min-w-0 flex-1 rounded-lg border border-line bg-background px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted/60"
+              aria-label="Plugin reference"
               placeholder={installPlaceholder()}
               value={installRef()}
               onInput={(event) => setInstallRef(event.currentTarget.value)}
@@ -224,12 +233,14 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             <div class="flex items-center gap-2">
               <input
                 class="focus-ring h-8 min-w-0 flex-1 rounded-lg border border-line bg-background px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted/60"
+                aria-label="Skill name"
                 placeholder="skill-name"
                 value={newSkillName()}
                 onInput={(event) => setNewSkillName(event.currentTarget.value)}
               />
               <input
                 class="focus-ring h-8 min-w-0 flex-[2] rounded-lg border border-line bg-background px-3 text-xs text-foreground outline-none placeholder:text-muted/60"
+                aria-label="Skill description (optional)"
                 placeholder="Description (optional)"
                 value={newSkillDescription()}
                 onInput={(event) => setNewSkillDescription(event.currentTarget.value)}
@@ -247,7 +258,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
           </form>
         </Show>
         <Show when={props.store.error()}>
-          {(error) => <p class="rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>}
+          {(error) => <p role="alert" class="break-words rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault">{error()}</p>}
         </Show>
         <div class={`flex min-h-0 flex-1 flex-col gap-2 ${props.store.busy() ? "pointer-events-none opacity-60" : ""}`}>
           <Show
@@ -285,6 +296,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                 <form class="flex items-center gap-2" onSubmit={submitMarketplaceAdd}>
                   <input
                     class="focus-ring h-8 min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted/60"
+                    aria-label="Marketplace source"
                     placeholder="owner/repo or https://..."
                     value={marketplaceSource()}
                     onInput={(event) => setMarketplaceSource(event.currentTarget.value)}
@@ -300,6 +312,11 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             }
           >
             <ul class="min-h-0 flex-1 space-y-1.5 overflow-y-auto" aria-label="Extensions">
+              <Show when={props.store.rows().length > 0} fallback={
+                <li role="status" class="py-8 text-center text-xs text-muted">
+                  {props.store.busy() ? "Loading extensions…" : props.store.query() ? "No extensions match your search." : "No extensions or skills in this scope."}
+                </li>
+              }>
               <For each={props.store.rows()}>
                 {(row) => (
                   <li>
@@ -310,6 +327,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                           ? "border-signal bg-signal/5 ring-1 ring-signal/20"
                           : "border-line bg-surface hover:border-muted/50 hover:bg-raised/40"
                       }`}
+                      aria-pressed={selectedKey() === rowKey(row)}
                       onClick={() => setSelectedKey(rowKey(row))}
                     >
                       <span class="flex min-w-0 items-center gap-2.5 truncate">
@@ -334,6 +352,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
                   </li>
                 )}
               </For>
+              </Show>
             </ul>
           </Show>
         </div>

@@ -185,6 +185,13 @@ describe("SupervisionPanel", () => {
       expect(screen.getByText("Activity log")).toBeInTheDocument();
       expect(screen.getByText(/Approved command execution/)).toBeInTheDocument();
     });
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    const excerpt = screen.getByRole("region", { name: "Terminal excerpt for dialog" });
+    expect(excerpt).toHaveAttribute("tabindex", "0");
+    excerpt.focus();
+    expect(excerpt).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
+    expect(screen.queryByRole("region", { name: "Terminal excerpt for dialog" })).toBeNull();
   });
 
   it("changing one class Select issues exactly one supervision.set whose classes contains only changed override semantics", async () => {

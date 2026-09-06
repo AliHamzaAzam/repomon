@@ -581,9 +581,9 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
 
                     return (
                       <div class="rounded-xl border border-line bg-raised/20 p-3 text-xs">
-                        <div class="flex items-center justify-between gap-2">
-                          <div class="flex min-w-0 items-center gap-1.5">
-                            <span class="truncate font-mono text-xs font-semibold text-foreground">{entry.trigger}</span>
+                        <div class="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
+                          <div class="flex min-w-28 flex-1 items-center gap-1.5">
+                            <span class="min-w-0 truncate font-mono text-xs font-semibold text-foreground" title={entry.trigger}>{entry.trigger}</span>
                             <Show when={entry.dialog_class}>
                               {(dc) => <span class="font-mono text-[10px] text-muted">({dc()})</span>}
                             </Show>
@@ -602,9 +602,9 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
                         </div>
 
                         <div class="mt-1 flex items-center gap-2 text-[11px] text-muted">
-                          <span>{formatTime(entry.at)}</span>
+                          <span class="shrink-0">{formatTime(entry.at)}</span>
                           <Show when={entry.reason ?? entry.subject}>
-                            {(text) => <span class="truncate font-mono">· {text()}</span>}
+                            {(text) => <span class="min-w-0 truncate font-mono" title={text()}>· {text()}</span>}
                           </Show>
                         </div>
 
@@ -633,7 +633,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
                                 </div>
                               </Show>
                               <Show when={entry.pane_excerpt}>
-                                <pre class="max-h-36 overflow-auto whitespace-pre-wrap rounded-lg bg-surface/80 p-2 font-mono text-[10px] text-muted">
+                                <pre tabindex="0" role="region" aria-label={`Terminal excerpt for ${entry.trigger}`} class="focus-ring max-h-36 overflow-auto whitespace-pre-wrap rounded-lg bg-surface/80 p-2 font-mono text-[10px] text-muted">
                                   {entry.pane_excerpt}
                                 </pre>
                               </Show>

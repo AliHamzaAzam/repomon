@@ -50,10 +50,11 @@ export default function SkillEditorModal(props: SkillEditorModalProps) {
       <div class="flex flex-col gap-3">
         <Show
           when={!content.error}
-          fallback={<p class="rounded-md border border-fault/40 bg-fault/8 p-2 font-mono text-[0.64rem] text-fault">{content.error instanceof Error ? content.error.message : String(content.error)}</p>}
+          fallback={<p role="alert" class="break-words rounded-md border border-fault/40 bg-fault/8 p-2 font-mono text-[0.64rem] text-fault">{content.error instanceof Error ? content.error.message : String(content.error)}</p>}
         >
           <Show when={!content.loading} fallback={<p class="font-mono text-[0.64rem] text-muted">Loading…</p>}>
             <textarea
+              aria-label="Skill content"
               class="focus-ring h-72 w-full resize-y rounded-md border border-line bg-raised p-3 font-mono text-[0.7rem] leading-relaxed"
               value={text()}
               onInput={(event) => setDraft(event.currentTarget.value)}
@@ -62,7 +63,7 @@ export default function SkillEditorModal(props: SkillEditorModalProps) {
           </Show>
         </Show>
         <Show when={error()}>
-          {(message) => <p class="rounded-md border border-fault/40 bg-fault/8 p-2 font-mono text-[0.64rem] text-fault">{message()}</p>}
+          {(message) => <p role="alert" class="break-words rounded-md border border-fault/40 bg-fault/8 p-2 font-mono text-[0.64rem] text-fault">{message()}</p>}
         </Show>
         <p class="text-[0.62rem] text-muted">Saved changes apply to new agent sessions.</p>
       </div>

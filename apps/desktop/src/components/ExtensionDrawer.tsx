@@ -18,7 +18,7 @@ export default function ExtensionDrawer(props: ExtensionDrawerProps) {
   );
 
   return (
-    <aside class="flex w-80 shrink-0 flex-col gap-3.5 border-l border-line bg-surface p-4 text-xs">
+    <aside class="flex min-h-0 w-80 shrink-0 flex-col gap-3.5 overflow-y-auto border-l border-line bg-surface p-4 text-xs [overflow-wrap:anywhere]" aria-label="Extension details">
       <div class="flex items-center justify-between">
         <span class="section-label">{props.row.kind === "plugin" ? "Plugin Details" : "Skill Details"}</span>
         <button
