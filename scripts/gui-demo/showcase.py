@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Operator-run macOS showcase recorder. All mutations stay in the disposable fleet."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import time
 
 from fixtures import git, seed, seed_usage, write
 from rpc import call
+from connection_probe import DesktopProbe
 
 HELPERS = Path(__file__).resolve().parent
 REPO = HELPERS.parent.parent
@@ -33,6 +35,40 @@ def production_pids():
     return sorted(line.split(None, 1)[0] for line in output.splitlines()
                   if "repomond" in line and "repomon-gui-demo." not in line
                   and "--socket" in line and "/tmp/repomon-" in line)
+
+
+def daemon_pids():
+    output = sp.check_output(["/bin/ps", "-axo", "pid=,comm="], text=True)
+    return sorted(int(line.split(None, 1)[0]) for line in output.splitlines()
+                  if Path(line.split(None, 1)[1]).name == "repomond")
+
+
+def verify_desktop(root, app, probe, baseline_pids):
+    lanes = call(root, "lane.list")
+    def connected():
+        if app.poll() is not None:
+            raise AssertionError(f"Demo app exited: see {root}/out/app.log")
+        evidence = probe.evidence(lanes)
+        if evidence:
+            assert evidence['app_pid'] == app.pid
+            return evidence
+        return None
+    evidence = eventually(connected, "desktop fetched all 5 repos and 8 lanes from the seeded daemon and selected a viewport", 30)
+    after = daemon_pids()
+    assert after == baseline_pids, f"repomond PID set changed during app launch: {baseline_pids} to {after}"
+    evidence['repomond_pids_before_app'] = baseline_pids
+    evidence['repomond_pids_after_app'] = after
+    # Existing desktop binaries emit no successful-endpoint log. Inspect their native launch
+    # log if one exists; distinguish it from our wire-level observer rather than inventing one.
+    native_log = root / "data/logs/repomond.out.log"
+    evidence['native_launch_log'] = str(native_log) if native_log.exists() else None
+    evidence['native_launch_log_tail'] = native_log.read_text(errors='replace')[-4096:] if native_log.exists() else "No native launch log: the app did not launch a daemon."
+    evidence['observed_rpc_log'] = str(probe.log_path)
+    write(root / "out/desktop-connection.json", json.dumps(evidence, indent=2))
+    log(f"PASS kernel peers: desktop {app.pid} via {probe.endpoint} to daemon {probe.daemon_pid} at {probe.backend}")
+    log(f"PASS no second repomond: {baseline_pids} unchanged")
+    log(f"Desktop endpoint evidence: {probe.log_path}; native launch log: {evidence['native_launch_log'] or 'absent'}")
+    return evidence
 
 
 def eventually(check, label, seconds=60):
@@ -70,8 +106,11 @@ def prepare(root, bin_dir):
 (deny file-read* file-write* (subpath {json.dumps(personal_home)}))
 (deny network-outbound (remote ip "*:*"))
 ''')
+    write(root / "app-guard.sb", (root / "guard.sb").read_text() +
+          f'(deny process-exec (literal {json.dumps(str(root / "bin/repomond"))}))\n')
     label = root.name.replace(".", "-")
-    config = f'''theme = "dark"
+    config = f'''socket_path = "{root}/app.sock"
+theme = "dark"
 accent = "brand"
 tmux_session = "{label}"
 auto_continue = true
@@ -259,6 +298,7 @@ def main():
     label = root.name.replace(".", "-")
     env = None
     completed = False
+    desktop_probe = None
     try:
         prepare(root, args.bin_dir.resolve())
         env = environment(root)
@@ -284,11 +324,31 @@ with socket.socket() as client:
         eventually(lambda: (root / "demo.sock").is_socket(), "private daemon socket", 20)
         assignments = fleet(root)
         verify(root, assignments)
+        app_guard = ["/usr/bin/sandbox-exec", "-f", root / "app-guard.sb"]
+        spawn_probe = """import subprocess, sys
+try:
+    subprocess.run([sys.argv[1], "--version"], check=True, capture_output=True)
+except PermissionError:
+    pass
+else:
+    raise SystemExit("Desktop guard allowed a second repomond execution")
+"""
+        run(app_guard + [sys.executable, "-c", spawn_probe, root / "bin/repomond"], env=env, cwd=root)
+        log("PASS desktop guard denies spawning repomond")
+        desktop_probe = DesktopProbe(root, daemon.pid)
+        app_env = {**env, "REPOMON_SOCKET": str(desktop_probe.endpoint)}
+        baseline_pids = daemon_pids()
+        write(root / "out/launch.json", json.dumps({
+            "app_endpoint": app_env["REPOMON_SOCKET"], "daemon_endpoint": str(root / "demo.sock"),
+            "config": str(root / "config/repomon/config.toml"),
+            "binary_sha256": {name: hashlib.sha256((root / "bin" / name).read_bytes()).hexdigest()
+                              for name in ("repomon-desktop", "repomond")},
+        }, indent=2))
         app_log = (root / "out/app.log").open("w")
-        app = sp.Popen([str(a) for a in guard + [root / "bin/repomon-desktop"]], env=env, cwd=root, stdout=app_log, stderr=sp.STDOUT)
+        app = sp.Popen([str(a) for a in app_guard + [root / "bin/repomon-desktop"]], env=app_env, cwd=root, stdout=app_log, stderr=sp.STDOUT)
         children.append(app)
-        time.sleep(5)
-        assert app.poll() is None, f"Demo app exited: see {root}/out/app.log"
+        desktop_probe.expect_app(app.pid)
+        verify_desktop(root, app, desktop_probe, baseline_pids)
         log(f"PASS isolated app launched (PID {app.pid})")
         if args.dry_run and not args.tour:
             log("Dry run complete. No screen capture or permission probe was performed.")
@@ -314,6 +374,8 @@ with socket.socket() as client:
                 except sp.TimeoutExpired:
                     child.kill()
                     child.wait()
+        if desktop_probe:
+            desktop_probe.close()
         if env:
             sp.run(["tmux", "-L", label, "kill-server"], env=env, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
         (root / "demo.sock").unlink(missing_ok=True)

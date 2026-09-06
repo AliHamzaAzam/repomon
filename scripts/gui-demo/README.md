@@ -11,12 +11,37 @@ scripts/record-gui-demo.sh --still --bin-dir /Users/azaleas/Developer/Claude/rep
 scripts/record-gui-demo.sh --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
 ```
 
-The first command seeds, checks, launches the app for five seconds, then cleans up. The second
+The first command seeds the fleet, launches the app, verifies its daemon connection and loaded fleet, then cleans up. The second
 rehearses the actual AppleScript tour with no recording. The last two require Screen Recording
 permission for the invoking terminal; the rehearsal and captures also require Accessibility
 and Automation access to System Events. Run these from the operator's terminal. `--keep-sandbox`
 retains fixtures and `out/*.json` evidence after stopping the demo app, daemon and tmux server.
 `--skip-build` remains accepted for older commands; all runs already skip builds.
+
+## Verify the desktop connection
+
+Run `--dry-run --keep-sandbox` before using the tour. **Time: about 1 minute; the desktop handshake has a 30-second deadline.**
+
+1. Run the first command above with the existing binary directory.
+2. Look for `PASS desktop fetched all 5 repos and 8 lanes` and `PASS no second repomond`.
+3. Read the retained sandbox's `out/desktop-connection.json` for the app PID, daemon PID, endpoint paths, returned fleet counts and selected viewport.
+
+**You know it worked when:** the kernel-identified desktop client receives the exact seeded repo/lane IDs and sends a nonempty viewport, while the complete repomond PID set stays unchanged.
+
+<details>
+<summary>Details: endpoint evidence and launch guard</summary>
+
+The desktop's `REPOMON_SOCKET` and sandbox config `socket_path` point to `app.sock`. A recorder-owned observer forwards original framed bytes to `demo.sock`, where the seeded daemon is already running. Darwin's LOCAL_PEERPID identifies both peers; a different client or daemon fails verification. Fixture and mock-agent RPCs continue to use `demo.sock` directly and cannot satisfy the desktop check.
+
+The observer writes method names, fleet IDs/counts, endpoint paths and peer PIDs to `data/logs/desktop-rpc.jsonl`. It excludes config payloads, tokens, terminal output and mail bodies. `out/launch.json` records the endpoint inputs and hashes of the supplied binaries.
+
+The desktop receives a separate OS guard that denies execution of its sibling `repomond`. A subprocess probe proves that denial before launch. The existing real-home and outbound-IP restrictions remain in place.
+
+The existing desktop binary does not write a native successful-connection log. Verification checks `data/logs/repomond.out.log`, which the native launcher creates if it tries to spawn a daemon, and reports whether it exists. The RPC observer log is recorder-generated evidence, not a native application log.
+
+An investigation with the operator's identical binary hashes found the app connected to the seeded daemon and receiving all five repos/eight lanes, so a wrong endpoint was not reproduced. If these checks pass but the AX dump still lacks rows, retain both the RPC log and AX dump to investigate the renderer or accessibility tree separately.
+
+</details>
 
 ## Rehearse after a lookup failure
 
