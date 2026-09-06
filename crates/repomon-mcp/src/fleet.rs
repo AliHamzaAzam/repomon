@@ -388,6 +388,7 @@ mod tests {
             custom_label: None,
             generated_label: None,
             status_reason: None,
+            attention_kind: None,
         }
     }
 
