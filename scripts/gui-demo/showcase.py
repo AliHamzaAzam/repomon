@@ -215,6 +215,23 @@ def verify(root, assignments):
     log("PASS throwaway Repomind home, two plans, one playbook draft, pinned controller")
 
 
+def run_tour(root, tour, phase, children):
+    """Tee AppleScript diagnostics to the terminal and retained sandbox evidence."""
+    with (root / "out/tour.log").open("a") as tour_log:
+        log(f"Starting AX phase: {phase}; log: {root}/out/tour.log")
+        process = sp.Popen([str(arg) for arg in tour + [phase, root / "out"]],
+                           cwd=root, stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1)
+        children.append(process)
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            tour_log.write(line)
+            tour_log.flush()
+        code = process.wait()
+        if code:
+            raise RuntimeError(f"AX phase {phase} failed ({code}); see {root}/out/tour.log "
+                               f"and {root}/out/ax-dump.txt")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="verify, launch, wait, clean up; never capture")
@@ -278,9 +295,9 @@ with socket.socket() as client:
             completed = True
             return
         tour = ["osascript", HELPERS / "tour.applescript", str(app.pid)]
-        run(tour + ["opening"], cwd=root)
+        run_tour(root, tour, "opening", children)
         if args.dry_run:
-            run(tour + ["tour"], cwd=root)
+            run_tour(root, tour, "tour", children)
             log("PASS tour rehearsal completed without screen capture")
             completed = True
             return
@@ -328,7 +345,7 @@ def capture(root, window_id, tour, still, children):
         time.sleep(2)
         if recorder.poll() is not None:
             raise RuntimeError("Window capture failed. Run from a terminal with Screen Recording permission.")
-        run(tour + ["tour"], cwd=root)
+        run_tour(root, tour, "tour", children)
         recorder.wait(timeout=20)
         if recorder.returncode:
             raise RuntimeError("Window recording failed")

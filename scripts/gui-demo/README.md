@@ -18,6 +18,34 @@ and Automation access to System Events. Run these from the operator's terminal. 
 retains fixtures and `out/*.json` evidence after stopping the demo app, daemon and tmux server.
 `--skip-build` remains accepted for older commands; all runs already skip builds.
 
+## Rehearse after a lookup failure
+
+Run the rehearsal from the operator's terminal before capturing again. **Time: about 2-3 minutes, including the 90-second tour.**
+
+1. Run the updated recorder with retained diagnostics.
+
+   ```sh
+   scripts/record-gui-demo.sh --dry-run --tour --keep-sandbox --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
+   ```
+
+2. Check the printed sandbox path. `out/tour.log` records how long fleet readiness took, whether onboarding was skipped, and which AX fields or static-text child matched each button.
+3. If a lookup fails, read `out/ax-dump.txt`. It lists every front-window AXButton, AXRadioButton and AXStaticText with role, description, name and value. The first 40 lines also appear in the terminal and `out/tour.log`.
+
+**You know it worked when:** the log reports `Fleet ready after ... s`, a match for `nav-focus-trap`, and `PASS tour rehearsal completed without screen capture`.
+
+<details>
+<summary>Details: readiness and lane matching</summary>
+
+Both GIF and still use the same opening routine. Before selecting a lane, it polls for an AXStaticText containing `orbit-api` for up to 30 seconds. If `Skip setup` appears during that wait, it presses that control in the isolated app and continues waiting for the fleet.
+
+Onboarding completion and the resume step are browser-local preferences, not daemon TOML settings. The current app normally skips onboarding when the seeded fleet has repos; the explicit Skip setup handling also covers a wizard in the supplied binary. The recorder never edits real preferences.
+
+Button and content lookups retry for 12 seconds. Button matching checks description, name and value independently. If WebKit exposes lane text only in a static child, the recorder follows AXParent to its enclosing button. It does not select an unrelated row merely because aria-current is set.
+
+At the source revision used for this fix, LaneRow renders the title in a text span and the branch in a truncated span inside the button. The button has aria-current but no explicit aria-label. Source markup cannot prove how an existing WebKit binary exposes its AX name, so the runtime match log and failure dump supply that evidence. No product markup change or rebuild is required.
+
+</details>
+
 The GIF writes `docs/gui-demo.gif` at 1200x750; `--still` writes `docs/preview.png` at 1440x900.
 Both use the same opening routine and crop the top-left 1440x900 content rectangle after
 normalizing Retina scale. This removes the 86-pixel bottom band seen in a window-ID capture.
@@ -87,3 +115,5 @@ visual tour, opening-frame crop, and final GIF remain unverified until the opera
 and captures from their terminal. The existing 50-second GIF is 1.124 MB, so duration-only
 scaling suggests about 2.0 MB for 90 seconds; the extra views and motion can increase that.
 The encoder's 15 MB check, rather than that estimate, decides whether to replace the asset.
+
+Tour-fix verification on 2026-09-06: the capture-free dry run passed with the same fleet and usage totals above. Shell syntax, shellcheck, Python compilation and AppleScript compilation passed. Synthetic AX tests passed for a generic description with a meaningful name, static-text parent selection, exact and role matching, and a complete dump with a 40-line log preview. These tests use synthetic nodes; the live tour and capture still require the operator's permissions.

@@ -1,6 +1,186 @@
 -- Only the demo process is targeted. Semantic AX buttons and the current keymap drive the tour.
+use scripting additions
+
 property demoPID : 0
 property tourStart : missing value
+property outputDirectory : ""
+property tourPhase : "opening"
+property lookupSeconds : 12
+property readinessSeconds : 30
+
+-- Read each AX field independently. WebKit may put visible text in name or value while
+-- description still contains a generic role label. CSS truncation is not a selector.
+on nodeFields(node)
+    set nodeRole to ""
+    set nodeDescription to ""
+    set nodeName to ""
+    set nodeValue to ""
+    tell application "System Events"
+        try
+            set nodeRole to role of node as text
+        end try
+        try
+            set nodeDescription to description of node as text
+        end try
+        try
+            set nodeName to name of node as text
+        end try
+        try
+            set nodeValue to value of node as text
+        end try
+    end tell
+    return {nodeRole, nodeDescription, nodeName, nodeValue}
+end nodeFields
+
+on fieldsMatch(fields, labelText, exactMatch)
+    repeat with fieldNumber from 2 to 4
+        set fieldText to item fieldNumber of fields
+        if exactMatch then
+            if fieldText is labelText then return true
+        else
+            if fieldText contains labelText then return true
+        end if
+    end repeat
+    return false
+end fieldsMatch
+
+on windowNodes()
+    tell application "System Events"
+        tell (first process whose unix id is demoPID)
+            return entire contents of front window
+        end tell
+    end tell
+end windowNodes
+
+on flatText(rawText)
+    set savedDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to {return, linefeed, tab}
+    set parts to text items of rawText
+    set AppleScript's text item delimiters to " "
+    set resultText to parts as text
+    set AppleScript's text item delimiters to savedDelimiters
+    return resultText
+end flatText
+
+on describeNode(node)
+    set fields to my nodeFields(node)
+    return "role=" & item 1 of fields & tab & "description=" & my flatText(item 2 of fields) & tab & "name=" & my flatText(item 3 of fields) & tab & "value=" & my flatText(item 4 of fields)
+end describeNode
+
+on dumpAccessibility(reasonText)
+    set dumpLines to {"phase=" & tourPhase & "; pid=" & demoPID & "; reason=" & reasonText}
+    try
+        set nodes to my windowNodes()
+        repeat with node in nodes
+            set fields to my nodeFields(node)
+            if item 1 of fields is in {"AXButton", "AXRadioButton", "AXStaticText"} then
+                set end of dumpLines to my describeNode(node)
+            end if
+        end repeat
+    on error dumpError
+        set end of dumpLines to "AX traversal failed: " & dumpError
+    end try
+    set savedDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set dumpText to (dumpLines as text) & linefeed
+    set AppleScript's text item delimiters to savedDelimiters
+    set dumpFile to missing value
+    try
+        set dumpFile to open for access (POSIX file (outputDirectory & "/ax-dump.txt")) with write permission
+        set eof of dumpFile to 0
+        write dumpText to dumpFile as «class utf8»
+        close access dumpFile
+    on error writeError
+        try
+            if dumpFile is not missing value then close access dumpFile
+        end try
+        log "[gui-demo] Could not write AX dump: " & writeError
+    end try
+    log "[gui-demo] AX dump: " & outputDirectory & "/ax-dump.txt (first 40 lines follow)"
+    set previewCount to count of dumpLines
+    if previewCount > 40 then set previewCount to 40
+    repeat with lineNumber from 1 to previewCount
+        log "[gui-demo] AX " & item lineNumber of dumpLines
+    end repeat
+end dumpAccessibility
+
+on lookupFailure(reasonText)
+    my dumpAccessibility(reasonText)
+    error reasonText
+end lookupFailure
+
+-- Prefer the button's own fields. If WebKit exposes a lane's name only as an AXStaticText,
+-- follow AXParent to its enclosing button; never click an unrelated current/selected row.
+on parentNode(node)
+    tell application "System Events" to return value of attribute "AXParent" of node
+end parentNode
+
+on findButton(nodes, labelText, exactMatch, wantedRole)
+    repeat with node in nodes
+        set fields to my nodeFields(node)
+        set nodeRole to item 1 of fields
+        if (nodeRole is "AXButton" or nodeRole is "AXRadioButton") and (wantedRole is "" or nodeRole is wantedRole) then
+            if my fieldsMatch(fields, labelText, exactMatch) then return {contents of node, "button fields"}
+        end if
+    end repeat
+    repeat with node in nodes
+        set fields to my nodeFields(node)
+        if item 1 of fields is "AXStaticText" and my fieldsMatch(fields, labelText, exactMatch) then
+            set ancestor to contents of node
+            repeat 12 times
+                try
+                    set ancestor to my parentNode(ancestor)
+                    set parentFields to my nodeFields(ancestor)
+                    set parentRole to item 1 of parentFields
+                    if (parentRole is "AXButton" or parentRole is "AXRadioButton") and (wantedRole is "" or parentRole is wantedRole) then
+                        return {ancestor, "static text child: " & my describeNode(node)}
+                    end if
+                    if parentRole is "AXWindow" or parentRole is "AXApplication" then exit repeat
+                on error
+                    exit repeat
+                end try
+            end repeat
+        end if
+    end repeat
+    return missing value
+end findButton
+
+on pressFound(found, labelText)
+    set targetNode to item 1 of found
+    log "[gui-demo] Match " & labelText & " via " & item 2 of found & "; " & my describeNode(targetNode)
+    tell application "System Events" to perform action "AXPress" of targetNode
+    delay 0.3
+end pressFound
+
+on waitForFleet()
+    set readinessStart to current date
+    set lastError to "no fleet text yet"
+    set skipSeen to false
+    repeat
+        try
+            set nodes to my windowNodes()
+            set skipButton to my findButton(nodes, "Skip setup", true, "")
+            if skipButton is not missing value then
+                set skipSeen to true
+                log "[gui-demo] Onboarding detected; pressing Skip setup in the isolated app"
+                my pressFound(skipButton, "Skip setup")
+            else
+                repeat with node in nodes
+                    set fields to my nodeFields(node)
+                    if item 1 of fields is "AXStaticText" and my fieldsMatch(fields, "orbit-api", false) then
+                        log "[gui-demo] Fleet ready after " & ((current date) - readinessStart) & " s; onboarding skipped=" & skipSeen
+                        return
+                    end if
+                end repeat
+            end if
+        on error readinessError
+            set lastError to readinessError
+        end try
+        if ((current date) - readinessStart) >= readinessSeconds then exit repeat
+        delay 0.5
+    end repeat
+    my lookupFailure("Fleet not ready after " & ((current date) - readinessStart) & " s: AXStaticText orbit-api missing; onboarding seen=" & skipSeen & "; " & lastError)
+end waitForFleet
 
 on activateDemo()
     tell application "System Events"
@@ -15,7 +195,7 @@ on activateDemo()
             delay 0.5
         end repeat
     end tell
-    error "Demo app did not expose an accessible window. Check Accessibility permission for the invoking terminal."
+    my lookupFailure("Demo app did not expose an accessible window. Check Accessibility permission for the invoking terminal.")
 end activateDemo
 
 on pressKey(k, shifted)
@@ -44,53 +224,46 @@ on escapeKey()
 end escapeKey
 
 on buttonMatching(labelText, exactMatch, optional)
-    my activateDemo()
-    repeat 12 times
-        tell application "System Events"
-            tell (first process whose unix id is demoPID)
-                set nodes to entire contents of front window
-                repeat with node in nodes
-                    try
-                        if role of node is "AXButton" or role of node is "AXRadioButton" then
-                            set nodeLabel to description of node as text
-                            if nodeLabel is "" or nodeLabel is "button" then set nodeLabel to name of node as text
-                            if (exactMatch and nodeLabel is labelText) or ((not exactMatch) and nodeLabel contains labelText) then
-                                perform action "AXPress" of node
-                                delay 0.3
-                                return true
-                            end if
-                        end if
-                    end try
-                end repeat
-            end tell
-        end tell
-        if optional then return false
-        delay 0.25
-    end repeat
-    error "Required demo button not found: " & labelText
+    return my buttonWithRole(labelText, exactMatch, optional, "")
 end buttonMatching
 
-on requireText(labelText)
-    repeat 12 times
-        tell application "System Events"
-            tell (first process whose unix id is demoPID)
-                set nodes to entire contents of front window
-                repeat with node in nodes
-                    try
-                        if (value of node as text) contains labelText then return true
-                    end try
-                    try
-                        if (description of node as text) contains labelText then return true
-                    end try
-                    try
-                        if (name of node as text) contains labelText then return true
-                    end try
-                end repeat
-            end tell
-        end tell
-        delay 0.25
+on buttonWithRole(labelText, exactMatch, optional, wantedRole)
+    my activateDemo()
+    set lookupStart to current date
+    set lastError to "no matching AX button"
+    repeat
+        try
+            set found to my findButton(my windowNodes(), labelText, exactMatch, wantedRole)
+            if found is not missing value then
+                my pressFound(found, labelText)
+                return true
+            end if
+        on error pressError
+            set lastError to pressError
+        end try
+        if ((current date) - lookupStart) >= lookupSeconds then exit repeat
+        delay 0.5
     end repeat
-    error "Required demo content not found: " & labelText
+    set reasonText to "Required demo button not found: " & labelText & " after " & ((current date) - lookupStart) & " s; " & lastError
+    if optional then
+        my dumpAccessibility(reasonText)
+        return false
+    end if
+    my lookupFailure(reasonText)
+end buttonWithRole
+
+on requireText(labelText)
+    set lookupStart to current date
+    repeat
+        try
+            repeat with node in my windowNodes()
+                if my fieldsMatch(my nodeFields(node), labelText, false) then return true
+            end repeat
+        end try
+        if ((current date) - lookupStart) >= lookupSeconds then exit repeat
+        delay 0.5
+    end repeat
+    my lookupFailure("Required demo content not found: " & labelText)
 end requireText
 
 on revealText(labelText)
@@ -100,7 +273,7 @@ on revealText(labelText)
             set nodes to entire contents of front window
             repeat with node in nodes
                 try
-                    if role of node is "AXStaticText" and (value of node as text) contains labelText then
+                    if role of node is "AXStaticText" and my fieldsMatch(my nodeFields(node), labelText, false) then
                         perform action "AXScrollToVisible" of node
                         return
                     end if
@@ -108,7 +281,7 @@ on revealText(labelText)
             end repeat
         end tell
     end tell
-    error "Could not scroll required demo content into view: " & labelText
+    my lookupFailure("Could not scroll required demo content into view: " & labelText)
 end revealText
 
 on selectHero()
@@ -127,6 +300,7 @@ on openFoundFile()
 end openFoundFile
 
 on holdUntil(secondsFromStart, beat)
+    set tourPhase to beat
     log "[gui-demo] Tour: " & beat
     set waitSeconds to secondsFromStart - ((get current date) - tourStart)
     if waitSeconds < -2 then error "Tour fell behind its recording schedule at " & beat
@@ -142,7 +316,7 @@ on opening()
             if size of front window is not {1440, 900} then error "Display cannot accommodate the 1440x900 demo window"
         end tell
     end tell
-    my buttonMatching("Skip setup", true, true)
+    my waitForFleet()
     my selectHero()
     my pressKey("1", true)
     my requireText("Repomind")
@@ -152,6 +326,8 @@ end opening
 
 on run argv
     set demoPID to item 1 of argv as integer
+    set outputDirectory to item 3 of argv
+    set tourPhase to item 2 of argv
     if item 2 of argv is "opening" then
         my opening()
         return
@@ -199,20 +375,8 @@ on run argv
     my revealText("Sessions")
     my holdUntil(53, "Usage: seven-day chart, cards and sessions")
     my pressKey(",", false)
-    -- Settings uses tab buttons; the header Usage button is outside its dialog.
-    tell application "System Events"
-        tell (first process whose unix id is demoPID)
-            set nodes to entire contents of front window
-            set usageTab to missing value
-            repeat with node in nodes
-                try
-                    if role of node is "AXRadioButton" and name of node is "Usage" then set usageTab to node
-                end try
-            end repeat
-            if usageTab is missing value then error "Settings Usage tab not found"
-            perform action "AXPress" of usageTab
-        end tell
-    end tell
+    -- Restrict the match to the radio/tab role so the toolbar Usage button cannot win.
+    my buttonWithRole("Usage", true, false, "AXRadioButton")
     my requireText("Model")
     my holdUntil(61, "Settings: model rates")
     my escapeKey()
