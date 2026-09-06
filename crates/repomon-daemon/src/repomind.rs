@@ -702,8 +702,17 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let mut config = Config::default();
+        let mut config = Config {
+            tmux_session: unique_tmux_session("legacy-playbooks"),
+            ..Config::default()
+        };
         config.repomind.home = home.to_string_lossy().into_owned();
+        config.repomind.basic_memory_config = Some(
+            dir.path()
+                .join("basic-memory.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let ctx = Ctx::new_with_paths(
             store,
             config,
