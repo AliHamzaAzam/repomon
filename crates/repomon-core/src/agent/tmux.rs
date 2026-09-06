@@ -1130,18 +1130,6 @@ impl TmuxRuntime {
         self.run_allow_absent(&["kill-window", "-t", &self.exact_target(name)])?;
         Ok(())
     }
-
-    /// Args for `tmux attach` to this lane (the TUI execs this for a raw session), including
-    /// the dedicated socket.
-    pub fn attach_args(&self, lane: LaneId) -> Vec<String> {
-        vec![
-            "-L".into(),
-            self.session.clone(),
-            "attach".into(),
-            "-t".into(),
-            self.target(lane),
-        ]
-    }
 }
 
 /// Single-quote a string for safe inclusion in a shell command.
@@ -2331,9 +2319,14 @@ mod tests {
     #[test]
     fn tmux_not_applicable_on_windows_regardless_of_probe() {
         for available in [true, false] {
-            let doc =
-                tmux_doctor_for_platform(crate::model::DoctorPlatform::Windows, sample_tmux_doctor(available));
-            assert!(doc.not_applicable, "windows tmux must be marked not_applicable");
+            let doc = tmux_doctor_for_platform(
+                crate::model::DoctorPlatform::Windows,
+                sample_tmux_doctor(available),
+            );
+            assert!(
+                doc.not_applicable,
+                "windows tmux must be marked not_applicable"
+            );
         }
     }
 
@@ -2345,7 +2338,10 @@ mod tests {
         ] {
             let raw = sample_tmux_doctor(true);
             let doc = tmux_doctor_for_platform(platform, raw.clone());
-            assert_eq!(doc, raw, "non-windows platforms must pass the probe through unchanged");
+            assert_eq!(
+                doc, raw,
+                "non-windows platforms must pass the probe through unchanged"
+            );
         }
     }
 }

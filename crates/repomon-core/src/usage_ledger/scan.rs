@@ -30,7 +30,7 @@ use std::path::Path;
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::pricing::TokenCounts;
 
 /// The characters-per-token ratio used when a source keeps no counts of its own.
@@ -282,7 +282,10 @@ pub fn scan_claude_transcript(
         if let Some(usage) = message.get("usage") {
             group.has_usage = true;
             group.tokens.input = group.tokens.input.max(u64_at(Some(usage), "input_tokens"));
-            group.tokens.output = group.tokens.output.max(u64_at(Some(usage), "output_tokens"));
+            group.tokens.output = group
+                .tokens
+                .output
+                .max(u64_at(Some(usage), "output_tokens"));
             group.tokens.cache_read = group
                 .tokens
                 .cache_read
@@ -496,7 +499,9 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
     // No turn_context ever surfaced a model in this scan: fall back to the session_meta model
     // when the payload carries one, or an explicit placeholder, so nothing lands blank.
     if !pending_model_backfill.is_empty() {
-        let fallback = meta_model.clone().unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+        let fallback = meta_model
+            .clone()
+            .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
         for idx in pending_model_backfill.drain(..) {
             events[idx].model = fallback.clone();
         }
@@ -803,7 +808,11 @@ fn strip_injected_blocks(raw: &str) -> String {
             };
             let end = end_markers
                 .iter()
-                .filter_map(|marker| text[start..].find(marker).map(|rel| start + rel + marker.len()))
+                .filter_map(|marker| {
+                    text[start..]
+                        .find(marker)
+                        .map(|rel| start + rel + marker.len())
+                })
                 .min()
                 .unwrap_or(text.len());
             if cut.is_none_or(|(previous, _)| start < previous) {
@@ -930,19 +939,6 @@ fn message_text(message: &Value) -> Option<String> {
         None
     } else {
         Some(joined)
-    }
-}
-
-/// Reject a source path that is not a readable file, so a scan error is distinguishable from an
-/// empty read.
-pub fn require_readable(path: &Path) -> Result<()> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(Error::NotFound(format!(
-            "usage source {} is not a file",
-            path.display()
-        )))
     }
 }
 
@@ -1167,13 +1163,19 @@ mod tests {
         assert_eq!(scan.events.len(), 1, "three lines, one billable message");
         let e = &scan.events[0];
         assert_eq!(e.tokens.input, 5);
-        assert_eq!(e.tokens.output, 250, "the highest count the message reported");
+        assert_eq!(
+            e.tokens.output, 250,
+            "the highest count the message reported"
+        );
         assert_eq!(e.tokens.cache_read, 1000);
         assert_eq!(e.tokens.cache_write, 400);
         assert_eq!(e.thinking_tokens, 30);
         let s = scan.sessions.first().expect("one session");
         assert_eq!(s.turns, 1, "one message is one turn");
-        assert_eq!(s.tool_calls, 2, "both tool calls in the message still count");
+        assert_eq!(
+            s.tool_calls, 2,
+            "both tool calls in the message still count"
+        );
     }
 
     #[test]
@@ -1182,15 +1184,14 @@ mod tests {
         // rewinds to its first line rather than settling a partial count.
         let dir = tempfile::tempdir().unwrap();
         let body = include_str!("fixtures/claude_multiblock_v0.jsonl");
-        let truncated: String = body
-            .lines()
-            .take(3)
-            .map(|l| format!("{l}\n"))
-            .collect();
+        let truncated: String = body.lines().take(3).map(|l| format!("{l}\n")).collect();
         let p = write(dir.path(), "s.jsonl", &truncated);
         let scan = scan_claude_transcript(&p, 0, None).unwrap();
         assert_eq!(scan.events.len(), 1);
-        assert_eq!(scan.events[0].tokens.output, 7, "only what has been written");
+        assert_eq!(
+            scan.events[0].tokens.output, 7,
+            "only what has been written"
+        );
         assert_eq!(
             scan.sessions.first().expect("one session").turns,
             0,
@@ -1215,7 +1216,9 @@ mod tests {
         let scan = scan_claude_transcript(&p, 0, None).unwrap();
         assert_eq!(scan.events.len(), 2);
         assert!(
-            scan.events.iter().all(|e| e.session_id.as_deref() == Some("sess-claude-1")),
+            scan.events
+                .iter()
+                .all(|e| e.session_id.as_deref() == Some("sess-claude-1")),
             "a subagent turn belongs to the session that spawned it"
         );
         assert!(
