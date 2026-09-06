@@ -106,15 +106,27 @@ mod tests {
     /// unrecognized value keeps the historical default of the full catalog.
     #[test]
     fn catalog_mode_selects_the_worker_surface_only_for_agent() {
-        assert_eq!(CatalogMode::from_env_value(Some("agent")), CatalogMode::Worker);
+        assert_eq!(
+            CatalogMode::from_env_value(Some("agent")),
+            CatalogMode::Worker
+        );
         assert_eq!(
             CatalogMode::from_env_value(Some("orchestrator")),
             CatalogMode::Full
         );
         assert_eq!(CatalogMode::from_env_value(None), CatalogMode::Full);
         assert_eq!(CatalogMode::from_env_value(Some("")), CatalogMode::Full);
-        assert_eq!(CatalogMode::from_env_value(Some("Agent")), CatalogMode::Worker);
-        assert_eq!(CatalogMode::from_env_value(Some(" agent ")), CatalogMode::Worker);
-        assert_eq!(CatalogMode::from_env_value(Some("whatever")), CatalogMode::Full);
+        assert_eq!(
+            CatalogMode::from_env_value(Some("Agent")),
+            CatalogMode::Worker
+        );
+        assert_eq!(
+            CatalogMode::from_env_value(Some(" agent ")),
+            CatalogMode::Worker
+        );
+        assert_eq!(
+            CatalogMode::from_env_value(Some("whatever")),
+            CatalogMode::Full
+        );
     }
 }

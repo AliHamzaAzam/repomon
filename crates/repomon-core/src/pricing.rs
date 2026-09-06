@@ -197,7 +197,9 @@ impl PriceTable {
                 .filter(|r| r.model == model)
                 .max_by_key(|r| r.effective_from)
                 .cloned();
-            let base = exact.clone().or_else(|| self.lookup(&model, Utc::now()).cloned());
+            let base = exact
+                .clone()
+                .or_else(|| self.lookup(&model, Utc::now()).cloned());
             let effective_from = over
                 .effective_from
                 .or_else(|| exact.as_ref().map(|b| b.effective_from))
@@ -249,7 +251,10 @@ impl PriceTable {
             // pinned no-op, see `ALIASES`): re-running the exact match on the same string would
             // just repeat step 1's miss, so only take the alias branch when it names somewhere new.
             if alias != model {
-                if let Some(hit) = self.exact_match(alias, at).or_else(|| self.prefix_match(alias, at)) {
+                if let Some(hit) = self
+                    .exact_match(alias, at)
+                    .or_else(|| self.prefix_match(alias, at))
+                {
                     return Some(hit);
                 }
             }
@@ -418,18 +423,23 @@ pub fn model_rate_rows(
         .into_iter()
         .map(|(model, (last_seen, tokens_30d))| {
             let resolved = table.lookup(&model, at);
-            let (input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, source) =
-                match resolved {
-                    Some(p) => (
-                        p.input_per_mtok,
-                        p.output_per_mtok,
-                        p.cache_read_per_mtok,
-                        p.cache_write_per_mtok,
-                        p.source.into(),
-                    ),
-                    None if is_free_tier(&model) => (0.0, 0.0, 0.0, 0.0, ModelRateSource::Builtin),
-                    None => (0.0, 0.0, 0.0, 0.0, ModelRateSource::Unpriced),
-                };
+            let (
+                input_per_mtok,
+                output_per_mtok,
+                cache_read_per_mtok,
+                cache_write_per_mtok,
+                source,
+            ) = match resolved {
+                Some(p) => (
+                    p.input_per_mtok,
+                    p.output_per_mtok,
+                    p.cache_read_per_mtok,
+                    p.cache_write_per_mtok,
+                    p.source.into(),
+                ),
+                None if is_free_tier(&model) => (0.0, 0.0, 0.0, 0.0, ModelRateSource::Builtin),
+                None => (0.0, 0.0, 0.0, 0.0, ModelRateSource::Unpriced),
+            };
             ModelRateRow {
                 model: model.clone(),
                 input_per_mtok,
@@ -559,7 +569,10 @@ pub fn format_rates_footnote(status: &RatesStatus, now: DateTime<Utc>) -> String
         None => "Rates: LiteLLM not fetched yet".to_string(),
     };
     if status.source_counts.overrides > 0 {
-        line.push_str(&format!(", {} from overrides", status.source_counts.overrides));
+        line.push_str(&format!(
+            ", {} from overrides",
+            status.source_counts.overrides
+        ));
     }
     if status.source_counts.builtin > 0 {
         line.push_str(&format!(", {} built-in", status.source_counts.builtin));
@@ -769,7 +782,9 @@ mod tests {
         assert_eq!(price.input_per_mtok, 1.25);
         assert_eq!(price.output_per_mtok, 10.0);
         assert!(
-            table.cost("gpt-6-astra", Utc::now(), &TokenCounts::default()).is_some(),
+            table
+                .cost("gpt-6-astra", Utc::now(), &TokenCounts::default())
+                .is_some(),
             "a gpt-6 id should price rather than read as a gap in the table"
         );
     }
@@ -862,7 +877,11 @@ mod tests {
     #[test]
     fn an_unaliased_unmatched_model_stays_unpriced() {
         let table = PriceTable::builtin();
-        assert!(table.lookup("some-unknown-model-9000", at(2026, 9, 1)).is_none());
+        assert!(
+            table
+                .lookup("some-unknown-model-9000", at(2026, 9, 1))
+                .is_none()
+        );
     }
 
     #[test]
@@ -942,7 +961,11 @@ mod tests {
     #[test]
     fn model_rate_rows_resolves_an_exact_id_match() {
         let table = PriceTable::builtin();
-        let seen = [("claude-sonnet-5".to_string(), Some(at(2026, 9, 1)), 1_000u64)];
+        let seen = [(
+            "claude-sonnet-5".to_string(),
+            Some(at(2026, 9, 1)),
+            1_000u64,
+        )];
         let rows = model_rate_rows(&table, &HashMap::new(), &seen, at(2026, 9, 1));
         let row = rows.iter().find(|r| r.model == "claude-sonnet-5").unwrap();
         assert_eq!(row.source, ModelRateSource::Builtin);
@@ -1060,14 +1083,24 @@ mod tests {
         let now = Utc::now();
         let mut table = PriceTable::empty();
         table.insert(ModelPrice {
-            model: "claude-sonnet-5".into(), input_per_mtok: 4.0, output_per_mtok: 20.0,
-            cache_read_per_mtok: 0.4, cache_write_per_mtok: 5.0,
-            effective_from: now, source: RateSource::Litellm,
+            model: "claude-sonnet-5".into(),
+            input_per_mtok: 4.0,
+            output_per_mtok: 20.0,
+            cache_read_per_mtok: 0.4,
+            cache_write_per_mtok: 5.0,
+            effective_from: now,
+            source: RateSource::Litellm,
         });
-        table.apply_overrides([("claude-sonnet-5-20260901".into(), PriceOverride {
-            output_per_mtok: Some(8.0), ..Default::default()
-        })]);
-        let row = table.lookup("claude-sonnet-5-20260901", at(2026, 9, 1)).unwrap();
+        table.apply_overrides([(
+            "claude-sonnet-5-20260901".into(),
+            PriceOverride {
+                output_per_mtok: Some(8.0),
+                ..Default::default()
+            },
+        )]);
+        let row = table
+            .lookup("claude-sonnet-5-20260901", at(2026, 9, 1))
+            .unwrap();
         assert_eq!(row.effective_from, Utc.timestamp_opt(0, 0).unwrap());
         assert_eq!(row.input_per_mtok, 4.0);
         assert_eq!(row.output_per_mtok, 8.0);
@@ -1078,9 +1111,13 @@ mod tests {
         let mut table = PriceTable::builtin();
         let model = "claude-haiku-4-5-20251001";
         let base = table.lookup(model, at(2026, 9, 1)).unwrap().clone();
-        table.apply_overrides([(model.into(), PriceOverride {
-            output_per_mtok: Some(9.0), ..Default::default()
-        })]);
+        table.apply_overrides([(
+            model.into(),
+            PriceOverride {
+                output_per_mtok: Some(9.0),
+                ..Default::default()
+            },
+        )]);
         let row = table.lookup(model, at(2026, 9, 1)).unwrap();
         assert_eq!(row.source, RateSource::Override);
         assert_eq!(row.output_per_mtok, 9.0);
@@ -1092,7 +1129,11 @@ mod tests {
     #[test]
     fn model_rate_rows_flags_a_seen_model_with_no_match_as_unpriced() {
         let table = PriceTable::builtin();
-        let seen = [("some-unknown-model-9000".to_string(), Some(at(2026, 9, 1)), 3u64)];
+        let seen = [(
+            "some-unknown-model-9000".to_string(),
+            Some(at(2026, 9, 1)),
+            3u64,
+        )];
         let rows = model_rate_rows(&table, &HashMap::new(), &seen, at(2026, 9, 1));
         let row = rows
             .iter()

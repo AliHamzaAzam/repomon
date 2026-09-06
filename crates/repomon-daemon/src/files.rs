@@ -380,11 +380,7 @@ pub fn read_file_raw(path: &Path) -> Result<FileReadRawResult, ReadError> {
     let data = std::fs::read(path)?;
     let mime = mime_for_path(path).to_string();
     let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
-    Ok(FileReadRawResult {
-        base64,
-        mime,
-        size,
-    })
+    Ok(FileReadRawResult { base64, mime, size })
 }
 
 /// Read the HEAD version of a worktree path for git diff and editor gutter markers.
@@ -715,9 +711,7 @@ pub fn delete_path(
     } else {
         std::fs::remove_file(&path)?;
     }
-    Ok(FileDeleteResult {
-        path: clean_rel,
-    })
+    Ok(FileDeleteResult { path: clean_rel })
 }
 
 /// Options for searching files in a worktree.

@@ -376,7 +376,9 @@ pub enum RatesCmd {
 }
 
 fn parse_rate(raw: &str) -> Result<f64, String> {
-    let rate: f64 = raw.parse().map_err(|_| "rate must be a number".to_string())?;
+    let rate: f64 = raw
+        .parse()
+        .map_err(|_| "rate must be a number".to_string())?;
     if !rate.is_finite() || rate < 0.0 {
         return Err("rate must be a finite non-negative number".into());
     }
@@ -469,16 +471,18 @@ async fn handle_usage(cmd: UsageCmd, config: &Config, socket: Option<PathBuf>) -
             print!("{}", render_rates_table(&status, Utc::now()));
         }
         UsageCmd::Rates {
-            cmd: Some(RatesCmd::Set {
-                model,
-                input,
-                output,
-                cache_read,
-                cache_write,
-            }),
+            cmd:
+                Some(RatesCmd::Set {
+                    model,
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                }),
             ..
         } => {
-            if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none() {
+            if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none()
+            {
                 return Err(anyhow!(
                     "usage rates set needs at least one of --input, --output, --cache-read, --cache-write"
                 ));
@@ -532,7 +536,10 @@ fn rates_override_patch(
 }
 
 /// Render `usage.rates`' answer as the footnote line plus a small key/value table.
-fn render_rates_table(status: &repomon_core::pricing::RatesStatus, now: chrono::DateTime<Utc>) -> String {
+fn render_rates_table(
+    status: &repomon_core::pricing::RatesStatus,
+    now: chrono::DateTime<Utc>,
+) -> String {
     let mut out = String::new();
     out.push_str(&repomon_core::pricing::format_rates_footnote(status, now));
     out.push('\n');
@@ -1503,11 +1510,7 @@ fn format_repomind_export(v: &Value) -> String {
     if files.is_empty() {
         return "no changes to export\n".to_string();
     }
-    let mut out = format!(
-        "exported {} file(s)  ({})\n",
-        files.len(),
-        kinds.join(", ")
-    );
+    let mut out = format!("exported {} file(s)  ({})\n", files.len(), kinds.join(", "));
     for f in &files {
         if let Some(s) = f.as_str() {
             out.push_str(&format!("  {s}\n"));
@@ -2150,15 +2153,26 @@ mod tests {
     fn usage_rates_set_rejects_invalid_numbers() {
         use clap::Parser;
         for rate in ["NaN", "inf", "-1", "abc"] {
-            assert!(crate::Cli::try_parse_from([
-                "repomon", "usage", "rates", "set", "test-model", "--input", rate,
-            ]).is_err(), "accepted {rate}");
+            assert!(
+                crate::Cli::try_parse_from([
+                    "repomon",
+                    "usage",
+                    "rates",
+                    "set",
+                    "test-model",
+                    "--input",
+                    rate,
+                ])
+                .is_err(),
+                "accepted {rate}"
+            );
         }
     }
 
     #[test]
     fn rates_override_patch_includes_only_the_named_fields() {
-        let patch = super::rates_override_patch("claude-sonnet-5", Some(2.5), None, None, Some(3.75));
+        let patch =
+            super::rates_override_patch("claude-sonnet-5", Some(2.5), None, None, Some(3.75));
         assert_eq!(patch["model"], "claude-sonnet-5");
         assert_eq!(patch["input_per_mtok"], 2.5);
         assert_eq!(patch["cache_write_per_mtok"], 3.75);
@@ -2190,7 +2204,10 @@ mod tests {
         let mut buf = Vec::new();
         man.render(&mut buf).unwrap();
         let man_out = String::from_utf8(buf).unwrap();
-        assert!(man_out.contains("repomind"), "man page missing repomind:\n{man_out}");
+        assert!(
+            man_out.contains("repomind"),
+            "man page missing repomind:\n{man_out}"
+        );
 
         let mut cmd = crate::Cli::command();
         let mut buf = Vec::new();
@@ -2733,7 +2750,10 @@ mod tests {
             "trimmed": ["journal/2026-01-01.md"],
         });
         let out = super::format_repomind_boot(&v);
-        assert!(out.contains("path     /home/op/repomind/.repomind/boot.md"), "{out}");
+        assert!(
+            out.contains("path     /home/op/repomind/.repomind/boot.md"),
+            "{out}"
+        );
         assert!(out.contains("tokens   128"), "{out}");
         assert!(out.contains("trimmed  1"), "{out}");
     }
@@ -2751,7 +2771,10 @@ mod tests {
             "kinds": ["journal", "approvals"],
         });
         let out = super::format_repomind_export(&v);
-        assert!(out.starts_with("exported 2 file(s)  (journal, approvals)\n"), "{out}");
+        assert!(
+            out.starts_with("exported 2 file(s)  (journal, approvals)\n"),
+            "{out}"
+        );
         assert!(out.contains("  journal/2026-01-01.md\n"), "{out}");
         assert!(out.contains("  profile/approvals.md\n"), "{out}");
     }
@@ -2816,7 +2839,10 @@ mod tests {
         assert!(out.contains("claude-code"));
         assert!(out.contains("codex"));
         assert!(out.contains("TOTAL"));
-        assert!(out.contains("42%"), "the cache hit rate is shown as a percentage");
+        assert!(
+            out.contains("42%"),
+            "the cache hit rate is shown as a percentage"
+        );
     }
 
     #[test]
@@ -2853,9 +2879,11 @@ mod tests {
     fn usage_csv_has_a_header_and_one_line_per_group() {
         let out = super::render_usage_csv(&summary());
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "group,events,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd");
+        assert_eq!(
+            lines[0],
+            "group,events,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd"
+        );
         assert_eq!(lines.len(), 3);
         assert!(lines[1].starts_with("claude-code,"));
     }
-
 }

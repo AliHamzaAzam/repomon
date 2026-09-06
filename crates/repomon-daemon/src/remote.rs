@@ -604,7 +604,12 @@ mod tests {
         ] {
             assert!(remote_method_allowed(m), "{m} must be allowed");
         }
-        for m in ["usage.refresh", "usage.ingest_now", "usage.export", "usage.refresh_rates"] {
+        for m in [
+            "usage.refresh",
+            "usage.ingest_now",
+            "usage.export",
+            "usage.refresh_rates",
+        ] {
             assert!(!remote_method_allowed(m), "{m} must be blocked");
         }
     }

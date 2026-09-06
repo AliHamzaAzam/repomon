@@ -3391,26 +3391,36 @@ pub async fn dispatch(
             let p: ConfigSet = parse(params)?;
             // Validate the entire rate patch before mutating any live configuration.
             if p.usage_price_override_upsert.is_some() && p.usage_price_override_reset.is_some() {
-                return Err(RpcError::invalid_params("upsert and reset cannot be combined"));
+                return Err(RpcError::invalid_params(
+                    "upsert and reset cannot be combined",
+                ));
             }
             if let Some(u) = &p.usage_price_override_upsert {
-                let rates = [u.input_per_mtok, u.output_per_mtok,
-                    u.cache_read_per_mtok, u.cache_write_per_mtok];
+                let rates = [
+                    u.input_per_mtok,
+                    u.output_per_mtok,
+                    u.cache_read_per_mtok,
+                    u.cache_write_per_mtok,
+                ];
                 if u.model.trim().is_empty() || u.model != u.model.trim() {
-                    return Err(RpcError::invalid_params("model must be non-empty with no surrounding whitespace"));
+                    return Err(RpcError::invalid_params(
+                        "model must be non-empty with no surrounding whitespace",
+                    ));
                 }
                 if rates.iter().all(Option::is_none) {
                     return Err(RpcError::invalid_params("provide at least one rate"));
                 }
                 if rates.iter().flatten().any(|v| !v.is_finite() || *v < 0.0) {
-                    return Err(RpcError::invalid_params("rates must be finite non-negative numbers"));
+                    return Err(RpcError::invalid_params(
+                        "rates must be finite non-negative numbers",
+                    ));
                 }
             }
             let injection_policy_changed =
                 p.message_inject_agents.is_some() || p.message_inject_operator.is_some();
-            let usage_prices_changed =
-                p.usage_price_override_upsert.is_some() || p.usage_price_override_reset.is_some()
-                    || p.usage_refresh_prices.is_some();
+            let usage_prices_changed = p.usage_price_override_upsert.is_some()
+                || p.usage_price_override_reset.is_some()
+                || p.usage_refresh_prices.is_some();
             {
                 let mut cfg = ctx.config.write().await;
                 let prev = cfg.clone();
@@ -4941,7 +4951,11 @@ pub async fn dispatch(
         // The Settings > Usage "Model rates" table: one row per model the ledger has ever seen
         // plus one for every model with an override the ledger hasn't seen yet. Kept separate
         // from `usage.rates` rather than folded into it so that small status payload stays small.
-        "usage.models" => to_value(crate::usage_query::model_rates(ctx).await.map_err(internal)?),
+        "usage.models" => to_value(
+            crate::usage_query::model_rates(ctx)
+                .await
+                .map_err(internal)?,
+        ),
         // LOCAL-ONLY: forces an immediate LiteLLM fetch, bypassing the daily cadence. Stays off
         // the remote allowlist for the same reason `usage.ingest_now` does: it's an on-demand
         // network call a paired device shouldn't be able to trigger at will.
@@ -6251,8 +6265,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         .find(|s| !s.external && s.status != AgentStatus::RateLimited)
                 };
                 if let Some(sess) = sess {
-                    if rate_limit_has_lifted(rl.detected_at, rl.reset_at, sess.last_activity_at, now)
-                    {
+                    if rate_limit_has_lifted(
+                        rl.detected_at,
+                        rl.reset_at,
+                        sess.last_activity_at,
+                        now,
+                    ) {
                         // The reset time named in the pause has already arrived, or the
                         // transcript shows real output newer than when the pause was first
                         // detected: the agent has resumed, whatever a lingering pane capture
@@ -6524,8 +6542,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             // A quota wall's own "resets in Xh Ym" window is fixed to an absolute deadline the
             // first time it's seen for this window; once that deadline passes, a lingering copy
             // of the same message still inside the (short) pane capture no longer counts.
-            let found_quota =
-                gate_quota_reading(&mut quota_deadlines, &w, found_quota, now_utc);
+            let found_quota = gate_quota_reading(&mut quota_deadlines, &w, found_quota, now_utc);
             let s = &mut lanes[li].agent_sessions[si];
             s.subagent_running = found_subagent;
             let (status, reason) = status_from_pane(
@@ -9396,7 +9413,10 @@ mod tests {
         );
         let lim = repomon_core::agent::detect_usage_limit(pane)
             .expect("sanity: the pane still reads as a usage-limit pause to the raw pane scan");
-        assert_eq!(lim.reset_at, None, "sanity: this message names no reset time");
+        assert_eq!(
+            lim.reset_at, None,
+            "sanity: this message names no reset time"
+        );
         let detected_at = Utc.with_ymd_and_hms(2026, 9, 5, 2, 31, 0).unwrap();
         let last_activity_at = Utc.with_ymd_and_hms(2026, 9, 5, 10, 45, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 9, 5, 11, 7, 0).unwrap();

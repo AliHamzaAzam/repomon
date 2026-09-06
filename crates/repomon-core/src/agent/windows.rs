@@ -1308,11 +1308,8 @@ mod tests {
         std::fs::create_dir_all(&sibling_dir).unwrap();
         std::fs::write(sibling_dir.join("repomon-agent-host.exe"), b"sibling").unwrap();
 
-        let resolved = resolve_agent_host_from(
-            Some(fake_env_host.to_str().unwrap()),
-            &[sibling_dir],
-            None,
-        );
+        let resolved =
+            resolve_agent_host_from(Some(fake_env_host.to_str().unwrap()), &[sibling_dir], None);
         assert_eq!(
             resolved,
             Some((fake_env_host, crate::model::AgentHostSource::Path))
@@ -1365,8 +1362,7 @@ mod tests {
         std::fs::create_dir_all(&empty_sibling_dir).unwrap();
         let empty_path = std::ffi::OsStr::new("");
 
-        let resolved =
-            resolve_agent_host_from(None, &[empty_sibling_dir], Some(empty_path));
+        let resolved = resolve_agent_host_from(None, &[empty_sibling_dir], Some(empty_path));
         assert_eq!(resolved, None);
     }
 }

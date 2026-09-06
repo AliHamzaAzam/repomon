@@ -95,7 +95,11 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
 
     // `repomind.status` resolves the live window rather than reporting the stale record.
     let status = call(&mut stream, 1, "repomind.status", None).await;
-    assert!(status.error.is_none(), "repomind.status errored: {:?}", status.error);
+    assert!(
+        status.error.is_none(),
+        "repomind.status errored: {:?}",
+        status.error
+    );
     let result = status.result.unwrap();
     assert_eq!(
         result["window"],
@@ -156,8 +160,10 @@ async fn repomind_status_reports_null_window_when_nothing_is_live() {
         .await
         .expect("ensure_home");
 
-    let sock =
-        std::env::temp_dir().join(format!("repomon-primary-none-it-{}.sock", std::process::id()));
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-primary-none-it-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&sock);
     let server = {
         let ctx = ctx.clone();

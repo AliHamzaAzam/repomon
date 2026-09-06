@@ -432,9 +432,11 @@ mod tests {
         assert_eq!(book.content, "v1\n");
         assert_eq!(book.draft_content.as_deref(), Some("v2\n"));
         assert!(draft_path(&home, "fleet-sweep").is_file());
-        let fm = md::split_frontmatter(&std::fs::read_to_string(draft_path(&home, "fleet-sweep")).unwrap())
-            .0
-            .expect("frontmatter");
+        let fm = md::split_frontmatter(
+            &std::fs::read_to_string(draft_path(&home, "fleet-sweep")).unwrap(),
+        )
+        .0
+        .expect("frontmatter");
         assert_eq!(md::field(&fm, "revises").as_deref(), Some("fleet-sweep"));
         // The approved file, and therefore what search returns, is untouched.
         assert_eq!(search(&home, "v1", 10).unwrap().len(), 1);
@@ -504,7 +506,10 @@ mod tests {
 
         assert!(!approved_path(&home, "fleet-sweep").exists());
         assert!(!draft_path(&home, "fleet-sweep").exists());
-        assert!(delete(&home, "fleet-sweep").is_err(), "gone means not found");
+        assert!(
+            delete(&home, "fleet-sweep").is_err(),
+            "gone means not found"
+        );
     }
 
     #[test]
@@ -611,9 +616,11 @@ mod tests {
         let (_d, home) = home();
         save(&home, "keeper", "mine\n").unwrap();
 
-        assert!(migrate(&home, &[row("keeper", "draft", "stale\n", None)])
-            .unwrap()
-            .is_empty());
+        assert!(
+            migrate(&home, &[row("keeper", "draft", "stale\n", None)])
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(get(&home, "keeper").unwrap().unwrap().content, "mine\n");
     }
 }

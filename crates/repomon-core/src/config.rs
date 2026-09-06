@@ -1114,7 +1114,10 @@ mod tests {
         c.repomind.boot_budget_tokens = 4000;
         c.save_to(&path).unwrap();
         assert_eq!(
-            Config::load_from(&path).unwrap().repomind.boot_budget_tokens,
+            Config::load_from(&path)
+                .unwrap()
+                .repomind
+                .boot_budget_tokens,
             4000
         );
     }
@@ -1127,7 +1130,10 @@ mod tests {
         c.repomind.basic_memory_config = Some("/srv/bm/config.json".into());
         c.save_to(&path).unwrap();
         assert_eq!(
-            Config::load_from(&path).unwrap().repomind.basic_memory_config,
+            Config::load_from(&path)
+                .unwrap()
+                .repomind
+                .basic_memory_config,
             Some("/srv/bm/config.json".to_string())
         );
     }

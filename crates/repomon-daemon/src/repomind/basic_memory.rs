@@ -184,7 +184,10 @@ mod tests {
     #[test]
     fn the_basic_memory_config_dir_environment_override_wins() {
         assert_eq!(
-            resolve_config_path(Some(PathBuf::from("/tmp/iso/bm")), Some(Path::new("/cfg.json"))),
+            resolve_config_path(
+                Some(PathBuf::from("/tmp/iso/bm")),
+                Some(Path::new("/cfg.json"))
+            ),
             PathBuf::from("/tmp/iso/bm").join(CONFIG_FILE_NAME)
         );
     }
@@ -214,7 +217,10 @@ mod tests {
     fn the_child_cli_is_pointed_at_the_same_config_directory() {
         assert_eq!(
             cli_config_dir_env(Path::new("/tmp/iso/bm/config.json")),
-            ("BASIC_MEMORY_CONFIG_DIR".to_string(), "/tmp/iso/bm".to_string())
+            (
+                "BASIC_MEMORY_CONFIG_DIR".to_string(),
+                "/tmp/iso/bm".to_string()
+            )
         );
     }
 
@@ -242,7 +248,10 @@ mod tests {
     fn a_missing_or_broken_config_is_not_registered() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!already_registered(&dir.path().join("nope.json"), PROJECT));
-        assert!(!already_registered(&config(dir.path(), "not json"), PROJECT));
+        assert!(!already_registered(
+            &config(dir.path(), "not json"),
+            PROJECT
+        ));
     }
 
     #[test]

@@ -225,7 +225,9 @@ pub async fn status(ctx: &Arc<Ctx>) -> repomon_core::Result<UsageStatus> {
 
 /// The Settings > Usage "Model rates" table: one row per model the ledger has ever seen, plus one
 /// for every model with a `[usage.price_overrides]` entry the ledger hasn't seen yet.
-pub async fn model_rates(ctx: &Arc<Ctx>) -> repomon_core::Result<Vec<repomon_core::pricing::ModelRateRow>> {
+pub async fn model_rates(
+    ctx: &Arc<Ctx>,
+) -> repomon_core::Result<Vec<repomon_core::pricing::ModelRateRow>> {
     let table = crate::usage_ingest::price_table(ctx).await;
     let overrides = ctx.config.read().await.usage.price_overrides.clone();
     let now = Utc::now();
@@ -426,7 +428,9 @@ mod tests {
         let (ctx, repo_id, lane_id) = ctx_with_repo().await;
         let labels = Labels::load(&ctx).await;
         assert_eq!(
-            labels.session_label(Some(repo_id), Some(lane_id)).as_deref(),
+            labels
+                .session_label(Some(repo_id), Some(lane_id))
+                .as_deref(),
             Some("demo/feature")
         );
         assert_eq!(
@@ -484,12 +488,18 @@ mod tests {
             .unwrap();
         let out = summary(
             &ctx,
-            (event.at - chrono::Duration::minutes(1), event.at + chrono::Duration::minutes(1)),
+            (
+                event.at - chrono::Duration::minutes(1),
+                event.at + chrono::Duration::minutes(1),
+            ),
             GroupBy::Model,
         )
         .await
         .unwrap();
-        assert!(out.unpriced_models.contains(&"totally-unpublished-model".to_string()));
+        assert!(
+            out.unpriced_models
+                .contains(&"totally-unpublished-model".to_string())
+        );
         let row = out
             .groups
             .iter()
@@ -576,9 +586,10 @@ mod tests {
         assert!(sonnet.last_seen.is_some());
         assert_eq!(sonnet.tokens_30d, 1_500);
         let gpt7 = rows.iter().find(|r| r.model == "gpt-7").unwrap();
-        assert_eq!(gpt7.source, repomon_core::pricing::ModelRateSource::Override);
+        assert_eq!(
+            gpt7.source,
+            repomon_core::pricing::ModelRateSource::Override
+        );
         assert_eq!(gpt7.last_seen, None, "never seen in the ledger");
-
-
     }
 }

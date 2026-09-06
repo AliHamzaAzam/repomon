@@ -724,7 +724,9 @@ async fn worktree_watcher_lifecycle_and_events() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+        if let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await
+        {
             if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
                 if note.method == "event.file.changed"
                     && note.params["lane_id"] == json!(h.lane_id)
@@ -747,7 +749,9 @@ async fn worktree_watcher_lifecycle_and_events() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+        if let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await
+        {
             if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
                 if note.method == "event.file.changed"
                     && note.params["lane_id"] == json!(h.lane_id)
@@ -773,7 +777,9 @@ async fn worktree_watcher_lifecycle_and_events() {
     let mut saw_ignored_event = false;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+        if let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await
+        {
             if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
                 if note.method == "event.file.changed"
                     && note.params["path"] == json!("test.ignored")
@@ -784,7 +790,10 @@ async fn worktree_watcher_lifecycle_and_events() {
             }
         }
     }
-    assert!(!saw_ignored_event, "ignored files must not broadcast events");
+    assert!(
+        !saw_ignored_event,
+        "ignored files must not broadcast events"
+    );
 
     // 4. File removal
     std::fs::remove_file(h.root.join("new_external.txt")).unwrap();
@@ -793,7 +802,9 @@ async fn worktree_watcher_lifecycle_and_events() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+        if let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await
+        {
             if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
                 if note.method == "event.file.changed"
                     && note.params["lane_id"] == json!(h.lane_id)
@@ -824,7 +835,9 @@ async fn worktree_watcher_lifecycle_and_events() {
     let mut saw_unwatched_event = false;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Ok(Ok(Some(frame))) = tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await {
+        if let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(remaining, protocol::read_frame(&mut h.stream)).await
+        {
             if let Ok(note) = serde_json::from_slice::<protocol::Notification>(&frame) {
                 if note.method == "event.file.changed"
                     && note.params["path"] == json!("unwatched.txt")
@@ -835,7 +848,10 @@ async fn worktree_watcher_lifecycle_and_events() {
             }
         }
     }
-    assert!(!saw_unwatched_event, "unwatched lane must not produce events");
+    assert!(
+        !saw_unwatched_event,
+        "unwatched lane must not produce events"
+    );
 
     h.shutdown().await;
 }
@@ -945,7 +961,9 @@ async fn file_rename_operations_and_traversal() {
         &mut h.stream,
         12,
         "file.rename",
-        Some(json!({ "lane_id": h.lane_id, "from": "target_dir/moved.txt", "to": "../escaped.txt" })),
+        Some(
+            json!({ "lane_id": h.lane_id, "from": "target_dir/moved.txt", "to": "../escaped.txt" }),
+        ),
     )
     .await;
     assert!(r3.error.is_some());
@@ -1045,7 +1063,11 @@ async fn file_search_features_and_truncation() {
     )
     .unwrap();
     // Binary file: should be skipped
-    std::fs::write(h.root.join("src/blob.bin"), [0u8, 1, 2, b's', b'c', b'o', b'r', b'e']).unwrap();
+    std::fs::write(
+        h.root.join("src/blob.bin"),
+        [0u8, 1, 2, b's', b'c', b'o', b'r', b'e'],
+    )
+    .unwrap();
     // Ignored file: should be skipped
     std::fs::write(h.root.join(".gitignore"), "*.log\n").unwrap();
     std::fs::write(h.root.join("audit.log"), "score in log\n").unwrap();
@@ -1062,9 +1084,14 @@ async fn file_search_features_and_truncation() {
     )
     .await;
     assert!(r1.error.is_none());
-    let res1: repomon_core::model::FileSearchResult = serde_json::from_value(r1.result.unwrap()).unwrap();
+    let res1: repomon_core::model::FileSearchResult =
+        serde_json::from_value(r1.result.unwrap()).unwrap();
     assert_eq!(res1.hits.len(), 2);
-    let hit_lib = res1.hits.iter().find(|hit| hit.path == "src/lib.rs").unwrap();
+    let hit_lib = res1
+        .hits
+        .iter()
+        .find(|hit| hit.path == "src/lib.rs")
+        .unwrap();
     assert_eq!(hit_lib.line, 1);
     assert_eq!(hit_lib.column, 8); // "pub fn " is 7 chars, so column is 8!
     assert!(hit_lib.preview.contains("calculate_score"));
@@ -1081,8 +1108,14 @@ async fn file_search_features_and_truncation() {
         })),
     )
     .await;
-    let res2: repomon_core::model::FileSearchResult = serde_json::from_value(r2.result.unwrap()).unwrap();
-    assert!(!res2.hits.iter().any(|hit| hit.preview.contains("println!(\"Score:")));
+    let res2: repomon_core::model::FileSearchResult =
+        serde_json::from_value(r2.result.unwrap()).unwrap();
+    assert!(
+        !res2
+            .hits
+            .iter()
+            .any(|hit| hit.preview.contains("println!(\"Score:"))
+    );
 
     // Case insensitive search
     let r2_ci = call(
@@ -1096,8 +1129,14 @@ async fn file_search_features_and_truncation() {
         })),
     )
     .await;
-    let res2_ci: repomon_core::model::FileSearchResult = serde_json::from_value(r2_ci.result.unwrap()).unwrap();
-    assert!(res2_ci.hits.iter().any(|hit| hit.preview.contains("println!(\"Score:")));
+    let res2_ci: repomon_core::model::FileSearchResult =
+        serde_json::from_value(r2_ci.result.unwrap()).unwrap();
+    assert!(
+        res2_ci
+            .hits
+            .iter()
+            .any(|hit| hit.preview.contains("println!(\"Score:"))
+    );
 
     // 3. Regex mode
     let r3 = call(
@@ -1111,7 +1150,8 @@ async fn file_search_features_and_truncation() {
         })),
     )
     .await;
-    let res3: repomon_core::model::FileSearchResult = serde_json::from_value(r3.result.unwrap()).unwrap();
+    let res3: repomon_core::model::FileSearchResult =
+        serde_json::from_value(r3.result.unwrap()).unwrap();
     assert_eq!(res3.hits.len(), 1);
     assert_eq!(res3.hits[0].path, "src/lib.rs");
     assert_eq!(res3.hits[0].line, 2);
@@ -1128,7 +1168,8 @@ async fn file_search_features_and_truncation() {
         })),
     )
     .await;
-    let res4: repomon_core::model::FileSearchResult = serde_json::from_value(r4.result.unwrap()).unwrap();
+    let res4: repomon_core::model::FileSearchResult =
+        serde_json::from_value(r4.result.unwrap()).unwrap();
     assert!(!res4.hits.is_empty());
     assert!(res4.hits.iter().all(|hit| hit.path == "src/main.rs"));
 
@@ -1148,7 +1189,8 @@ async fn file_search_features_and_truncation() {
         })),
     )
     .await;
-    let res6: repomon_core::model::FileSearchResult = serde_json::from_value(r6.result.unwrap()).unwrap();
+    let res6: repomon_core::model::FileSearchResult =
+        serde_json::from_value(r6.result.unwrap()).unwrap();
     assert_eq!(res6.hits.len(), 1);
     assert!(res6.truncated);
 
@@ -1170,7 +1212,8 @@ async fn file_diff_base_rpc_integration() {
         })),
     )
     .await;
-    let res1: repomon_core::model::FileDiffBaseResult = serde_json::from_value(r1.result.unwrap()).unwrap();
+    let res1: repomon_core::model::FileDiffBaseResult =
+        serde_json::from_value(r1.result.unwrap()).unwrap();
     assert_eq!(res1.kind, "text");
     assert_eq!(res1.content.as_deref(), Some("hi\n"));
 
@@ -1186,7 +1229,8 @@ async fn file_diff_base_rpc_integration() {
         })),
     )
     .await;
-    let res2: repomon_core::model::FileDiffBaseResult = serde_json::from_value(r2.result.unwrap()).unwrap();
+    let res2: repomon_core::model::FileDiffBaseResult =
+        serde_json::from_value(r2.result.unwrap()).unwrap();
     assert_eq!(res2.kind, "text");
     assert_eq!(res2.content.as_deref(), Some("hi\n"));
 
@@ -1202,7 +1246,8 @@ async fn file_diff_base_rpc_integration() {
         })),
     )
     .await;
-    let res3: repomon_core::model::FileDiffBaseResult = serde_json::from_value(r3.result.unwrap()).unwrap();
+    let res3: repomon_core::model::FileDiffBaseResult =
+        serde_json::from_value(r3.result.unwrap()).unwrap();
     assert_eq!(res3.kind, "missing");
     assert_eq!(res3.content, None);
 

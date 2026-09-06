@@ -26,7 +26,10 @@ pub const WINDOWS_STANDARD_GIT_DIRS: [&str; 2] = [
 /// directories to check for `git.exe` directly. Takes the PATH value and candidate directories
 /// as parameters, so the Windows fallback is unit-testable on every OS without touching real
 /// environment state.
-pub fn find_git_from(path_var: Option<&std::ffi::OsStr>, standard_dirs: &[PathBuf]) -> Option<PathBuf> {
+pub fn find_git_from(
+    path_var: Option<&std::ffi::OsStr>,
+    standard_dirs: &[PathBuf],
+) -> Option<PathBuf> {
     let on_path = match path_var {
         Some(p) => crate::exec::find_in(p, "git"),
         None => crate::exec::find_in_path("git"),
@@ -48,7 +51,10 @@ pub fn find_git_from(path_var: Option<&std::ffi::OsStr>, standard_dirs: &[PathBu
 pub fn probe() -> crate::model::GitDoctorInfo {
     let standard_dirs: Vec<PathBuf> =
         if crate::model::DoctorPlatform::current() == crate::model::DoctorPlatform::Windows {
-            WINDOWS_STANDARD_GIT_DIRS.iter().map(PathBuf::from).collect()
+            WINDOWS_STANDARD_GIT_DIRS
+                .iter()
+                .map(PathBuf::from)
+                .collect()
         } else {
             Vec::new()
         };

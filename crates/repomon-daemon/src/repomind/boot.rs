@@ -249,9 +249,7 @@ pub fn ready_target<'a>(
         .find(|lane| lane.id == lane_id)?
         .agent_sessions
         .iter()
-        .find(|s| {
-            s.tmux_window.as_deref() == Some(window) && crate::mail::injection_eligible(s)
-        })
+        .find(|s| s.tmux_window.as_deref() == Some(window) && crate::mail::injection_eligible(s))
 }
 
 /// Announce the boot document to a backend with no launch-time context mechanism, by typing one
@@ -971,12 +969,18 @@ mod tests {
     #[test]
     fn each_backend_gets_the_delivery_its_cli_supports() {
         use repomon_core::model::AgentKind;
-        assert_eq!(delivery(&AgentKind::ClaudeCode), Delivery::AppendSystemPromptFile);
+        assert_eq!(
+            delivery(&AgentKind::ClaudeCode),
+            Delivery::AppendSystemPromptFile
+        );
         assert_eq!(delivery(&AgentKind::OpenCode), Delivery::InstructionsFile);
         assert_eq!(delivery(&AgentKind::Codex), Delivery::TypedLine);
         assert_eq!(delivery(&AgentKind::Antigravity), Delivery::TypedLine);
         // A CLI with no launch-time context mechanism still gets told where to look.
-        assert_eq!(delivery(&AgentKind::Other("hermes".into())), Delivery::TypedLine);
+        assert_eq!(
+            delivery(&AgentKind::Other("hermes".into())),
+            Delivery::TypedLine
+        );
     }
 
     /// The typed line names the file by its home-relative path (the controller's cwd is the
@@ -984,7 +988,12 @@ mod tests {
     #[test]
     fn the_typed_line_names_the_boot_file_and_carries_its_marker() {
         let line = typed_line();
-        assert!(line.starts_with("Read .repomind/boot.md in your working directory before anything else."), "{line}");
+        assert!(
+            line.starts_with(
+                "Read .repomind/boot.md in your working directory before anything else."
+            ),
+            "{line}"
+        );
         assert!(line.ends_with(TYPED_MARKER), "{line}");
     }
 
@@ -998,7 +1007,10 @@ mod tests {
         let lanes = [test_lane(7, "repomind", Some("main"), vec![ready])];
 
         assert!(ready_target(&lanes, 7, "lane-7-1").is_some());
-        assert!(ready_target(&lanes, 7, "lane-7-2").is_none(), "wrong window");
+        assert!(
+            ready_target(&lanes, 7, "lane-7-2").is_none(),
+            "wrong window"
+        );
         assert!(ready_target(&lanes, 9, "lane-7-1").is_none(), "wrong lane");
     }
 

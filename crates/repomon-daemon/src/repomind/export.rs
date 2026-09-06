@@ -421,11 +421,7 @@ fn schedule_body(s: &Schedule) -> String {
     let created = s.created_at.with_timezone(&Local);
     let last = s
         .last_run_at
-        .map(|t| {
-            t.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
+        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "never".to_string());
     // Anchored on the last run (or creation), never on "now": a mirror whose next-run line moved
     // every few minutes would rewrite and re-commit the file on every export.
@@ -471,7 +467,10 @@ pub fn export_schedules(home: &Path, schedules: &[Schedule]) -> std::io::Result<
                 "permalink",
                 format!("repomind/plans/standing/{}", schedule_slug(s, schedules)),
             ),
-            ("source", format!("repomond {}", Utc::now().format("%Y-%m-%d"))),
+            (
+                "source",
+                format!("repomond {}", Utc::now().format("%Y-%m-%d")),
+            ),
             ("status", "active".to_string()),
             ("schedule", s.id.to_string()),
         ];
@@ -535,7 +534,10 @@ pub fn export_approvals(home: &Path, rules: &[ApprovalRule]) -> std::io::Result<
         ("title", "Approval rules".to_string()),
         ("type", "note".to_string()),
         ("permalink", "repomind/profile/approvals".to_string()),
-        ("source", format!("repomond {}", Utc::now().format("%Y-%m-%d"))),
+        (
+            "source",
+            format!("repomond {}", Utc::now().format("%Y-%m-%d")),
+        ),
     ];
     // With no rules and no file yet there is nothing to say: an empty home should not sprout a
     // "no approval rules" note it never asked for. Once the file exists (the operator's template
@@ -874,7 +876,10 @@ mod tests {
 
         let paths = export_journal(&home, &rows).unwrap();
 
-        assert!(paths.is_empty(), "a re-run must touch nothing, got {paths:?}");
+        assert!(
+            paths.is_empty(),
+            "a re-run must touch nothing, got {paths:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(home.join("journal/2026-09-04.md")).unwrap(),
             before
@@ -911,9 +916,11 @@ mod tests {
     #[test]
     fn schedule_export_writes_one_plan_file_per_schedule() {
         let (_d, home) = home();
-        let paths =
-            export_schedules(&home, &[schedule(1, "daily 09:00", "Sweep the fleet for stalls")])
-                .unwrap();
+        let paths = export_schedules(
+            &home,
+            &[schedule(1, "daily 09:00", "Sweep the fleet for stalls")],
+        )
+        .unwrap();
 
         assert_eq!(
             paths,
@@ -928,7 +935,10 @@ mod tests {
         assert_eq!(md::field(&fm, "type").as_deref(), Some("plan"));
         assert!(body.contains("daily 09:00"), "{body}");
         assert!(body.contains("Sweep the fleet for stalls"), "{body}");
-        assert!(body.contains("10"), "the action cap belongs in the file: {body}");
+        assert!(
+            body.contains("10"),
+            "the action cap belongs in the file: {body}"
+        );
     }
 
     #[test]
@@ -1134,8 +1144,13 @@ mod tests {
             &mut state,
         )
         .unwrap();
-        let too_soon = commit(&home, &second, now + chrono::Duration::seconds(5), &mut state)
-            .unwrap();
+        let too_soon = commit(
+            &home,
+            &second,
+            now + chrono::Duration::seconds(5),
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(
             too_soon,
             CommitOutcome::TooSoon,
@@ -1143,8 +1158,13 @@ mod tests {
         );
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
 
-        let later = commit(&home, &second, now + chrono::Duration::seconds(90), &mut state)
-            .unwrap();
+        let later = commit(
+            &home,
+            &second,
+            now + chrono::Duration::seconds(90),
+            &mut state,
+        )
+        .unwrap();
         assert!(matches!(later, CommitOutcome::Committed(_)), "{later:?}");
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "2");
     }
@@ -1276,8 +1296,12 @@ mod tests {
         let (_d, home) = git_home();
         let ctx = test_ctx(&home).await;
         std::fs::create_dir_all(home.join("fleet/repomon")).unwrap();
-        std::fs::write(home.join("fleet/repomon/notes.md"), "notes
-").unwrap();
+        std::fs::write(
+            home.join("fleet/repomon/notes.md"),
+            "notes
+",
+        )
+        .unwrap();
         request_files(&ctx, "notes", vec!["fleet/repomon/notes.md".to_string()]).await;
         assert!(pending(&ctx).await);
 
@@ -1324,7 +1348,11 @@ mod tests {
             .unwrap();
         let run = run_now(&ctx).await.unwrap();
 
-        assert!(matches!(run.commit, CommitOutcome::TooSoon), "{:?}", run.commit);
+        assert!(
+            matches!(run.commit, CommitOutcome::TooSoon),
+            "{:?}",
+            run.commit
+        );
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
         assert!(
             pending(&ctx).await,
@@ -1338,7 +1366,11 @@ mod tests {
 
         let run = run_now(&ctx).await.unwrap();
 
-        assert!(matches!(run.commit, CommitOutcome::Committed(_)), "{:?}", run.commit);
+        assert!(
+            matches!(run.commit, CommitOutcome::Committed(_)),
+            "{:?}",
+            run.commit
+        );
         assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "2");
         assert!(
             git(&home, &["log", "-1", "--name-only", "--format="]).contains("journal/"),

@@ -125,11 +125,7 @@ fn rel_for_path(root: &Path, canonical_root: &Path, path: &Path) -> Option<Strin
         .or_else(|_| path.strip_prefix(root))
         .ok()?;
     let s = rel.to_string_lossy().replace('\\', "/");
-    if is_git_internal(&s) {
-        None
-    } else {
-        Some(s)
-    }
+    if is_git_internal(&s) { None } else { Some(s) }
 }
 
 async fn process_debounced_events(

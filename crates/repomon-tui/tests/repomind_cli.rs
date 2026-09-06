@@ -27,7 +27,12 @@ async fn connect_retry(sock: &Path) -> IpcStream {
     panic!("daemon endpoint {} never came up", sock.display());
 }
 
-async fn call(stream: &mut IpcStream, id: u64, method: &str, params: Option<serde_json::Value>) -> Response {
+async fn call(
+    stream: &mut IpcStream,
+    id: u64,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> Response {
     let req = Request::new(id, method, params);
     protocol::write_message(stream, &req).await.unwrap();
     let frame = protocol::read_frame(stream)
@@ -50,8 +55,10 @@ async fn repomind_cli_status_boot_export_round_trip_through_an_isolated_daemon()
     // so `repomind.boot`/`repomind.export` below have somewhere to write.
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
 
-    let sock =
-        std::env::temp_dir().join(format!("repomon-repomind-cli-it-{}.sock", std::process::id()));
+    let sock = std::env::temp_dir().join(format!(
+        "repomon-repomind-cli-it-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&sock);
     let _server = {
         let ctx = ctx.clone();

@@ -24,13 +24,19 @@ pub fn frontmatter(fields: &[(&str, String)]) -> String {
 fn scalar(value: &str) -> String {
     let needs_quotes = value.is_empty()
         || value.trim() != value
-        || value
-            .chars()
-            .any(|c| matches!(c, ':' | '#' | '"' | '\'' | '{' | '}' | '[' | ']' | ',' | '\n'));
+        || value.chars().any(|c| {
+            matches!(
+                c,
+                ':' | '#' | '"' | '\'' | '{' | '}' | '[' | ']' | ',' | '\n'
+            )
+        });
     if !needs_quotes {
         return value.to_string();
     }
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ");
     format!("\"{escaped}\"")
 }
 
@@ -61,7 +67,9 @@ pub fn field(frontmatter: &str, key: &str) -> Option<String> {
 /// Strip one layer of matching quotes, undoing what [`scalar`] added.
 fn unquote(value: &str) -> String {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        return value[1..value.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\");
+        return value[1..value.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\");
     }
     if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
         return value[1..value.len() - 1].to_string();
