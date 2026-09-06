@@ -4,13 +4,15 @@
 //! Every test here points `[repomind] home` at a tempdir. The operator's real `~/repomind` is
 //! never created, read, or written by the suite.
 
+mod common;
+
 use std::path::Path;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 
 async fn connect_retry(sock: &Path) -> IpcStream {
@@ -48,7 +50,8 @@ async fn repomind_boot_regenerates_the_document_and_status_reports_it() {
     let home = dir.path().join("repomind");
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    let fixture = common::Fixture::new(Store::open_in_memory().unwrap(), config, None);
+    let ctx = fixture.ctx.clone();
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
     seed(&home);
 
@@ -65,14 +68,20 @@ async fn repomind_boot_regenerates_the_document_and_status_reports_it() {
     assert!(booted.error.is_none(), "{:?}", booted.error);
     let result = booted.result.unwrap();
 
-    assert_eq!(result["path"], json!(home.join(".repomind/boot.md").to_string_lossy()));
+    assert_eq!(
+        result["path"],
+        json!(home.join(".repomind/boot.md").to_string_lossy())
+    );
     assert_eq!(result["trimmed"], json!([]));
     assert!(result["bytes"].as_u64().unwrap() > 0);
     assert!(result["tokens_estimate"].as_u64().unwrap() > 0);
 
     let body = std::fs::read_to_string(home.join(".repomind/boot.md")).unwrap();
     assert!(body.contains("keep it terse"), "{body}");
-    assert!(body.contains("Ship R3: in flight, owner lane-1/1"), "{body}");
+    assert!(
+        body.contains("Ship R3: in flight, owner lane-1/1"),
+        "{body}"
+    );
     assert!(body.contains("land the boot document"), "{body}");
     // The home itself is a registered repo with a controller lane, so it is in the snapshot.
     assert!(body.contains("## Fleet snapshot"), "{body}");
@@ -95,7 +104,8 @@ async fn status_reports_no_boot_state_before_the_first_regeneration() {
     let home = dir.path().join("repomind");
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    let fixture = common::Fixture::new(Store::open_in_memory().unwrap(), config, None);
+    let ctx = fixture.ctx.clone();
 
     let sock = std::env::temp_dir().join(format!("repomon-rmb0-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
@@ -126,7 +136,8 @@ async fn a_tiny_budget_trims_the_document_and_the_result_names_what_went() {
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
     config.repomind.boot_budget_tokens = 150;
-    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    let fixture = common::Fixture::new(Store::open_in_memory().unwrap(), config, None);
+    let ctx = fixture.ctx.clone();
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
     seed(&home);
     std::fs::write(
@@ -144,11 +155,17 @@ async fn a_tiny_budget_trims_the_document_and_the_result_names_what_went() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    let result = call(&mut stream, 1, "repomind.boot", None).await.result.unwrap();
+    let result = call(&mut stream, 1, "repomind.boot", None)
+        .await
+        .result
+        .unwrap();
 
     assert_eq!(result["trimmed"], json!(["profile/fleet.md"]));
     let body = std::fs::read_to_string(home.join(".repomind/boot.md")).unwrap();
-    assert!(body.trim_end().ends_with("Trimmed: profile/fleet.md"), "{body}");
+    assert!(
+        body.trim_end().ends_with("Trimmed: profile/fleet.md"),
+        "{body}"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

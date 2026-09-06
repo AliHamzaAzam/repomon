@@ -1,5 +1,7 @@
 //! End-to-end: start the daemon on a temp socket and exercise the JSON-RPC surface.
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -7,7 +9,7 @@ use std::time::Duration;
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 
 /// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
@@ -86,7 +88,14 @@ async fn config_set_persists_every_sound_preference() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new_with_config_path(store, Config::default(), None, config_path.clone());
+    let fixture = common::Fixture::with_paths(
+        store,
+        Config::default(),
+        None,
+        Some(config_path.clone()),
+        None,
+    );
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!(
         "repomon-sound-config-it-{}.sock",
         std::process::id()
@@ -171,7 +180,8 @@ async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() 
         .unwrap();
     let mut config = Config::default();
     config.usage.refresh_prices = false;
-    let ctx = Ctx::new_with_config_path(store, config, None, config_path.clone());
+    let fixture = common::Fixture::with_paths(store, config, None, Some(config_path.clone()), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!(
         "repomon-price-override-it-{}.sock",
         std::process::id()
@@ -249,9 +259,15 @@ async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() 
     );
 
     // A sparse update keeps previously overridden fields.
-    let patch = call(&mut stream, 5, "config.set", Some(json!({
-        "usage_price_override_upsert": { "model": "repomon-test-model", "output_per_mtok": 9.0 }
-    }))).await;
+    let patch = call(
+        &mut stream,
+        5,
+        "config.set",
+        Some(json!({
+            "usage_price_override_upsert": { "model": "repomon-test-model", "output_per_mtok": 9.0 }
+        })),
+    )
+    .await;
     assert!(patch.error.is_none());
     let over = ctx.config.read().await.usage.price_overrides["repomon-test-model"].clone();
     assert_eq!(over.input_per_mtok, Some(2.0));
@@ -264,9 +280,15 @@ async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() 
         json!({ "model": "", "input_per_mtok": 2.0 }),
         json!({ "model": "repomon-test-model" }),
     ] {
-        let result = call(&mut stream, 6, "config.set", Some(json!({
-            "usage_enabled": false, "usage_price_override_upsert": invalid
-        }))).await;
+        let result = call(
+            &mut stream,
+            6,
+            "config.set",
+            Some(json!({
+                "usage_enabled": false, "usage_price_override_upsert": invalid
+            })),
+        )
+        .await;
         assert!(result.error.is_some());
         let cfg = ctx.config.read().await;
         assert!(cfg.usage.enabled);
@@ -279,27 +301,48 @@ async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() 
     }))).await;
     assert_eq!(conflict.error.unwrap().code, -32602);
     assert!(ctx.config.read().await.usage.enabled);
-    assert_eq!(ctx.config.read().await.usage.price_overrides["repomon-test-model"], over);
-    assert_eq!(Config::load_from(&config_path).unwrap().usage.price_overrides["repomon-test-model"], over);
+    assert_eq!(
+        ctx.config.read().await.usage.price_overrides["repomon-test-model"],
+        over
+    );
+    assert_eq!(
+        Config::load_from(&config_path)
+            .unwrap()
+            .usage
+            .price_overrides["repomon-test-model"],
+        over
+    );
     let rates = call(&mut stream, 7, "usage.rates", None).await;
     assert_eq!(rates.result.unwrap()["source_counts"]["overrides"], 1);
-    let reset = call(&mut stream, 8, "config.set", Some(json!({
-        "usage_price_override_reset": "repomon-test-model"
-    }))).await;
+    let reset = call(
+        &mut stream,
+        8,
+        "config.set",
+        Some(json!({
+            "usage_price_override_reset": "repomon-test-model"
+        })),
+    )
+    .await;
     assert!(reset.error.is_none());
-    assert!(!Config::load_from(&config_path).unwrap().usage.price_overrides.contains_key("repomon-test-model"));
+    assert!(
+        !Config::load_from(&config_path)
+            .unwrap()
+            .usage
+            .price_overrides
+            .contains_key("repomon-test-model")
+    );
     let reset_rows = call(&mut stream, 9, "usage.models", None).await;
     assert_eq!(reset_rows.result.unwrap()[0]["source"], "unpriced");
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-
 }
 
 #[tokio::test]
 async fn daemon_serves_repo_and_lane_methods() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
 
     // Short socket path (macOS caps UDS paths at ~104 chars).
     let sock = std::env::temp_dir().join(format!("repomon-it-{}.sock", std::process::id()));
@@ -369,7 +412,8 @@ async fn daemon_spawns_and_drives_an_agent() {
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let fixture = common::Fixture::new(store, config, None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-agent-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
 
@@ -523,7 +567,8 @@ async fn streams_agent_output_for_visible_lanes() {
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let fixture = common::Fixture::new(store, config, None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-stream-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
 
@@ -646,7 +691,8 @@ async fn dashboard_timeline_sessions_search() {
         .unwrap();
     assert_eq!(report.commits_added, 2);
 
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-dash-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -718,7 +764,8 @@ fn git_commit_at(dir: &Path, epoch: i64, msg: &str) {
 #[tokio::test]
 async fn fs_browse_marks_repos_and_added() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-browse-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -794,7 +841,8 @@ async fn agent_detect_lists_builtins_and_customs() {
         "claude --dangerously-skip-permissions".into(),
     );
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let fixture = common::Fixture::new(store, config, None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-detect-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -840,7 +888,8 @@ async fn system_doctor_reports_machine_health_and_agents() {
         "claude --dangerously-skip-permissions".into(),
     );
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let fixture = common::Fixture::new(store, config, None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-doctor-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -935,7 +984,8 @@ async fn agent_spawn_uses_custom_command() {
         "bash -c 'echo CUSTOM_AGENT_OK; sleep 30'".into(),
     );
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let fixture = common::Fixture::new(store, config, None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-custom-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -995,7 +1045,9 @@ async fn agent_manager_add_set_default_and_remove() {
     // Isolate config writes to a tempdir so we never touch the real ~/.config/repomon.
     let cfg_dir = tempfile::tempdir().unwrap();
     let cfg_path = cfg_dir.path().join("config.toml");
-    let ctx = Ctx::new_with_config_path(store, Config::default(), None, cfg_path.clone());
+    let fixture =
+        common::Fixture::with_paths(store, Config::default(), None, Some(cfg_path.clone()), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-agmgr-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1119,7 +1171,8 @@ async fn agent_manager_add_set_default_and_remove() {
 #[tokio::test]
 async fn commit_recent_returns_latest_even_when_none_today() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-recent-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1189,7 +1242,8 @@ async fn commit_recent_returns_latest_even_when_none_today() {
 #[tokio::test]
 async fn orchestrator_input_errors_loudly_when_not_running() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-orch-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1235,7 +1289,8 @@ async fn orchestrator_input_errors_loudly_when_not_running() {
 #[tokio::test]
 async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-diff-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1339,7 +1394,8 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
 #[tokio::test]
 async fn commit_show_returns_full_detail_rejects_malformed_oid_and_honors_truncation() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock =
         std::env::temp_dir().join(format!("repomon-commitshow-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
@@ -1479,7 +1535,8 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
     .unwrap();
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-ext-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1661,7 +1718,8 @@ async fn plugin_details_returns_cli_text_or_structured_error() {
     // Missing CLI must produce -32021, not a crash. (PATH manipulation is process-global; if the
     // real claude is installed this asserts the success path instead.)
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-ext2-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1691,13 +1749,14 @@ async fn repo_notes_get_set_round_trip() {
     let store = Store::open_in_memory().unwrap();
     let cfg_dir = tempfile::tempdir().unwrap();
     let notes_dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new_with_paths(
+    let fixture = common::Fixture::with_paths(
         store,
         isolated_config(cfg_dir.path()),
         None,
-        cfg_dir.path().join("config.toml"),
-        notes_dir.path().to_path_buf(),
+        Some(cfg_dir.path().join("config.toml")),
+        Some(notes_dir.path().to_path_buf()),
     );
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-notes-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1764,7 +1823,10 @@ async fn repo_notes_get_set_round_trip() {
         "path was {path:?}"
     );
     assert!(
-        std::fs::read_dir(notes_dir.path()).unwrap().next().is_none(),
+        std::fs::read_dir(notes_dir.path())
+            .unwrap()
+            .next()
+            .is_none(),
         "the app-support repo-notes directory must no longer be written"
     );
 
@@ -1812,7 +1874,8 @@ async fn repo_notes_get_set_round_trip() {
 async fn journal_append_and_query() {
     let store = Store::open_in_memory().unwrap();
     let home_dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
+    let fixture = common::Fixture::new(store, isolated_config(home_dir.path()), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-jrnl-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -1889,7 +1952,8 @@ async fn journal_append_and_query() {
 async fn playbook_lifecycle_over_rpc() {
     let store = Store::open_in_memory().unwrap();
     let home_dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
+    let fixture = common::Fixture::new(store, isolated_config(home_dir.path()), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-pb-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -2005,7 +2069,8 @@ async fn playbook_lifecycle_over_rpc() {
 async fn schedule_add_list_remove() {
     let store = Store::open_in_memory().unwrap();
     let home_dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
+    let fixture = common::Fixture::new(store, isolated_config(home_dir.path()), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-sch-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -2078,7 +2143,8 @@ async fn schedule_add_list_remove() {
 async fn approval_record_and_rules_lifecycle() {
     let store = Store::open_in_memory().unwrap();
     let home_dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(store, isolated_config(home_dir.path()), None);
+    let fixture = common::Fixture::new(store, isolated_config(home_dir.path()), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-ap-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -2184,7 +2250,8 @@ async fn approval_record_and_rules_lifecycle() {
 #[tokio::test]
 async fn orchestrator_watch_is_per_connection() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let fixture = common::Fixture::new(store, Config::default(), None);
+    let ctx = fixture.ctx.clone();
     let sock = std::env::temp_dir().join(format!("repomon-ow-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -2244,4 +2311,27 @@ async fn orchestrator_watch_is_per_connection() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn fixture_defaults_isolate_backend_and_writable_paths() {
+    let a = common::Fixture::new(Store::open_in_memory().unwrap(), Config::default(), None);
+    let b = common::Fixture::new(Store::open_in_memory().unwrap(), Config::default(), None);
+    let ac = a.ctx.config.read().await;
+    let bc = b.ctx.config.read().await;
+    assert_ne!(ac.tmux_session, Config::default().tmux_session);
+    assert_ne!(ac.tmux_session, bc.tmux_session);
+    assert_ne!(ac.repomind_home(), bc.repomind_home());
+    assert_ne!(a.ctx.config_path, b.ctx.config_path);
+    assert_ne!(a.ctx.notes_dir, b.ctx.notes_dir);
+    assert!(
+        ac.repomind_home()
+            .starts_with(a.ctx.config_path.parent().unwrap())
+    );
+    assert!(
+        a.ctx
+            .notes_dir
+            .starts_with(a.ctx.config_path.parent().unwrap())
+    );
+    assert!(repomon_core::config::valid_tmux_session(&ac.tmux_session));
 }

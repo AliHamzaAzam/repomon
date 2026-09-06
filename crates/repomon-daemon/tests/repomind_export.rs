@@ -4,13 +4,15 @@
 //! Every test here points `[repomind] home` at a tempdir. The operator's real `~/repomind` is
 //! never created, read, or written by the suite.
 
+mod common;
+
 use std::path::Path;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 
 async fn connect_retry(sock: &Path) -> IpcStream {
@@ -49,7 +51,8 @@ async fn journal_append_then_repomind_export_writes_the_day_file_and_commits() {
     let home = dir.path().join("repomind");
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    let fixture = common::Fixture::new(Store::open_in_memory().unwrap(), config, None);
+    let ctx = fixture.ctx.clone();
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
 
     let sock = std::env::temp_dir().join(format!("repomon-rmx-{}.sock", std::process::id()));
@@ -127,13 +130,14 @@ async fn repo_notes_are_written_to_and_read_from_the_home() {
 
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    let ctx = Ctx::new_with_paths(
+    let fixture = common::Fixture::with_paths(
         Store::open_in_memory().unwrap(),
         config,
         None,
-        dir.path().join("config.toml"),
-        legacy.clone(),
+        Some(dir.path().join("config.toml")),
+        Some(legacy.clone()),
     );
+    let ctx = fixture.ctx.clone();
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
     let repo = ctx.registry.add(&work).await.unwrap();
 
@@ -194,7 +198,8 @@ async fn a_playbook_draft_is_inert_until_approval_moves_the_file() {
     let home = dir.path().join("repomind");
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    let fixture = common::Fixture::new(Store::open_in_memory().unwrap(), config, None);
+    let ctx = fixture.ctx.clone();
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
 
     let sock = std::env::temp_dir().join(format!("repomon-rmp-{}.sock", std::process::id()));
@@ -265,7 +270,8 @@ async fn repomind_status_reports_the_export_state_and_home_counts() {
     let home = dir.path().join("repomind");
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    let ctx = Ctx::new(Store::open_in_memory().unwrap(), config, None);
+    let fixture = common::Fixture::new(Store::open_in_memory().unwrap(), config, None);
+    let ctx = fixture.ctx.clone();
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
     std::fs::write(home.join("plans/active/ship-r2.md"), "goal\n").unwrap();
 
@@ -342,9 +348,14 @@ async fn a_daemon_start_exports_journal_rows_written_before_the_home_existed() {
 
     let mut config = Config::default();
     config.repomind.home = home.to_string_lossy().into_owned();
-    config.repomind.basic_memory_config =
-        Some(basic_memory.join("config.json").to_string_lossy().into_owned());
-    let ctx = Ctx::new(store, config, None);
+    config.repomind.basic_memory_config = Some(
+        basic_memory
+            .join("config.json")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let fixture = common::Fixture::new(store, config, None);
+    let ctx = fixture.ctx.clone();
 
     tokio::spawn(repomon_daemon::repomind::export::export_watch(ctx.clone()));
     repomon_daemon::repomind::start(&ctx).await;
@@ -367,8 +378,14 @@ async fn a_daemon_start_exports_journal_rows_written_before_the_home_existed() {
     }
 
     let body = std::fs::read_to_string(&file).expect("the start pass should write the day file");
-    assert!(body.contains("spawn_agent before the home existed"), "{body}");
-    assert!(body.contains("merge_lane before the home existed"), "{body}");
+    assert!(
+        body.contains("spawn_agent before the home existed"),
+        "{body}"
+    );
+    assert!(
+        body.contains("merge_lane before the home existed"),
+        "{body}"
+    );
     assert_eq!(git(&home, &["rev-list", "--count", "HEAD"]), "1");
     assert_eq!(
         git(&home, &["log", "-1", "--format=%s"]),
