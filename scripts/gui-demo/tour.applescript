@@ -44,12 +44,29 @@ on fieldsMatch(fields, labelText, exactMatch)
     return false
 end fieldsMatch
 
+-- System Events' "entire contents" stops a few levels into a WKWebView (it returned 96 nodes,
+-- most without a role, for a fleet of eight lanes), so walk the tree ourselves, depth first.
+on collectNodes(node, acc, depth)
+    if depth > 40 then return acc
+    set end of acc to node
+    set kids to {}
+    try
+        tell application "System Events" to set kids to UI elements of node
+    end try
+    repeat with kid in kids
+        set acc to my collectNodes(kid, acc, depth + 1)
+    end repeat
+    return acc
+end collectNodes
+
 on windowNodes()
+    set acc to {}
     tell application "System Events"
         tell (first process whose unix id is demoPID)
-            return entire contents of front window
+            set rootWindow to front window
         end tell
     end tell
+    return my collectNodes(rootWindow, acc, 0)
 end windowNodes
 
 on flatText(rawText)
@@ -270,7 +287,7 @@ on revealText(labelText)
     my requireText(labelText)
     tell application "System Events"
         tell (first process whose unix id is demoPID)
-            set nodes to entire contents of front window
+            set nodes to my windowNodes()
             repeat with node in nodes
                 try
                     if role of node is "AXStaticText" and my fieldsMatch(my nodeFields(node), labelText, false) then
