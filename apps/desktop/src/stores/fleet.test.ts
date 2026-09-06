@@ -683,7 +683,7 @@ describe("serialized fleet refresh", () => {
   function harness() {
     const pending: Array<{ resolve: (snapshot: Awaited<ReturnType<FleetSource["load"]>>) => void; reject: (error: Error) => void }> = [];
     const source: FleetSource = {
-      load: vi.fn(() => new Promise((resolve, reject) => pending.push({ resolve, reject }))),
+      load: vi.fn(() => new Promise<Awaited<ReturnType<FleetSource["load"]>>>((resolve, reject) => pending.push({ resolve, reject }))),
       refreshUsage: async () => {},
       subscribe: async () => () => {},
     };
