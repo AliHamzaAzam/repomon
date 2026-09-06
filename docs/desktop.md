@@ -4,6 +4,13 @@ Mission Control is repomon's desktop client: the same fleet the TUI drives, in a
 embedded terminals for every agent. It talks to the same daemon over the same socket, so the TUI,
 the desktop app, and the iOS client can all watch one fleet at once.
 
+The [GUI demo recorder](../scripts/record-gui-demo.sh) stages an isolated, entirely synthetic
+fleet for a 90-second tour of multitasking, Git, the editor, Usage, Repomail, Supervision and
+Repomind. Run `--dry-run` to verify the sandbox or `--dry-run --tour` to rehearse without
+recording. The operator runs the capture from a macOS terminal with Screen Recording and
+Accessibility permission; `--still` captures the same opening hero frame at 1440x900. See
+[the recorder guide](../scripts/gui-demo/README.md) for the exact commands and isolation details.
+
 ## Install
 
 Download published builds from the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest).
