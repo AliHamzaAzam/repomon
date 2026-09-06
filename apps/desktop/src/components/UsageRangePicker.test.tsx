@@ -24,6 +24,54 @@ function open(onApply = vi.fn()) {
 }
 
 describe("UsageRangePicker", () => {
+  it("returns focus to Custom after applying or dismissing from any popover control", () => {
+    open();
+    const trigger = screen.getByRole("button", { name: "Custom" });
+    const apply = screen.getByRole("button", { name: "Apply" });
+    apply.focus();
+    fireEvent.keyDown(apply, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("announces the keyboard day within six calendar rows and keeps it in the displayed month", () => {
+    open();
+    const grid = screen.getByRole("grid", { name: "Days" });
+    const activeDay = () => document.getElementById(grid.getAttribute("aria-activedescendant")!);
+    expect(screen.getAllByRole("row")).toHaveLength(6);
+    expect(activeDay()).toHaveAttribute("aria-label", TODAY.toDateString());
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
+    grid.focus();
+    fireEvent.keyDown(grid, { key: "ArrowRight" });
+    expect(activeDay()).toHaveAttribute("aria-label", new Date(2026, 7, 2).toDateString());
+    expect(screen.getByText("August 2026")).toBeInTheDocument();
+  });
+
+  it("keeps keyboard movement out of future dates just like the disabled day buttons", () => {
+    open();
+    const grid = screen.getByRole("grid", { name: "Days" });
+    for (const key of ["ArrowRight", "ArrowDown", "PageDown"]) {
+      fireEvent.keyDown(grid, { key });
+      expect(document.getElementById(grid.getAttribute("aria-activedescendant")!))
+        .toHaveAttribute("aria-label", TODAY.toDateString());
+    }
+    expect(screen.getByRole("button", { name: "Next month" })).toBeDisabled();
+  });
+
+  it("reopens on today's month with its default range instead of a stale navigation month", () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
+    fireEvent.keyDown(screen.getByRole("grid"), { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Custom" }));
+    expect(screen.getByText("September 2026")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next month" })).toBeDisabled();
+  });
+
   it("opens already spanning the last 7 days ending today", () => {
     const onApply = open();
     const expectedFrom = new Date(TODAY);

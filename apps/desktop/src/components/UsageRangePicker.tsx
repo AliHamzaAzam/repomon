@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, createUniqueId, onCleanup, onMount } from "solid-js";
 
 import { IconChevronDown, IconChevronLeft, IconChevronRight } from "./icons";
 
@@ -82,11 +82,21 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
   const [cursor, setCursor] = createSignal(startOfDay(new Date()));
   const [from, setFrom] = createSignal<Date | null>(null);
   const [to, setTo] = createSignal<Date | null>(null);
+  const calendarId = createUniqueId();
+  const dayId = (day: Date) => `${calendarId}-${day.getTime()}`;
+  let triggerRef: HTMLButtonElement | undefined;
   let rootRef: HTMLDivElement | undefined;
   let gridRef: HTMLDivElement | undefined;
 
-  function close() {
+  function close(restoreFocus = true) {
     setOpen(false);
+    if (restoreFocus) triggerRef?.focus();
+  }
+
+  function showMonth(next: Date) {
+    const day = next > today() ? today() : next;
+    setMonth(day);
+    setCursor(day);
   }
 
   function toggle() {
@@ -95,6 +105,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
     if (next) {
       // The last 7 days ending today, so a picker opened and applied without touching a day
       // still lands on a sensible window rather than an empty one.
+      showMonth(today());
       setFrom(addDays(today(), -6));
       setTo(today());
       queueMicrotask(() => gridRef?.focus());
@@ -105,7 +116,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
   function onPointerDown(event: PointerEvent) {
     if (!open()) return;
     if (rootRef && event.target instanceof Node && rootRef.contains(event.target)) return;
-    close();
+    close(false);
   }
   onMount(() => document.addEventListener("pointerdown", onPointerDown, true));
   onCleanup(() => document.removeEventListener("pointerdown", onPointerDown, true));
@@ -151,16 +162,12 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
     const step = moves[event.key];
     if (step !== undefined) {
       event.preventDefault();
-      const next = addDays(cursor(), step);
-      setCursor(next);
-      setMonth(startOfDay(new Date(next.getFullYear(), next.getMonth(), 1)));
+      showMonth(addDays(cursor(), step));
       return;
     }
     if (event.key === "PageUp" || event.key === "PageDown") {
       event.preventDefault();
-      const next = addMonths(cursor(), event.key === "PageUp" ? -1 : 1);
-      setCursor(next);
-      setMonth(next);
+      showMonth(addMonths(cursor(), event.key === "PageUp" ? -1 : 1));
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -168,14 +175,12 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
       pick(cursor());
       return;
     }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    }
   }
 
-  const days = createMemo(() => monthGrid(month()));
+  const weeks = createMemo(() => {
+    const days = monthGrid(month());
+    return Array.from({ length: 6 }, (_, index) => days.slice(index * 7, index * 7 + 7));
+  });
   const inRange = (day: Date) => {
     const start = from();
     const end = to();
@@ -192,6 +197,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
   return (
     <div class="relative" ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         class={`focus-ring flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
           props.active ? "bg-signal/12 font-semibold text-signal" : "text-muted hover:text-foreground"
@@ -209,6 +215,12 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
           class="absolute left-0 top-8 z-50 w-64 rounded-xl border border-line bg-surface p-3 shadow-2xl"
           role="dialog"
           aria-label="Pick a date range"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+          }}
         >
           <div class="mb-2 flex gap-1.5">
             <button
@@ -232,7 +244,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
               type="button"
               class="focus-ring rounded p-1 text-muted transition-colors hover:text-foreground"
               aria-label="Previous month"
-              onClick={() => setMonth(addMonths(month(), -1))}
+              onClick={() => showMonth(addMonths(month(), -1))}
             >
               <IconChevronLeft size={12} />
             </button>
@@ -244,7 +256,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
               class="focus-ring rounded p-1 text-muted transition-colors hover:text-foreground disabled:opacity-30 disabled:hover:text-muted"
               aria-label="Next month"
               disabled={sameMonth(month(), today())}
-              onClick={() => setMonth(addMonths(month(), 1))}
+              onClick={() => showMonth(addMonths(month(), 1))}
             >
               <IconChevronRight size={12} />
             </button>
@@ -263,49 +275,57 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
             class="focus-ring grid grid-cols-7 gap-px rounded"
             role="grid"
             aria-label="Days"
+            aria-activedescendant={dayId(cursor())}
             tabindex="0"
             onKeyDown={onGridKeyDown}
           >
-            <For each={days()}>
-              {(day) => {
-                const outside = () => day.getMonth() !== month().getMonth();
-                const selected = () => isEdge(day);
-                const covered = () => inRange(day) && !selected();
-                const focused = () => sameDay(day, cursor());
-                // A day after today is not a read the daemon can answer, so it is shown muted
-                // and takes neither hover nor a click rather than quietly picking a future date.
-                const future = () => day > today();
-                return (
-                  <button
-                    type="button"
-                    role="gridcell"
-                    tabindex="-1"
-                    aria-selected={selected()}
-                    aria-disabled={future()}
-                    aria-label={day.toDateString()}
-                    disabled={future()}
-                    class={`h-7 rounded text-center text-[11px] tabular-nums transition-colors ${
-                      future()
-                        ? "cursor-default text-muted/30"
-                        : selected()
-                          ? "bg-signal font-semibold text-background"
-                          : covered()
-                            ? "bg-signal/15 text-foreground"
-                            : outside()
-                              ? "text-muted/50 hover:bg-raised"
-                              : "text-foreground hover:bg-raised"
-                    } ${focused() && !selected() ? "ring-1 ring-signal/60" : ""}`}
-                    onClick={() => {
-                      if (future()) return;
-                      setCursor(day);
-                      pick(day);
-                      gridRef?.focus();
+            <For each={weeks()}>
+              {(week) => (
+                <div role="row" class="contents">
+                  <For each={week}>
+                    {(day) => {
+                      const outside = () => day.getMonth() !== month().getMonth();
+                      const selected = () => isEdge(day);
+                      const covered = () => inRange(day) && !selected();
+                      const focused = () => sameDay(day, cursor());
+                      // A day after today is not a read the daemon can answer, so it is shown muted
+                      // and takes neither hover nor a click rather than quietly picking a future date.
+                      const future = () => day > today();
+                      return (
+                        <button
+                          type="button"
+                          role="gridcell"
+                          id={dayId(day)}
+                          tabindex="-1"
+                          aria-selected={selected()}
+                          aria-disabled={future()}
+                          aria-label={day.toDateString()}
+                          disabled={future()}
+                          class={`h-7 rounded text-center text-[11px] tabular-nums transition-colors ${
+                            future()
+                              ? "cursor-default text-muted/30"
+                              : selected()
+                                ? "bg-signal font-semibold text-background"
+                                : covered()
+                                  ? "bg-signal/15 text-foreground"
+                                  : outside()
+                                    ? "text-muted/50 hover:bg-raised"
+                                    : "text-foreground hover:bg-raised"
+                          } ${focused() && !selected() ? "ring-1 ring-signal/60" : ""}`}
+                          onClick={() => {
+                            if (future()) return;
+                            setCursor(day);
+                            pick(day);
+                            gridRef?.focus();
+                          }}
+                        >
+                          {day.getDate()}
+                        </button>
+                      );
                     }}
-                  >
-                    {day.getDate()}
-                  </button>
-                );
-              }}
+                  </For>
+                </div>
+              )}
             </For>
           </div>
 
