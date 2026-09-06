@@ -1,10 +1,12 @@
 //! Serves the JSON-RPC API over platform IPC with a persistent store and file watchers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use repomon_core::transport::{self, Endpoint, IpcListener};
 use repomon_core::{Config, Store, Watcher, config};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::{Ctx, socket::serve_listener};
 use serde_json::json;
 use tokio::time::{Duration, interval};
 use tracing_subscriber::EnvFilter;
@@ -76,6 +78,30 @@ async fn run() {
 
     let ctx = Ctx::new(store, config, Some(db));
 
+    let listener = match bind_before_startup(&socket, start_background_tasks(ctx.clone())).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("serve error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = serve_listener(ctx, &socket, listener).await {
+        eprintln!("serve error: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Binds before startup can spawn children, preventing listener inheritance before cloexec is set.
+async fn bind_before_startup(
+    socket: &Path,
+    startup: impl std::future::Future<Output = ()>,
+) -> std::io::Result<IpcListener> {
+    let listener = transport::listen(&Endpoint::from_path(socket)).await?;
+    startup.await;
+    Ok(listener)
+}
+
+async fn start_background_tasks(ctx: Arc<Ctx>) {
     // Make the repomind home exist, be registered, and carry its controller lane. In a background
     // task for the same reason as the watcher below: a first run creates directories and runs
     // `git init`, and the socket should bind before any of that.
@@ -245,11 +271,6 @@ async fn run() {
             ctx_s.request_shutdown();
         });
     }
-
-    if let Err(e) = serve(ctx, &socket).await {
-        eprintln!("serve error: {e}");
-        std::process::exit(1);
-    }
 }
 
 /// `repomond mcp` - serve the MCP protocol over stdio for the repomind orchestrator.
@@ -270,5 +291,43 @@ async fn run_mcp(socket_override: Option<PathBuf>) {
     if let Err(e) = repomon_mcp::serve_stdio(repomon_mcp::Options { socket }).await {
         eprintln!("repomond mcp: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ipc_is_bound_before_startup_can_spawn_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("startup.sock");
+        let endpoint = Endpoint::from_path(&socket);
+        let mut startup_ran = false;
+
+        let _listener = bind_before_startup(&socket, async {
+            transport::connect(&endpoint)
+                .await
+                .expect("IPC must be bound before the startup future is polled");
+            startup_ran = true;
+        })
+        .await
+        .unwrap();
+
+        assert!(startup_ran);
+    }
+
+    #[tokio::test]
+    async fn bind_failure_does_not_start_background_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("occupied.sock");
+        let endpoint = Endpoint::from_path(&socket);
+        let _owner = transport::listen(&endpoint).await.unwrap();
+        let mut startup_ran = false;
+
+        let result = bind_before_startup(&socket, async { startup_ran = true }).await;
+
+        assert!(result.is_err());
+        assert!(!startup_ran);
     }
 }

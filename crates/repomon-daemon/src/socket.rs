@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response, RpcError};
-use repomon_core::transport::{self, Endpoint, IpcStream};
+use repomon_core::transport::{self, Endpoint, IpcListener, IpcStream};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
@@ -22,7 +22,16 @@ const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// and parent-dir creation happen inside `transport::listen`; pipes need neither).
 pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
     let endpoint = Endpoint::from_path(socket_path);
-    let mut listener = transport::listen(&endpoint).await?;
+    let listener = transport::listen(&endpoint).await?;
+    serve_listener(ctx, socket_path, listener).await
+}
+
+/// Serves an already-bound IPC listener until shutdown, removing its Unix socket file on exit.
+pub async fn serve_listener(
+    ctx: Arc<Ctx>,
+    socket_path: &Path,
+    mut listener: IpcListener,
+) -> std::io::Result<()> {
     tracing::info!("listening on {}", socket_path.display());
 
     loop {
